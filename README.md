@@ -4,7 +4,7 @@ A secure, modular, Lua-scriptable Discord automation platform with a high-perfor
 
 Rusty Discord Bot is designed as a modern, extensible alternative to closed all-in-one bots. Server behavior lives in self-contained, versioned Lua modules (each in its own folder with `module.lua`, `config.json` and `README.md`); Discord connectivity, authorization, storage, rate-sensitive operations and privileged actions remain behind a validated Rust API.
 
-> **Current status:** advanced release. The repository contains the modular runtime, `install.xml` plugin registry, dashboard, OAuth2 login, PostgreSQL migrations, Discord command registration, voice queue integration and 26 modular Lua feature packages. The complete product scope is tracked in [`docs/FEATURE_MATRIX.md`](docs/FEATURE_MATRIX.md), while the audited Discord API surface is recorded in [`docs/DISCORD_PLATFORM_COVERAGE.md`](docs/DISCORD_PLATFORM_COVERAGE.md). [`docs/VERSION_POLICY.md`](docs/VERSION_POLICY.md) defines the latest-stable dependency policy.
+> **Current status:** advanced release. The repository contains the modular runtime, `install.xml` plugin registry, dashboard, OAuth2 login, PostgreSQL migrations, Discord command registration, voice queue integration and 26 modular Lua feature packages. The complete product scope is tracked in [`docs/FEATURE_MATRIX.md`](docs/FEATURE_MATRIX.md), while the audited Discord API surface is recorded in [`docs/DISCORD_PLATFORM_COVERAGE.md`](docs/DISCORD_PLATFORM_COVERAGE.md). [`docs/VERSION_POLICY.md`](docs/VERSION_POLICY.md) defines the latest-stable dependency policy, and the 20-agent execution roadmap for issues #72–#91 is formalized in [`docs/MULTI_AGENT_ROADMAP.md`](docs/MULTI_AGENT_ROADMAP.md).
 
 ## Why Rust plus Lua?
 
