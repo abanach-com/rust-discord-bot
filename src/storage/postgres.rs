@@ -5,8 +5,9 @@ use uuid::Uuid;
 
 use super::{
     AdjustMemberProgressParams, AuditLogEntry, CoinTransfer, CoinTransferOutcome,
-    DailyClaimOutcome, GuildModuleSettings, MemberProgress, ModerationExecutionIntent,
-    ProgressMetric, ReputationGrantOutcome, XpAward, level_for_xp,
+    DailyClaimOutcome, GuildModuleSettings, MemberProgress, ModerationAppeal,
+    ModerationExecutionIntent, ModuleDraftConfig, ProgressMetric, ReputationGrantOutcome,
+    TimedRoleGrant, XpAward, level_for_xp,
 };
 
 pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
@@ -678,6 +679,256 @@ impl PostgresStore {
         .await?;
 
         Ok(results)
+    }
+
+    pub async fn get_module_draft(
+        &self,
+        guild_id: &str,
+        module_id: &str,
+    ) -> anyhow::Result<Option<ModuleDraftConfig>> {
+        let result = sqlx::query_as::<_, ModuleDraftConfig>(
+            r#"
+            SELECT guild_id, module_id, config_json, updated_by, updated_at
+            FROM module_draft_configs
+            WHERE guild_id = $1 AND module_id = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(module_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(result)
+    }
+
+    pub async fn set_module_draft(
+        &self,
+        guild_id: &str,
+        module_id: &str,
+        config: Value,
+        updated_by: &str,
+    ) -> anyhow::Result<ModuleDraftConfig> {
+        let result = sqlx::query_as::<_, ModuleDraftConfig>(
+            r#"
+            INSERT INTO module_draft_configs (guild_id, module_id, config_json, updated_by, updated_at)
+            VALUES ($1, $2, $3, $4, NOW())
+            ON CONFLICT (guild_id, module_id) DO UPDATE SET
+                config_json = EXCLUDED.config_json,
+                updated_by = EXCLUDED.updated_by,
+                updated_at = NOW()
+            RETURNING guild_id, module_id, config_json, updated_by, updated_at
+            "#,
+        )
+        .bind(guild_id)
+        .bind(module_id)
+        .bind(config)
+        .bind(updated_by)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(result)
+    }
+
+    pub async fn delete_module_draft(
+        &self,
+        guild_id: &str,
+        module_id: &str,
+    ) -> anyhow::Result<bool> {
+        let res = sqlx::query(
+            r#"
+            DELETE FROM module_draft_configs
+            WHERE guild_id = $1 AND module_id = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(module_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn create_appeal(&self, appeal: &ModerationAppeal) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO moderation_appeals (
+                id, guild_id, case_number, user_id, status, reason, evidence_url, staff_notes, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            "#,
+        )
+        .bind(appeal.id)
+        .bind(&appeal.guild_id)
+        .bind(appeal.case_number)
+        .bind(&appeal.user_id)
+        .bind(&appeal.status)
+        .bind(&appeal.reason)
+        .bind(&appeal.evidence_url)
+        .bind(&appeal.staff_notes)
+        .bind(appeal.created_at)
+        .bind(appeal.updated_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn list_appeals(
+        &self,
+        guild_id: &str,
+        status: Option<&str>,
+    ) -> anyhow::Result<Vec<ModerationAppeal>> {
+        let results = sqlx::query_as::<_, ModerationAppeal>(
+            r#"
+            SELECT id, guild_id, case_number, user_id, status, reason, evidence_url, staff_notes, created_at, updated_at
+            FROM moderation_appeals
+            WHERE guild_id = $1 AND ($2::text IS NULL OR status = $2)
+            ORDER BY created_at DESC
+            "#,
+        )
+        .bind(guild_id)
+        .bind(status)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(results)
+    }
+
+    pub async fn get_appeal(&self, appeal_id: Uuid) -> anyhow::Result<Option<ModerationAppeal>> {
+        let result = sqlx::query_as::<_, ModerationAppeal>(
+            r#"
+            SELECT id, guild_id, case_number, user_id, status, reason, evidence_url, staff_notes, created_at, updated_at
+            FROM moderation_appeals
+            WHERE id = $1
+            "#,
+        )
+        .bind(appeal_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(result)
+    }
+
+    pub async fn update_appeal_status(
+        &self,
+        appeal_id: Uuid,
+        status: &str,
+        staff_notes: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let res = sqlx::query(
+            r#"
+            UPDATE moderation_appeals
+            SET status = $2, staff_notes = COALESCE($3, staff_notes), updated_at = NOW()
+            WHERE id = $1
+            "#,
+        )
+        .bind(appeal_id)
+        .bind(status)
+        .bind(staff_notes)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn grant_timed_role(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_id: &str,
+        expires_at: DateTime<Utc>,
+    ) -> anyhow::Result<Uuid> {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO timed_role_grants (id, guild_id, user_id, role_id, expires_at, created_at)
+            VALUES ($1, $2, $3, $4, $5, NOW())
+            "#,
+        )
+        .bind(id)
+        .bind(guild_id)
+        .bind(user_id)
+        .bind(role_id)
+        .bind(expires_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(id)
+    }
+
+    pub async fn get_active_timed_roles(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Vec<TimedRoleGrant>> {
+        let results = sqlx::query_as::<_, TimedRoleGrant>(
+            r#"
+            SELECT id, guild_id, user_id, role_id, expires_at, created_at
+            FROM timed_role_grants
+            WHERE guild_id = $1 AND user_id = $2 AND expires_at > NOW()
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(results)
+    }
+
+    pub async fn cleanup_expired_timed_roles(&self) -> anyhow::Result<u64> {
+        let res = sqlx::query("DELETE FROM timed_role_grants WHERE expires_at <= NOW()")
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected())
+    }
+
+    pub async fn save_persistent_roles(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_ids: &[String],
+    ) -> anyhow::Result<()> {
+        let json_val = serde_json::to_value(role_ids)?;
+        sqlx::query(
+            r#"
+            INSERT INTO persistent_user_roles (guild_id, user_id, role_ids, updated_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (guild_id, user_id) DO UPDATE SET
+                role_ids = EXCLUDED.role_ids,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .bind(json_val)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn get_persistent_roles(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        let result: Option<(Value,)> = sqlx::query_as(
+            r#"
+            SELECT role_ids
+            FROM persistent_user_roles
+            WHERE guild_id = $1 AND user_id = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match result {
+            Some((val,)) => Ok(serde_json::from_value(val).unwrap_or_default()),
+            None => Ok(Vec::new()),
+        }
     }
 }
 

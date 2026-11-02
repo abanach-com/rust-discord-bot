@@ -41,7 +41,7 @@ impl SchedulerExecutionContext {
     }
 }
 
-pub async fn execute(
+pub(super) async fn execute(
     ctx: &Context,
     state: &AppState,
     module_id: &str,

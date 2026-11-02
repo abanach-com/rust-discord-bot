@@ -76,6 +76,39 @@ pub struct ModerationExecutionIntent {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ModuleDraftConfig {
+    pub guild_id: String,
+    pub module_id: String,
+    pub config_json: Value,
+    pub updated_by: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ModerationAppeal {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub case_number: i64,
+    pub user_id: String,
+    pub status: String,
+    pub reason: String,
+    pub evidence_url: Option<String>,
+    pub staff_notes: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct TimedRoleGrant {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub user_id: String,
+    pub role_id: String,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
 impl Storage {
     pub async fn connect(database_url: Option<&str>) -> anyhow::Result<Self> {
         match database_url {
@@ -414,6 +447,131 @@ impl Storage {
         match self {
             Self::Memory(store) => Ok(store.list_pending_moderation_intents(kind, step)),
             Self::Postgres(store) => store.list_pending_moderation_intents(kind, step).await,
+        }
+    }
+
+    pub async fn get_module_draft(
+        &self,
+        guild_id: &str,
+        module_id: &str,
+    ) -> anyhow::Result<Option<ModuleDraftConfig>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_module_draft(guild_id, module_id)),
+            Self::Postgres(store) => store.get_module_draft(guild_id, module_id).await,
+        }
+    }
+
+    pub async fn set_module_draft(
+        &self,
+        guild_id: &str,
+        module_id: &str,
+        config: Value,
+        updated_by: &str,
+    ) -> anyhow::Result<ModuleDraftConfig> {
+        match self {
+            Self::Memory(store) => Ok(store.set_module_draft(guild_id, module_id, config, updated_by)),
+            Self::Postgres(store) => store.set_module_draft(guild_id, module_id, config, updated_by).await,
+        }
+    }
+
+    pub async fn delete_module_draft(
+        &self,
+        guild_id: &str,
+        module_id: &str,
+    ) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => Ok(store.delete_module_draft(guild_id, module_id)),
+            Self::Postgres(store) => store.delete_module_draft(guild_id, module_id).await,
+        }
+    }
+
+    pub async fn create_appeal(&self, appeal: &ModerationAppeal) -> anyhow::Result<()> {
+        match self {
+            Self::Memory(store) => {
+                store.create_appeal(appeal.clone());
+                Ok(())
+            }
+            Self::Postgres(store) => store.create_appeal(appeal).await,
+        }
+    }
+
+    pub async fn list_appeals(
+        &self,
+        guild_id: &str,
+        status: Option<&str>,
+    ) -> anyhow::Result<Vec<ModerationAppeal>> {
+        match self {
+            Self::Memory(store) => Ok(store.list_appeals(guild_id, status)),
+            Self::Postgres(store) => store.list_appeals(guild_id, status).await,
+        }
+    }
+
+    pub async fn get_appeal(&self, appeal_id: Uuid) -> anyhow::Result<Option<ModerationAppeal>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_appeal(appeal_id)),
+            Self::Postgres(store) => store.get_appeal(appeal_id).await,
+        }
+    }
+
+    pub async fn update_appeal_status(
+        &self,
+        appeal_id: Uuid,
+        status: &str,
+        staff_notes: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => Ok(store.update_appeal_status(appeal_id, status, staff_notes)),
+            Self::Postgres(store) => store.update_appeal_status(appeal_id, status, staff_notes).await,
+        }
+    }
+
+    pub async fn grant_timed_role(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_id: &str,
+        expires_at: DateTime<Utc>,
+    ) -> anyhow::Result<Uuid> {
+        match self {
+            Self::Memory(store) => Ok(store.grant_timed_role(guild_id, user_id, role_id, expires_at)),
+            Self::Postgres(store) => store.grant_timed_role(guild_id, user_id, role_id, expires_at).await,
+        }
+    }
+
+    pub async fn get_active_timed_roles(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Vec<TimedRoleGrant>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_active_timed_roles(guild_id, user_id)),
+            Self::Postgres(store) => store.get_active_timed_roles(guild_id, user_id).await,
+        }
+    }
+
+    pub async fn save_persistent_roles(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_ids: &[String],
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Memory(store) => {
+                store.save_persistent_roles(guild_id, user_id, role_ids);
+                Ok(())
+            }
+            Self::Postgres(store) => store.save_persistent_roles(guild_id, user_id, role_ids).await,
+        }
+    }
+
+    pub async fn get_persistent_roles(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_persistent_roles(guild_id, user_id)),
+            Self::Postgres(store) => store.get_persistent_roles(guild_id, user_id).await,
         }
     }
 }

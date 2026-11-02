@@ -7,8 +7,9 @@ use uuid::Uuid;
 
 use super::{
     AdjustMemberProgressParams, AuditLogEntry, CoinTransfer, CoinTransferOutcome,
-    DailyClaimOutcome, GuildModuleSettings, MemberProgress, ModerationExecutionIntent,
-    ProgressMetric, ReputationGrantOutcome, XpAward, level_for_xp,
+    DailyClaimOutcome, GuildModuleSettings, MemberProgress, ModerationAppeal,
+    ModerationExecutionIntent, ModuleDraftConfig, ProgressMetric, ReputationGrantOutcome,
+    TimedRoleGrant, XpAward, level_for_xp,
 };
 
 type ModuleKey = (String, String);
@@ -27,6 +28,10 @@ pub struct MemoryStore {
     progression_lock: Arc<Mutex<()>>,
     role_rewards: Arc<DashSet<(String, String, String)>>,
     moderation_intents: Arc<DashMap<Uuid, ModerationExecutionIntent>>,
+    module_drafts: Arc<DashMap<ModuleKey, ModuleDraftConfig>>,
+    appeals: Arc<DashMap<Uuid, ModerationAppeal>>,
+    timed_roles: Arc<DashMap<Uuid, TimedRoleGrant>>,
+    persistent_roles: Arc<DashMap<MemberKey, Vec<String>>>,
 }
 
 impl MemoryStore {
@@ -486,5 +491,119 @@ impl MemoryStore {
     fn store_profile(&self, profile: MemberProgress) {
         self.progression
             .insert((profile.guild_id.clone(), profile.user_id.clone()), profile);
+    }
+
+    pub fn get_module_draft(&self, guild_id: &str, module_id: &str) -> Option<ModuleDraftConfig> {
+        self.module_drafts
+            .get(&(guild_id.to_owned(), module_id.to_owned()))
+            .map(|entry| entry.value().clone())
+    }
+
+    pub fn set_module_draft(
+        &self,
+        guild_id: &str,
+        module_id: &str,
+        config: Value,
+        updated_by: &str,
+    ) -> ModuleDraftConfig {
+        let draft = ModuleDraftConfig {
+            guild_id: guild_id.to_owned(),
+            module_id: module_id.to_owned(),
+            config_json: config,
+            updated_by: updated_by.to_owned(),
+            updated_at: Utc::now(),
+        };
+        self.module_drafts
+            .insert((guild_id.to_owned(), module_id.to_owned()), draft.clone());
+        draft
+    }
+
+    pub fn delete_module_draft(&self, guild_id: &str, module_id: &str) -> bool {
+        self.module_drafts
+            .remove(&(guild_id.to_owned(), module_id.to_owned()))
+            .is_some()
+    }
+
+    pub fn create_appeal(&self, appeal: ModerationAppeal) {
+        self.appeals.insert(appeal.id, appeal);
+    }
+
+    pub fn list_appeals(&self, guild_id: &str, status: Option<&str>) -> Vec<ModerationAppeal> {
+        let mut results: Vec<ModerationAppeal> = self
+            .appeals
+            .iter()
+            .filter(|e| e.guild_id == guild_id && status.is_none_or(|s| e.status == s))
+            .map(|e| e.value().clone())
+            .collect();
+        results.sort_by_key(|a| std::cmp::Reverse(a.created_at));
+        results
+    }
+
+    pub fn get_appeal(&self, appeal_id: Uuid) -> Option<ModerationAppeal> {
+        self.appeals.get(&appeal_id).map(|e| e.value().clone())
+    }
+
+    pub fn update_appeal_status(
+        &self,
+        appeal_id: Uuid,
+        status: &str,
+        staff_notes: Option<&str>,
+    ) -> bool {
+        if let Some(mut entry) = self.appeals.get_mut(&appeal_id) {
+            let appeal = entry.value_mut();
+            appeal.status = status.to_owned();
+            if let Some(notes) = staff_notes {
+                appeal.staff_notes = Some(notes.to_owned());
+            }
+            appeal.updated_at = Utc::now();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn grant_timed_role(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_id: &str,
+        expires_at: chrono::DateTime<Utc>,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        self.timed_roles.insert(
+            id,
+            TimedRoleGrant {
+                id,
+                guild_id: guild_id.to_owned(),
+                user_id: user_id.to_owned(),
+                role_id: role_id.to_owned(),
+                expires_at,
+                created_at: Utc::now(),
+            },
+        );
+        id
+    }
+
+    pub fn get_active_timed_roles(&self, guild_id: &str, user_id: &str) -> Vec<TimedRoleGrant> {
+        let now = Utc::now();
+        self.timed_roles
+            .iter()
+            .filter(|e| e.guild_id == guild_id && e.user_id == user_id && e.expires_at > now)
+            .map(|e| e.value().clone())
+            .collect()
+    }
+
+    pub fn save_persistent_roles(&self, guild_id: &str, user_id: &str, role_ids: &[String]) {
+        self.persistent_roles.insert(
+            (guild_id.to_owned(), user_id.to_owned()),
+            role_ids.to_vec(),
+        );
+    }
+
+    pub fn get_persistent_roles(&self, guild_id: &str, user_id: &str) -> Vec<String> {
+        self.persistent_roles
+            .get(&(guild_id.to_owned(), user_id.to_owned()))
+            .map(|e| e.value().clone())
+            .unwrap_or_default()
     }
 }

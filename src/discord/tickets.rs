@@ -55,7 +55,7 @@ impl TicketExecutionContext {
     }
 }
 
-pub async fn execute(
+pub(super) async fn execute(
     ctx: &Context,
     state: &AppState,
     module_id: &str,
@@ -1203,6 +1203,50 @@ fn format_transcript_message(message: &Message) -> String {
         ));
     }
     result
+}
+
+pub fn escape_html(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for c in input.chars() {
+        match c {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
+pub fn render_html_transcript(ticket_id: &str, guild_id: &str, plaintext_content: &str) -> String {
+    let safe_content = escape_html(plaintext_content);
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
+<title>Transkrypt Ticketu {ticket_id}</title>
+<style>
+body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 2rem; }}
+.card {{ background: #1e293b; border-radius: 8px; padding: 1.5rem; border: 1px solid #334155; max-width: 900px; margin: 0 auto; }}
+h1 {{ color: #38bdf8; font-size: 1.4rem; margin-top: 0; }}
+.meta {{ color: #94a3b8; font-size: 0.9rem; margin-bottom: 1rem; border-bottom: 1px solid #334155; padding-bottom: 0.5rem; }}
+pre {{ background: #090d16; padding: 1rem; border-radius: 6px; overflow-x: auto; color: #e2e8f0; font-size: 0.85rem; line-height: 1.5; white-space: pre-wrap; }}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>📄 Transkrypt Wsparcia Technicznego</h1>
+<div class="meta">Serwer: {guild_id} | Identyfikator Ticketu: {ticket_id}</div>
+<pre>{safe_content}</pre>
+</div>
+</body>
+</html>"#
+    )
 }
 
 async fn send_transcript(

@@ -3,9 +3,9 @@ pub mod executor;
 mod handler;
 pub mod moderation_cases;
 pub mod music;
-mod progression;
-mod scheduler;
-mod tickets;
+pub mod progression;
+pub mod scheduler;
+pub mod tickets;
 
 use std::sync::Arc;
 

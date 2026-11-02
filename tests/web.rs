@@ -333,3 +333,193 @@ async fn test_http_api_guild_endpoints_enforce_permissions_and_revalidation() {
         "Uprawnienia do zarządzania tym serwerem zostały cofnięte."
     );
 }
+
+#[tokio::test]
+async fn test_phase1_governance_and_defense_suite() {
+    let (web_state, _) = test_web_state().await;
+    let app = build_router(web_state.clone());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve axum");
+    });
+
+    let session_id = "test_sess_phase1";
+    let user = DashboardUser {
+        id: "3001".to_owned(),
+        username: "tester_phase1".to_owned(),
+        global_name: None,
+        avatar: None,
+    };
+    let guilds = vec![DashboardGuild {
+        id: "guild_phase1".to_owned(),
+        name: "Phase1 Test Guild".to_owned(),
+        icon: None,
+        owner: true,
+        permissions: (1 << 3).to_string(), // Administrator
+    }];
+
+    web_state
+        .app
+        .sessions
+        .save_session(
+            session_id,
+            user,
+            guilds,
+            "csrf_phase1_token".to_owned(),
+            Utc::now() + Duration::hours(1),
+            Some("token_123".to_owned()),
+        )
+        .await
+        .expect("save session");
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let session_cookie = format!("rusty_discord_bot_session={session_id}");
+
+    // 1. Wizard profiles check (#73 / Agent 02)
+    let wizard_resp = client
+        .get(format!("{base_url}/api/guilds/guild_phase1/wizard"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .expect("wizard request");
+    assert_eq!(wizard_resp.status(), reqwest::StatusCode::OK);
+    let wizard_body: serde_json::Value = wizard_resp.json().await.expect("wizard json");
+    let profiles = wizard_body["profiles"].as_array().expect("profiles array");
+    assert_eq!(profiles.len(), 3);
+    assert_eq!(profiles[0]["id"], "gaming");
+    assert_eq!(profiles[1]["id"], "community");
+    assert_eq!(profiles[2]["id"], "support");
+
+    // 2. Diagnostics check (#73 / Agent 02)
+    let diag_resp = client
+        .get(format!("{base_url}/api/guilds/guild_phase1/diagnostics"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .expect("diagnostics request");
+    assert_eq!(diag_resp.status(), reqwest::StatusCode::OK);
+    let diag_body: serde_json::Value = diag_resp.json().await.expect("diag json");
+    assert!(diag_body["active_modules_count"].as_u64().unwrap() > 0);
+    assert_eq!(diag_body["overall_health_percent"], 100);
+
+    // 3. Draft vs Published configuration lifecycle (#73 / Agent 02)
+    let draft_payload = serde_json::json!({
+        "config": {
+            "anti_spam": true,
+            "max_mentions": 3
+        }
+    });
+
+    // Save draft
+    let save_draft_resp = client
+        .post(format!("{base_url}/api/guilds/guild_phase1/modules/automod/draft"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", "csrf_phase1_token")
+        .json(&draft_payload)
+        .send()
+        .await
+        .expect("save draft request");
+    assert_eq!(save_draft_resp.status(), reqwest::StatusCode::OK);
+
+    // Read draft
+    let get_draft_resp = client
+        .get(format!("{base_url}/api/guilds/guild_phase1/modules/automod/draft"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .expect("get draft request");
+    assert_eq!(get_draft_resp.status(), reqwest::StatusCode::OK);
+    let draft_val: serde_json::Value = get_draft_resp.json().await.expect("draft val");
+    assert_eq!(draft_val["has_draft"], true);
+    assert_eq!(draft_val["config"]["max_mentions"], 3);
+
+    // Publish draft
+    let publish_resp = client
+        .post(format!("{base_url}/api/guilds/guild_phase1/modules/automod/publish"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", "csrf_phase1_token")
+        .send()
+        .await
+        .expect("publish draft request");
+    assert_eq!(publish_resp.status(), reqwest::StatusCode::OK);
+
+    // Verify draft was cleared after publish
+    let get_draft_after = client
+        .get(format!("{base_url}/api/guilds/guild_phase1/modules/automod/draft"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .expect("get draft after publish");
+    let after_val: serde_json::Value = get_draft_after.json().await.expect("after draft val");
+    assert_eq!(after_val["has_draft"], false);
+
+    // 4. Privacy Center summary & export (#73 / Agent 02)
+    let privacy_resp = client
+        .get(format!("{base_url}/api/guilds/guild_phase1/privacy"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .expect("privacy request");
+    assert_eq!(privacy_resp.status(), reqwest::StatusCode::OK);
+    let privacy_body: serde_json::Value = privacy_resp.json().await.expect("privacy json");
+    assert!(privacy_body["stored_entities"].as_array().unwrap().len() >= 3);
+
+    let export_resp = client
+        .post(format!("{base_url}/api/guilds/guild_phase1/privacy/export"))
+        .header(COOKIE, &session_cookie)
+        .json(&serde_json::json!({ "user_id": "3001" }))
+        .send()
+        .await
+        .expect("privacy export request");
+    assert_eq!(export_resp.status(), reqwest::StatusCode::OK);
+    let export_body: serde_json::Value = export_resp.json().await.expect("export json");
+    assert_eq!(export_body["user_id"], "3001");
+
+    // 5. AutoMod dry-run simulator (#75 / Agent 04)
+    let sim_invite_resp = client
+        .post(format!("{base_url}/api/guilds/guild_phase1/automod/simulate"))
+        .header(COOKIE, &session_cookie)
+        .json(&serde_json::json!({
+            "content": "Dołącz do nas! discord.gg/super-serwer",
+            "author_account_age_days": 10,
+            "has_avatar": true
+        }))
+        .send()
+        .await
+        .expect("simulate invite request");
+    assert_eq!(sim_invite_resp.status(), reqwest::StatusCode::OK);
+    let sim_invite_body: serde_json::Value = sim_invite_resp.json().await.expect("sim invite json");
+    assert_eq!(sim_invite_body["matched"], true);
+    assert_eq!(sim_invite_body["winning_rule"], "automod.invite_guard");
+
+    let sim_clean_resp = client
+        .post(format!("{base_url}/api/guilds/guild_phase1/automod/simulate"))
+        .header(COOKIE, &session_cookie)
+        .json(&serde_json::json!({
+            "content": "Cześć wszystkim, miłego dnia życzę!",
+            "author_account_age_days": 100,
+            "has_avatar": true
+        }))
+        .send()
+        .await
+        .expect("simulate clean request");
+    assert_eq!(sim_clean_resp.status(), reqwest::StatusCode::OK);
+    let sim_clean_body: serde_json::Value = sim_clean_resp.json().await.expect("sim clean json");
+    assert_eq!(sim_clean_body["matched"], false);
+    assert_eq!(sim_clean_body["expected_action"], "allow");
+
+    // 6. Appeals lifecycle (#74 / Agent 03)
+    let appeals_list_resp = client
+        .get(format!("{base_url}/api/guilds/guild_phase1/appeals"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .expect("list appeals request");
+    assert_eq!(appeals_list_resp.status(), reqwest::StatusCode::OK);
+}

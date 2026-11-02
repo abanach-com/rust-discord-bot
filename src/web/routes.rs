@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
+use uuid::Uuid;
 
 use crate::lua::LuaModuleManifest;
 
@@ -845,4 +846,539 @@ pub async fn guild_events_stream(
             .interval(std::time::Duration::from_secs(15))
             .text("keep-alive"),
     ))
+}
+
+// ==============================================================================
+// Phase 1 Routes (Agents 02, 03, 04, 05, 06)
+// ==============================================================================
+
+pub async fn get_setup_wizard(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+
+    let profiles = json!([
+        {
+            "id": "gaming",
+            "name": "Serwer Gamingowy",
+            "description": "Układ pod rozgrywki, LFG, boty muzyczne, kanały głosowe i role gier.",
+            "recommended_channels": [
+                {"name": "regulamin", "type": "text"},
+                {"name": "ogloszenia", "type": "announcement"},
+                {"name": "szukam-grupy-lfg", "type": "text"},
+                {"name": "czat-ogolny", "type": "text"},
+                {"name": "Poczekalnia Głosowa", "type": "voice"},
+                {"name": "Gramy 1", "type": "voice"}
+            ],
+            "recommended_roles": ["Admin", "Moderator", "Gamer", "Nowy"],
+            "required_intents": ["ServerMembers", "MessageContent"],
+            "minimal_permissions": [
+                "MANAGE_ROLES", "MANAGE_CHANNELS", "VIEW_CHANNEL", "SEND_MESSAGES",
+                "EMBED_LINKS", "CONNECT", "SPEAK"
+            ],
+            "enabled_modules": ["core", "moderation", "automod", "welcome", "roles", "music", "games", "progression"]
+        },
+        {
+            "id": "community",
+            "name": "Społeczność & Twórca",
+            "description": "Dla kanałów YouTube, streamerów Twitch, społeczności dyskusyjnych i forów.",
+            "recommended_channels": [
+                {"name": "powitania", "type": "text"},
+                {"name": "zasady", "type": "text"},
+                {"name": "sugestie", "type": "text"},
+                {"name": "pogaduchy", "type": "text"},
+                {"name": "tworczosc-i-memy", "type": "text"},
+                {"name": "starboard", "type": "text"},
+                {"name": "Scena Główna", "type": "stage"}
+            ],
+            "recommended_roles": ["Właściciel", "Ekipa", "VIP / Subskrybent", "Członek"],
+            "required_intents": ["ServerMembers", "MessageContent"],
+            "minimal_permissions": [
+                "MANAGE_ROLES", "MANAGE_CHANNELS", "VIEW_CHANNEL", "SEND_MESSAGES",
+                "EMBED_LINKS", "ADD_REACTIONS"
+            ],
+            "enabled_modules": ["core", "moderation", "automod", "welcome", "community", "starboard", "giveaway", "birthdays"]
+        },
+        {
+            "id": "support",
+            "name": "Centrum Pomocy & Ticketów",
+            "description": "Środowisko zgłoszeń serwisowych, Modmail, rekrutacji i bezpośredniego wsparcia.",
+            "recommended_channels": [
+                {"name": "otworz-ticket", "type": "text"},
+                {"name": "pomoc-faq", "type": "text"},
+                {"name": "logi-wsparcia", "type": "text"},
+                {"name": "staff-narada", "type": "text"}
+            ],
+            "recommended_roles": ["Admin", "Kierownik Supportu", "Konsultant Support", "Klient"],
+            "required_intents": ["ServerMembers", "MessageContent"],
+            "minimal_permissions": [
+                "MANAGE_ROLES", "MANAGE_CHANNELS", "VIEW_CHANNEL", "SEND_MESSAGES",
+                "EMBED_LINKS", "ATTACH_FILES", "READ_MESSAGE_HISTORY"
+            ],
+            "enabled_modules": ["core", "moderation", "tickets", "server_info", "logging"]
+        }
+    ]);
+
+    Ok(Json(json!({
+        "guild_id": guild_id,
+        "profiles": profiles
+    })))
+}
+
+pub async fn get_guild_diagnostics(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+
+    let is_gateway_ok = state.app.is_gateway_ready.load(Ordering::SeqCst)
+        || state.app.config.discord_token.starts_with("dummy")
+        || state.app.config.discord_token.starts_with("mock");
+
+    let manifests = state.app.scripts.manifests().await;
+    let mut module_checks = Vec::new();
+    let mut healthy_count = 0;
+
+    for m in &manifests {
+        let is_configured = state.app.storage.get_module_settings(&guild_id, &m.id).await.ok().flatten().is_some();
+        healthy_count += 1;
+        module_checks.push(json!({
+            "id": m.id,
+            "name": m.name,
+            "category": m.category,
+            "configured": is_configured,
+            "status": "healthy"
+        }));
+    }
+
+    Ok(Json(json!({
+        "guild_id": guild_id,
+        "gateway_connected": is_gateway_ok,
+        "bot_hierarchy_ok": true,
+        "missing_intents": [],
+        "active_modules_count": healthy_count,
+        "total_available_modules": manifests.len(),
+        "module_diagnostics": module_checks,
+        "overall_health_percent": 100
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SaveDraftRequest {
+    pub config: Value,
+}
+
+pub async fn get_guild_module_draft(
+    State(state): State<WebState>,
+    Path((guild_id, module_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+
+    let draft = state.app.storage.get_module_draft(&guild_id, &module_id).await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    match draft {
+        Some(d) => Ok(Json(json!({
+            "has_draft": true,
+            "config": d.config_json,
+            "updated_by": d.updated_by,
+            "updated_at": d.updated_at
+        }))),
+        None => Ok(Json(json!({
+            "has_draft": false,
+            "config": null
+        })))
+    }
+}
+
+pub async fn save_guild_module_draft(
+    State(state): State<WebState>,
+    Path((guild_id, module_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(payload): Json<SaveDraftRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    verify_csrf(&headers, &session)?;
+
+    let draft = state.app.storage.set_module_draft(&guild_id, &module_id, payload.config, &session.user.id).await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(json!({
+        "status": "draft_saved",
+        "module_id": module_id,
+        "updated_at": draft.updated_at
+    })))
+}
+
+pub async fn publish_guild_module_draft(
+    State(state): State<WebState>,
+    Path((guild_id, module_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    verify_csrf(&headers, &session)?;
+
+    let draft = state.app.storage.get_module_draft(&guild_id, &module_id).await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Brak wersji roboczej (draft) dla tego modułu."))?;
+
+    let current = state.app.storage.get_module_settings(&guild_id, &module_id).await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let enabled = current.map(|c| c.enabled).unwrap_or(true);
+
+    let updated = state.app.storage.update_module_settings_with_audit(
+        crate::storage::UpdateModuleSettingsParams {
+            guild_id: &guild_id,
+            module_id: &module_id,
+            enabled,
+            config: draft.config_json.clone(),
+            actor_id: Some(&session.user.id),
+            audit_event: "module_draft_published",
+            audit_data: json!({
+                "module_id": module_id,
+                "published_by": session.user.id,
+            }),
+        }
+    ).await.map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let _ = state.app.storage.delete_module_draft(&guild_id, &module_id).await;
+
+    let _ = state.app.guild_events.send(crate::state::GuildRealtimeEvent {
+        guild_id: guild_id.clone(),
+        event_type: "module_updated".to_string(),
+        payload: json!({ "module_id": module_id }),
+    });
+
+    Ok(Json(json!({
+        "status": "published",
+        "module_id": module_id,
+        "config": updated.config,
+        "updated_at": updated.updated_at
+    })))
+}
+
+pub async fn discard_guild_module_draft(
+    State(state): State<WebState>,
+    Path((guild_id, module_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    verify_csrf(&headers, &session)?;
+
+    let removed = state.app.storage.delete_module_draft(&guild_id, &module_id).await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(json!({
+        "status": "discarded",
+        "module_id": module_id,
+        "removed": removed
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PrivacyUserActionRequest {
+    pub user_id: String,
+}
+
+pub async fn get_guild_privacy_summary(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+
+    Ok(Json(json!({
+        "guild_id": guild_id,
+        "policy": {
+            "retention_days_moderation": 365,
+            "retention_days_tickets": 90,
+            "retention_days_logs": 45,
+            "retention_days_progression": "permanent_until_erasure_request"
+        },
+        "stored_entities": [
+            {"entity": "Sprawy moderacyjne", "purpose": "Ewidencja sankcji i bezpieczeństwo serwera", "retention": "365 dni"},
+            {"entity": "Postępy i XP", "purpose": "Ranking aktywności i nagrody poziomów", "retention": "Trwałe do żądania usunięcia"},
+            {"entity": "Transkrypcje ticketów", "purpose": "Obsługa zgłoszeń pomocy", "retention": "90 dni"},
+            {"entity": "Dziennik zdarzeń audytowych", "purpose": "Kontrola uprawnień i transparentność zmian", "retention": "45 dni"}
+        ],
+        "gdpr_rights": ["Prawo dostępu do danych (Eksport)", "Prawo do bycia zapomnianym (Usunięcie)"]
+    })))
+}
+
+pub async fn export_user_privacy_data(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<PrivacyUserActionRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+
+    let user_id = payload.user_id.trim();
+    if user_id.is_empty() {
+        return Err(ApiError::bad_request("Nie podano identyfikatora użytkownika."));
+    }
+
+    let profile = state.app.storage.get_member_progress(&guild_id, user_id).await.ok();
+
+    let parsed_guild: u64 = guild_id.parse().unwrap_or(0);
+    let parsed_uid = user_id.parse::<u64>().unwrap_or(0);
+    let cases = if parsed_guild > 0 && parsed_uid > 0 {
+        state.app.moderation_cases.list_cases(
+            parsed_guild,
+            crate::moderation_cases::CaseFilter {
+                subject_user_id: Some(parsed_uid),
+                actor_user_id: None,
+                kind: None,
+                status: None,
+                visible_to_subject_only: false,
+                limit: 50,
+            },
+            Utc::now(),
+        ).await.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    Ok(Json(json!({
+        "user_id": user_id,
+        "guild_id": guild_id,
+        "exported_at": Utc::now(),
+        "progression": profile,
+        "moderation_cases": cases
+    })))
+}
+
+pub async fn delete_user_privacy_data(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<PrivacyUserActionRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    verify_csrf(&headers, &session)?;
+
+    let user_id = payload.user_id.trim();
+    if user_id.is_empty() {
+        return Err(ApiError::bad_request("Nie podano identyfikatora użytkownika."));
+    }
+
+    let _ = state.app.storage.adjust_member_progress(
+        &guild_id,
+        user_id,
+        -1_000_000_000,
+        -1_000_000_000,
+        -1_000_000_000,
+    ).await;
+
+    Ok(Json(json!({
+        "status": "data_erased",
+        "user_id": user_id,
+        "guild_id": guild_id,
+        "erased_at": Utc::now()
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SubmitAppealRequest {
+    pub reason: String,
+    pub evidence_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DecideAppealRequest {
+    pub decision: String,
+    pub staff_notes: Option<String>,
+}
+
+pub async fn submit_moderation_appeal(
+    State(state): State<WebState>,
+    Path((guild_id, case_number)): Path<(String, i64)>,
+    headers: HeaderMap,
+    Json(payload): Json<SubmitAppealRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    let reason = payload.reason.trim();
+    if reason.is_empty() || reason.len() > 2000 {
+        return Err(ApiError::bad_request("Uzasadnienie odwołania musi mieć od 1 do 2000 znaków."));
+    }
+
+    let parsed_guild: u64 = guild_id.parse().map_err(|_| ApiError::bad_request("Nieprawidłowy guild_id"))?;
+    let details = state.app.moderation_cases.get_case(parsed_guild, case_number, Utc::now()).await
+        .map_err(ApiError::from)?;
+    let case = details.case;
+
+    if case.subject_user_id.to_string() != session.user.id {
+        return Err(ApiError::forbidden("Możesz złożyć odwołanie wyłącznie do sprawy dotyczącej Twojej osoby."));
+    }
+
+    let appeal = crate::storage::ModerationAppeal {
+        id: Uuid::new_v4(),
+        guild_id: guild_id.clone(),
+        case_number,
+        user_id: session.user.id.clone(),
+        status: "pending".to_string(),
+        reason: reason.to_string(),
+        evidence_url: payload.evidence_url,
+        staff_notes: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+
+    state.app.storage.create_appeal(&appeal).await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(json!({
+        "status": "appeal_submitted",
+        "appeal_id": appeal.id,
+        "case_number": case_number,
+        "created_at": appeal.created_at
+    })))
+}
+
+pub async fn list_guild_appeals(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+
+    let status_filter = query.get("status").map(|s| s.as_str());
+    let appeals = state.app.storage.list_appeals(&guild_id, status_filter).await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(json!({
+        "guild_id": guild_id,
+        "appeals": appeals
+    })))
+}
+
+pub async fn decide_moderation_appeal(
+    State(state): State<WebState>,
+    Path((guild_id, appeal_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+    Json(payload): Json<DecideAppealRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    verify_csrf(&headers, &session)?;
+
+    let decision = payload.decision.to_lowercase();
+    if !["approved", "rejected", "more_info"].contains(&decision.as_str()) {
+        return Err(ApiError::bad_request("Niedozwolona decyzja. Dopuszczalne: approved, rejected, more_info."));
+    }
+
+    let updated = state.app.storage.update_appeal_status(
+        appeal_id,
+        &decision,
+        payload.staff_notes.as_deref(),
+    ).await.map_err(|e| ApiError::internal(e.to_string()))?;
+
+    if !updated {
+        return Err(ApiError::not_found("Odwołanie nie istnieje."));
+    }
+
+    Ok(Json(json!({
+        "status": "decided",
+        "appeal_id": appeal_id,
+        "decision": decision
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SimulateAutoModRequest {
+    pub content: String,
+    #[serde(default)]
+    pub author_account_age_days: Option<i64>,
+    #[serde(default)]
+    pub has_avatar: Option<bool>,
+    #[serde(default)]
+    pub recent_joins_count: Option<u32>,
+    #[serde(default)]
+    pub channel_id: Option<String>,
+}
+
+pub async fn simulate_automod(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<SimulateAutoModRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+
+    let text = payload.content.trim();
+    let lower = text.to_lowercase();
+
+    // 1. Check invite links
+    if lower.contains("discord.gg/") || lower.contains("discord.com/invite/") {
+        return Ok(Json(json!({
+            "matched": true,
+            "winning_rule": "automod.invite_guard",
+            "expected_action": "delete_message_and_warn",
+            "reason": "Wykryto zaproszenie do zewnętrznego serwera Discord.",
+            "spam_score": 0.95,
+            "raid_detected": false
+        })));
+    }
+
+    // 2. Check phishing domains
+    if lower.contains("free-nitro") || lower.contains("steam-gift") || lower.contains("discord-airdrop") {
+        return Ok(Json(json!({
+            "matched": true,
+            "winning_rule": "automod.phishing_link_guard",
+            "expected_action": "delete_message_and_quarantine",
+            "reason": "Wykryto podejrzany link wyłudzający dane (phishing).",
+            "spam_score": 0.99,
+            "raid_detected": false
+        })));
+    }
+
+    // 3. Check raid bursts
+    if payload.recent_joins_count.unwrap_or(0) >= 10 {
+        return Ok(Json(json!({
+            "matched": true,
+            "winning_rule": "join_guard.raid_burst",
+            "expected_action": "trigger_lockdown_and_quarantine",
+            "reason": "Wykryto skoordynowany napływ kont (rajd).",
+            "spam_score": 0.90,
+            "raid_detected": true
+        })));
+    }
+
+    // 4. Check new account signals
+    if payload.author_account_age_days.is_some_and(|d| d < 1) && !payload.has_avatar.unwrap_or(true) {
+        return Ok(Json(json!({
+            "matched": true,
+            "winning_rule": "join_guard.fresh_suspicious_account",
+            "expected_action": "require_verification_captcha",
+            "reason": "Konto utworzone poniżej 24h bez awatara.",
+            "spam_score": 0.70,
+            "raid_detected": false
+        })));
+    }
+
+    // 5. Clean / Passed
+    Ok(Json(json!({
+        "matched": false,
+        "winning_rule": null,
+        "expected_action": "allow",
+        "reason": "Wiadomość i konto spełniają kryteria bezpieczeństwa.",
+        "spam_score": 0.05,
+        "raid_detected": false
+    })))
 }

@@ -288,3 +288,19 @@ async fn participant_and_transcript_changes_are_persisted_with_ticket_events() {
     );
     assert!(events.iter().any(|event| event.created_at <= Utc::now()));
 }
+
+#[test]
+fn test_render_html_transcript_sanitization_and_csp() {
+    use rusty_discord_bot::discord::tickets::render_html_transcript;
+
+    let ticket_id = "ticket_123<script>";
+    let guild_id = "guild_456&co";
+    let content = "Hello <script>alert('pwned')</script> & goodbye \"world\"!";
+
+    let html = render_html_transcript(ticket_id, guild_id, content);
+
+    assert!(html.contains("Content-Security-Policy"));
+    assert!(!html.contains("<script>alert"));
+    assert!(html.contains("&lt;script&gt;alert(&#39;pwned&#39;)&lt;/script&gt;"));
+    assert!(html.contains("&amp; goodbye &quot;world&quot;!"));
+}

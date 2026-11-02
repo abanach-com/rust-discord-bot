@@ -137,6 +137,53 @@ pub fn build_router(state: WebState) -> Router {
             "/api/guilds/{guild_id}/events",
             get(routes::guild_events_stream),
         )
+        // Phase 1 endpoints
+        .route(
+            "/api/guilds/{guild_id}/wizard",
+            get(routes::get_setup_wizard),
+        )
+        .route(
+            "/api/guilds/{guild_id}/diagnostics",
+            get(routes::get_guild_diagnostics),
+        )
+        .route(
+            "/api/guilds/{guild_id}/modules/{module_id}/draft",
+            get(routes::get_guild_module_draft)
+                .post(routes::save_guild_module_draft)
+                .delete(routes::discard_guild_module_draft),
+        )
+        .route(
+            "/api/guilds/{guild_id}/modules/{module_id}/publish",
+            post(routes::publish_guild_module_draft),
+        )
+        .route(
+            "/api/guilds/{guild_id}/privacy",
+            get(routes::get_guild_privacy_summary),
+        )
+        .route(
+            "/api/guilds/{guild_id}/privacy/export",
+            post(routes::export_user_privacy_data),
+        )
+        .route(
+            "/api/guilds/{guild_id}/privacy/delete",
+            post(routes::delete_user_privacy_data),
+        )
+        .route(
+            "/api/guilds/{guild_id}/cases/{case_number}/appeal",
+            post(routes::submit_moderation_appeal),
+        )
+        .route(
+            "/api/guilds/{guild_id}/appeals",
+            get(routes::list_guild_appeals),
+        )
+        .route(
+            "/api/guilds/{guild_id}/appeals/{appeal_id}/decide",
+            post(routes::decide_moderation_appeal),
+        )
+        .route(
+            "/api/guilds/{guild_id}/automod/simulate",
+            post(routes::simulate_automod),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn_with_state(
             state.clone(),
