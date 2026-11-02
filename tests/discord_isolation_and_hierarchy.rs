@@ -1,6 +1,9 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use axum::{
@@ -10,13 +13,6 @@ use axum::{
     response::{IntoResponse, Json, Response},
     routing::{any, get},
 };
-use serde_json::{Value, json};
-use serenity::{
-    all::{ChannelId, GatewayIntents, GuildId, Ready, UserId},
-    client::{Context, EventHandler},
-    http::HttpBuilder,
-};
-use tokio::sync::{Mutex, oneshot};
 use rusty_discord_bot::{
     AppState,
     config::Config,
@@ -26,6 +22,13 @@ use rusty_discord_bot::{
     },
     lua::LuaAction,
 };
+use serde_json::{Value, json};
+use serenity::{
+    all::{ChannelId, GatewayIntents, GuildId, Ready, UserId},
+    client::{Context, EventHandler},
+    http::HttpBuilder,
+};
+use tokio::sync::{Mutex, oneshot};
 
 #[derive(Clone, Default)]
 struct MockServerState {
@@ -108,9 +111,11 @@ async fn mock_discord_handler(
     State(mock): State<MockServerState>,
     method: Method,
     uri: axum::http::Uri,
+    bytes: axum::body::Bytes,
 ) -> Response {
     let path = uri.path().to_string();
-    println!("MOCK HTTP RECV: {} {}", method, path);
+    let body_str = String::from_utf8_lossy(&bytes).to_string();
+    println!("MOCK HTTP RECV: {} {} -> {}", method, path, body_str);
 
     if matches!(
         method,
@@ -121,7 +126,7 @@ async fn mock_discord_handler(
     mock.recorded_calls
         .lock()
         .await
-        .push((method.clone(), path.clone()));
+        .push((method.clone(), format!("{}|{}", path, body_str)));
 
     // Gateway URL
     if path == "/api/v10/gateway" || path == "/api/v10/gateway/bot" {
@@ -237,6 +242,18 @@ async fn mock_discord_handler(
             })),
         )
             .into_response();
+    }
+
+    // Delete Message: DELETE /api/v10/channels/{channel_id}/messages/{message_id}
+    if method == Method::DELETE && path.contains("/messages/") {
+        if path.contains("denied") || path.contains("fail") {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"message": "Missing Permissions to delete message", "code": 50013})),
+            )
+                .into_response();
+        }
+        return StatusCode::NO_CONTENT.into_response();
     }
 
     // Guild query: GET /api/v10/guilds/{guild_id}
@@ -665,6 +682,141 @@ async fn test_join_guard_raid_kick_timeout_and_self_punishment_contract() {
             .unwrap_err()
             .to_string()
             .contains("nie możesz wykonać tej akcji na sobie")
+    );
+
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn test_event_action_failures_suppress_sent_audit_and_adjust_message_delete() {
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state().await;
+    let guild_id = GuildId::new(100);
+
+    // 1. Welcome action failure: channel "999" does not exist (returns 404 in mock).
+    // The sequence is: SendMessage (fails) -> Audit "welcome_sent"
+    let welcome_actions = vec![
+        LuaAction::SendMessage {
+            channel_id: Some("999".to_string()),
+            content: "Witaj na serwerze!".to_string(),
+        },
+        LuaAction::Audit {
+            event: "welcome_sent".to_string(),
+            data: BTreeMap::from([
+                ("user_id".to_string(), json!("123456")),
+                ("channel_id".to_string(), json!("999")),
+            ]),
+        },
+    ];
+
+    let res = execute_event_actions(
+        &ctx,
+        &state,
+        "welcome",
+        Some(guild_id),
+        None,
+        Some(UserId::new(123456)),
+        &welcome_actions,
+    )
+    .await;
+    assert!(res.is_ok(), "execute_event_actions gracefully absorbs failures");
+
+    let audit_events = state.storage.list_audit_events("100", 20).await.unwrap();
+    // Must NOT contain false positive welcome_sent
+    assert!(
+        !audit_events.iter().any(|e| e.event == "welcome_sent"),
+        "failed welcome SendMessage must not emit false positive welcome_sent audit event"
+    );
+    // Must contain action_denied for failed message sending
+    assert!(
+        audit_events.iter().any(|e| e.event == "action_denied"),
+        "failure should be recorded as action_denied audit entry"
+    );
+
+    // 2. Goodbye action failure: channel "999" does not exist
+    let goodbye_actions = vec![
+        LuaAction::SendMessage {
+            channel_id: Some("999".to_string()),
+            content: "Żegnaj!".to_string(),
+        },
+        LuaAction::Audit {
+            event: "goodbye_sent".to_string(),
+            data: BTreeMap::from([
+                ("user_id".to_string(), json!("123456")),
+                ("channel_id".to_string(), json!("999")),
+            ]),
+        },
+    ];
+
+    let res_goodbye = execute_event_actions(
+        &ctx,
+        &state,
+        "welcome",
+        Some(guild_id),
+        None,
+        Some(UserId::new(123456)),
+        &goodbye_actions,
+    )
+    .await;
+    assert!(res_goodbye.is_ok());
+
+    let audit_events_after = state.storage.list_audit_events("100", 20).await.unwrap();
+    assert!(
+        !audit_events_after.iter().any(|e| e.event == "goodbye_sent"),
+        "failed goodbye SendMessage must not emit false positive goodbye_sent audit event"
+    );
+
+    // 3. AutoMod message deletion failure:
+    // Message ID "denied_msg_777" fails with 403 Forbidden.
+    // Subsequent SendMessage notice should be adjusted:
+    // "została usunięta przez AutoMod" -> "narusza zasady AutoMod (usunięcie zablokowane)"
+    let automod_actions = vec![
+        LuaAction::DeleteMessage {
+            channel_id: "101".to_string(),
+            message_id: "denied_msg_777".to_string(),
+        },
+        LuaAction::SendMessage {
+            channel_id: Some("101".to_string()),
+            content: "<@123456> Wiadomość została usunięta przez AutoMod (blocked_word).".to_string(),
+        },
+    ];
+
+    let res_automod = execute_event_actions(
+        &ctx,
+        &state,
+        "automod",
+        Some(guild_id),
+        Some(ChannelId::new(101)),
+        Some(UserId::new(123456)),
+        &automod_actions,
+    )
+    .await;
+    assert!(res_automod.is_ok());
+
+    // Verify calls recorded by the mock server
+    let calls = mock.recorded_calls.lock().await.clone();
+    let post_calls: Vec<_> = calls
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+        .collect();
+
+    assert!(!post_calls.is_empty(), "AutoMod notice message must still be dispatched");
+    let last_post = post_calls.last().unwrap();
+    assert!(
+        last_post.1.contains("narusza zasady AutoMod (usunięcie zablokowane)"),
+        "dependent notice content should have been adjusted to indicate deletion was blocked, got: {}",
+        last_post.1
+    );
+    assert!(
+        !last_post.1.contains("została usunięta przez AutoMod"),
+        "dependent notice must not falsely claim message was deleted when deletion failed, got: {}",
+        last_post.1
+    );
+
+    let final_audits = state.storage.list_audit_events("100", 20).await.unwrap();
+    assert!(
+        final_audits.iter().any(|e| e.event == "action_denied" && e.module_id == "automod"),
+        "AutoMod message deletion failure must record action_denied audit entry"
     );
 
     shard_manager.shutdown_all().await;

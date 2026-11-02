@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -29,8 +30,7 @@ pub struct RateLimitDecision {
 #[derive(Clone, Debug)]
 pub struct RateLimiter {
     policies: Arc<DashMap<String, RateLimitQuota>>,
-    history: Arc<DashMap<String, Vec<Instant>>>,
-    reservation_lock: Arc<Mutex<()>>,
+    history: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
 }
 
 impl Default for RateLimiter {
@@ -61,8 +61,7 @@ impl Default for RateLimiter {
 
         Self {
             policies,
-            history: Arc::new(DashMap::new()),
-            reservation_lock: Arc::new(Mutex::new(())),
+            history: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -98,7 +97,7 @@ impl RateLimiter {
 
     #[must_use]
     pub fn keys_count(&self) -> usize {
-        self.history.len()
+        self.history.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     fn evaluate_capacity(
@@ -130,12 +129,8 @@ impl RateLimiter {
 
     pub fn check_rate_limit(&self, key: &str, quota: RateLimitQuota) -> RateLimitDecision {
         let now = Instant::now();
-        let _guard = self
-            .reservation_lock
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let mut entry = self.history.entry(key.to_string()).or_default();
-        let timestamps = entry.value_mut();
+        let mut history = self.history.lock().unwrap_or_else(|e| e.into_inner());
+        let timestamps = history.entry(key.to_string()).or_default();
 
         match Self::evaluate_capacity(timestamps, now, quota) {
             Ok(()) => {
@@ -172,34 +167,29 @@ impl RateLimiter {
             let guild_quota = self.quota_for("command_guild");
             let guild_key = format!("guild:{gid}:cmd");
 
-            let _guard = self
-                .reservation_lock
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut history = self.history.lock().unwrap_or_else(|e| e.into_inner());
 
             // Evaluate user capacity first under atomic lock
-            let mut user_entry = self.history.entry(user_key).or_default();
-            if let Err(decision) = Self::evaluate_capacity(user_entry.value_mut(), now, cmd_quota) {
+            let user_timestamps = history.entry(user_key.clone()).or_default();
+            if let Err(decision) = Self::evaluate_capacity(user_timestamps, now, cmd_quota) {
                 return decision;
             }
 
             // Evaluate guild capacity under same atomic lock
-            let mut guild_entry = self.history.entry(guild_key).or_default();
-            if let Err(decision) =
-                Self::evaluate_capacity(guild_entry.value_mut(), now, guild_quota)
-            {
+            let guild_timestamps = history.entry(guild_key.clone()).or_default();
+            if let Err(decision) = Self::evaluate_capacity(guild_timestamps, now, guild_quota) {
                 // Neither user nor guild quota is consumed when guild limit is exceeded
                 return decision;
             }
 
             // Both user and guild budgets verified: commit timestamps atomically
-            let user_timestamps = user_entry.value_mut();
+            let user_timestamps = history.entry(user_key).or_default();
             user_timestamps.push(now);
             let remaining = cmd_quota
                 .max_requests
                 .saturating_sub(user_timestamps.len() as u32);
 
-            let guild_timestamps = guild_entry.value_mut();
+            let guild_timestamps = history.entry(guild_key).or_default();
             guild_timestamps.push(now);
 
             RateLimitDecision {
@@ -234,11 +224,8 @@ impl RateLimiter {
 
     pub fn cleanup_stale_entries_at(&self, now: Instant) {
         let max_window = self.max_window();
-        let _guard = self
-            .reservation_lock
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        self.history.retain(|_, timestamps| {
+        let mut history = self.history.lock().unwrap_or_else(|e| e.into_inner());
+        history.retain(|_, timestamps| {
             timestamps.retain(|&ts| now.saturating_duration_since(ts) < max_window);
             !timestamps.is_empty()
         });

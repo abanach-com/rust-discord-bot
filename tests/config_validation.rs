@@ -1,7 +1,7 @@
+use rusty_discord_bot::lua::{LuaEngine, LuaLimits};
 use serde_json::json;
 use std::path::PathBuf;
 use tempfile::tempdir;
-use rusty_discord_bot::lua::{LuaEngine, LuaLimits};
 
 fn limits() -> LuaLimits {
     LuaLimits {

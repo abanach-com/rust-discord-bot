@@ -8,7 +8,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 pub use memory::MemoryStore;
-pub use postgres::PostgresStore;
+pub use postgres::{PostgresStore, run_safe_migrations};
 pub use progression::{
     CoinTransfer, CoinTransferOutcome, DailyClaimOutcome, MemberProgress, ProgressMetric,
     ReputationGrantOutcome, XpAward, level_for_xp, total_xp_for_level,

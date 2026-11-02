@@ -40,6 +40,7 @@ const state = {
   session: null,
   guildId: null,
   generationId: 0,
+  guildAbortController: null,
   activeTab: "modules",
   modulesData: [],
   analyticsTimer: null,
@@ -117,7 +118,16 @@ async function request(path, options = {}) {
     headers.set("x-csrf-token", state.session.csrf_token);
   }
 
-  const signal = options.signal || AbortSignal.timeout(10000);
+  let signal = options.signal;
+  if (!signal) {
+    signal = typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(10000) : undefined;
+  } else if (typeof AbortSignal.any === "function" && typeof AbortSignal.timeout === "function") {
+    try {
+      signal = AbortSignal.any([options.signal, AbortSignal.timeout(10000)]);
+    } catch {
+      signal = options.signal;
+    }
+  }
 
   const response = await fetch(path, {
     credentials: "same-origin",
@@ -239,6 +249,9 @@ function initRealtimeStream() {
       if (state.activeTab === "moderation") {
         loadCases();
       }
+      if (state.activeTab === "audit") {
+        loadAudit();
+      }
       updateKpis();
     });
 
@@ -246,6 +259,9 @@ function initRealtimeStream() {
       showToast("Utworzono nową sprawę moderacyjną", "info", 3000);
       if (state.activeTab === "moderation") {
         loadCases();
+      }
+      if (state.activeTab === "audit") {
+        loadAudit();
       }
       updateKpis();
     });
@@ -318,6 +334,10 @@ async function showDashboard() {
     return;
   }
 
+  if (state.guildAbortController) {
+    try { state.guildAbortController.abort(); } catch {}
+  }
+  state.guildAbortController = new AbortController();
   state.guildId = state.session.guilds[0].id;
   ui.guildSelect.value = state.guildId;
   initRealtimeStream();
@@ -328,6 +348,10 @@ async function showDashboard() {
 async function loadLiveUptime() {
   try {
     const live = await request("/health/live");
+    if (ui.kpiBotStatus) {
+      ui.kpiBotStatus.textContent = "ONLINE";
+      ui.kpiBotStatus.style.color = "var(--success)";
+    }
     if (ui.kpiUptime) {
       const upSec = live.uptime_seconds || 0;
       const hours = Math.floor(upSec / 3600);
@@ -335,6 +359,10 @@ async function loadLiveUptime() {
       ui.kpiUptime.textContent = `Uptime: ${hours}h ${minutes}m (v${live.version})`;
     }
   } catch {
+    if (ui.kpiBotStatus) {
+      ui.kpiBotStatus.textContent = "OFFLINE";
+      ui.kpiBotStatus.style.color = "var(--danger)";
+    }
     if (ui.kpiUptime) {
       ui.kpiUptime.textContent = "Uptime: niedostępny";
     }
@@ -345,6 +373,7 @@ async function updateKpis() {
   if (!state.guildId) return;
   const gen = state.generationId;
   const targetGuild = state.guildId;
+  const signal = state.guildAbortController?.signal;
 
   if (state.modulesData && state.modulesData.length > 0) {
     const enabled = state.modulesData.filter((m) => m.enabled).length;
@@ -356,25 +385,41 @@ async function updateKpis() {
   }
 
   try {
-    const casesRes = await request(`/api/guilds/${encodeURIComponent(targetGuild)}/cases?limit=1`);
+    const casesRes = await request(
+      `/api/guilds/${encodeURIComponent(targetGuild)}/cases?limit=1`,
+      signal ? { signal } : {}
+    );
     if (gen !== state.generationId || state.guildId !== targetGuild) return;
     const total = casesRes.total !== undefined ? casesRes.total : (Array.isArray(casesRes) ? casesRes.length : 0);
     if (ui.kpiTotalCases) ui.kpiTotalCases.textContent = String(total);
-  } catch {}
+  } catch (err) {
+    if (err.name === "AbortError") return;
+  }
 
   try {
-    const auditRes = await request(`/api/guilds/${encodeURIComponent(targetGuild)}/audit?limit=1`);
+    const auditRes = await request(
+      `/api/guilds/${encodeURIComponent(targetGuild)}/audit?limit=1`,
+      signal ? { signal } : {}
+    );
     if (gen !== state.generationId || state.guildId !== targetGuild) return;
     const total = auditRes.total !== undefined ? auditRes.total : (Array.isArray(auditRes) ? auditRes.length : 0);
     if (ui.kpiAuditEvents) ui.kpiAuditEvents.textContent = String(total);
-  } catch {}
+  } catch (err) {
+    if (err.name === "AbortError") return;
+  }
+
+  loadLiveUptime();
 }
 
 async function updateSingleModuleCard(moduleId) {
   const gen = state.generationId;
   const targetGuild = state.guildId;
+  const signal = state.guildAbortController?.signal;
   try {
-    const modules = await request(`/api/guilds/${encodeURIComponent(targetGuild)}/modules`);
+    const modules = await request(
+      `/api/guilds/${encodeURIComponent(targetGuild)}/modules`,
+      signal ? { signal } : {}
+    );
     if (gen !== state.generationId || state.guildId !== targetGuild) return;
     state.modulesData = modules;
     const updated = modules.find((m) => m.manifest.id === moduleId);
@@ -392,7 +437,9 @@ async function updateSingleModuleCard(moduleId) {
         }
       }
     }
-  } catch {}
+  } catch (err) {
+    if (err.name === "AbortError") return;
+  }
 }
 
 async function loadModules() {
@@ -403,24 +450,26 @@ async function loadModules() {
 
   const gen = state.generationId;
   const targetGuild = state.guildId;
+  const signal = state.guildAbortController?.signal;
 
   try {
     const modules = await request(
-      `/api/guilds/${encodeURIComponent(targetGuild)}/modules`
+      `/api/guilds/${encodeURIComponent(targetGuild)}/modules`,
+      signal ? { signal } : {}
     );
     if (gen !== state.generationId || state.guildId !== targetGuild) return;
     state.modulesData = modules;
-    renderModules(modules);
+    renderModules(modules, targetGuild);
     updateKpis();
   } catch (error) {
-    if (gen !== state.generationId || state.guildId !== targetGuild) return;
+    if (error.name === "AbortError" || gen !== state.generationId || state.guildId !== targetGuild) return;
     ui.modules.replaceChildren(
       messageCard("Nie udało się pobrać modułów", error.message)
     );
   }
 }
 
-function renderModules(modules) {
+function renderModules(modules, targetGuild = state.guildId) {
   ui.modules.replaceChildren();
   if (ui.moduleCount) {
     ui.moduleCount.textContent = `${modules.length} ${
@@ -431,6 +480,9 @@ function renderModules(modules) {
   for (const module of modules) {
     const fragment = ui.template.content.cloneNode(true);
     const card = fragment.querySelector(".module-card");
+    if (card) {
+      card.dataset.moduleId = module.manifest.id;
+    }
     const enabled = fragment.querySelector(".module-enabled");
     const configTextarea = fragment.querySelector(".module-config");
     const saveBtn = fragment.querySelector(".save-button");
@@ -483,7 +535,7 @@ function renderModules(modules) {
     }
 
     saveBtn.addEventListener("click", async () => {
-      await saveModule(card, module.manifest.id, enabled, configTextarea, saveBtn);
+      await saveModule(targetGuild, card, module.manifest.id, enabled, configTextarea, saveBtn);
     });
 
     ui.modules.append(fragment);
@@ -718,8 +770,13 @@ function buildSchemaForm(container, manifest, config, onUpdate) {
   container.append(form);
 }
 
-async function saveModule(card, moduleId, enabled, config, button) {
+async function saveModule(targetGuild, card, moduleId, enabled, config, button) {
   clearStatus();
+  if (!targetGuild || targetGuild !== state.guildId) {
+    setStatus("Nie można zapisać konfiguracji: aktywny serwer uległ zmianie.", "error");
+    return;
+  }
+  const gen = state.generationId;
   button.disabled = true;
   button.textContent = "Zapisywanie...";
 
@@ -727,7 +784,7 @@ async function saveModule(card, moduleId, enabled, config, button) {
     const parsed = JSON.parse(config.value || "{}");
     const updated = await request(
       `/api/guilds/${encodeURIComponent(
-        state.guildId
+        targetGuild
       )}/modules/${encodeURIComponent(moduleId)}`,
       {
         method: "PUT",
@@ -738,12 +795,17 @@ async function saveModule(card, moduleId, enabled, config, button) {
       }
     );
 
+    if (gen !== state.generationId || state.guildId !== targetGuild) {
+      return;
+    }
+
     card.querySelector(".module-state").textContent = `Zmieniono: ${formatDate(
       updated.updated_at
     )}`;
     setStatus("Zapisano pomyślnie konfigurację modułu.", "success");
     updateKpis();
   } catch (error) {
+    if (gen !== state.generationId || state.guildId !== targetGuild) return;
     setStatus(error.message, "error");
   } finally {
     button.disabled = false;
@@ -755,17 +817,21 @@ async function loadCases(append = false) {
   clearStatus();
   if (!append) {
     state.casesOffset = 0;
-    ui.casesList.replaceChildren(
-      messageCard("Ładowanie spraw", "Pobieranie rejestru moderacji...")
-    );
+    if (!ui.casesList.querySelector(".case-card")) {
+      ui.casesList.replaceChildren(
+        messageCard("Ładowanie spraw", "Pobieranie rejestru moderacji...")
+      );
+    }
   }
 
   const gen = state.generationId;
   const targetGuild = state.guildId;
+  const signal = state.guildAbortController?.signal;
 
   try {
     const res = await request(
-      `/api/guilds/${encodeURIComponent(targetGuild)}/cases?limit=25&offset=${state.casesOffset}`
+      `/api/guilds/${encodeURIComponent(targetGuild)}/cases?limit=25&offset=${state.casesOffset}`,
+      signal ? { signal } : {}
     );
     if (gen !== state.generationId || state.guildId !== targetGuild) return;
     const items = Array.isArray(res) ? res : (res.items || []);
@@ -773,9 +839,9 @@ async function loadCases(append = false) {
     const nextOffset = res.next_offset !== undefined ? res.next_offset : null;
 
     if (ui.kpiTotalCases) ui.kpiTotalCases.textContent = String(total);
-    renderCases(items, append, nextOffset);
+    renderCases(items, append, nextOffset, targetGuild);
   } catch (error) {
-    if (gen !== state.generationId || state.guildId !== targetGuild) return;
+    if (error.name === "AbortError" || gen !== state.generationId || state.guildId !== targetGuild) return;
     if (!append) {
       ui.casesList.replaceChildren(
         messageCard("Błąd pobierania spraw moderacyjnych", error.message)
@@ -784,7 +850,7 @@ async function loadCases(append = false) {
   }
 }
 
-function renderCases(cases, append = false, nextOffset = null) {
+function renderCases(cases, append = false, nextOffset = null, targetGuild = state.guildId) {
   const existingMoreBtn = ui.casesList.querySelector("#cases-load-more");
   if (existingMoreBtn) existingMoreBtn.remove();
 
@@ -840,7 +906,7 @@ function renderCases(cases, append = false, nextOffset = null) {
       }
       toggleBtn.textContent = "Ukryj";
       container.style.display = "block";
-      await loadCaseDetails(c.case_number, container, c);
+      await loadCaseDetails(targetGuild, c.case_number, container, c);
     });
 
     ui.casesList.append(card);
@@ -863,17 +929,24 @@ function renderCases(cases, append = false, nextOffset = null) {
   }
 }
 
-async function loadCaseDetails(caseNumber, container, caseItem) {
+async function loadCaseDetails(targetGuild, caseNumber, container, caseItem) {
   container.innerHTML = `<p style="font-size:13px; color:var(--muted);">Ładowanie szczegółów sprawy...</p>`;
+  const gen = state.generationId;
+  const signal = state.guildAbortController?.signal;
   try {
-    const details = await request(`/api/guilds/${encodeURIComponent(state.guildId)}/cases/${caseNumber}`);
-    renderCaseDetailsContent(container, details, caseItem);
+    const details = await request(
+      `/api/guilds/${encodeURIComponent(targetGuild)}/cases/${caseNumber}`,
+      signal ? { signal } : {}
+    );
+    if (gen !== state.generationId || state.guildId !== targetGuild) return;
+    renderCaseDetailsContent(container, details, caseItem, targetGuild);
   } catch (error) {
+    if (error.name === "AbortError" || gen !== state.generationId || state.guildId !== targetGuild) return;
     container.innerHTML = `<p style="color:var(--danger); font-size:13px;">Błąd pobierania szczegółów: ${escapeHtml(error.message)}</p>`;
   }
 }
 
-function renderCaseDetailsContent(container, details, caseItem) {
+function renderCaseDetailsContent(container, details, caseItem, targetGuild = state.guildId) {
   const c = details.case;
   container.replaceChildren();
 
@@ -927,22 +1000,28 @@ function renderCaseDetailsContent(container, details, caseItem) {
 
   addNoteForm.addEventListener("submit", async (e) => {
     e.preventDefault();
+    if (state.guildId !== targetGuild) {
+      setStatus("Nie można dodać notatki: aktywny serwer uległ zmianie.", "error");
+      return;
+    }
     const input = addNoteForm.querySelector(".case-note-input");
     const visibleBox = addNoteForm.querySelector(".case-note-visible");
     const bodyText = input.value.trim();
     if (!bodyText) return;
 
     try {
-      await request(`/api/guilds/${encodeURIComponent(state.guildId)}/cases/${c.case_number}/notes`, {
+      await request(`/api/guilds/${encodeURIComponent(targetGuild)}/cases/${c.case_number}/notes`, {
         method: "POST",
         body: JSON.stringify({
           body: bodyText,
           visible_to_subject: visibleBox.checked,
         }),
       });
+      if (state.guildId !== targetGuild) return;
       setStatus(`Dodano notatkę do sprawy #${c.case_number}.`, "success");
-      await loadCaseDetails(c.case_number, container, c);
+      await loadCaseDetails(targetGuild, c.case_number, container, c);
     } catch (err) {
+      if (state.guildId !== targetGuild) return;
       setStatus(`Błąd dodawania notatki: ${err.message}`, "error");
     }
   });
@@ -986,10 +1065,14 @@ function renderCaseDetailsContent(container, details, caseItem) {
 
     editContainer.querySelector(".case-edit-form").addEventListener("submit", async (e) => {
       e.preventDefault();
+      if (state.guildId !== targetGuild) {
+        setStatus("Nie można zaktualizować sprawy: aktywny serwer uległ zmianie.", "error");
+        return;
+      }
       const newReason = editContainer.querySelector(".edit-reason-input").value.trim();
       const newPoints = parseInt(editContainer.querySelector(".edit-points-input").value, 10);
       try {
-        await request(`/api/guilds/${encodeURIComponent(state.guildId)}/cases/${c.case_number}`, {
+        await request(`/api/guilds/${encodeURIComponent(targetGuild)}/cases/${c.case_number}`, {
           method: "PATCH",
           body: JSON.stringify({
             expected_version: c.version,
@@ -997,16 +1080,18 @@ function renderCaseDetailsContent(container, details, caseItem) {
             points: isNaN(newPoints) ? c.points : newPoints,
           }),
         });
+        if (state.guildId !== targetGuild) return;
         setStatus(`Zaktualizowano sprawę #${c.case_number}.`, "success");
         await loadCases();
       } catch (err) {
+        if (state.guildId !== targetGuild) return;
         setStatus(`Błąd aktualizacji sprawy: ${err.message}`, "error");
       }
     });
     container.append(editContainer);
 
     voidBtn.addEventListener("click", () => {
-      openVoidModal(c);
+      openVoidModal(c, targetGuild);
     });
   }
 }
@@ -1024,11 +1109,19 @@ function setupVoidDialog() {
     const c = state.pendingVoidCase;
     if (!c) return;
 
+    const targetGuild = c.targetGuild || state.guildId;
+    if (state.guildId !== targetGuild) {
+      ui.voidDialog.close();
+      state.pendingVoidCase = null;
+      setStatus("Nie można unieważnić sprawy: aktywny serwer uległ zmianie.", "error");
+      return;
+    }
+
     const reason = ui.voidReasonInput.value.trim();
     if (!reason) return;
 
     try {
-      await request(`/api/guilds/${encodeURIComponent(state.guildId)}/cases/${c.case_number}/void`, {
+      await request(`/api/guilds/${encodeURIComponent(targetGuild)}/cases/${c.case_number}/void`, {
         method: "POST",
         body: JSON.stringify({
           expected_version: c.version,
@@ -1037,16 +1130,18 @@ function setupVoidDialog() {
       });
       ui.voidDialog.close();
       state.pendingVoidCase = null;
+      if (state.guildId !== targetGuild) return;
       setStatus(`Sprawa #${c.case_number} została unieważniona w bazie danych (kara w Discordzie wymaga osobnego cofnięcia).`, "success");
       await loadCases();
     } catch (err) {
+      if (state.guildId !== targetGuild) return;
       setStatus(`Błąd unieważnienia: ${err.message}`, "error");
     }
   });
 }
 
-function openVoidModal(caseItem) {
-  state.pendingVoidCase = caseItem;
+function openVoidModal(caseItem, targetGuild = state.guildId) {
+  state.pendingVoidCase = { ...caseItem, targetGuild };
   if (ui.voidReasonInput) ui.voidReasonInput.value = "";
   const titleEl = document.querySelector("#void-dialog-title");
   if (titleEl) {
@@ -1061,17 +1156,21 @@ async function loadAudit(append = false) {
   clearStatus();
   if (!append) {
     state.auditOffset = 0;
-    ui.auditList.replaceChildren(
-      messageCard("Ładowanie dziennika", "Pobieranie zdarzeń audytowych...")
-    );
+    if (!ui.auditList.querySelector(".audit-table")) {
+      ui.auditList.replaceChildren(
+        messageCard("Ładowanie dziennika", "Pobieranie zdarzeń audytowych...")
+      );
+    }
   }
 
   const gen = state.generationId;
   const targetGuild = state.guildId;
+  const signal = state.guildAbortController?.signal;
 
   try {
     const res = await request(
-      `/api/guilds/${encodeURIComponent(targetGuild)}/audit?limit=25&offset=${state.auditOffset}`
+      `/api/guilds/${encodeURIComponent(targetGuild)}/audit?limit=25&offset=${state.auditOffset}`,
+      signal ? { signal } : {}
     );
     if (gen !== state.generationId || state.guildId !== targetGuild) return;
     const items = Array.isArray(res) ? res : (res.items || []);
@@ -1081,7 +1180,7 @@ async function loadAudit(append = false) {
     if (ui.kpiAuditEvents) ui.kpiAuditEvents.textContent = String(total);
     renderAudit(items, append, nextOffset);
   } catch (error) {
-    if (gen !== state.generationId || state.guildId !== targetGuild) return;
+    if (error.name === "AbortError" || gen !== state.generationId || state.guildId !== targetGuild) return;
     if (!append) {
       ui.auditList.replaceChildren(
         messageCard("Błąd pobierania audytu", error.message)
@@ -1160,13 +1259,25 @@ async function loadAnalytics() {
     const res = await fetch("/health/ready", { headers: { "Accept": "application/json" } });
     const data = await res.json().catch(() => ({}));
     if (res.status === 200) {
+      if (ui.kpiBotStatus) {
+        ui.kpiBotStatus.textContent = "ONLINE";
+        ui.kpiBotStatus.style.color = "var(--success)";
+      }
       renderAnalytics(data, true);
     } else if (res.status === 503) {
+      if (ui.kpiBotStatus) {
+        ui.kpiBotStatus.textContent = "DEGRADED";
+        ui.kpiBotStatus.style.color = "var(--warning)";
+      }
       renderAnalytics(data, false);
     } else {
       throw new Error(`HTTP ${res.status}`);
     }
   } catch (err) {
+    if (ui.kpiBotStatus) {
+      ui.kpiBotStatus.textContent = "OFFLINE";
+      ui.kpiBotStatus.style.color = "var(--danger)";
+    }
     renderAnalyticsNetworkError(err);
   }
 }
@@ -1319,13 +1430,31 @@ function messageCard(title, body) {
 
 ui.guildSelect?.addEventListener("change", async (event) => {
   state.generationId++;
+  if (state.guildAbortController) {
+    try {
+      state.guildAbortController.abort();
+    } catch {}
+  }
+  state.guildAbortController = new AbortController();
+
   if (ui.voidDialog && typeof ui.voidDialog.close === "function") {
     try { ui.voidDialog.close(); } catch {}
   }
   state.pendingVoidCase = null;
+  state.modulesData = [];
+  state.casesOffset = 0;
+  state.auditOffset = 0;
+  state.editingModuleId = null;
+
   ui.modules?.replaceChildren();
   ui.casesList?.replaceChildren();
   ui.auditList?.replaceChildren();
+
+  if (ui.kpiActiveModules) ui.kpiActiveModules.textContent = "-";
+  if (ui.kpiModulesHint) ui.kpiModulesHint.textContent = "";
+  if (ui.kpiTotalCases) ui.kpiTotalCases.textContent = "-";
+  if (ui.kpiAuditEvents) ui.kpiAuditEvents.textContent = "-";
+
   state.guildId = event.target.value;
   initRealtimeStream();
   switchTab(state.activeTab);

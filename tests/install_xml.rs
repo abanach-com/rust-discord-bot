@@ -1,5 +1,5 @@
-use tempfile::TempDir;
 use rusty_discord_bot::lua::{LuaEngine, LuaLimits};
+use tempfile::TempDir;
 
 fn limits() -> LuaLimits {
     LuaLimits {

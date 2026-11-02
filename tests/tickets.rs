@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 use chrono::Utc;
-use serde_json::json;
 use rusty_discord_bot::{
     lua::{LuaAction, LuaEngine, LuaExecutionContext, LuaLimits, TicketOperation},
     tickets::{
@@ -10,6 +9,7 @@ use rusty_discord_bot::{
         TicketStore,
     },
 };
+use serde_json::json;
 
 fn limits() -> LuaLimits {
     LuaLimits {

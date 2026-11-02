@@ -76,6 +76,30 @@ async fn test_health_endpoints_metrics_and_graceful_shutdown() {
     assert_eq!(ready_body["status"], "ready");
     assert_eq!(ready_body["checks"]["storage"], "ok");
     assert_eq!(ready_body["checks"]["lifecycle"], "ok (running)");
+    let initial_reqs = ready_body["dashboard_requests_total"]
+        .as_u64()
+        .expect("dashboard_requests_total must be present in /health/ready");
+    assert!(initial_reqs >= 1);
+
+    // Issue #58 verification: requests increment dashboard_requests_total
+    let _ = client
+        .get(format!("{base}/health/live"))
+        .send()
+        .await
+        .unwrap();
+    let res_next = client
+        .get(format!("{base}/health/ready"))
+        .send()
+        .await
+        .unwrap();
+    let next_body: serde_json::Value = res_next.json().await.unwrap();
+    let next_reqs = next_body["dashboard_requests_total"]
+        .as_u64()
+        .expect("dashboard_requests_total must be present");
+    assert!(
+        next_reqs > initial_reqs,
+        "dashboard_requests_total must strictly increase with HTTP requests"
+    );
 
     // Test /metrics
     let res = client.get(format!("{base}/metrics")).send().await.unwrap();
@@ -83,8 +107,21 @@ async fn test_health_endpoints_metrics_and_graceful_shutdown() {
     let metrics_text = res.text().await.unwrap();
     assert!(metrics_text.contains("zuckerbot_uptime_seconds"));
     assert!(metrics_text.contains("zuckerbot_dashboard_requests_total"));
+    assert!(metrics_text.contains("rusty_discord_bot_dashboard_requests_total"));
 
-    // Test readiness transitions to 503 during shutdown
+    // Issue #58 & #65 asset checks: verify app.js has real metrics, no Math.random, and handles 503 degraded status
+    let res_app_js = client
+        .get(format!("{base}/assets/app.js"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res_app_js.status(), reqwest::StatusCode::OK);
+    let app_js_text = res_app_js.text().await.unwrap();
+    assert!(!app_js_text.contains("Math.random()"));
+    assert!(app_js_text.contains("dashboard_requests_total"));
+    assert!(app_js_text.contains("res.status === 503"));
+
+    // Issue #65 verification: test readiness transitions to 503 during degraded state and includes payload
     state
         .is_shutting_down
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -97,6 +134,15 @@ async fn test_health_endpoints_metrics_and_graceful_shutdown() {
         res_shutting_down.status(),
         reqwest::StatusCode::SERVICE_UNAVAILABLE,
         "readiness must return 503 when process is shutting down"
+    );
+    let degraded_body: serde_json::Value = res_shutting_down.json().await.unwrap();
+    assert_eq!(degraded_body["status"], "unready");
+    assert!(degraded_body["dashboard_requests_total"].as_u64().is_some());
+    assert!(
+        degraded_body["checks"]["lifecycle"]
+            .as_str()
+            .unwrap()
+            .contains("unready")
     );
 
     // Test graceful shutdown

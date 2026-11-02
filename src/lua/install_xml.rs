@@ -47,15 +47,22 @@ impl InstallManifest {
             .attributes
             .get("version")
             .cloned()
-            .or_else(|| root.find_child("version").map(|c| c.text.trim().to_string()))
+            .or_else(|| {
+                root.find_child("version")
+                    .map(|c| c.text.trim().to_string())
+            })
             .unwrap_or_else(|| "1.0.0".to_string());
 
-        let bot_name = root
-            .find_child("bot")
-            .and_then(|b| b.attributes.get("name").cloned().or_else(|| {
+        let bot_name = root.find_child("bot").and_then(|b| {
+            b.attributes.get("name").cloned().or_else(|| {
                 let t = b.text.trim();
-                if t.is_empty() { None } else { Some(t.to_string()) }
-            }));
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t.to_string())
+                }
+            })
+        });
 
         let min_engine_version = root
             .find_child("bot")
@@ -298,7 +305,8 @@ pub fn parse_xml_to_dom(source: &str) -> Result<XmlElement, InstallXmlError> {
             // Opening tag <tag attr="val"> or <tag attr="val" />
             i += 1; // skip '<'
             let start_tag = i;
-            while i < len && !bytes[i].is_ascii_whitespace() && bytes[i] != b'>' && bytes[i] != b'/' {
+            while i < len && !bytes[i].is_ascii_whitespace() && bytes[i] != b'>' && bytes[i] != b'/'
+            {
                 i += 1;
             }
             let tag_name = source[start_tag..i].trim().to_string();

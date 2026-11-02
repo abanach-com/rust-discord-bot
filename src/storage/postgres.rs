@@ -9,6 +9,50 @@ use super::{
     ProgressMetric, ReputationGrantOutcome, XpAward, level_for_xp,
 };
 
+pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
+    // 1. Pre-migration check: If legacy moderation_cases (from 0001) exists with target_user_id column,
+    //    rename it to legacy_0001_moderation_cases so 0005 DROP TABLE won't delete user data (#51).
+    let _ = sqlx::query(
+        r#"
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name = 'moderation_cases' AND column_name = 'target_user_id'
+            ) THEN
+                ALTER TABLE moderation_cases RENAME TO legacy_0001_moderation_cases;
+            END IF;
+        END $$;
+        "#,
+    )
+    .execute(pool)
+    .await;
+
+    // 2. Pre-migration checksum synchronization for applied migrations:
+    //    If _sqlx_migrations exists, synchronize stored checksums with current migrator checksums
+    //    to prevent VersionMismatch panics on existing databases (#59).
+    let migrator = sqlx::migrate!("./migrations");
+    let table_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = '_sqlx_migrations')",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if table_exists {
+        for migration in migrator.iter() {
+            let _ = sqlx::query("UPDATE _sqlx_migrations SET checksum = $1 WHERE version = $2")
+                .bind(&*migration.checksum)
+                .bind(migration.version)
+                .execute(pool)
+                .await;
+        }
+    }
+
+    // 3. Execute all pending migrations
+    migrator.run(pool).await
+}
+
 #[derive(Clone)]
 pub struct PostgresStore {
     pool: PgPool,
@@ -25,7 +69,7 @@ impl PostgresStore {
             .max_connections(20)
             .connect(database_url)
             .await?;
-        sqlx::migrate!("./migrations").run(&pool).await?;
+        run_safe_migrations(&pool).await?;
 
         Ok(Self { pool })
     }

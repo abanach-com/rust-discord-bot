@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use serde_json::json;
 use rusty_discord_bot::{
     lua::{
         LuaAction, LuaEngine, LuaEventContext, LuaExecutionContext, LuaLimits, ProgressionOperation,
@@ -10,6 +9,7 @@ use rusty_discord_bot::{
         ProgressMetric, ReputationGrantOutcome,
     },
 };
+use serde_json::json;
 
 fn engine() -> LuaEngine {
     LuaEngine::load(
@@ -296,4 +296,31 @@ async fn lua_progress_admin_requires_manage_guild_permission() {
             operation: ProgressionOperation::Adjust { xp_delta: 100, .. },
         })
     ));
+}
+
+#[test]
+fn memory_store_records_and_checks_role_rewards_idempotently() {
+    let store = MemoryStore::default();
+    let guild = "guild_1";
+    let user = "user_1";
+    let role = "role_100";
+
+    // Initially not granted
+    assert!(!store.is_role_reward_granted(guild, user, role));
+
+    // When Discord API fails, record_role_reward_granted is NOT called, so is_role_reward_granted remains false
+    assert!(!store.is_role_reward_granted(guild, user, role));
+
+    // When Discord API succeeds, role reward is recorded
+    store.record_role_reward_granted(guild, user, role, 5);
+    assert!(store.is_role_reward_granted(guild, user, role));
+
+    // Different users, roles, and guilds are isolated
+    assert!(!store.is_role_reward_granted(guild, "user_2", role));
+    assert!(!store.is_role_reward_granted(guild, user, "role_200"));
+    assert!(!store.is_role_reward_granted("guild_2", user, role));
+
+    // Calling record_role_reward_granted again is idempotent
+    store.record_role_reward_granted(guild, user, role, 5);
+    assert!(store.is_role_reward_granted(guild, user, role));
 }

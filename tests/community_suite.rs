@@ -3,11 +3,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use serde_json::json;
 use rusty_discord_bot::lua::{
     LuaAction, LuaEngine, LuaEventContext, LuaExecutionContext, LuaLimits, MusicOperation,
     ProgressionOperation,
 };
+use serde_json::json;
 
 fn limits() -> LuaLimits {
     LuaLimits {
@@ -322,6 +322,114 @@ async fn automod_detects_naked_domains_and_userinfo_urls() {
     assert!(
         matches!(actions2.first(), Some(LuaAction::DeleteMessage { .. })),
         "expected delete message for url with userinfo"
+    );
+
+    // 3. Naked domain with path: bit.ly/offer
+    let event3 = LuaEventContext {
+        name: "message_create".to_owned(),
+        guild_id: Some("100000000000000001".to_owned()),
+        channel_id: Some("100000000000000002".to_owned()),
+        actor_id: Some("100000000000000003".to_owned()),
+        data: json!({
+            "message_id": "100000000000000012",
+            "content": "Check this out bit.ly/offer right now",
+            "attachments": []
+        }),
+        config: json!({
+            "block_suspicious_links": true,
+            "delete_messages": true
+        }),
+    };
+    let actions3 = engine
+        .execute_event("automod", "message_create", event3)
+        .await
+        .expect("automod event should execute");
+    assert!(
+        matches!(actions3.first(), Some(LuaAction::DeleteMessage { .. })),
+        "expected delete message for naked domain with path bit.ly/offer"
+    );
+
+    // 4. Userinfo trick: https://trusted.example@evil.example/path
+    // Whitelist includes trusted.example, blacklist includes evil.example.
+    // The actual destination is evil.example, so it MUST be blocked!
+    let event4 = LuaEventContext {
+        name: "message_create".to_owned(),
+        guild_id: Some("100000000000000001".to_owned()),
+        channel_id: Some("100000000000000002".to_owned()),
+        actor_id: Some("100000000000000003".to_owned()),
+        data: json!({
+            "message_id": "100000000000000013",
+            "content": "Visit https://trusted.example@evil.example/path for account verification",
+            "attachments": []
+        }),
+        config: json!({
+            "allowed_domains": ["trusted.example"],
+            "blocked_domains": ["evil.example"],
+            "delete_messages": true
+        }),
+    };
+    let actions4 = engine
+        .execute_event("automod", "message_create", event4)
+        .await
+        .expect("automod event should execute");
+    assert!(
+        matches!(actions4.first(), Some(LuaAction::DeleteMessage { .. })),
+        "expected delete message when evil destination is disguised with trusted userinfo"
+    );
+
+    // 5. Inverted userinfo trick: https://evil.example@trusted.example/path
+    // Whitelist includes trusted.example, blacklist includes evil.example.
+    // The actual destination is trusted.example (allowed), userinfo is evil.example.
+    // This MUST be allowed (no DeleteMessage action).
+    let event5 = LuaEventContext {
+        name: "message_create".to_owned(),
+        guild_id: Some("100000000000000001".to_owned()),
+        channel_id: Some("100000000000000002".to_owned()),
+        actor_id: Some("100000000000000003".to_owned()),
+        data: json!({
+            "message_id": "100000000000000014",
+            "content": "Safe link https://evil.example@trusted.example/path to docs",
+            "attachments": []
+        }),
+        config: json!({
+            "allowed_domains": ["trusted.example"],
+            "blocked_domains": ["evil.example"],
+            "delete_messages": true
+        }),
+    };
+    let actions5 = engine
+        .execute_event("automod", "message_create", event5)
+        .await
+        .expect("automod event should execute");
+    assert!(
+        actions5.is_empty(),
+        "expected no actions (allowed) when destination is trusted.example despite userinfo containing evil.example"
+    );
+
+    // 6. Whitelist exemption for naked domain with path: bit.ly/offer
+    let event6 = LuaEventContext {
+        name: "message_create".to_owned(),
+        guild_id: Some("100000000000000001".to_owned()),
+        channel_id: Some("100000000000000002".to_owned()),
+        actor_id: Some("100000000000000003".to_owned()),
+        data: json!({
+            "message_id": "100000000000000015",
+            "content": "Official shortlink bit.ly/offer for server members",
+            "attachments": []
+        }),
+        config: json!({
+            "block_suspicious_links": true,
+            "allowed_domains": ["bit.ly"],
+            "delete_messages": true
+        }),
+    };
+    let actions6 = engine
+        .execute_event("automod", "message_create", event6)
+        .await
+        .expect("automod event should execute");
+    assert!(
+        actions6.is_empty(),
+        "expected naked domain to be allowed when present in allowed_domains"
     );
 }
 

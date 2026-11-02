@@ -27,7 +27,7 @@ impl PostgresSessionStore {
             .max_connections(20)
             .connect(database_url)
             .await?;
-        sqlx::migrate!("./migrations").run(&pool).await?;
+        crate::storage::run_safe_migrations(&pool).await?;
         Ok(Self { pool })
     }
 

@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 use chrono::{Duration, Utc};
-use serde_json::json;
 use rusty_discord_bot::{
     lua::{LuaAction, LuaEngine, LuaExecutionContext, LuaLimits, SchedulerOperation},
     scheduler::{
@@ -9,6 +8,7 @@ use rusty_discord_bot::{
         STATUS_COMPLETED, STATUS_FAILED, STATUS_PROCESSING, SchedulerStore,
     },
 };
+use serde_json::json;
 
 fn limits() -> LuaLimits {
     LuaLimits {
@@ -394,4 +394,89 @@ async fn expired_lease_with_exhausted_attempts_marks_job_failed_and_frees_quota(
         .await
         .expect("create_job should succeed");
     assert!(matches!(outcome2, CreateJobOutcome::Created(_)));
+}
+
+#[tokio::test]
+async fn multi_guild_polling_is_not_blocked_by_expired_job_in_another_guild() {
+    let store = SchedulerStore::memory();
+    let now = Utc::now();
+
+    // Guild 1: Job that is processing and will expire with exhausted attempts
+    let mut guild1_job = new_job(now - Duration::seconds(10));
+    guild1_job.guild_id = "guild-100".to_owned();
+    guild1_job.max_attempts = 1;
+    let created_g1 = created_job(&store, guild1_job, 10).await;
+
+    // Worker claims Guild 1 job at T=0
+    let claimed_g1 = store
+        .claim_due("worker-1", now, now - Duration::seconds(60), 1)
+        .await
+        .expect("worker-1 claim should succeed");
+    assert_eq!(claimed_g1.len(), 1);
+    assert_eq!(claimed_g1[0].id, created_g1.id);
+
+    // Guild 2: Job that is due
+    let mut guild2_job = new_job(now - Duration::seconds(5));
+    guild2_job.guild_id = "guild-200".to_owned();
+    guild2_job.creator_user_id = "user-200".to_owned();
+    let created_g2 = created_job(&store, guild2_job, 10).await;
+
+    // Time passes past lease threshold (65s > 60s)
+    let claim_time = now + Duration::seconds(65);
+    let stale_before = claim_time - Duration::seconds(60);
+
+    // Worker polls for due jobs across guilds
+    let claimed = store
+        .claim_due("worker-2", claim_time, stale_before, 10)
+        .await
+        .expect("claim_due should succeed");
+
+    // Guild 1 job expired and failed; Guild 2 job was claimed without blocking
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].id, created_g2.id);
+    assert_eq!(claimed[0].guild_id, "guild-200");
+
+    let g1_after = store.get_job(&created_g1.id).await.unwrap().unwrap();
+    assert_eq!(g1_after.status, STATUS_FAILED);
+}
+
+#[tokio::test]
+async fn completed_jobs_with_completed_at_are_not_claimable_or_resurrected() {
+    let store = SchedulerStore::memory();
+    let now = Utc::now();
+    let created = created_job(&store, new_job(now - Duration::seconds(10)), 10).await;
+
+    // Claim and complete the job
+    let claimed = store
+        .claim_due("worker-1", now, now - Duration::seconds(60), 1)
+        .await
+        .expect("claim should succeed");
+    assert_eq!(claimed.len(), 1);
+
+    let completed = store
+        .mark_succeeded(&created.id, "worker-1", now)
+        .await
+        .expect("mark_succeeded should succeed")
+        .expect("job exists");
+    assert_eq!(completed.status, STATUS_COMPLETED);
+    assert!(completed.completed_at.is_some());
+
+    // Advance time further into the future
+    let future_now = now + Duration::minutes(30);
+    let stale_before = future_now - Duration::seconds(60);
+
+    // Ensure completed job is not claimable
+    assert!(!completed.is_claimable(future_now, stale_before));
+
+    // Polling must not resurrect or return the completed job
+    let claimed_future = store
+        .claim_due("worker-2", future_now, stale_before, 10)
+        .await
+        .expect("claim_due should succeed");
+    assert!(claimed_future.is_empty());
+
+    // Fetch from store and verify it is still completed
+    let job_in_store = store.get_job(&created.id).await.unwrap().unwrap();
+    assert_eq!(job_in_store.status, STATUS_COMPLETED);
+    assert!(job_in_store.completed_at.is_some());
 }

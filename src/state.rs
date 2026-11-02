@@ -55,7 +55,7 @@ impl AppState {
                 .acquire_timeout(std::time::Duration::from_secs(5))
                 .connect(url)
                 .await?;
-            sqlx::migrate!("./migrations").run(&pool).await?;
+            crate::storage::run_safe_migrations(&pool).await?;
 
             (
                 Storage::postgres(pool.clone()),
@@ -91,8 +91,14 @@ impl AppState {
                         .error("przekierowanie w odtwarzaczu mediów musi używać protokołu HTTPS");
                 }
 
-                if let Some(host) = next_url.host_str()
-                    && let Ok(ip) = host.parse::<std::net::IpAddr>()
+                let ip = match next_url.host() {
+                    Some(url::Host::Ipv4(v4)) => Some(std::net::IpAddr::V4(v4)),
+                    Some(url::Host::Ipv6(v6)) => Some(std::net::IpAddr::V6(v6)),
+                    _ => next_url
+                        .host_str()
+                        .and_then(|h| h.trim_matches(['[', ']']).parse::<std::net::IpAddr>().ok()),
+                };
+                if let Some(ip) = ip
                     && crate::discord::music::is_blocked_ip(ip)
                 {
                     return attempt.error("przekierowanie do zablokowanego prywatnego adresu IP");

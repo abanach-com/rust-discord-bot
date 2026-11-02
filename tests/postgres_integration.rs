@@ -1,6 +1,4 @@
 use chrono::{Duration, Utc};
-use serde_json::json;
-use uuid::Uuid;
 use rusty_discord_bot::{
     moderation_cases::{CaseKind, CaseSeverity, CreateCase, ModerationCaseStore},
     scheduler::{
@@ -13,6 +11,8 @@ use rusty_discord_bot::{
         TicketMutationOutcome,
     },
 };
+use serde_json::json;
+use uuid::Uuid;
 
 fn get_database_url() -> Option<String> {
     std::env::var("DATABASE_URL")

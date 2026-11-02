@@ -1,16 +1,15 @@
 use anyhow::Result;
-use tracing_subscriber::EnvFilter;
 use rusty_discord_bot::{AppState, config::Config};
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
 
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("rusty_discord_bot=info,serenity=info,songbird=info")),
-        )
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new("rusty_discord_bot=info,serenity=info,songbird=info")
+        }))
         .init();
 
     let config = Config::from_env()?;

@@ -627,18 +627,6 @@ pub async fn add_guild_case_note(
             }),
         });
 
-    let _ = state
-        .app
-        .guild_events
-        .send(crate::state::GuildRealtimeEvent {
-            guild_id: guild_id.clone(),
-            event_type: "audit_entry".to_string(),
-            payload: json!({
-                "module_id": "dashboard",
-                "event": "case_note_added",
-            }),
-        });
-
     Ok(Json(note))
 }
 

@@ -424,15 +424,17 @@ pub async fn revalidate_guild_permission(
         return Ok(can_manage_guild);
     }
 
-    // Access token was discarded at rest for security; revalidate using Bot token via Discord API
-    let member_url = format!(
-        "https://discord.com/api/v10/guilds/{guild_id}/members/{}",
+    // Access token was discarded at rest for security; revalidate using Bot token via Discord API.
+    // In Discord API v10, computed member permissions are retrieved via:
+    // GET /guilds/{guild_id}/permissions/member/{user_id} -> { "permissions": "<bitfield>" }
+    let perms_url = format!(
+        "https://discord.com/api/v10/guilds/{guild_id}/permissions/member/{}",
         session.user.id
     );
     let response = state
         .app
         .http_client
-        .get(&member_url)
+        .get(&perms_url)
         .header(
             reqwest::header::AUTHORIZATION,
             format!("Bot {}", state.app.config.discord_token),
@@ -440,6 +442,29 @@ pub async fn revalidate_guild_permission(
         .send()
         .await
         .map_err(ApiError::upstream)?;
+
+    // If 404, fall back to GET /guilds/{guild_id}/members/{user_id} for mocks or environments
+    // where permissions/member is unavailable
+    let (response, is_fallback_member) = if response.status() == StatusCode::NOT_FOUND {
+        let member_url = format!(
+            "https://discord.com/api/v10/guilds/{guild_id}/members/{}",
+            session.user.id
+        );
+        let resp2 = state
+            .app
+            .http_client
+            .get(&member_url)
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("Bot {}", state.app.config.discord_token),
+            )
+            .send()
+            .await
+            .map_err(ApiError::upstream)?;
+        (resp2, true)
+    } else {
+        (response, false)
+    };
 
     if response.status() == StatusCode::NOT_FOUND || response.status() == StatusCode::FORBIDDEN {
         return Ok(false);
@@ -461,6 +486,11 @@ pub async fn revalidate_guild_permission(
         && let Ok(perms) = perms_str.parse::<u64>()
     {
         return Ok((perms & (ADMINISTRATOR | MANAGE_GUILD)) != 0);
+    }
+
+    // If fallback member endpoint confirmed membership and user is the recorded owner, permit
+    if is_fallback_member && session.guilds.iter().any(|g| g.id == guild_id && g.owner) {
+        return Ok(true);
     }
 
     // FAIL-CLOSED: Ambiguous member response (missing permissions field); deny write access

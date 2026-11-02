@@ -107,7 +107,9 @@ jobs:
           cargo test --locked --all-features 2>&1 | tee tests.log
 
       - name: Validate dashboard JavaScript
-        run: node --check web/static/app.js
+        run: |
+          node --check web/static/app.js
+          node --test tests/guild_switching.test.js
 
       - name: Validate Docker Compose configuration
         shell: bash

@@ -144,9 +144,21 @@ Implemented events:
 
 `data` contains `message_id`, `content`, author data, mentions and attachment metadata.
 
+### `message_update`
+
+Fires when an existing message is edited in a guild. `data` contains `message_id`, `content`, author data, `mentions`, `mention_roles`, `mention_everyone`, attachment metadata (`attachments`), and `is_edit = true`.
+
+### `message_delete`
+
+Fires when a message is deleted from a channel in a guild. `data` contains `message_id` and `channel_id`.
+
 ### `guild_member_add`
 
-`data` contains user data, roles and `joined_at`.
+Fires when a new user joins a guild. `data` contains user data, roles, `joined_at`, `recent_joins_count`, `guild_name` and `member_count`.
+
+### `guild_member_remove`
+
+Fires when a member leaves, is kicked, or is banned from a guild. `data` contains user data (`user`), roles (if cached), `joined_at` (if cached), `guild_name` and `member_count`.
 
 The stable event envelope lets future versions add events without exposing Serenity internals directly to Lua.
 
@@ -177,6 +189,18 @@ For commands, the first reply becomes the interaction response. Additional repli
 ```
 
 Generated messages use an empty allowed-mentions policy. Text such as `@everyone` cannot trigger an uncontrolled mass mention.
+
+### Send direct message
+
+```lua
+{
+    type = "send_direct_message",
+    user_id = "123",
+    content = "Direct message text",
+}
+```
+
+Sends a direct message (DM) to the specified user. The bot opens a direct message channel with `user_id` and delivers the message with empty allowed mentions. Emits an audit log event (`send_direct_message`). Fails if the user has direct messages disabled or has blocked the bot.
 
 ### Delete message
 

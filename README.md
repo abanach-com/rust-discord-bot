@@ -23,9 +23,9 @@ Lua owns server behavior:
 - slash-command manifests
 - command installation and interaction contexts
 - command options and choices
-- reactions to Discord events
+- reactions to Discord events (`message_create`, `message_update`, `message_delete`, `guild_member_add`, `guild_member_remove`)
 - per-guild configuration schemas
-- declarative actions returned to the Rust host
+- declarative actions returned to the Rust host (messages, `send_direct_message`, moderation, roles, music, scheduler, tickets, audit)
 
 A Lua script never receives the Discord bot token, raw database credentials, unrestricted network access or direct filesystem access.
 

@@ -1165,7 +1165,8 @@ async fn build_transcript(
     }
 
     messages.sort_by_key(|message| message.id);
-    let mut output = String::from("Rusty Discord Bot ticket transcript\n============================\n");
+    let mut output =
+        String::from("Rusty Discord Bot ticket transcript\n============================\n");
     let mut included = 0_i32;
     for message in &messages {
         let line = format_transcript_message(message);

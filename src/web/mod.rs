@@ -1,6 +1,6 @@
-mod auth;
-mod routes;
-mod static_files;
+pub mod auth;
+pub mod routes;
+pub mod static_files;
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -59,7 +59,38 @@ pub async fn serve_with_shutdown(
         }
     });
 
-    let router = Router::new()
+    let router = build_router(state);
+
+    let listener = TcpListener::bind(bind).await?;
+    tracing::info!(%bind, "dashboard is listening");
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        let _ = shutdown_rx.recv().await;
+        tracing::info!("dashboard received shutdown signal");
+    })
+    .await?;
+
+    Ok(())
+}
+
+async fn track_dashboard_requests(
+    State(state): State<WebState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    state
+        .app
+        .metrics
+        .dashboard_requests_total
+        .fetch_add(1, Ordering::Relaxed);
+    next.run(request).await
+}
+
+pub fn build_router(state: WebState) -> Router {
+    Router::new()
         .route("/", get(static_files::index))
         .route("/favicon.ico", get(static_files::favicon))
         .route("/favicon.svg", get(static_files::favicon))
@@ -111,32 +142,5 @@ pub async fn serve_with_shutdown(
             state.clone(),
             track_dashboard_requests,
         ))
-        .with_state(state);
-
-    let listener = TcpListener::bind(bind).await?;
-    tracing::info!(%bind, "dashboard is listening");
-    axum::serve(
-        listener,
-        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move {
-        let _ = shutdown_rx.recv().await;
-        tracing::info!("dashboard received shutdown signal");
-    })
-    .await?;
-
-    Ok(())
-}
-
-async fn track_dashboard_requests(
-    State(state): State<WebState>,
-    request: Request,
-    next: Next,
-) -> Response {
-    state
-        .app
-        .metrics
-        .dashboard_requests_total
-        .fetch_add(1, Ordering::Relaxed);
-    next.run(request).await
+        .with_state(state)
 }

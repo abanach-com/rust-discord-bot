@@ -5,11 +5,11 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
     routing::get,
 };
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use rusty_discord_bot::AppState;
 use rusty_discord_bot::config::Config;
 use rusty_discord_bot::discord::music::validate_source;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Clone, Default)]
 struct MockMediaServerState {
@@ -21,12 +21,20 @@ async fn handle_redirect_to_metadata() -> impl IntoResponse {
     Redirect::temporary("https://169.254.169.254/latest/meta-data")
 }
 
+async fn handle_redirect_to_metadata_ipv6_mapped() -> impl IntoResponse {
+    Redirect::temporary("https://[::ffff:169.254.169.254]/latest/meta-data")
+}
+
 async fn handle_redirect_to_non_https() -> impl IntoResponse {
     Redirect::temporary("http://example.com/unencrypted")
 }
 
 async fn handle_redirect_to_loopback() -> impl IntoResponse {
     Redirect::temporary("https://127.0.0.1:9999/secret")
+}
+
+async fn handle_redirect_to_loopback_ipv6() -> impl IntoResponse {
+    Redirect::temporary("https://[::1]:9999/secret")
 }
 
 async fn handle_internal_secret(State(state): State<MockMediaServerState>) -> Response {
@@ -46,8 +54,16 @@ async fn test_music_resolver_network_egress_and_ssrf_boundary() {
     let mock_state = MockMediaServerState::default();
     let app = Router::new()
         .route("/redirect_metadata", get(handle_redirect_to_metadata))
+        .route(
+            "/redirect_metadata_ipv6_mapped",
+            get(handle_redirect_to_metadata_ipv6_mapped),
+        )
         .route("/redirect_non_https", get(handle_redirect_to_non_https))
         .route("/redirect_loopback", get(handle_redirect_to_loopback))
+        .route(
+            "/redirect_loopback_ipv6",
+            get(handle_redirect_to_loopback_ipv6),
+        )
         .route("/internal_secret", get(handle_internal_secret))
         .route("/media.mp3", get(handle_allowed_media_stream))
         .with_state(mock_state.clone());
@@ -76,9 +92,16 @@ async fn test_music_resolver_network_egress_and_ssrf_boundary() {
         lua_memory_limit_bytes: 4 * 1024 * 1024,
         lua_instruction_limit: 200_000,
         lua_hook_granularity: 100,
-        music_allowed_hosts: ["youtube.com".to_string(), "127.0.0.1".to_string()]
-            .into_iter()
-            .collect(),
+        music_allowed_hosts: [
+            "youtube.com".to_string(),
+            "127.0.0.1".to_string(),
+            "[::1]".to_string(),
+            "[::ffff:127.0.0.1]".to_string(),
+            "[::ffff:169.254.169.254]".to_string(),
+            "169.254.169.254".to_string(),
+        ]
+        .into_iter()
+        .collect(),
         trusted_proxies: ["127.0.0.1".parse().unwrap()].into_iter().collect(),
     };
 
@@ -91,6 +114,14 @@ async fn test_music_resolver_network_egress_and_ssrf_boundary() {
         "https://172.16.0.1/audio.mp3",
         "https://192.168.1.1/audio.mp3",
         "https://169.254.169.254/audio.mp3",
+        "https://[::1]/audio.mp3",
+        "https://[::ffff:127.0.0.1]/audio.mp3",
+        "https://[::ffff:169.254.169.254]/audio.mp3",
+        "https://[::ffff:10.0.0.1]/audio.mp3",
+        "https://[::ffff:172.16.0.1]/audio.mp3",
+        "https://[::ffff:192.168.1.1]/audio.mp3",
+        "https://[fe80::1]/audio.mp3",
+        "https://[fc00::1]/audio.mp3",
     ];
     for url in blocked_urls {
         assert!(
@@ -99,7 +130,7 @@ async fn test_music_resolver_network_egress_and_ssrf_boundary() {
         );
     }
 
-    // 2. Test egress redirect policy: media client refuses redirect to cloud metadata IP
+    // 2. Test egress redirect policy: media client refuses redirect to cloud metadata IPv4
     let res_metadata = state
         .media_http_client
         .get(format!("http://127.0.0.1:{port}/redirect_metadata"))
@@ -108,6 +139,19 @@ async fn test_music_resolver_network_egress_and_ssrf_boundary() {
     assert!(
         res_metadata.is_err(),
         "redirect to cloud metadata IP 169.254.169.254 must be blocked by redirect policy"
+    );
+
+    // 2b. Test egress redirect policy: media client refuses redirect to IPv6-mapped cloud metadata IP
+    let res_metadata_ipv6 = state
+        .media_http_client
+        .get(format!(
+            "http://127.0.0.1:{port}/redirect_metadata_ipv6_mapped"
+        ))
+        .send()
+        .await;
+    assert!(
+        res_metadata_ipv6.is_err(),
+        "redirect to cloud metadata IPv6 mapped IP must be blocked by redirect policy"
     );
 
     // 3. Test egress redirect policy: media client refuses redirect to loopback IP literal
@@ -119,6 +163,17 @@ async fn test_music_resolver_network_egress_and_ssrf_boundary() {
     assert!(
         res_loopback.is_err(),
         "redirect to loopback 127.0.0.1 must be blocked by redirect policy"
+    );
+
+    // 3b. Test egress redirect policy: media client refuses redirect to IPv6 loopback literal
+    let res_loopback_ipv6 = state
+        .media_http_client
+        .get(format!("http://127.0.0.1:{port}/redirect_loopback_ipv6"))
+        .send()
+        .await;
+    assert!(
+        res_loopback_ipv6.is_err(),
+        "redirect to loopback [::1] must be blocked by redirect policy"
     );
 
     // 4. Test egress redirect policy: media client refuses redirect to non-HTTPS

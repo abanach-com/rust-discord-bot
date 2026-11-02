@@ -268,7 +268,7 @@ pub async fn execute_event_actions(
     for action in actions {
         if let LuaAction::Audit { event, .. } = action
             && !last_action_succeeded
-            && (event == "welcome_sent" || event == "goodbye_sent")
+            && (event == "welcome_sent" || event == "goodbye_sent" || event.ends_with("_sent"))
         {
             tracing::info!(
                 event,

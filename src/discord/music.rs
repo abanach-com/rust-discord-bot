@@ -268,8 +268,8 @@ pub fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
             if (segments[0] & 0xffc0) == 0xfe80 {
                 return true;
             }
-            // IPv4-mapped IPv6 address (::ffff:a.b.c.d)
-            if let Some(ipv4) = ipv6.to_ipv4_mapped() {
+            // IPv4-mapped IPv6 address (::ffff:a.b.c.d) or IPv4-compatible (::a.b.c.d)
+            if let Some(ipv4) = ipv6.to_ipv4_mapped().or_else(|| ipv6.to_ipv4()) {
                 return is_blocked_ip(std::net::IpAddr::V4(ipv4));
             }
             false
@@ -307,7 +307,15 @@ pub fn validate_source(state: &AppState, query: &str) -> Result<()> {
         .to_ascii_lowercase();
 
     // Check if the host is an IP literal targeting blocked ranges
-    if let Ok(ip) = host.parse::<std::net::IpAddr>()
+    let ip = match url.host() {
+        Some(url::Host::Ipv4(v4)) => Some(std::net::IpAddr::V4(v4)),
+        Some(url::Host::Ipv6(v6)) => Some(std::net::IpAddr::V6(v6)),
+        _ => host
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .ok(),
+    };
+    if let Some(ip) = ip
         && is_blocked_ip(ip)
     {
         return Err(anyhow!(
@@ -357,11 +365,38 @@ mod tests {
         assert!(is_blocked_ip(IpAddr::V6("fe80::1".parse().unwrap())));
         assert!(is_blocked_ip(IpAddr::V6("2001:db8::1".parse().unwrap())));
 
+        // IPv6-mapped IPv4 addresses (::ffff:x.x.x.x)
+        assert!(is_blocked_ip(IpAddr::V6(
+            "::ffff:127.0.0.1".parse().unwrap()
+        )));
+        assert!(is_blocked_ip(IpAddr::V6(
+            "::ffff:10.0.0.1".parse().unwrap()
+        )));
+        assert!(is_blocked_ip(IpAddr::V6(
+            "::ffff:172.16.0.1".parse().unwrap()
+        )));
+        assert!(is_blocked_ip(IpAddr::V6(
+            "::ffff:192.168.1.1".parse().unwrap()
+        )));
+        assert!(is_blocked_ip(IpAddr::V6(
+            "::ffff:169.254.169.254".parse().unwrap()
+        )));
+
+        // IPv4-compatible IPv6 addresses (::x.x.x.x)
+        assert!(is_blocked_ip(IpAddr::V6("::127.0.0.1".parse().unwrap())));
+        assert!(is_blocked_ip(IpAddr::V6("::10.0.0.1".parse().unwrap())));
+        assert!(is_blocked_ip(IpAddr::V6(
+            "::169.254.169.254".parse().unwrap()
+        )));
+
         // Public internet IPs (must NOT be blocked)
         assert!(!is_blocked_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
         assert!(!is_blocked_ip(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
         assert!(!is_blocked_ip(IpAddr::V6(
             "2001:4860:4860::8888".parse().unwrap()
+        )));
+        assert!(!is_blocked_ip(IpAddr::V6(
+            "::ffff:8.8.8.8".parse().unwrap()
         )));
     }
 }

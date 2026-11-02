@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
+use rusty_discord_bot::lua::{LuaAction, LuaEngine, LuaExecutionContext, LuaLimits};
 use serde_json::json;
 use tempfile::TempDir;
-use rusty_discord_bot::lua::{LuaAction, LuaEngine, LuaExecutionContext, LuaLimits};
 
 fn limits() -> LuaLimits {
     LuaLimits {

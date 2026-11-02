@@ -25,7 +25,7 @@ impl PostgresTicketStore {
             .max_connections(8)
             .connect(database_url)
             .await?;
-        sqlx::migrate!("./migrations").run(&pool).await?;
+        crate::storage::run_safe_migrations(&pool).await?;
         Ok(Self { pool })
     }
 

@@ -153,3 +153,40 @@ fn test_concurrent_simultaneous_requests_with_limit_one() {
         "all other concurrent requests should be rejected"
     );
 }
+
+#[test]
+fn test_composite_reservations_cannot_deadlock() {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    let limiter = Arc::new(RateLimiter::new());
+    // Sequential loop over 1,000 distinct user/guild combinations
+    for i in 0..1000 {
+        let user = format!("u_{i}");
+        let guild = format!("g_{i}");
+        let res = limiter.check_command("cmd", &user, Some(&guild));
+        assert!(res.allowed);
+    }
+
+    // Multithreaded concurrent reservations across interleaved users & guilds
+    let thread_count = 16;
+    let barrier = Arc::new(Barrier::new(thread_count));
+    let mut handles = Vec::new();
+
+    for t in 0..thread_count {
+        let lim = Arc::clone(&limiter);
+        let bar = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            bar.wait();
+            for i in 0..100 {
+                let user = format!("user_{}_{}", t, i % 5);
+                let guild = format!("guild_{}", i % 3);
+                lim.check_command("ping", &user, Some(&guild));
+            }
+        }));
+    }
+
+    for handle in handles {
+        handle.join().expect("thread join must not deadlock");
+    }
+}

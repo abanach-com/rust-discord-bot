@@ -296,10 +296,11 @@ impl LuaEngine {
 fn build_registry(scripts_dir: &Path, limits: LuaLimits) -> Result<Registry, LuaEngineError> {
     let install_xml_path = scripts_dir.join("install.xml");
     let installer_manifest = if install_xml_path.is_file() {
-        let content = fs::read_to_string(&install_xml_path).map_err(|source| LuaEngineError::Io {
-            path: install_xml_path.clone(),
-            source,
-        })?;
+        let content =
+            fs::read_to_string(&install_xml_path).map_err(|source| LuaEngineError::Io {
+                path: install_xml_path.clone(),
+                source,
+            })?;
         let manifest =
             InstallManifest::parse(&content).map_err(|err| LuaEngineError::InvalidInstallXml {
                 path: install_xml_path.clone(),
