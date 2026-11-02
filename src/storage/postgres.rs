@@ -4,10 +4,13 @@ use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
 use uuid::Uuid;
 
 use super::{
-    AdjustMemberProgressParams, AuditLogEntry, CoinTransfer, CoinTransferOutcome,
-    DailyClaimOutcome, GuildModuleSettings, MemberProgress, ModerationAppeal,
-    ModerationExecutionIntent, ModuleDraftConfig, ProgressMetric, ReputationGrantOutcome,
-    TimedRoleGrant, XpAward, level_for_xp,
+    AdjustMemberProgressParams, AuditLogEntry, CardCollection, CardTrade, CoinTransfer,
+    CoinTransferOutcome, CommunityPoll, CountingGame, CustomAutomation, DailyClaimOutcome,
+    DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink, Giveaway,
+    GuildModuleSettings, InviteTracking, MemberProgress, ModerationAppeal,
+    ModerationExecutionIntent, ModuleDraftConfig, ProgressMetric, ProgressionSeason,
+    ReputationGrantOutcome, ScheduledEvent, ServerSnapshot, StarboardEntry, StickyMessage,
+    StoreItem, TimedRoleGrant, Tournament, TupperProfile, XpAward, level_for_xp,
 };
 
 pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
@@ -929,6 +932,1587 @@ impl PostgresStore {
             Some((val,)) => Ok(serde_json::from_value(val).unwrap_or_default()),
             None => Ok(Vec::new()),
         }
+    }
+
+    pub async fn create_server_snapshot(
+        &self,
+        guild_id: &str,
+        name: &str,
+        snapshot_json: Value,
+        created_by: &str,
+    ) -> anyhow::Result<ServerSnapshot> {
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let rec = sqlx::query_as::<_, ServerSnapshot>(
+            r#"
+            INSERT INTO server_snapshots (id, guild_id, name, snapshot_json, created_by, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING id, guild_id, name, snapshot_json, created_by, created_at
+            "#,
+        )
+        .bind(id)
+        .bind(guild_id)
+        .bind(name)
+        .bind(snapshot_json)
+        .bind(created_by)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(rec)
+    }
+
+    pub async fn list_server_snapshots(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<ServerSnapshot>> {
+        let rows = sqlx::query_as::<_, ServerSnapshot>(
+            r#"
+            SELECT id, guild_id, name, snapshot_json, created_by, created_at
+            FROM server_snapshots
+            WHERE guild_id = $1
+            ORDER BY created_at DESC
+            "#,
+        )
+        .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn get_server_snapshot(
+        &self,
+        snapshot_id: Uuid,
+    ) -> anyhow::Result<Option<ServerSnapshot>> {
+        let row = sqlx::query_as::<_, ServerSnapshot>(
+            r#"
+            SELECT id, guild_id, name, snapshot_json, created_by, created_at
+            FROM server_snapshots
+            WHERE id = $1
+            "#,
+        )
+        .bind(snapshot_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    pub async fn delete_server_snapshot(&self, snapshot_id: Uuid) -> anyhow::Result<bool> {
+        let res = sqlx::query("DELETE FROM server_snapshots WHERE id = $1")
+            .bind(snapshot_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn create_custom_automation(
+        &self,
+        guild_id: &str,
+        name: &str,
+        trigger_type: &str,
+        conditions_json: Value,
+        actions_json: Value,
+    ) -> anyhow::Result<CustomAutomation> {
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let rec = sqlx::query_as::<_, CustomAutomation>(
+            r#"
+            INSERT INTO custom_automations (id, guild_id, name, trigger_type, conditions_json, actions_json, enabled, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, true, $7, $7)
+            RETURNING id, guild_id, name, trigger_type, conditions_json, actions_json, enabled, created_at, updated_at
+            "#,
+        )
+        .bind(id)
+        .bind(guild_id)
+        .bind(name)
+        .bind(trigger_type)
+        .bind(conditions_json)
+        .bind(actions_json)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(rec)
+    }
+
+    pub async fn list_custom_automations(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<CustomAutomation>> {
+        let rows = sqlx::query_as::<_, CustomAutomation>(
+            r#"
+            SELECT id, guild_id, name, trigger_type, conditions_json, actions_json, enabled, created_at, updated_at
+            FROM custom_automations
+            WHERE guild_id = $1
+            "#,
+        )
+        .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn delete_custom_automation(&self, automation_id: Uuid) -> anyhow::Result<bool> {
+        let res = sqlx::query("DELETE FROM custom_automations WHERE id = $1")
+            .bind(automation_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn get_sticky_message(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+    ) -> anyhow::Result<Option<StickyMessage>> {
+        let row = sqlx::query_as::<_, StickyMessage>(
+            r#"
+            SELECT guild_id, channel_id, message_id, content, cooldown_seconds, last_updated_at
+            FROM sticky_messages
+            WHERE guild_id = $1 AND channel_id = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(channel_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    pub async fn set_sticky_message(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        message_id: &str,
+        content: &str,
+        cooldown_seconds: i32,
+    ) -> anyhow::Result<StickyMessage> {
+        let now = Utc::now();
+        let rec = sqlx::query_as::<_, StickyMessage>(
+            r#"
+            INSERT INTO sticky_messages (guild_id, channel_id, message_id, content, cooldown_seconds, last_updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (guild_id, channel_id) DO UPDATE
+            SET message_id = $3, content = $4, cooldown_seconds = $5, last_updated_at = $6
+            RETURNING guild_id, channel_id, message_id, content, cooldown_seconds, last_updated_at
+            "#,
+        )
+        .bind(guild_id)
+        .bind(channel_id)
+        .bind(message_id)
+        .bind(content)
+        .bind(cooldown_seconds)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(rec)
+    }
+
+    pub async fn delete_sticky_message(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+    ) -> anyhow::Result<bool> {
+        let res =
+            sqlx::query("DELETE FROM sticky_messages WHERE guild_id = $1 AND channel_id = $2")
+                .bind(guild_id)
+                .bind(channel_id)
+                .execute(&self.pool)
+                .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn create_community_poll(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        question: &str,
+        options: &[String],
+        is_anonymous: bool,
+        expires_at: DateTime<Utc>,
+    ) -> anyhow::Result<CommunityPoll> {
+        let id = Uuid::new_v4();
+        let tallies = vec![0i64; options.len()];
+        let options_json = serde_json::json!(options);
+        let tallies_json = serde_json::json!(tallies);
+        let now = Utc::now();
+
+        let rec = sqlx::query_as::<_, CommunityPoll>(
+            r#"
+            INSERT INTO community_polls (id, guild_id, channel_id, question, options_json, tallies_json, is_anonymous, expires_at, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            RETURNING id, guild_id, channel_id, question, options_json, tallies_json, is_anonymous, expires_at, created_at
+            "#,
+        )
+        .bind(id)
+        .bind(guild_id)
+        .bind(channel_id)
+        .bind(question)
+        .bind(options_json)
+        .bind(tallies_json)
+        .bind(is_anonymous)
+        .bind(expires_at)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(rec)
+    }
+
+    pub async fn get_community_poll(&self, poll_id: Uuid) -> anyhow::Result<Option<CommunityPoll>> {
+        let row = sqlx::query_as::<_, CommunityPoll>(
+            r#"
+            SELECT id, guild_id, channel_id, question, options_json, tallies_json, is_anonymous, expires_at, created_at
+            FROM community_polls
+            WHERE id = $1
+            "#,
+        )
+        .bind(poll_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    pub async fn vote_community_poll(
+        &self,
+        poll_id: Uuid,
+        option_idx: usize,
+    ) -> anyhow::Result<Option<CommunityPoll>> {
+        let mut tx = self.pool.begin().await?;
+        let poll = sqlx::query_as::<_, CommunityPoll>(
+            r#"
+            SELECT id, guild_id, channel_id, question, options_json, tallies_json, is_anonymous, expires_at, created_at
+            FROM community_polls
+            WHERE id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(poll_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let mut poll = match poll {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        if let Some(val) = poll
+            .tallies_json
+            .as_array_mut()
+            .and_then(|t| t.get_mut(option_idx))
+        {
+            let count = val.as_i64().unwrap_or(0);
+            *val = serde_json::json!(count + 1);
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE community_polls
+            SET tallies_json = $2
+            WHERE id = $1
+            "#,
+        )
+        .bind(poll_id)
+        .bind(&poll.tallies_json)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(Some(poll))
+    }
+
+    pub async fn create_giveaway(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        prize: &str,
+        winners_count: i32,
+        expires_at: DateTime<Utc>,
+    ) -> anyhow::Result<Giveaway> {
+        let id = Uuid::new_v4();
+        let empty_json = serde_json::json!([]);
+        let now = Utc::now();
+
+        let rec = sqlx::query_as::<_, Giveaway>(
+            r#"
+            INSERT INTO giveaways (id, guild_id, channel_id, prize, winners_count, participants_json, winners_json, ended, expires_at, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $6, false, $7, $8)
+            RETURNING id, guild_id, channel_id, prize, winners_count, participants_json, winners_json, ended, expires_at, created_at
+            "#,
+        )
+        .bind(id)
+        .bind(guild_id)
+        .bind(channel_id)
+        .bind(prize)
+        .bind(winners_count)
+        .bind(empty_json)
+        .bind(expires_at)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(rec)
+    }
+
+    pub async fn get_giveaway(&self, giveaway_id: Uuid) -> anyhow::Result<Option<Giveaway>> {
+        let row = sqlx::query_as::<_, Giveaway>(
+            r#"
+            SELECT id, guild_id, channel_id, prize, winners_count, participants_json, winners_json, ended, expires_at, created_at
+            FROM giveaways
+            WHERE id = $1
+            "#,
+        )
+        .bind(giveaway_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    pub async fn join_giveaway(&self, giveaway_id: Uuid, user_id: &str) -> anyhow::Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        let ga = sqlx::query_as::<_, Giveaway>(
+            r#"
+            SELECT id, guild_id, channel_id, prize, winners_count, participants_json, winners_json, ended, expires_at, created_at
+            FROM giveaways
+            WHERE id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(giveaway_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let mut ga = match ga {
+            Some(g) if !g.ended => g,
+            _ => return Ok(false),
+        };
+
+        let list = match ga.participants_json.as_array_mut() {
+            Some(l) => l,
+            None => return Ok(false),
+        };
+
+        let user_val = serde_json::json!(user_id);
+        if list.contains(&user_val) {
+            return Ok(false);
+        }
+        list.push(user_val);
+
+        sqlx::query(
+            r#"
+            UPDATE giveaways
+            SET participants_json = $2
+            WHERE id = $1
+            "#,
+        )
+        .bind(giveaway_id)
+        .bind(&ga.participants_json)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    pub async fn reroll_giveaway(&self, giveaway_id: Uuid) -> anyhow::Result<Vec<String>> {
+        let mut tx = self.pool.begin().await?;
+        let ga = sqlx::query_as::<_, Giveaway>(
+            r#"
+            SELECT id, guild_id, channel_id, prize, winners_count, participants_json, winners_json, ended, expires_at, created_at
+            FROM giveaways
+            WHERE id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(giveaway_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let mut ga = match ga {
+            Some(g) => g,
+            None => return Ok(Vec::new()),
+        };
+
+        let participants: Vec<String> = ga
+            .participants_json
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_owned()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if participants.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let count = (ga.winners_count as usize).min(participants.len());
+        let mut winners = Vec::new();
+        for i in 0..count {
+            winners.push(
+                participants
+                    [(i + (Utc::now().timestamp_subsec_millis() as usize)) % participants.len()]
+                .clone(),
+            );
+        }
+
+        ga.winners_json = serde_json::json!(winners);
+        sqlx::query(
+            r#"
+            UPDATE giveaways
+            SET winners_json = $2, ended = true
+            WHERE id = $1
+            "#,
+        )
+        .bind(giveaway_id)
+        .bind(&ga.winners_json)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(winners)
+    }
+
+    pub async fn record_starboard_entry(
+        &self,
+        guild_id: &str,
+        source_channel_id: &str,
+        source_message_id: &str,
+        starboard_message_id: &str,
+        reaction_count: i32,
+    ) -> anyhow::Result<StarboardEntry> {
+        let now = Utc::now();
+        let rec = sqlx::query_as::<_, StarboardEntry>(
+            r#"
+            INSERT INTO starboard_entries (guild_id, source_channel_id, source_message_id, starboard_message_id, reaction_count, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (guild_id, source_message_id) DO UPDATE
+            SET reaction_count = $5, starboard_message_id = $4
+            RETURNING guild_id, source_channel_id, source_message_id, starboard_message_id, reaction_count, created_at
+            "#,
+        )
+        .bind(guild_id)
+        .bind(source_channel_id)
+        .bind(source_message_id)
+        .bind(starboard_message_id)
+        .bind(reaction_count)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(rec)
+    }
+
+    pub async fn get_starboard_entry(
+        &self,
+        guild_id: &str,
+        source_message_id: &str,
+    ) -> anyhow::Result<Option<StarboardEntry>> {
+        let row = sqlx::query_as::<_, StarboardEntry>(
+            r#"
+            SELECT guild_id, source_channel_id, source_message_id, starboard_message_id, reaction_count, created_at
+            FROM starboard_entries
+            WHERE guild_id = $1 AND source_message_id = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(source_message_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    pub async fn list_store_items(&self, guild_id: &str) -> anyhow::Result<Vec<StoreItem>> {
+        let rows = sqlx::query_as::<_, StoreItem>(
+            r#"
+            SELECT id, guild_id, name, description, price, role_id, stock, created_at
+            FROM store_items
+            WHERE guild_id = $1
+            "#,
+        )
+        .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn create_store_item(
+        &self,
+        guild_id: &str,
+        name: &str,
+        description: &str,
+        price: i64,
+        role_id: Option<&str>,
+        stock: Option<i32>,
+    ) -> anyhow::Result<StoreItem> {
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let rec = sqlx::query_as::<_, StoreItem>(
+            r#"
+            INSERT INTO store_items (id, guild_id, name, description, price, role_id, stock, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            RETURNING id, guild_id, name, description, price, role_id, stock, created_at
+            "#,
+        )
+        .bind(id)
+        .bind(guild_id)
+        .bind(name)
+        .bind(description)
+        .bind(price)
+        .bind(role_id)
+        .bind(stock)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(rec)
+    }
+
+    pub async fn purchase_store_item(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        item_id: Uuid,
+    ) -> anyhow::Result<(StoreItem, i64)> {
+        let mut tx = self.pool.begin().await?;
+        let item = sqlx::query_as::<_, StoreItem>(
+            r#"
+            SELECT id, guild_id, name, description, price, role_id, stock, created_at
+            FROM store_items
+            WHERE id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(item_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let mut item = item.ok_or_else(|| anyhow::anyhow!("store item not found"))?;
+        if item.guild_id != guild_id {
+            return Err(anyhow::anyhow!("item does not belong to this guild"));
+        }
+        if let Some(stock) = item.stock {
+            if stock <= 0 {
+                return Err(anyhow::anyhow!("item is out of stock"));
+            }
+            item.stock = Some(stock - 1);
+            sqlx::query("UPDATE store_items SET stock = $2 WHERE id = $1")
+                .bind(item_id)
+                .bind(item.stock)
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        ensure_profile(&mut tx, guild_id, user_id).await?;
+        let mut profile = lock_profile(&mut tx, guild_id, user_id).await?;
+
+        if profile.coins < item.price {
+            return Err(anyhow::anyhow!("insufficient coins balance"));
+        }
+
+        profile.coins -= item.price;
+        profile.updated_at = Utc::now();
+        write_profile(&mut tx, &profile).await?;
+
+        let purchase_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO store_purchases (id, guild_id, user_id, item_id, price_paid, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+        )
+        .bind(purchase_id)
+        .bind(guild_id)
+        .bind(user_id)
+        .bind(item_id)
+        .bind(item.price)
+        .bind(Utc::now())
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok((item, profile.coins))
+    }
+
+    pub async fn archive_progression_season(
+        &self,
+        guild_id: &str,
+        name: &str,
+    ) -> anyhow::Result<ProgressionSeason> {
+        let standings_rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(
+            r#"
+            SELECT user_id, level, xp, coins
+            FROM member_progress
+            WHERE guild_id = $1
+            ORDER BY xp DESC
+            LIMIT 100
+            "#,
+        )
+        .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let standings: Vec<Value> = standings_rows
+            .into_iter()
+            .map(|(uid, lvl, xp, coins)| {
+                serde_json::json!({
+                    "user_id": uid,
+                    "level": lvl,
+                    "xp": xp,
+                    "coins": coins
+                })
+            })
+            .collect();
+
+        let count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM progression_seasons WHERE guild_id = $1")
+                .bind(guild_id)
+                .fetch_one(&self.pool)
+                .await?;
+
+        let season_num = count.0 as i32 + 1;
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let rec = sqlx::query_as::<_, ProgressionSeason>(
+            r#"
+            INSERT INTO progression_seasons (id, guild_id, season_number, name, standings_json, archived_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING id, guild_id, season_number, name, standings_json, archived_at
+            "#,
+        )
+        .bind(id)
+        .bind(guild_id)
+        .bind(season_num)
+        .bind(name)
+        .bind(serde_json::json!(standings))
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(rec)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_scheduled_event(
+        &self,
+        guild_id: &str,
+        title: &str,
+        description: &str,
+        start_time: DateTime<Utc>,
+        end_time: Option<DateTime<Utc>>,
+        timezone: &str,
+        max_participants: Option<i32>,
+    ) -> anyhow::Result<ScheduledEvent> {
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let rec = sqlx::query_as::<_, ScheduledEvent>(
+            r#"
+            INSERT INTO scheduled_events (id, guild_id, title, description, start_time, end_time, timezone, max_participants, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            RETURNING id, guild_id, title, description, start_time, end_time, timezone, max_participants, created_at
+            "#,
+        )
+        .bind(id)
+        .bind(guild_id)
+        .bind(title)
+        .bind(description)
+        .bind(start_time)
+        .bind(end_time)
+        .bind(timezone)
+        .bind(max_participants)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(rec)
+    }
+
+    pub async fn list_scheduled_events(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<ScheduledEvent>> {
+        let rows = sqlx::query_as::<_, ScheduledEvent>(
+            r#"
+            SELECT id, guild_id, title, description, start_time, end_time, timezone, max_participants, created_at
+            FROM scheduled_events
+            WHERE guild_id = $1
+            ORDER BY start_time ASC
+            "#,
+        )
+        .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn get_scheduled_event(
+        &self,
+        event_id: Uuid,
+    ) -> anyhow::Result<Option<ScheduledEvent>> {
+        let row = sqlx::query_as::<_, ScheduledEvent>(
+            r#"
+            SELECT id, guild_id, title, description, start_time, end_time, timezone, max_participants, created_at
+            FROM scheduled_events
+            WHERE id = $1
+            "#,
+        )
+        .bind(event_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    pub async fn join_event_roster(
+        &self,
+        event_id: Uuid,
+        user_id: &str,
+        max_main: i32,
+    ) -> anyhow::Result<EventRoster> {
+        let mut tx = self.pool.begin().await?;
+        let existing = sqlx::query_as::<_, EventRoster>(
+            r#"
+            SELECT event_id, user_id, role_type, position, joined_at
+            FROM event_rosters
+            WHERE event_id = $1 AND user_id = $2
+            "#,
+        )
+        .bind(event_id)
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if let Some(r) = existing {
+            return Ok(r);
+        }
+
+        let main_count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM event_rosters WHERE event_id = $1 AND role_type = 'main'",
+        )
+        .bind(event_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let role_type = if (main_count.0 as i32) < max_main {
+            "main"
+        } else {
+            "reserve"
+        };
+        let total_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM event_rosters WHERE event_id = $1")
+                .bind(event_id)
+                .fetch_one(&mut *tx)
+                .await?;
+
+        let position = total_count.0 as i32 + 1;
+        let now = Utc::now();
+
+        let rec = sqlx::query_as::<_, EventRoster>(
+            r#"
+            INSERT INTO event_rosters (event_id, user_id, role_type, position, joined_at)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING event_id, user_id, role_type, position, joined_at
+            "#,
+        )
+        .bind(event_id)
+        .bind(user_id)
+        .bind(role_type)
+        .bind(position)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(rec)
+    }
+
+    pub async fn leave_event_roster(
+        &self,
+        event_id: Uuid,
+        user_id: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let mut tx = self.pool.begin().await?;
+        let existing = sqlx::query_as::<_, EventRoster>(
+            r#"
+            SELECT event_id, user_id, role_type, position, joined_at
+            FROM event_rosters
+            WHERE event_id = $1 AND user_id = $2
+            "#,
+        )
+        .bind(event_id)
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let existing = match existing {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+
+        sqlx::query("DELETE FROM event_rosters WHERE event_id = $1 AND user_id = $2")
+            .bind(event_id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+
+        let mut promoted = None;
+        if existing.role_type == "main" {
+            let next_reserve = sqlx::query_as::<_, EventRoster>(
+                r#"
+                SELECT event_id, user_id, role_type, position, joined_at
+                FROM event_rosters
+                WHERE event_id = $1 AND role_type = 'reserve'
+                ORDER BY position ASC
+                LIMIT 1
+                "#,
+            )
+            .bind(event_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            if let Some(reserve) = next_reserve {
+                sqlx::query("UPDATE event_rosters SET role_type = 'main' WHERE event_id = $1 AND user_id = $2")
+                    .bind(event_id)
+                    .bind(&reserve.user_id)
+                    .execute(&mut *tx)
+                    .await?;
+                promoted = Some(reserve.user_id);
+            }
+        }
+
+        tx.commit().await?;
+        Ok(promoted)
+    }
+
+    pub async fn create_tournament(
+        &self,
+        guild_id: &str,
+        name: &str,
+        teams: &[String],
+    ) -> anyhow::Result<Tournament> {
+        let id = Uuid::new_v4();
+        let mut matches = Vec::new();
+        for chunk in teams.chunks(2) {
+            let team_a = chunk.first().cloned().unwrap_or_default();
+            let team_b = chunk.get(1).cloned().unwrap_or_default();
+            matches.push(serde_json::json!({
+                "round": 1,
+                "team_a": team_a,
+                "team_b": team_b,
+                "winner": null
+            }));
+        }
+        let bracket = serde_json::json!({
+            "teams": teams,
+            "matches": matches,
+        });
+        let now = Utc::now();
+
+        let rec = sqlx::query_as::<_, Tournament>(
+            r#"
+            INSERT INTO tournaments (id, guild_id, name, bracket_json, status, created_at)
+            VALUES ($1, $2, $3, $4, 'in_progress', $5)
+            RETURNING id, guild_id, name, bracket_json, status, created_at
+            "#,
+        )
+        .bind(id)
+        .bind(guild_id)
+        .bind(name)
+        .bind(bracket)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(rec)
+    }
+
+    pub async fn advance_tournament_match(
+        &self,
+        tournament_id: Uuid,
+        match_idx: usize,
+        winner: &str,
+    ) -> anyhow::Result<Tournament> {
+        let mut tx = self.pool.begin().await?;
+        let tourney = sqlx::query_as::<_, Tournament>(
+            r#"
+            SELECT id, guild_id, name, bracket_json, status, created_at
+            FROM tournaments
+            WHERE id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(tournament_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let mut tourney = tourney.ok_or_else(|| anyhow::anyhow!("tournament not found"))?;
+        let matches = tourney
+            .bracket_json
+            .get_mut("matches")
+            .and_then(|m| m.as_array_mut())
+            .ok_or_else(|| anyhow::anyhow!("malformed bracket matches"))?;
+        let match_obj = matches
+            .get_mut(match_idx)
+            .ok_or_else(|| anyhow::anyhow!("match index out of bounds"))?;
+        match_obj["winner"] = serde_json::json!(winner);
+
+        sqlx::query("UPDATE tournaments SET bracket_json = $2 WHERE id = $1")
+            .bind(tournament_id)
+            .bind(&tourney.bracket_json)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        Ok(tourney)
+    }
+
+    pub async fn record_invite(
+        &self,
+        guild_id: &str,
+        code: &str,
+        inviter_id: &str,
+        campaign_tag: Option<&str>,
+    ) -> anyhow::Result<InviteTracking> {
+        let now = Utc::now();
+        let rec = sqlx::query_as::<_, InviteTracking>(
+            r#"
+            INSERT INTO invites_tracking (guild_id, code, inviter_id, uses, campaign_tag, created_at)
+            VALUES ($1, $2, $3, 1, $4, $5)
+            ON CONFLICT (guild_id, code) DO UPDATE
+            SET uses = invites_tracking.uses + 1
+            RETURNING guild_id, code, inviter_id, uses, campaign_tag, created_at
+            "#,
+        )
+        .bind(guild_id)
+        .bind(code)
+        .bind(inviter_id)
+        .bind(campaign_tag)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(rec)
+    }
+
+    pub async fn list_invites(&self, guild_id: &str) -> anyhow::Result<Vec<InviteTracking>> {
+        let rows = sqlx::query_as::<_, InviteTracking>(
+            r#"
+            SELECT guild_id, code, inviter_id, uses, campaign_tag, created_at
+            FROM invites_tracking
+            WHERE guild_id = $1
+            "#,
+        )
+        .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn register_dynamic_voice_room(
+        &self,
+        channel_id: &str,
+        guild_id: &str,
+        owner_id: &str,
+    ) -> anyhow::Result<DynamicVoiceRoom> {
+        let now = Utc::now();
+        let rec = sqlx::query_as::<_, DynamicVoiceRoom>(
+            r#"
+            INSERT INTO dynamic_voice_rooms (channel_id, guild_id, owner_id, empty_since, created_at)
+            VALUES ($1, $2, $3, NULL, $4)
+            RETURNING channel_id, guild_id, owner_id, empty_since, created_at
+            "#,
+        )
+        .bind(channel_id)
+        .bind(guild_id)
+        .bind(owner_id)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(rec)
+    }
+
+    pub async fn update_dynamic_voice_empty_state(
+        &self,
+        channel_id: &str,
+        is_empty: bool,
+    ) -> anyhow::Result<()> {
+        let empty_since = if is_empty { Some(Utc::now()) } else { None };
+        sqlx::query("UPDATE dynamic_voice_rooms SET empty_since = $2 WHERE channel_id = $1")
+            .bind(channel_id)
+            .bind(empty_since)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_stale_dynamic_voice_rooms(
+        &self,
+        threshold_seconds: i64,
+    ) -> anyhow::Result<Vec<DynamicVoiceRoom>> {
+        let cutoff = Utc::now() - Duration::seconds(threshold_seconds);
+        let rows = sqlx::query_as::<_, DynamicVoiceRoom>(
+            r#"
+            SELECT channel_id, guild_id, owner_id, empty_since, created_at
+            FROM dynamic_voice_rooms
+            WHERE empty_since IS NOT NULL AND empty_since <= $1
+            "#,
+        )
+        .bind(cutoff)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn remove_dynamic_voice_room(&self, channel_id: &str) -> anyhow::Result<bool> {
+        let res = sqlx::query("DELETE FROM dynamic_voice_rooms WHERE channel_id = $1")
+            .bind(channel_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn create_feed_subscription(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        feed_type: &str,
+        url_or_target: &str,
+    ) -> anyhow::Result<FeedSubscription> {
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let rec = sqlx::query_as::<_, FeedSubscription>(
+            r#"
+            INSERT INTO feed_subscriptions (id, guild_id, channel_id, feed_type, url_or_target, watermark, last_polled_at, created_at)
+            VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6)
+            RETURNING id, guild_id, channel_id, feed_type, url_or_target, watermark, last_polled_at, created_at
+            "#,
+        )
+        .bind(id)
+        .bind(guild_id)
+        .bind(channel_id)
+        .bind(feed_type)
+        .bind(url_or_target)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(rec)
+    }
+
+    pub async fn list_feed_subscriptions(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<FeedSubscription>> {
+        let rows = sqlx::query_as::<_, FeedSubscription>(
+            r#"
+            SELECT id, guild_id, channel_id, feed_type, url_or_target, watermark, last_polled_at, created_at
+            FROM feed_subscriptions
+            WHERE guild_id = $1
+            "#,
+        )
+        .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn update_feed_watermark(
+        &self,
+        subscription_id: Uuid,
+        watermark: &str,
+    ) -> anyhow::Result<()> {
+        let now = Utc::now();
+        sqlx::query(
+            "UPDATE feed_subscriptions SET watermark = $2, last_polled_at = $3 WHERE id = $1",
+        )
+        .bind(subscription_id)
+        .bind(watermark)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn create_game_link(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        platform: &str,
+        platform_account_id: &str,
+        code: Option<&str>,
+    ) -> anyhow::Result<GameAccountLink> {
+        let id = Uuid::new_v4();
+        let verified = code.is_none();
+        let now = Utc::now();
+        let rec = sqlx::query_as::<_, GameAccountLink>(
+            r#"
+            INSERT INTO game_account_links (id, guild_id, user_id, platform, platform_account_id, verification_code, verified, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (guild_id, user_id, platform) DO UPDATE
+            SET platform_account_id = $5, verification_code = $6, verified = $7
+            RETURNING id, guild_id, user_id, platform, platform_account_id, verification_code, verified, created_at
+            "#,
+        )
+        .bind(id)
+        .bind(guild_id)
+        .bind(user_id)
+        .bind(platform)
+        .bind(platform_account_id)
+        .bind(code)
+        .bind(verified)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(rec)
+    }
+
+    pub async fn verify_game_link(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        platform: &str,
+        code: &str,
+    ) -> anyhow::Result<bool> {
+        let res = sqlx::query(
+            r#"
+            UPDATE game_account_links
+            SET verified = true
+            WHERE guild_id = $1 AND user_id = $2 AND platform = $3 AND verification_code = $4
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .bind(platform)
+        .bind(code)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn get_game_links(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Vec<GameAccountLink>> {
+        let rows = sqlx::query_as::<_, GameAccountLink>(
+            r#"
+            SELECT id, guild_id, user_id, platform, platform_account_id, verification_code, verified, created_at
+            FROM game_account_links
+            WHERE guild_id = $1 AND user_id = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn get_or_create_counting_game(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+    ) -> anyhow::Result<CountingGame> {
+        sqlx::query(
+            r#"
+            INSERT INTO counting_games (guild_id, channel_id, current_count, last_user_id, highest_count)
+            VALUES ($1, $2, 0, NULL, 0)
+            ON CONFLICT (guild_id, channel_id) DO NOTHING
+            "#,
+        )
+        .bind(guild_id)
+        .bind(channel_id)
+        .execute(&self.pool)
+        .await?;
+
+        let rec = sqlx::query_as::<_, CountingGame>(
+            r#"
+            SELECT guild_id, channel_id, current_count, last_user_id, highest_count
+            FROM counting_games
+            WHERE guild_id = $1 AND channel_id = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(channel_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(rec)
+    }
+
+    pub async fn submit_count(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        user_id: &str,
+        count: i64,
+    ) -> anyhow::Result<(bool, CountingGame)> {
+        let mut tx = self.pool.begin().await?;
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO counting_games (guild_id, channel_id, current_count, last_user_id, highest_count)
+            VALUES ($1, $2, 0, NULL, 0)
+            ON CONFLICT (guild_id, channel_id) DO NOTHING
+            "#,
+        )
+        .bind(guild_id)
+        .bind(channel_id)
+        .execute(&mut *tx)
+        .await?;
+
+        let mut game = sqlx::query_as::<_, CountingGame>(
+            r#"
+            SELECT guild_id, channel_id, current_count, last_user_id, highest_count
+            FROM counting_games
+            WHERE guild_id = $1 AND channel_id = $2
+            FOR UPDATE
+            "#,
+        )
+        .bind(guild_id)
+        .bind(channel_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let valid =
+            count == game.current_count + 1 && game.last_user_id.as_deref() != Some(user_id);
+        if valid {
+            game.current_count = count;
+            game.last_user_id = Some(user_id.to_owned());
+            if game.current_count > game.highest_count {
+                game.highest_count = game.current_count;
+            }
+        } else {
+            game.current_count = 0;
+            game.last_user_id = None;
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE counting_games
+            SET current_count = $3, last_user_id = $4, highest_count = $5
+            WHERE guild_id = $1 AND channel_id = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(channel_id)
+        .bind(game.current_count)
+        .bind(&game.last_user_id)
+        .bind(game.highest_count)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok((valid, game))
+    }
+
+    pub async fn list_user_cards(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Vec<CardCollection>> {
+        let rows = sqlx::query_as::<_, CardCollection>(
+            r#"
+            SELECT id, guild_id, user_id, card_id, card_name, rarity, acquired_at
+            FROM card_collections
+            WHERE guild_id = $1 AND user_id = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn grant_user_card(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        card_id: &str,
+        card_name: &str,
+        rarity: &str,
+    ) -> anyhow::Result<CardCollection> {
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let rec = sqlx::query_as::<_, CardCollection>(
+            r#"
+            INSERT INTO card_collections (id, guild_id, user_id, card_id, card_name, rarity, acquired_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING id, guild_id, user_id, card_id, card_name, rarity, acquired_at
+            "#,
+        )
+        .bind(id)
+        .bind(guild_id)
+        .bind(user_id)
+        .bind(card_id)
+        .bind(card_name)
+        .bind(rarity)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(rec)
+    }
+
+    pub async fn propose_card_trade(
+        &self,
+        guild_id: &str,
+        initiator_id: &str,
+        initiator_card_id: Uuid,
+        target_id: &str,
+        target_card_id: Uuid,
+    ) -> anyhow::Result<CardTrade> {
+        let mut tx = self.pool.begin().await?;
+        let c1 = sqlx::query_as::<_, CardCollection>("SELECT id, guild_id, user_id, card_id, card_name, rarity, acquired_at FROM card_collections WHERE id = $1")
+            .bind(initiator_card_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let c1 = c1.ok_or_else(|| anyhow::anyhow!("initiator card not found"))?;
+        if c1.guild_id != guild_id || c1.user_id != initiator_id {
+            return Err(anyhow::anyhow!("initiator does not own card"));
+        }
+
+        let c2 = sqlx::query_as::<_, CardCollection>("SELECT id, guild_id, user_id, card_id, card_name, rarity, acquired_at FROM card_collections WHERE id = $1")
+            .bind(target_card_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let c2 = c2.ok_or_else(|| anyhow::anyhow!("target card not found"))?;
+        if c2.guild_id != guild_id || c2.user_id != target_id {
+            return Err(anyhow::anyhow!("target does not own card"));
+        }
+
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let rec = sqlx::query_as::<_, CardTrade>(
+            r#"
+            INSERT INTO card_trades (id, guild_id, initiator_user_id, initiator_card_id, target_user_id, target_card_id, status, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $7)
+            RETURNING id, guild_id, initiator_user_id, initiator_card_id, target_user_id, target_card_id, status, created_at, updated_at
+            "#,
+        )
+        .bind(id)
+        .bind(guild_id)
+        .bind(initiator_id)
+        .bind(initiator_card_id)
+        .bind(target_id)
+        .bind(target_card_id)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(rec)
+    }
+
+    pub async fn accept_card_trade(
+        &self,
+        guild_id: &str,
+        trade_id: Uuid,
+        target_id: &str,
+    ) -> anyhow::Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        let trade = sqlx::query_as::<_, CardTrade>(
+            r#"
+            SELECT id, guild_id, initiator_user_id, initiator_card_id, target_user_id, target_card_id, status, created_at, updated_at
+            FROM card_trades
+            WHERE id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(trade_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let trade = trade.ok_or_else(|| anyhow::anyhow!("trade not found"))?;
+        if trade.guild_id != guild_id || trade.target_user_id != target_id {
+            return Err(anyhow::anyhow!("unauthorized to accept trade"));
+        }
+        if trade.status != "pending" {
+            return Err(anyhow::anyhow!("trade is not pending"));
+        }
+
+        let c1 = sqlx::query_as::<_, CardCollection>(
+            "SELECT id, guild_id, user_id, card_id, card_name, rarity, acquired_at FROM card_collections WHERE id = $1 FOR UPDATE"
+        )
+        .bind(trade.initiator_card_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let c1 = c1.ok_or_else(|| anyhow::anyhow!("initiator card not found"))?;
+
+        let c2 = sqlx::query_as::<_, CardCollection>(
+            "SELECT id, guild_id, user_id, card_id, card_name, rarity, acquired_at FROM card_collections WHERE id = $1 FOR UPDATE"
+        )
+        .bind(trade.target_card_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let c2 = c2.ok_or_else(|| anyhow::anyhow!("target card not found"))?;
+
+        if c1.user_id != trade.initiator_user_id || c2.user_id != trade.target_user_id {
+            return Err(anyhow::anyhow!("ownership changed before trade completion"));
+        }
+
+        sqlx::query("UPDATE card_collections SET user_id = $2 WHERE id = $1")
+            .bind(trade.initiator_card_id)
+            .bind(&trade.target_user_id)
+            .execute(&mut *tx)
+            .await?;
+
+        sqlx::query("UPDATE card_collections SET user_id = $2 WHERE id = $1")
+            .bind(trade.target_card_id)
+            .bind(&trade.initiator_user_id)
+            .execute(&mut *tx)
+            .await?;
+
+        sqlx::query("UPDATE card_trades SET status = 'accepted', updated_at = $2 WHERE id = $1")
+            .bind(trade_id)
+            .bind(Utc::now())
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    pub async fn create_tupper_profile(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        name: &str,
+        avatar_url: Option<&str>,
+        prefix_or_brackets: &str,
+    ) -> anyhow::Result<TupperProfile> {
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let rec = sqlx::query_as::<_, TupperProfile>(
+            r#"
+            INSERT INTO tupper_profiles (id, guild_id, user_id, name, avatar_url, prefix_or_brackets, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING id, guild_id, user_id, name, avatar_url, prefix_or_brackets, created_at
+            "#,
+        )
+        .bind(id)
+        .bind(guild_id)
+        .bind(user_id)
+        .bind(name)
+        .bind(avatar_url)
+        .bind(prefix_or_brackets)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(rec)
+    }
+
+    pub async fn list_tupper_profiles(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Vec<TupperProfile>> {
+        let rows = sqlx::query_as::<_, TupperProfile>(
+            r#"
+            SELECT id, guild_id, user_id, name, avatar_url, prefix_or_brackets, created_at
+            FROM tupper_profiles
+            WHERE guild_id = $1 AND user_id = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn create_faq_entry(
+        &self,
+        guild_id: &str,
+        question: &str,
+        answer: &str,
+        aliases: &[String],
+        category: &str,
+    ) -> anyhow::Result<FaqEntry> {
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let aliases_json = serde_json::json!(aliases);
+        let rec = sqlx::query_as::<_, FaqEntry>(
+            r#"
+            INSERT INTO faq_entries (id, guild_id, question, answer, aliases_json, category, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+            RETURNING id, guild_id, question, answer, aliases_json, category, created_at, updated_at
+            "#,
+        )
+        .bind(id)
+        .bind(guild_id)
+        .bind(question)
+        .bind(answer)
+        .bind(aliases_json)
+        .bind(category)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(rec)
+    }
+
+    pub async fn list_faq_entries(
+        &self,
+        guild_id: &str,
+        query: Option<&str>,
+    ) -> anyhow::Result<Vec<FaqEntry>> {
+        let rows = if let Some(q) = query {
+            let pattern = format!("%{}%", q);
+            sqlx::query_as::<_, FaqEntry>(
+                r#"
+                SELECT id, guild_id, question, answer, aliases_json, category, created_at, updated_at
+                FROM faq_entries
+                WHERE guild_id = $1 AND (question ILIKE $2 OR answer ILIKE $2 OR category ILIKE $2)
+                "#,
+            )
+            .bind(guild_id)
+            .bind(pattern)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, FaqEntry>(
+                r#"
+                SELECT id, guild_id, question, answer, aliases_json, category, created_at, updated_at
+                FROM faq_entries
+                WHERE guild_id = $1
+                "#,
+            )
+            .bind(guild_id)
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        Ok(rows)
+    }
+
+    pub async fn delete_faq_entry(&self, faq_id: Uuid) -> anyhow::Result<bool> {
+        let res = sqlx::query("DELETE FROM faq_entries WHERE id = $1")
+            .bind(faq_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
     }
 }
 

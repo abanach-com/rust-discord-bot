@@ -907,7 +907,10 @@ async fn case_view_and_list_chunk_long_notes_and_evidence_to_stay_within_discord
         subject = c.subject_user_id,
         actor = c.actor_user_id,
         points = c.points,
-        expiry = c.expires_at.map(|e| e.to_rfc3339()).unwrap_or_else(|| "Nigdy".into()),
+        expiry = c
+            .expires_at
+            .map(|e| e.to_rfc3339())
+            .unwrap_or_else(|| "Nigdy".into()),
         reason = c.reason,
         created = c.created_at.to_rfc3339(),
     );

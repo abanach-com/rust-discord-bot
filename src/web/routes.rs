@@ -945,7 +945,14 @@ pub async fn get_guild_diagnostics(
     let mut healthy_count = 0;
 
     for m in &manifests {
-        let is_configured = state.app.storage.get_module_settings(&guild_id, &m.id).await.ok().flatten().is_some();
+        let is_configured = state
+            .app
+            .storage
+            .get_module_settings(&guild_id, &m.id)
+            .await
+            .ok()
+            .flatten()
+            .is_some();
         healthy_count += 1;
         module_checks.push(json!({
             "id": m.id,
@@ -981,7 +988,11 @@ pub async fn get_guild_module_draft(
     let (_, session) = authenticate(&state, &headers).await?;
     ensure_guild_access(&state, &session, &guild_id).await?;
 
-    let draft = state.app.storage.get_module_draft(&guild_id, &module_id).await
+    let draft = state
+        .app
+        .storage
+        .get_module_draft(&guild_id, &module_id)
+        .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     match draft {
@@ -994,7 +1005,7 @@ pub async fn get_guild_module_draft(
         None => Ok(Json(json!({
             "has_draft": false,
             "config": null
-        })))
+        }))),
     }
 }
 
@@ -1008,7 +1019,11 @@ pub async fn save_guild_module_draft(
     ensure_guild_access(&state, &session, &guild_id).await?;
     verify_csrf(&headers, &session)?;
 
-    let draft = state.app.storage.set_module_draft(&guild_id, &module_id, payload.config, &session.user.id).await
+    let draft = state
+        .app
+        .storage
+        .set_module_draft(&guild_id, &module_id, payload.config, &session.user.id)
+        .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(Json(json!({
@@ -1027,16 +1042,26 @@ pub async fn publish_guild_module_draft(
     ensure_guild_access(&state, &session, &guild_id).await?;
     verify_csrf(&headers, &session)?;
 
-    let draft = state.app.storage.get_module_draft(&guild_id, &module_id).await
+    let draft = state
+        .app
+        .storage
+        .get_module_draft(&guild_id, &module_id)
+        .await
         .map_err(|e| ApiError::internal(e.to_string()))?
         .ok_or_else(|| ApiError::not_found("Brak wersji roboczej (draft) dla tego modułu."))?;
 
-    let current = state.app.storage.get_module_settings(&guild_id, &module_id).await
+    let current = state
+        .app
+        .storage
+        .get_module_settings(&guild_id, &module_id)
+        .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
     let enabled = current.map(|c| c.enabled).unwrap_or(true);
 
-    let updated = state.app.storage.update_module_settings_with_audit(
-        crate::storage::UpdateModuleSettingsParams {
+    let updated = state
+        .app
+        .storage
+        .update_module_settings_with_audit(crate::storage::UpdateModuleSettingsParams {
             guild_id: &guild_id,
             module_id: &module_id,
             enabled,
@@ -1047,16 +1072,24 @@ pub async fn publish_guild_module_draft(
                 "module_id": module_id,
                 "published_by": session.user.id,
             }),
-        }
-    ).await.map_err(|e| ApiError::internal(e.to_string()))?;
+        })
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    let _ = state.app.storage.delete_module_draft(&guild_id, &module_id).await;
+    let _ = state
+        .app
+        .storage
+        .delete_module_draft(&guild_id, &module_id)
+        .await;
 
-    let _ = state.app.guild_events.send(crate::state::GuildRealtimeEvent {
-        guild_id: guild_id.clone(),
-        event_type: "module_updated".to_string(),
-        payload: json!({ "module_id": module_id }),
-    });
+    let _ = state
+        .app
+        .guild_events
+        .send(crate::state::GuildRealtimeEvent {
+            guild_id: guild_id.clone(),
+            event_type: "module_updated".to_string(),
+            payload: json!({ "module_id": module_id }),
+        });
 
     Ok(Json(json!({
         "status": "published",
@@ -1075,7 +1108,11 @@ pub async fn discard_guild_module_draft(
     ensure_guild_access(&state, &session, &guild_id).await?;
     verify_csrf(&headers, &session)?;
 
-    let removed = state.app.storage.delete_module_draft(&guild_id, &module_id).await
+    let removed = state
+        .app
+        .storage
+        .delete_module_draft(&guild_id, &module_id)
+        .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(Json(json!({
@@ -1127,26 +1164,38 @@ pub async fn export_user_privacy_data(
 
     let user_id = payload.user_id.trim();
     if user_id.is_empty() {
-        return Err(ApiError::bad_request("Nie podano identyfikatora użytkownika."));
+        return Err(ApiError::bad_request(
+            "Nie podano identyfikatora użytkownika.",
+        ));
     }
 
-    let profile = state.app.storage.get_member_progress(&guild_id, user_id).await.ok();
+    let profile = state
+        .app
+        .storage
+        .get_member_progress(&guild_id, user_id)
+        .await
+        .ok();
 
     let parsed_guild: u64 = guild_id.parse().unwrap_or(0);
     let parsed_uid = user_id.parse::<u64>().unwrap_or(0);
     let cases = if parsed_guild > 0 && parsed_uid > 0 {
-        state.app.moderation_cases.list_cases(
-            parsed_guild,
-            crate::moderation_cases::CaseFilter {
-                subject_user_id: Some(parsed_uid),
-                actor_user_id: None,
-                kind: None,
-                status: None,
-                visible_to_subject_only: false,
-                limit: 50,
-            },
-            Utc::now(),
-        ).await.unwrap_or_default()
+        state
+            .app
+            .moderation_cases
+            .list_cases(
+                parsed_guild,
+                crate::moderation_cases::CaseFilter {
+                    subject_user_id: Some(parsed_uid),
+                    actor_user_id: None,
+                    kind: None,
+                    status: None,
+                    visible_to_subject_only: false,
+                    limit: 50,
+                },
+                Utc::now(),
+            )
+            .await
+            .unwrap_or_default()
     } else {
         Vec::new()
     };
@@ -1172,16 +1221,22 @@ pub async fn delete_user_privacy_data(
 
     let user_id = payload.user_id.trim();
     if user_id.is_empty() {
-        return Err(ApiError::bad_request("Nie podano identyfikatora użytkownika."));
+        return Err(ApiError::bad_request(
+            "Nie podano identyfikatora użytkownika.",
+        ));
     }
 
-    let _ = state.app.storage.adjust_member_progress(
-        &guild_id,
-        user_id,
-        -1_000_000_000,
-        -1_000_000_000,
-        -1_000_000_000,
-    ).await;
+    let _ = state
+        .app
+        .storage
+        .adjust_member_progress(
+            &guild_id,
+            user_id,
+            -1_000_000_000,
+            -1_000_000_000,
+            -1_000_000_000,
+        )
+        .await;
 
     Ok(Json(json!({
         "status": "data_erased",
@@ -1212,16 +1267,26 @@ pub async fn submit_moderation_appeal(
     let (_, session) = authenticate(&state, &headers).await?;
     let reason = payload.reason.trim();
     if reason.is_empty() || reason.len() > 2000 {
-        return Err(ApiError::bad_request("Uzasadnienie odwołania musi mieć od 1 do 2000 znaków."));
+        return Err(ApiError::bad_request(
+            "Uzasadnienie odwołania musi mieć od 1 do 2000 znaków.",
+        ));
     }
 
-    let parsed_guild: u64 = guild_id.parse().map_err(|_| ApiError::bad_request("Nieprawidłowy guild_id"))?;
-    let details = state.app.moderation_cases.get_case(parsed_guild, case_number, Utc::now()).await
+    let parsed_guild: u64 = guild_id
+        .parse()
+        .map_err(|_| ApiError::bad_request("Nieprawidłowy guild_id"))?;
+    let details = state
+        .app
+        .moderation_cases
+        .get_case(parsed_guild, case_number, Utc::now())
+        .await
         .map_err(ApiError::from)?;
     let case = details.case;
 
     if case.subject_user_id.to_string() != session.user.id {
-        return Err(ApiError::forbidden("Możesz złożyć odwołanie wyłącznie do sprawy dotyczącej Twojej osoby."));
+        return Err(ApiError::forbidden(
+            "Możesz złożyć odwołanie wyłącznie do sprawy dotyczącej Twojej osoby.",
+        ));
     }
 
     let appeal = crate::storage::ModerationAppeal {
@@ -1237,7 +1302,11 @@ pub async fn submit_moderation_appeal(
         updated_at: Utc::now(),
     };
 
-    state.app.storage.create_appeal(&appeal).await
+    state
+        .app
+        .storage
+        .create_appeal(&appeal)
+        .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(Json(json!({
@@ -1258,7 +1327,11 @@ pub async fn list_guild_appeals(
     ensure_guild_access(&state, &session, &guild_id).await?;
 
     let status_filter = query.get("status").map(|s| s.as_str());
-    let appeals = state.app.storage.list_appeals(&guild_id, status_filter).await
+    let appeals = state
+        .app
+        .storage
+        .list_appeals(&guild_id, status_filter)
+        .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(Json(json!({
@@ -1279,14 +1352,17 @@ pub async fn decide_moderation_appeal(
 
     let decision = payload.decision.to_lowercase();
     if !["approved", "rejected", "more_info"].contains(&decision.as_str()) {
-        return Err(ApiError::bad_request("Niedozwolona decyzja. Dopuszczalne: approved, rejected, more_info."));
+        return Err(ApiError::bad_request(
+            "Niedozwolona decyzja. Dopuszczalne: approved, rejected, more_info.",
+        ));
     }
 
-    let updated = state.app.storage.update_appeal_status(
-        appeal_id,
-        &decision,
-        payload.staff_notes.as_deref(),
-    ).await.map_err(|e| ApiError::internal(e.to_string()))?;
+    let updated = state
+        .app
+        .storage
+        .update_appeal_status(appeal_id, &decision, payload.staff_notes.as_deref())
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     if !updated {
         return Err(ApiError::not_found("Odwołanie nie istnieje."));
@@ -1337,7 +1413,10 @@ pub async fn simulate_automod(
     }
 
     // 2. Check phishing domains
-    if lower.contains("free-nitro") || lower.contains("steam-gift") || lower.contains("discord-airdrop") {
+    if lower.contains("free-nitro")
+        || lower.contains("steam-gift")
+        || lower.contains("discord-airdrop")
+    {
         return Ok(Json(json!({
             "matched": true,
             "winning_rule": "automod.phishing_link_guard",
@@ -1361,7 +1440,8 @@ pub async fn simulate_automod(
     }
 
     // 4. Check new account signals
-    if payload.author_account_age_days.is_some_and(|d| d < 1) && !payload.has_avatar.unwrap_or(true) {
+    if payload.author_account_age_days.is_some_and(|d| d < 1) && !payload.has_avatar.unwrap_or(true)
+    {
         return Ok(Json(json!({
             "matched": true,
             "winning_rule": "join_guard.fresh_suspicious_account",

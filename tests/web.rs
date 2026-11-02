@@ -418,7 +418,9 @@ async fn test_phase1_governance_and_defense_suite() {
 
     // Save draft
     let save_draft_resp = client
-        .post(format!("{base_url}/api/guilds/guild_phase1/modules/automod/draft"))
+        .post(format!(
+            "{base_url}/api/guilds/guild_phase1/modules/automod/draft"
+        ))
         .header(COOKIE, &session_cookie)
         .header("x-csrf-token", "csrf_phase1_token")
         .json(&draft_payload)
@@ -429,7 +431,9 @@ async fn test_phase1_governance_and_defense_suite() {
 
     // Read draft
     let get_draft_resp = client
-        .get(format!("{base_url}/api/guilds/guild_phase1/modules/automod/draft"))
+        .get(format!(
+            "{base_url}/api/guilds/guild_phase1/modules/automod/draft"
+        ))
         .header(COOKIE, &session_cookie)
         .send()
         .await
@@ -441,7 +445,9 @@ async fn test_phase1_governance_and_defense_suite() {
 
     // Publish draft
     let publish_resp = client
-        .post(format!("{base_url}/api/guilds/guild_phase1/modules/automod/publish"))
+        .post(format!(
+            "{base_url}/api/guilds/guild_phase1/modules/automod/publish"
+        ))
         .header(COOKIE, &session_cookie)
         .header("x-csrf-token", "csrf_phase1_token")
         .send()
@@ -451,7 +457,9 @@ async fn test_phase1_governance_and_defense_suite() {
 
     // Verify draft was cleared after publish
     let get_draft_after = client
-        .get(format!("{base_url}/api/guilds/guild_phase1/modules/automod/draft"))
+        .get(format!(
+            "{base_url}/api/guilds/guild_phase1/modules/automod/draft"
+        ))
         .header(COOKIE, &session_cookie)
         .send()
         .await
@@ -483,7 +491,9 @@ async fn test_phase1_governance_and_defense_suite() {
 
     // 5. AutoMod dry-run simulator (#75 / Agent 04)
     let sim_invite_resp = client
-        .post(format!("{base_url}/api/guilds/guild_phase1/automod/simulate"))
+        .post(format!(
+            "{base_url}/api/guilds/guild_phase1/automod/simulate"
+        ))
         .header(COOKIE, &session_cookie)
         .json(&serde_json::json!({
             "content": "Dołącz do nas! discord.gg/super-serwer",
@@ -499,7 +509,9 @@ async fn test_phase1_governance_and_defense_suite() {
     assert_eq!(sim_invite_body["winning_rule"], "automod.invite_guard");
 
     let sim_clean_resp = client
-        .post(format!("{base_url}/api/guilds/guild_phase1/automod/simulate"))
+        .post(format!(
+            "{base_url}/api/guilds/guild_phase1/automod/simulate"
+        ))
         .header(COOKIE, &session_cookie)
         .json(&serde_json::json!({
             "content": "Cześć wszystkim, miłego dnia życzę!",

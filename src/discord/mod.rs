@@ -1,4 +1,6 @@
 mod commands;
+pub mod components;
+pub mod events;
 pub mod executor;
 mod handler;
 pub mod moderation_cases;

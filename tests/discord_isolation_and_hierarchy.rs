@@ -719,7 +719,10 @@ async fn test_event_action_failures_suppress_sent_audit_and_adjust_message_delet
         &welcome_actions,
     )
     .await;
-    assert!(res.is_ok(), "execute_event_actions gracefully absorbs failures");
+    assert!(
+        res.is_ok(),
+        "execute_event_actions gracefully absorbs failures"
+    );
 
     let audit_events = state.storage.list_audit_events("100", 20).await.unwrap();
     // Must NOT contain false positive welcome_sent
@@ -777,7 +780,8 @@ async fn test_event_action_failures_suppress_sent_audit_and_adjust_message_delet
         },
         LuaAction::SendMessage {
             channel_id: Some("101".to_string()),
-            content: "<@123456> Wiadomość została usunięta przez AutoMod (blocked_word).".to_string(),
+            content: "<@123456> Wiadomość została usunięta przez AutoMod (blocked_word)."
+                .to_string(),
         },
     ];
 
@@ -800,10 +804,15 @@ async fn test_event_action_failures_suppress_sent_audit_and_adjust_message_delet
         .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
         .collect();
 
-    assert!(!post_calls.is_empty(), "AutoMod notice message must still be dispatched");
+    assert!(
+        !post_calls.is_empty(),
+        "AutoMod notice message must still be dispatched"
+    );
     let last_post = post_calls.last().unwrap();
     assert!(
-        last_post.1.contains("narusza zasady AutoMod (usunięcie zablokowane)"),
+        last_post
+            .1
+            .contains("narusza zasady AutoMod (usunięcie zablokowane)"),
         "dependent notice content should have been adjusted to indicate deletion was blocked, got: {}",
         last_post.1
     );
@@ -815,7 +824,9 @@ async fn test_event_action_failures_suppress_sent_audit_and_adjust_message_delet
 
     let final_audits = state.storage.list_audit_events("100", 20).await.unwrap();
     assert!(
-        final_audits.iter().any(|e| e.event == "action_denied" && e.module_id == "automod"),
+        final_audits
+            .iter()
+            .any(|e| e.event == "action_denied" && e.module_id == "automod"),
         "AutoMod message deletion failure must record action_denied audit entry"
     );
 

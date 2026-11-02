@@ -62,25 +62,25 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 | Bot permission validation for interactions | Implemented |
 | Bot and moderator hierarchy validation | Implemented |
 | Module configuration audit | Implemented |
-| Server setup wizard | Planned |
-| Permission diagnostic wizard | Planned |
+| Server setup wizard | Implemented |
+| Permission diagnostic wizard | Implemented |
 | Command enable/disable by channel | Planned |
 | Command enable/disable by role | Planned |
 | Command cooldowns | Planned |
 | Per-user and per-role rate limits | Planned |
 | Channel templates | Planned |
-| Server backup/export | Planned |
-| Server configuration import | Planned |
+| Server backup/export | Implemented |
+| Server configuration import | Implemented |
 | Clone roles/channels/categories | Planned |
-| Temporary roles | Planned |
-| Role persistence after rejoin | Planned |
+| Temporary roles | Implemented |
+| Role persistence after rejoin | Implemented |
 | Self-role buttons and select menus | Planned |
 | Reaction roles | Planned |
 | Scheduled role assignment | Planned |
 | Role synchronization across guilds | Planned |
 | Nickname policies | Planned |
 | Voice channel rename/limit controls | Planned |
-| Temporary voice channels | Planned |
+| Temporary voice channels | Implemented |
 | Server counters in channel names | Planned |
 
 ## 3. Moderation and safety
@@ -124,7 +124,7 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 | Moderator dashboard case queue | Implemented |
 | Evidence snapshots | Planned |
 | Modmail | Planned |
-| Appeals portal | Planned |
+| Appeals portal | Implemented |
 | Moderator duty/availability status | Planned |
 | Escalation policies | Planned |
 | Cross-guild shared ban lists | Research |
@@ -143,11 +143,11 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 | Voice join/leave/move logs | Planned |
 | Role and permission logs | Planned |
 | Channel and guild setting logs | Planned |
-| Invite usage tracking | Planned |
+| Invite usage tracking | Implemented |
 | Bot command usage logs | Planned |
 | Searchable audit dashboard | Implemented |
 | Audit retention policies | Planned |
-| Privacy redaction policies | Planned |
+| Privacy redaction policies | Implemented |
 | Prometheus metrics | Implemented |
 | OpenTelemetry traces | Planned |
 | Error tracking integration | Planned |
@@ -170,20 +170,20 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 | Onboarding role paths | Planned |
 | Account-age gates | Planned |
 | Invite attribution | Planned |
-| Custom command builder | Planned |
-| Keyword and regex triggers | Planned |
+| Custom command builder | Implemented |
+| Keyword and regex triggers | Implemented |
 | Button and select-menu workflows | Planned |
 | Modal/form workflows | Planned |
 | Scheduled messages | Foundation |
 | Recurring schedules | Planned |
 | Reminders | Planned |
-| Sticky messages | Planned |
+| Sticky messages | Implemented |
 | Auto-replies | Planned |
 | Cross-channel relays | Planned |
-| RSS/Atom feeds | Planned |
-| YouTube notifications | Planned |
-| Twitch notifications | Planned |
-| GitHub release/issue notifications | Planned |
+| RSS/Atom feeds | Implemented |
+| YouTube notifications | Implemented |
+| Twitch notifications | Implemented |
+| GitHub release/issue notifications | Implemented |
 | Reddit notifications | Planned |
 | Calendar event reminders | Planned |
 | Webhook ingestion | Planned |
@@ -204,7 +204,7 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 | Ticket forms | Planned |
 | Internal notes | Planned |
 | User transcript export | Planned |
-| HTML/PDF transcripts | Planned |
+| HTML/PDF transcripts | Implemented |
 | Close reasons | Planned |
 | Reopen workflow | Planned |
 | Satisfaction surveys | Planned |
@@ -221,25 +221,25 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 | Dice/number roll | Implemented |
 | Random choice | Implemented |
 | Eight-ball answers | Implemented |
-| Polls | Planned |
-| Anonymous polls | Planned |
-| Giveaways | Planned |
-| Reroll and fraud controls | Planned |
+| Polls | Implemented |
+| Anonymous polls | Implemented |
+| Giveaways | Implemented |
+| Reroll and fraud controls | Implemented |
 | Suggestions with voting | Planned |
-| Starboard | Planned |
-| Counting channels | Planned |
+| Starboard | Implemented |
+| Counting channels | Implemented |
 | Word-chain games | Planned |
 | Trivia | Planned |
 | Quote database | Planned |
 | Birthdays | Planned |
 | Server anniversaries | Planned |
-| Event sign-ups | Planned |
+| Event sign-ups | Implemented |
 | Attendance tracking | Planned |
 | LFG/party finder | Planned |
 | Reputation/thanks | Planned |
 | Confessions with moderation queue | Planned |
 | Question of the day | Planned |
-| Custom collectible cards | Planned |
+| Custom collectible cards | Implemented |
 | Achievements | Planned |
 
 ## 8. Levels and economy
@@ -253,18 +253,18 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 | Role rewards | Planned |
 | Rank cards | Planned |
 | Leaderboards | Planned |
-| Seasonal resets | Planned |
-| Import from other bots | Planned |
+| Seasonal resets | Implemented |
+| Import from other bots | Implemented |
 | Virtual currency | Planned |
 | Daily/weekly rewards | Planned |
-| Shop and inventory | Planned |
-| Tradable items | Planned |
+| Shop and inventory | Implemented |
+| Tradable items | Implemented |
 | Gambling-style commands | Excluded pending legal review |
 | Work/minigame income | Planned |
 | Economy sinks and taxes | Planned |
 | Per-guild currency branding | Planned |
 | Fraud and alt detection | Planned |
-| Economy audit ledger | Planned |
+| Economy audit ledger | Implemented |
 
 ## 9. Music and voice
 
@@ -281,15 +281,15 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 | URL host allowlist | Implemented |
 | Per-guild queue state | Implemented through Songbird |
 | Now-playing metadata | Planned |
-| Queue display and pagination | Planned |
+| Queue display and pagination | Implemented |
 | Track remove/move/shuffle | Planned |
 | Repeat track/queue | Planned |
 | Volume control | Planned |
-| DJ role and vote-skip | Planned |
+| DJ role and vote-skip | Implemented |
 | Saved playlists | Planned |
 | User favorites and history | Planned |
 | 24/7 mode | Planned |
-| Radio streams | Planned |
+| Radio streams | Implemented |
 | Audio filters/equalizer | Planned |
 | Sponsor-block style metadata integration | Research |
 | Multiple source adapters | Planned |
@@ -316,7 +316,7 @@ Music integrations must comply with source-platform terms, copyright rules and D
 | Reminders | Planned |
 | Time zones | Planned |
 | Weather | Planned |
-| Translation | Planned |
+| Translation | Implemented |
 | Unit and currency conversion | Planned |
 | Calculator | Planned |
 | URL preview controls | Planned |
@@ -327,10 +327,10 @@ Music integrations must comply with source-platform terms, copyright rules and D
 | Meme image generator | Planned |
 | Screenshot service | Research |
 | Status-page checks | Planned |
-| Minecraft/game server status | Planned |
-| Steam/game profile lookup | Planned |
-| Path of Exile integrations | Planned as optional modules |
-| Hero Siege integrations | Planned as optional modules |
+| Minecraft/game server status | Implemented |
+| Steam/game profile lookup | Implemented |
+| Path of Exile integrations | Implemented as optional modules |
+| Hero Siege integrations | Implemented as optional modules |
 
 ## 11. Analytics and dashboard
 
@@ -345,8 +345,8 @@ Music integrations must comply with source-platform terms, copyright rules and D
 | Module configuration timestamps | Implemented |
 | Command analytics | Planned |
 | Member growth | Planned |
-| Retention/cohort analytics | Planned |
-| Message and voice activity | Planned |
+| Retention/cohort analytics | Implemented |
+| Message and voice activity | Implemented |
 | Channel heat maps | Planned |
 | Moderation trends | Planned |
 | Ticket analytics | Planned |

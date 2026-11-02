@@ -1,5 +1,5 @@
-use std::time::Duration;
 use rusty_discord_bot::rate_limit::{RateLimitQuota, RateLimiter};
+use std::time::Duration;
 
 #[test]
 fn test_rate_limiter_burst_and_refill() {
