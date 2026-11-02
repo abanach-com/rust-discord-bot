@@ -1,0 +1,39 @@
+{
+    "starting_balance": 100,
+    "min_work_payout": 50,
+    "max_work_payout": 250,
+    "crime_success_rate": 0.6,
+    "crime_payout_multiplier": 2.5,
+    "shop_items": [
+        {
+            "id": "vip_pass",
+            "name": "VIP Pass",
+            "price": 500,
+            "description": "Dostęp do kanałów VIP"
+        },
+        {
+            "id": "xp_booster",
+            "name": "XP Booster",
+            "price": 300,
+            "description": "Mnożnik XP +50%"
+        },
+        {
+            "id": "custom_color",
+            "name": "Custom Color",
+            "price": 200,
+            "description": "Wybór koloru nicku"
+        },
+        {
+            "id": "mystery_box",
+            "name": "Mystery Box",
+            "price": 150,
+            "description": "Losowa nagroda ze skrzyni"
+        },
+        {
+            "id": "trophy",
+            "name": "Diamond Trophy",
+            "price": 1000,
+            "description": "Prestiżowe trofeum na profilu"
+        }
+    ]
+}

@@ -1,0 +1,5 @@
+{
+    "min_account_age_hours": 24,
+    "action_on_flag": "kick",
+    "log_channel_id": null
+}

@@ -5,6 +5,7 @@ mod progression;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 pub use memory::MemoryStore;
 pub use postgres::PostgresStore;
@@ -30,6 +31,17 @@ pub struct UpdateModuleSettingsParams<'a> {
     pub audit_data: Value,
 }
 
+#[derive(Clone, Debug)]
+pub struct AdjustMemberProgressParams<'a> {
+    pub guild_id: &'a str,
+    pub user_id: &'a str,
+    pub xp_delta: i64,
+    pub coins_delta: i64,
+    pub reputation_delta: i64,
+    pub actor_id: Option<&'a str>,
+    pub reason: Option<&'a str>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct GuildModuleSettings {
     pub guild_id: String,
@@ -48,6 +60,20 @@ pub struct AuditLogEntry {
     pub event: String,
     pub data: Value,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ModerationExecutionIntent {
+    pub id: Uuid,
+    pub interaction_id: Option<String>,
+    pub guild_id: String,
+    pub user_id: String,
+    pub kind: String,
+    pub step: String,
+    pub reason: Option<String>,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 impl Storage {
@@ -224,7 +250,7 @@ impl Storage {
     ) -> anyhow::Result<CoinTransferOutcome> {
         match self {
             Self::Memory(store) => {
-                Ok(store.transfer_coins(guild_id, sender_user_id, recipient_user_id, amount))
+                store.transfer_coins(guild_id, sender_user_id, recipient_user_id, amount)
             }
             Self::Postgres(store) => {
                 store
@@ -294,6 +320,16 @@ impl Storage {
         }
     }
 
+    pub async fn adjust_member_progress_with_audit(
+        &self,
+        params: AdjustMemberProgressParams<'_>,
+    ) -> anyhow::Result<MemberProgress> {
+        match self {
+            Self::Memory(store) => store.adjust_member_progress_with_audit(params),
+            Self::Postgres(store) => store.adjust_member_progress_with_audit(params).await,
+        }
+    }
+
     pub async fn progression_leaderboard(
         &self,
         guild_id: &str,
@@ -303,6 +339,81 @@ impl Storage {
         match self {
             Self::Memory(store) => Ok(store.progression_leaderboard(guild_id, metric, limit)),
             Self::Postgres(store) => store.progression_leaderboard(guild_id, metric, limit).await,
+        }
+    }
+
+    pub async fn is_role_reward_granted(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_id: &str,
+    ) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => Ok(store.is_role_reward_granted(guild_id, user_id, role_id)),
+            Self::Postgres(store) => {
+                store
+                    .is_role_reward_granted(guild_id, user_id, role_id)
+                    .await
+            }
+        }
+    }
+
+    pub async fn record_role_reward_granted(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_id: &str,
+        level: i64,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Memory(store) => {
+                store.record_role_reward_granted(guild_id, user_id, role_id, level);
+                Ok(())
+            }
+            Self::Postgres(store) => {
+                store
+                    .record_role_reward_granted(guild_id, user_id, role_id, level)
+                    .await
+            }
+        }
+    }
+
+    pub async fn record_moderation_intent(
+        &self,
+        intent: &ModerationExecutionIntent,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Memory(store) => {
+                store.record_moderation_intent(intent.clone());
+                Ok(())
+            }
+            Self::Postgres(store) => store.record_moderation_intent(intent).await,
+        }
+    }
+
+    pub async fn update_moderation_intent_step(
+        &self,
+        id: Uuid,
+        step: &str,
+        error: Option<&str>,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Memory(store) => {
+                store.update_moderation_intent_step(id, step, error);
+                Ok(())
+            }
+            Self::Postgres(store) => store.update_moderation_intent_step(id, step, error).await,
+        }
+    }
+
+    pub async fn list_pending_moderation_intents(
+        &self,
+        kind: &str,
+        step: &str,
+    ) -> anyhow::Result<Vec<ModerationExecutionIntent>> {
+        match self {
+            Self::Memory(store) => Ok(store.list_pending_moderation_intents(kind, step)),
+            Self::Postgres(store) => store.list_pending_moderation_intents(kind, step).await,
         }
     }
 }

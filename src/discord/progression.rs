@@ -9,8 +9,8 @@ use crate::{
     AppState,
     lua::{ProgressionMetric as LuaProgressionMetric, ProgressionOperation},
     storage::{
-        CoinTransferOutcome, DailyClaimOutcome, ProgressMetric, ReputationGrantOutcome,
-        total_xp_for_level,
+        AdjustMemberProgressParams, CoinTransferOutcome, DailyClaimOutcome, ProgressMetric,
+        ReputationGrantOutcome, total_xp_for_level,
     },
 };
 
@@ -108,41 +108,58 @@ pub async fn execute(
                         continue;
                     }
 
-                    if award.leveled_up() || cached_member_roles.is_some() {
-                        if let Err(err) = ctx
-                            .http
-                            .add_member_role(
-                                guild_id,
-                                actor_id,
-                                role_snowflake,
-                                Some("Osiągnięto poziom w systemie levelingu"),
+                    let already_granted = state
+                        .storage
+                        .is_role_reward_granted(&guild_key, &actor_key, &reward.role_id)
+                        .await
+                        .unwrap_or(false);
+
+                    if already_granted {
+                        continue;
+                    }
+
+                    if let Err(err) = ctx
+                        .http
+                        .add_member_role(
+                            guild_id,
+                            actor_id,
+                            role_snowflake,
+                            Some("Osiągnięto poziom w systemie levelingu"),
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            guild_id = %guild_id,
+                            user_id = %actor_id,
+                            role_id = %reward.role_id,
+                            error = %err,
+                            "Nie udało się nadać roli za awans"
+                        );
+                    } else {
+                        granted_roles.push(reward.role_id.clone());
+                        let _ = state
+                            .storage
+                            .record_role_reward_granted(
+                                &guild_key,
+                                &actor_key,
+                                &reward.role_id,
+                                reward.level as i64,
                             )
-                            .await
-                        {
-                            tracing::warn!(
-                                guild_id = %guild_id,
-                                user_id = %actor_id,
-                                role_id = %reward.role_id,
-                                error = %err,
-                                "Nie udało się nadać roli za awans"
-                            );
-                        } else {
-                            granted_roles.push(reward.role_id.clone());
-                            state
-                                .storage
-                                .record_audit(
-                                    Some(&guild_key),
-                                    Some(&actor_key),
-                                    module_id,
-                                    "level_role_reward_granted",
-                                    serde_json::json!({
-                                        "user_id": actor_key,
-                                        "level": reward.level,
-                                        "role_id": reward.role_id,
-                                    }),
-                                )
-                                .await?;
-                        }
+                            .await;
+                        state
+                            .storage
+                            .record_audit(
+                                Some(&guild_key),
+                                Some(&actor_key),
+                                module_id,
+                                "level_role_reward_granted",
+                                serde_json::json!({
+                                    "user_id": actor_key,
+                                    "level": reward.level,
+                                    "role_id": reward.role_id,
+                                }),
+                            )
+                            .await?;
                     }
                 }
             }
@@ -398,35 +415,15 @@ pub async fn execute(
         } => {
             let profile = state
                 .storage
-                .adjust_member_progress(
-                    &guild_key,
+                .adjust_member_progress_with_audit(AdjustMemberProgressParams {
+                    guild_id: &guild_key,
                     user_id,
-                    *xp_delta,
-                    *coins_delta,
-                    *reputation_delta,
-                )
-                .await?;
-            state
-                .storage
-                .record_audit(
-                    Some(&guild_key),
-                    Some(&actor_key),
-                    module_id,
-                    "progress_adjusted",
-                    serde_json::json!({
-                        "target_user_id": user_id,
-                        "xp_delta": xp_delta,
-                        "coins_delta": coins_delta,
-                        "reputation_delta": reputation_delta,
-                        "reason": reason,
-                        "result": {
-                            "xp": profile.xp,
-                            "level": profile.level,
-                            "coins": profile.coins,
-                            "reputation": profile.reputation,
-                        }
-                    }),
-                )
+                    xp_delta: *xp_delta,
+                    coins_delta: *coins_delta,
+                    reputation_delta: *reputation_delta,
+                    actor_id: Some(&actor_key),
+                    reason: reason.as_deref(),
+                })
                 .await?;
 
             Ok(Some(format!(

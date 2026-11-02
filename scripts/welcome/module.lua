@@ -70,7 +70,10 @@ return {
             local server_name = tostring(ctx.data.guild_name or "naszym serwerze")
             local member_count = tostring(ctx.data.member_count or "")
             local safe_mention = "<@" .. user_id .. ">"
-            local safe_name = zuckerbot.escape_mentions(tostring(user.global_name or user.name or ""))
+            local raw_display = (type(user.global_name) == "string" and user.global_name ~= "") and user.global_name
+                or (type(user.name) == "string" and user.name ~= "") and user.name
+                or ""
+            local safe_name = zuckerbot.escape_mentions(raw_display)
 
             local function format_text(template)
                 local content = string.gsub(template, "{user}", function() return safe_mention end)
@@ -139,7 +142,10 @@ return {
             local user_id = tostring(user.id or "")
             local server_name = tostring(ctx.data.guild_name or "naszym serwerze")
             local member_count = tostring(ctx.data.member_count or "")
-            local safe_name = zuckerbot.escape_mentions(tostring(user.global_name or user.name or "użytkowniku"))
+            local raw_goodbye_display = (type(user.global_name) == "string" and user.global_name ~= "") and user.global_name
+                or (type(user.name) == "string" and user.name ~= "") and user.name
+                or "użytkowniku"
+            local safe_name = zuckerbot.escape_mentions(raw_goodbye_display)
 
             local template = ctx.config.goodbye_message or "Żegnaj {username}. Będziemy tęsknić!"
             local content = string.gsub(template, "{username}", function() return safe_name end)

@@ -34,12 +34,51 @@ pub struct ActionOrigin {
     pub enforce_actor_permissions: bool,
 }
 
+pub fn chunk_discord_text(text: &str, limit: usize) -> Vec<String> {
+    if text.len() <= limit {
+        return vec![text.to_owned()];
+    }
+    let mut chunks = Vec::new();
+    let mut current_chunk = String::new();
+
+    for line in text.lines() {
+        if line.len() > limit {
+            if !current_chunk.is_empty() {
+                chunks.push(std::mem::take(&mut current_chunk));
+            }
+            let mut sub_chunk = String::new();
+            for ch in line.chars() {
+                if sub_chunk.len() + ch.len_utf8() > limit {
+                    chunks.push(std::mem::take(&mut sub_chunk));
+                }
+                sub_chunk.push(ch);
+            }
+            if !sub_chunk.is_empty() {
+                current_chunk = sub_chunk;
+            }
+        } else if current_chunk.len() + line.len() + 1 > limit {
+            chunks.push(std::mem::take(&mut current_chunk));
+            current_chunk.push_str(line);
+            current_chunk.push('\n');
+        } else {
+            current_chunk.push_str(line);
+            current_chunk.push('\n');
+        }
+    }
+
+    if !current_chunk.is_empty() {
+        chunks.push(current_chunk.trim_end().to_owned());
+    }
+    chunks
+}
+
 pub async fn execute_command_actions(
     ctx: &Context,
     state: &AppState,
     command: &CommandInteraction,
     module_id: &str,
     actions: &[LuaAction],
+    is_deferred: bool,
 ) -> Result<()> {
     let first_reply = actions.iter().position(|action| {
         matches!(
@@ -51,19 +90,68 @@ pub async fn execute_command_actions(
         )
     });
 
-    if let Some(index) = first_reply {
+    if is_deferred {
+        if let Some(index) = first_reply {
+            if let LuaAction::Reply { content, ephemeral } = &actions[index] {
+                let chunks = chunk_discord_text(content, 1950);
+                if let Some(first) = chunks.first() {
+                    command
+                        .edit_response(
+                            &ctx.http,
+                            serenity::builder::EditInteractionResponse::new()
+                                .content(first)
+                                .allowed_mentions(CreateAllowedMentions::new()),
+                        )
+                        .await?;
+                }
+                for chunk in chunks.into_iter().skip(1) {
+                    command
+                        .create_followup(
+                            &ctx.http,
+                            CreateInteractionResponseFollowup::new()
+                                .content(chunk)
+                                .ephemeral(*ephemeral)
+                                .allowed_mentions(CreateAllowedMentions::new()),
+                        )
+                        .await?;
+                }
+            }
+        } else {
+            command
+                .edit_response(
+                    &ctx.http,
+                    serenity::builder::EditInteractionResponse::new()
+                        .content("Polecenie zostało wykonane.")
+                        .allowed_mentions(CreateAllowedMentions::new()),
+                )
+                .await?;
+        }
+    } else if let Some(index) = first_reply {
         if let LuaAction::Reply { content, ephemeral } = &actions[index] {
+            let chunks = chunk_discord_text(content, 1950);
+            let first_chunk = chunks.first().cloned().unwrap_or_default();
             command
                 .create_response(
                     &ctx.http,
                     CreateInteractionResponse::Message(
                         CreateInteractionResponseMessage::new()
-                            .content(content)
+                            .content(first_chunk)
                             .ephemeral(*ephemeral)
                             .allowed_mentions(CreateAllowedMentions::new()),
                     ),
                 )
                 .await?;
+            for chunk in chunks.into_iter().skip(1) {
+                command
+                    .create_followup(
+                        &ctx.http,
+                        CreateInteractionResponseFollowup::new()
+                            .content(chunk)
+                            .ephemeral(*ephemeral)
+                            .allowed_mentions(CreateAllowedMentions::new()),
+                    )
+                    .await?;
+            }
         }
     } else {
         command
@@ -98,29 +186,33 @@ pub async fn execute_command_actions(
         }
 
         if let LuaAction::Reply { content, ephemeral } = action {
-            command
-                .create_followup(
-                    &ctx.http,
-                    CreateInteractionResponseFollowup::new()
-                        .content(content)
-                        .ephemeral(*ephemeral)
-                        .allowed_mentions(CreateAllowedMentions::new()),
-                )
-                .await?;
+            for chunk in chunk_discord_text(content, 1950) {
+                command
+                    .create_followup(
+                        &ctx.http,
+                        CreateInteractionResponseFollowup::new()
+                            .content(chunk)
+                            .ephemeral(*ephemeral)
+                            .allowed_mentions(CreateAllowedMentions::new()),
+                    )
+                    .await?;
+            }
             continue;
         }
 
         match execute_action(ctx, state, module_id, &origin, action).await {
             Ok(Some(status)) => {
-                command
-                    .create_followup(
-                        &ctx.http,
-                        CreateInteractionResponseFollowup::new()
-                            .content(status)
-                            .ephemeral(true)
-                            .allowed_mentions(CreateAllowedMentions::new()),
-                    )
-                    .await?;
+                for chunk in chunk_discord_text(&status, 1950) {
+                    command
+                        .create_followup(
+                            &ctx.http,
+                            CreateInteractionResponseFollowup::new()
+                                .content(chunk)
+                                .ephemeral(true)
+                                .allowed_mentions(CreateAllowedMentions::new()),
+                        )
+                        .await?;
+                }
             }
             Ok(None) => {}
             Err(error) => {
@@ -131,15 +223,19 @@ pub async fn execute_command_actions(
                     ?error,
                     "Lua action failed"
                 );
-                command
-                    .create_followup(
-                        &ctx.http,
-                        CreateInteractionResponseFollowup::new()
-                            .content(format!("Nie udało się wykonać akcji: {error}"))
-                            .ephemeral(true)
-                            .allowed_mentions(CreateAllowedMentions::new()),
-                    )
-                    .await?;
+                for chunk in
+                    chunk_discord_text(&format!("Nie udało się wykonać akcji: {error}"), 1950)
+                {
+                    command
+                        .create_followup(
+                            &ctx.http,
+                            CreateInteractionResponseFollowup::new()
+                                .content(chunk)
+                                .ephemeral(true)
+                                .allowed_mentions(CreateAllowedMentions::new()),
+                        )
+                        .await?;
+                }
                 break;
             }
         }
@@ -166,8 +262,47 @@ pub async fn execute_event_actions(
         enforce_actor_permissions: false,
     };
 
+    let mut last_action_succeeded = true;
+    let mut message_delete_failed = false;
+
     for action in actions {
-        match action {
+        if let LuaAction::Audit { event, .. } = action
+            && !last_action_succeeded
+            && (event == "welcome_sent" || event == "goodbye_sent")
+        {
+            tracing::info!(
+                event,
+                "Skipping confirmation audit event because previous action failed"
+            );
+            continue;
+        }
+
+        let action = if message_delete_failed {
+            if let LuaAction::SendMessage {
+                channel_id,
+                content,
+            } = action
+            {
+                let adjusted_content = if content.contains("została usunięta przez AutoMod") {
+                    content.replace(
+                        "została usunięta przez AutoMod",
+                        "narusza zasady AutoMod (usunięcie zablokowane)",
+                    )
+                } else {
+                    content.clone()
+                };
+                LuaAction::SendMessage {
+                    channel_id: channel_id.clone(),
+                    content: adjusted_content,
+                }
+            } else {
+                action.clone()
+            }
+        } else {
+            action.clone()
+        };
+
+        match &action {
             LuaAction::Reply { content, .. } => {
                 let target_channel = match resolve_and_validate_channel(
                     ctx,
@@ -179,6 +314,7 @@ pub async fn execute_event_actions(
                 {
                     Ok(cid) => cid,
                     Err(err) => {
+                        last_action_succeeded = false;
                         tracing::warn!(error = %err, module_id, "Brak lub błąd kanału dla event reply");
                         let _ = audit_action(
                             state,
@@ -195,6 +331,7 @@ pub async fn execute_event_actions(
                     }
                 };
                 if let Err(err) = send_message(ctx, target_channel, content).await {
+                    last_action_succeeded = false;
                     tracing::warn!(error = %err, module_id, "Błąd wysyłania odpowiedzi na zdarzenie");
                     let _ = audit_action(
                         state,
@@ -207,10 +344,14 @@ pub async fn execute_event_actions(
                         }),
                     )
                     .await;
+                } else {
+                    last_action_succeeded = true;
                 }
             }
-            _ => {
-                if let Err(err) = execute_action(ctx, state, module_id, &origin, action).await {
+            LuaAction::DeleteMessage { .. } => {
+                if let Err(err) = execute_action(ctx, state, module_id, &origin, &action).await {
+                    last_action_succeeded = false;
+                    message_delete_failed = true;
                     tracing::warn!(
                         error = %err,
                         module_id,
@@ -229,6 +370,33 @@ pub async fn execute_event_actions(
                         }),
                     )
                     .await;
+                } else {
+                    last_action_succeeded = true;
+                }
+            }
+            _ => {
+                if let Err(err) = execute_action(ctx, state, module_id, &origin, &action).await {
+                    last_action_succeeded = false;
+                    tracing::warn!(
+                        error = %err,
+                        module_id,
+                        ?action,
+                        "Błąd lub odmowa wykonania akcji zdarzenia"
+                    );
+                    let _ = audit_action(
+                        state,
+                        &origin,
+                        module_id,
+                        "action_denied",
+                        serde_json::json!({
+                            "module_id": module_id,
+                            "action": format!("{action:?}"),
+                            "error": err.to_string(),
+                        }),
+                    )
+                    .await;
+                } else {
+                    last_action_succeeded = true;
                 }
             }
         }
@@ -334,6 +502,9 @@ async fn execute_action(
                             error = %err,
                             "Failed to deliver direct message"
                         );
+                        anyhow::bail!(
+                            "nie udało się dostarczyć wiadomości prywatnej do {user_id}: {err}"
+                        );
                     } else {
                         audit_action(
                             state,
@@ -353,6 +524,7 @@ async fn execute_action(
                         error = %err,
                         "Failed to create DM channel"
                     );
+                    anyhow::bail!("nie udało się otworzyć kanału prywatnego do {user_id}: {err}");
                 }
             }
             Ok(None)
@@ -421,7 +593,7 @@ async fn execute_action(
                 .kick_with_reason(
                     &ctx.http,
                     target_id,
-                    reason.as_deref().unwrap_or("ZuckerBot Lua module"),
+                    reason.as_deref().unwrap_or("Rusty Discord Bot Lua module"),
                 )
                 .await?;
             audit_action(
@@ -455,7 +627,7 @@ async fn execute_action(
                     &ctx.http,
                     target_id,
                     *delete_message_days,
-                    reason.as_deref().unwrap_or("ZuckerBot Lua module"),
+                    reason.as_deref().unwrap_or("Rusty Discord Bot Lua module"),
                 )
                 .await?;
             audit_action(
@@ -754,6 +926,48 @@ pub async fn resolve_and_validate_channel(
                         return Err(anyhow!(
                             "kategoria kanałów nie może być celem usuwania wiadomości"
                         ));
+                    }
+                }
+            }
+
+            if origin.enforce_actor_permissions {
+                let mut perms = origin.actor_permissions;
+                if !perms.contains(Permissions::ADMINISTRATOR)
+                    && let Some(actor_id) = origin.actor_id
+                {
+                    for overwrite in &guild_channel.permission_overwrites {
+                        match overwrite.kind {
+                            serenity::all::PermissionOverwriteType::Role(role_id) => {
+                                if role_id.get() == guild_channel.guild_id.get() {
+                                    perms.remove(overwrite.deny);
+                                    perms.insert(overwrite.allow);
+                                }
+                            }
+                            serenity::all::PermissionOverwriteType::Member(user_id)
+                                if user_id.get() == actor_id.get() =>
+                            {
+                                perms.remove(overwrite.deny);
+                                perms.insert(overwrite.allow);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                match purpose {
+                    ChannelPurpose::SendMessage => {
+                        if !perms.contains(Permissions::SEND_MESSAGES) {
+                            return Err(anyhow!(
+                                "brak uprawnień użytkownika do wysyłania wiadomości w kanale {channel_id}"
+                            ));
+                        }
+                    }
+                    ChannelPurpose::ManageMessages => {
+                        if !perms.contains(Permissions::MANAGE_MESSAGES) {
+                            return Err(anyhow!(
+                                "brak uprawnień użytkownika do zarządzania wiadomościami w kanale {channel_id}"
+                            ));
+                        }
                     }
                 }
             }

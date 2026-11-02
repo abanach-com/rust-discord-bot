@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use chrono::Utc;
 use serde_json::json;
-use zuckerbot::{
+use rusty_discord_bot::{
     lua::{LuaAction, LuaEngine, LuaExecutionContext, LuaLimits, TicketOperation},
     tickets::{
         NewTicketReservation, NewTicketTranscript, ParticipantMutationOutcome,
@@ -64,7 +64,7 @@ async fn reserved_ticket(
     store: &TicketStore,
     creator_user_id: &str,
     limit: u8,
-) -> zuckerbot::tickets::TicketRecord {
+) -> rusty_discord_bot::tickets::TicketRecord {
     match store
         .reserve_ticket(reservation(creator_user_id), limit)
         .await
@@ -77,7 +77,7 @@ async fn reserved_ticket(
     }
 }
 
-async fn active_ticket(store: &TicketStore) -> zuckerbot::tickets::TicketRecord {
+async fn active_ticket(store: &TicketStore) -> rusty_discord_bot::tickets::TicketRecord {
     let ticket = reserved_ticket(store, "100000000000000003", 3).await;
     match store
         .activate_ticket(

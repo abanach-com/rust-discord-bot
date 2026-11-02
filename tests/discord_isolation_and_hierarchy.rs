@@ -17,7 +17,7 @@ use serenity::{
     http::HttpBuilder,
 };
 use tokio::sync::{Mutex, oneshot};
-use zuckerbot::{
+use rusty_discord_bot::{
     AppState,
     config::Config,
     discord::executor::{
@@ -160,6 +160,22 @@ async fn mock_discord_handler(
                 "type": 0, // GuildText
                 "name": "general",
                 "position": 0
+            }))
+            .into_response(),
+            "102" => Json(json!({
+                "id": "102",
+                "guild_id": "100",
+                "type": 0, // GuildText
+                "name": "read-only-channel",
+                "position": 1,
+                "permission_overwrites": [
+                    {
+                        "id": "111111111111111111",
+                        "type": 1,
+                        "allow": "0",
+                        "deny": "2048"
+                    }
+                ]
             }))
             .into_response(),
             "201" => Json(json!({
@@ -508,6 +524,38 @@ async fn test_channel_resolution_server_isolation_and_error_handling() {
         mock.modifying_requests_count.load(Ordering::SeqCst),
         baseline_modifications,
         "Zero modifying requests should be made when reading channel fails"
+    );
+
+    // 6. Channel on same guild but actor denied SEND_MESSAGES via overwrite -> Rejected BEFORE modifying requests
+    let non_admin_origin = ActionOrigin {
+        guild_id: Some(origin_guild_id),
+        channel_id: Some(ChannelId::new(101)),
+        actor_id: Some(UserId::new(111111111111111111)),
+        actor_permissions: serenity::all::Permissions::SEND_MESSAGES,
+        app_permissions: serenity::all::Permissions::all(),
+        enforce_actor_permissions: true,
+    };
+    let denied_channel = resolve_and_validate_channel(
+        &ctx,
+        &non_admin_origin,
+        Some("102"),
+        ChannelPurpose::SendMessage,
+    )
+    .await;
+    assert!(
+        denied_channel.is_err(),
+        "channel 102 with denied SEND_MESSAGES should be rejected"
+    );
+    assert!(
+        denied_channel
+            .unwrap_err()
+            .to_string()
+            .contains("brak uprawnień użytkownika")
+    );
+    assert_eq!(
+        mock.modifying_requests_count.load(Ordering::SeqCst),
+        baseline_modifications,
+        "Zero modifying requests should be made when actor lacks permission in target channel"
     );
 
     shard_manager.shutdown_all().await;

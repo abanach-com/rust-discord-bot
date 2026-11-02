@@ -525,7 +525,7 @@ async fn open_ticket(
     let bot_id = ctx.cache.current_user().id;
     let permissions = build_open_permissions(guild_id, actor_id, bot_id, &policy.support_role_ids)?;
     let topic = format!(
-        "ZuckerBot ticket {} | owner {} | queue {}",
+        "Rusty Discord Bot ticket {} | owner {} | queue {}",
         reserved.id, reserved.creator_user_id, reserved.queue
     );
     let created_channel = match guild_id
@@ -536,7 +536,7 @@ async fn open_ticket(
                 .category(open_category)
                 .topic(topic)
                 .permissions(permissions)
-                .audit_log_reason("ZuckerBot ticket creation"),
+                .audit_log_reason("Rusty Discord Bot ticket creation"),
         )
         .await
     {
@@ -1165,7 +1165,7 @@ async fn build_transcript(
     }
 
     messages.sort_by_key(|message| message.id);
-    let mut output = String::from("ZuckerBot ticket transcript\n============================\n");
+    let mut output = String::from("Rusty Discord Bot ticket transcript\n============================\n");
     let mut included = 0_i32;
     for message in &messages {
         let line = format_transcript_message(message);

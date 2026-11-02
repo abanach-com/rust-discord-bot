@@ -23,11 +23,30 @@ pub async fn execute(
         .ok_or_else(|| anyhow!("Songbird voice manager is unavailable"))?
         .clone();
 
-    let existing_handler = manager.get(guild_id);
+    let validated_play_query = if matches!(operation, MusicOperation::Play) {
+        let q = query
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow!("brakuje tytułu albo adresu utworu"))?
+            .trim();
+        validate_source(state, q)?;
+        Some(q)
+    } else {
+        None
+    };
 
-    if existing_handler.is_none() {
+    let existing_handler = manager.get(guild_id);
+    let is_connected = match &existing_handler {
+        Some(handler) => {
+            let h = handler.lock().await;
+            h.current_channel().is_some()
+        }
+        None => false,
+    };
+
+    if !is_connected {
         match operation {
             MusicOperation::Leave => {
+                let _ = manager.remove(guild_id).await;
                 return Ok("Bot nie jest połączony z kanałem głosowym.".to_owned());
             }
             MusicOperation::Queue => {
@@ -39,60 +58,59 @@ pub async fn execute(
                 // Play will connect below
             }
             _ => {
+                let _ = manager.remove(guild_id).await;
                 return Err(anyhow!("Bot nie jest połączony z kanałem głosowym."));
             }
         }
     }
 
-    let handler_lock = match existing_handler {
-        Some(handler) => {
-            // If bot is connected, control actions require user to be in the same voice channel
-            if !matches!(operation, MusicOperation::Queue) {
-                let user_channel = user_voice_channel(ctx, guild_id, user_id)?;
-                let bot_channel = {
-                    let h = handler.lock().await;
-                    h.current_channel()
-                        .map(|ch| serenity::all::ChannelId::new(ch.0.get()))
-                        .or_else(|| {
-                            let bot_id = ctx.cache.current_user().id;
-                            ctx.cache.guild(guild_id).and_then(|g| {
-                                g.voice_states.get(&bot_id).and_then(|vs| vs.channel_id)
-                            })
-                        })
-                };
-                if let Some(bot_channel) = bot_channel
-                    && user_channel != bot_channel
-                {
-                    return Err(anyhow!(
-                        "musisz znajdować się na tym samym kanale głosowym co bot"
-                    ));
-                }
+    let handler_lock = if is_connected {
+        let handler = existing_handler.expect("handler must exist when is_connected is true");
+        // If bot is connected, control actions require user to be in the same voice channel
+        if !matches!(operation, MusicOperation::Queue) {
+            let user_channel = user_voice_channel(ctx, guild_id, user_id)?;
+            let bot_channel = {
+                let h = handler.lock().await;
+                h.current_channel()
+                    .map(|ch| serenity::all::ChannelId::new(ch.0.get()))
+                    .or_else(|| {
+                        let bot_id = ctx.cache.current_user().id;
+                        ctx.cache
+                            .guild(guild_id)
+                            .and_then(|g| g.voice_states.get(&bot_id).and_then(|vs| vs.channel_id))
+                    })
+            };
+            if let Some(bot_channel) = bot_channel
+                && user_channel != bot_channel
+            {
+                return Err(anyhow!(
+                    "musisz znajdować się na tym samym kanale głosowym co bot"
+                ));
             }
-
-            if matches!(operation, MusicOperation::Leave) {
-                manager.remove(guild_id).await?;
-                return Ok("Rozłączono bota z kanałem głosowym.".to_owned());
-            }
-
-            handler
         }
-        None => {
-            let channel_id = user_voice_channel(ctx, guild_id, user_id)?;
-            manager
-                .join(guild_id, channel_id)
-                .await
-                .context("nie udało się dołączyć do kanału głosowego")?
+
+        if matches!(operation, MusicOperation::Leave) {
+            manager.remove(guild_id).await?;
+            return Ok("Rozłączono bota z kanałem głosowym.".to_owned());
+        }
+
+        handler
+    } else {
+        let _ = manager.remove(guild_id).await;
+        let channel_id = user_voice_channel(ctx, guild_id, user_id)?;
+        match manager.join(guild_id, channel_id).await {
+            Ok(h) => h,
+            Err(err) => {
+                let _ = manager.remove(guild_id).await;
+                return Err(err).context("nie udało się dołączyć do kanału głosowego");
+            }
         }
     };
     let mut handler = handler_lock.lock().await;
 
     match operation {
         MusicOperation::Play => {
-            let query = query
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| anyhow!("brakuje tytułu albo adresu utworu"))?
-                .trim();
-            validate_source(state, query)?;
+            let query = validated_play_query.expect("query was validated");
 
             if handler.queue().len() >= MAX_QUEUE_SIZE {
                 return Err(anyhow!(

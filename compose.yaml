@@ -4,12 +4,12 @@ services:
     restart: unless-stopped
     shm_size: 128mb
     environment:
-      POSTGRES_DB: zuckerbot
-      POSTGRES_USER: zuckerbot
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-zuckerbot}
+      POSTGRES_DB: rusty_discord_bot
+      POSTGRES_USER: rusty_discord_bot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rusty_discord_bot}
       POSTGRES_INITDB_ARGS: --data-checksums
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U zuckerbot -d zuckerbot"]
+      test: ["CMD-SHELL", "pg_isready -U rusty_discord_bot -d rusty_discord_bot"]
       interval: 5s
       timeout: 3s
       retries: 15
@@ -32,7 +32,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgres://zuckerbot:${POSTGRES_PASSWORD:-zuckerbot}@postgres:5432/zuckerbot
+      DATABASE_URL: postgres://rusty_discord_bot:${POSTGRES_PASSWORD:-rusty_discord_bot}@postgres:5432/rusty_discord_bot
       SCRIPTS_DIR: /app/scripts
       DASHBOARD_BIND: 0.0.0.0:8080
     depends_on:

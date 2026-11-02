@@ -1,5 +1,5 @@
 use chrono::{Duration, Utc};
-use zuckerbot::moderation_cases::{
+use rusty_discord_bot::moderation_cases::{
     CaseFilter, CaseKind, CaseSeverity, CaseStatus, CreateCase, ModerationCaseStore, UpdateCase,
 };
 
@@ -143,7 +143,7 @@ async fn expired_cases_stop_contributing_to_active_stats() {
 async fn lua_moderation_module_emits_valid_case_actions() {
     use serde_json::json;
     use std::path::PathBuf;
-    use zuckerbot::lua::{
+    use rusty_discord_bot::lua::{
         LuaAction, LuaEngine, LuaExecutionContext, LuaLimits, ModerationCaseOperation,
     };
 
@@ -386,7 +386,7 @@ async fn softban_case_lifecycle_and_kind_serialization() {
 
 #[tokio::test]
 async fn moderation_case_store_connect_and_audit_logging() {
-    use zuckerbot::storage::Storage;
+    use rusty_discord_bot::storage::Storage;
 
     let store = ModerationCaseStore::connect(None).await.unwrap();
     let now = Utc::now();

@@ -1,16 +1,17 @@
-# ZuckerBot
+# Rusty Discord Bot (`rusty-discord-bot`)
 
-A secure, Lua-scriptable Discord automation platform with a high-performance Rust core, PostgreSQL storage, voice support and a first-party web dashboard.
+A secure, modular, Lua-scriptable Discord automation platform with a high-performance Rust core, PostgreSQL storage, voice support, XML plugin installer and a first-party web dashboard.
 
-ZuckerBot is designed as an extensible alternative to closed all-in-one bots. Server behavior lives in versioned Lua modules; Discord connectivity, authorization, storage, rate-sensitive operations and privileged actions remain behind a validated Rust API.
+Rusty Discord Bot is designed as a modern, extensible alternative to closed all-in-one bots. Server behavior lives in self-contained, versioned Lua modules (each in its own folder with `module.lua`, `config.json` and `README.md`); Discord connectivity, authorization, storage, rate-sensitive operations and privileged actions remain behind a validated Rust API.
 
-> **Current status:** foundation release. The repository already contains the runtime, dashboard, OAuth2 login, PostgreSQL migrations, Discord command registration, voice queue integration and example Lua modules. The complete product scope is tracked in [`docs/FEATURE_MATRIX.md`](docs/FEATURE_MATRIX.md), while the audited Discord API surface is recorded in [`docs/DISCORD_PLATFORM_COVERAGE.md`](docs/DISCORD_PLATFORM_COVERAGE.md). [`docs/VERSION_POLICY.md`](docs/VERSION_POLICY.md) defines the latest-stable dependency policy.
+> **Current status:** advanced release. The repository contains the modular runtime, `install.xml` plugin registry, dashboard, OAuth2 login, PostgreSQL migrations, Discord command registration, voice queue integration and 26 modular Lua feature packages. The complete product scope is tracked in [`docs/FEATURE_MATRIX.md`](docs/FEATURE_MATRIX.md), while the audited Discord API surface is recorded in [`docs/DISCORD_PLATFORM_COVERAGE.md`](docs/DISCORD_PLATFORM_COVERAGE.md). [`docs/VERSION_POLICY.md`](docs/VERSION_POLICY.md) defines the latest-stable dependency policy.
 
 ## Why Rust plus Lua?
 
 Rust owns the trust boundary:
 
 - Discord Gateway and HTTP clients
+- XML plugin manifest parser and module supervisor (`install.xml`)
 - permission and role-hierarchy checks
 - OAuth2 and browser sessions
 - database access and audit records
@@ -28,48 +29,64 @@ Lua owns server behavior:
 
 A Lua script never receives the Discord bot token, raw database credentials, unrestricted network access or direct filesystem access.
 
-## Included foundation
+## Modular Folder Architecture & `install.xml`
 
-- Discord slash commands generated from Lua manifests
-- current global-command `integration_types`, `contexts` and NSFW declarations
-- controlled migration from the deprecated `dm_permission` manifest field
-- event dispatch for `message_create` and `guild_member_add`
-- sandboxed Lua 5.4 with memory and global instruction limits
-- validated action API for replies, messages, moderation, roles, purge, music, progression, persistent scheduling, private tickets and audit events
-- action-level Discord permission checks
-- bot, moderator and target role-hierarchy checks
-- Songbird voice connection and queue controls
-- HTTPS media-host allowlist to reduce SSRF exposure
-- Discord OAuth2 dashboard login
-- per-guild module enable/disable and JSON configuration
-- HttpOnly sessions, OAuth2 state validation and CSRF protection
-- PostgreSQL migrations with an in-memory development fallback
-- audit records for privileged actions, scheduler transitions, ticket lifecycles and dashboard changes
-- lease-based PostgreSQL scheduler with retries, pause/resume and an in-memory test fallback
-- transactional private-ticket workflows with queues, claim, participants, archive and transcripts
-- Docker Compose development deployment
-- CI formatting, linting, tests, release build and production-container build
+Each Lua feature package lives in its own dedicated folder under `scripts/<module_name>/`:
+- `module.lua`: declarative manifest, command handlers and event subscribers
+- `config.json`: default / baseline configuration for the module
+- `README.md`: feature documentation, options, permissions and examples
 
-Bundled Lua modules:
+Right before the folders sits `scripts/install.xml`, the master plugin registry:
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<installer version="1.0.0">
+    <bot name="rusty-discord-bot" min_engine_version="0.2.0" author="Adrian Banach" />
+    <modules>
+        <module id="core" enabled="true" version="1.0.0">
+            <name>Core System</name>
+            <description>Podstawowe komendy diagnostyczne, ping, informacja o platformie i spis modułów.</description>
+            <category>platform</category>
+            <folder>core</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <!-- ... additional modules ... -->
+    </modules>
+</installer>
+```
+Modules can be toggled on/off globally by setting `enabled="true"` or `enabled="false"` in `install.xml`. The Rust engine respects this descriptor before loading code into memory.
 
-| Module | Commands or events |
-| --- | --- |
-| `core.lua` | `/ping`, `/about` |
-| `fun.lua` | `/meme`, `/roll`, `/choose`, `/eightball` |
-| `moderation.lua` | `/moderate` with timeout, kick, ban and purge |
-| `roles.lua` | `/role` add/remove |
-| `music.lua` | `/music` play, pause, resume, skip, stop, queue and leave |
-| `welcome.lua` | configurable `guild_member_add` welcome automation |
-| `automod.lua` | multi-rule message safety and anti-abuse engine |
-| `progression.lua` | XP, levels, coins, daily streaks, reputation and leaderboards |
-| `scheduler.lua` | persistent reminders and recurring server messages |
-| `tickets.lua` | private support tickets, queues, claim, archive and transcripts |
-| `community.lua` | suggestions, reports, feedback, applications and bug reports |
-| `utility.lua` | calculations, conversions, timestamps and Discord utilities |
-| `games.lua` | social games, dice, teams and cosmetic drops |
-| `staff_tools.lua` | announcements, broadcasts, alerts, rules and audit notes |
-| `server_info.lua` | rules, FAQ, links, support, staff and schedule |
-| `join_guard.lua` | account-age and suspicious-join safety signals |
+## Included 26 Modular Feature Packages
+
+| Category | Module Folder | Feature Summary |
+| --- | --- | --- |
+| **Platform** | `scripts/core/` | `/ping`, `/about` — diagnostyka i stan silnika |
+| **Safety** | `scripts/moderation/` | `/warn`, `/moderate`, `/case` — sankcje, unieważnienia i trwała ewidencja spraw |
+| **Safety** | `scripts/automod/` | Filtry słów, anty-spam, anty-caps, link guard i blokada zaproszeń |
+| **Support** | `scripts/tickets/` | `/ticket` — prywatne kanały pomocy, kolejki wsparcia i transkrypcje |
+| **Utility** | `scripts/scheduler/` | `/remind`, `/schedule` — terminowe przypomnienia i zadania cykliczne |
+| **Progression**| `scripts/progression/`| `/rank`, `/leaderboard`, `/daily`, `/rep` — poziomy XP i role za level |
+| **Economy** | `scripts/economy/` | `/economy` — portfel, praca, zlecenia crime, sklep serwerowy, ekwipunek i przelewy |
+| **Giveaway** | `scripts/giveaway/` | `/giveaway` — konkursy, losowania nagród i wybór zwycięzców |
+| **Social** | `scripts/starboard/` | `/starboard` — tablica chwały dla wiadomości wyróżnionych gwiazdkami |
+| **Utility** | `scripts/afk/` | `/afk` — statusy nieobecności z automatycznym powiadomieniem wzmiankujących |
+| **Utility** | `scripts/tags/` | `/tag` — własne komendy tekstowe, szablony i skróty |
+| **Community** | `scripts/birthdays/` | `/birthday` — kalendarz urodzin serwera i życzenia |
+| **Security** | `scripts/logging/` | `/logging` — rejestr zdarzeń serwerowych i usuniętych wiadomości |
+| **Management**| `scripts/reaction_roles/`| `/reactionrole` — samodzielny wybór ról poprzez reakcje pod wiadomościami |
+| **Fun** | `scripts/quotes/` | `/quote` — baza złotych myśli i pamiętnych cytatów serwera |
+| **Progression**| `scripts/achievements/`| `/achievements` — system odznak i osiągnięć serwerowych z nagrodami |
+| **Multimedia** | `scripts/music/` | `/music` — odtwarzacz audio Songbird ze wsparciem kolejki |
+| **Community** | `scripts/community/` | `/poll`, `/suggest`, `/report` — ankiety, sugestie i zgłoszenia |
+| **Management** | `scripts/welcome/` | Powitania nowych użytkowników i automatyczne nadawanie roli |
+| **Security** | `scripts/join_guard/`| `/joinguard` — ochrona anty-raid i weryfikacja wieku kont |
+| **Management** | `scripts/roles/` | `/role` — komendy przydzielania i odbierania ról |
+| **Fun** | `scripts/fun/` | `/roll`, `/8ball`, `/choose`, `/reverse` — rozrywka tekstowa |
+| **Fun** | `scripts/games/` | `/coinflip`, `/trivia`, `/rps`, `/guess` — quizy i mini-gry |
+| **Utility** | `scripts/utility/` | `/userinfo`, `/avatar`, `/serverinfo`, `/calculate` |
+| **Management** | `scripts/staff_tools/`| `/slowmode`, `/lockdown`, `/unlock`, `/announce` |
+| **Information**| `scripts/server_info/`| `/server`, `/channel`, `/rules` |
 
 ## Architecture
 
@@ -157,7 +174,7 @@ return {
         id = "hello",
         name = "Hello",
         version = "1.0.0",
-        description = "A minimal ZuckerBot module.",
+        description = "A minimal Rusty Discord Bot module.",
         category = "example",
         default_enabled = true,
         commands = {
@@ -181,7 +198,7 @@ return {
             return {
                 {
                     type = "reply",
-                    content = "Hello, " .. zuckerbot.escape_mentions(ctx.user_name) .. ".",
+                    content = "Hello, " .. rusty-discord-bot.escape_mentions(ctx.user_name) .. ".",
                     ephemeral = false,
                 },
             }
@@ -218,7 +235,7 @@ cargo fmt --all
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 cargo build --release
-docker build --tag zuckerbot:local .
+docker build --tag rusty-discord-bot:local .
 ```
 
 ## Music and external services

@@ -4,7 +4,7 @@ use std::{
 };
 
 use serde_json::json;
-use zuckerbot::lua::{
+use rusty_discord_bot::lua::{
     LuaAction, LuaEngine, LuaEventContext, LuaExecutionContext, LuaLimits, MusicOperation,
     ProgressionOperation,
 };

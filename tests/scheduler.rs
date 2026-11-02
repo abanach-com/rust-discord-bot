@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use chrono::{Duration, Utc};
 use serde_json::json;
-use zuckerbot::{
+use rusty_discord_bot::{
     lua::{LuaAction, LuaEngine, LuaExecutionContext, LuaLimits, SchedulerOperation},
     scheduler::{
         CreateJobOutcome, JobMutation, JobMutationOutcome, NewScheduledJob, STATUS_ACTIVE,
@@ -62,7 +62,7 @@ async fn created_job(
     store: &SchedulerStore,
     job: NewScheduledJob,
     max_jobs: u16,
-) -> zuckerbot::scheduler::ScheduledJob {
+) -> rusty_discord_bot::scheduler::ScheduledJob {
     match store
         .create_job(job, max_jobs)
         .await

@@ -76,7 +76,7 @@ impl AppState {
                 SessionStore::memory(),
             )
         };
-        let user_agent = concat!("ZuckerBot/", env!("CARGO_PKG_VERSION"));
+        let user_agent = concat!("RustyDiscordBot/", env!("CARGO_PKG_VERSION"));
         let http_client = reqwest::Client::builder().user_agent(user_agent).build()?;
         let media_http_client = reqwest_songbird::Client::builder()
             .user_agent(user_agent)

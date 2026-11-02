@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <title>ZuckerBot Control</title>
+  <title>Rusty Discord Bot Control</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/assets/styles.css">
   <script src="/assets/app.js" defer></script>
@@ -13,11 +13,11 @@
   <a href="#main-content" class="skip-link">Przejdź do treści</a>
   <div class="shell">
     <aside class="sidebar">
-      <a class="brand" href="/" aria-label="ZuckerBot Control">
-        <span class="brand-mark">Z</span>
+      <a class="brand" href="/" aria-label="Rusty Discord Bot Control">
+        <span class="brand-mark">R</span>
         <span>
-          <strong>ZuckerBot</strong>
-          <small>Control platform</small>
+          <strong>RustyBot</strong>
+          <small>Discord platform</small>
         </span>
       </a>
 
@@ -56,7 +56,7 @@
       <section id="login-view" class="login-panel">
         <div class="login-copy">
           <p class="eyebrow">Bezpieczny dostęp</p>
-          <h2>Zarządzaj ZuckerBotem przez Discord</h2>
+          <h2>Zarządzaj Rusty Discord Botem przez Discord</h2>
           <p>Panel pokaże wyłącznie serwery, których jesteś właścicielem albo na których masz uprawnienie Zarządzanie serwerem.</p>
           <a class="primary-button" href="/auth/discord">Zaloguj przez Discord</a>
         </div>
@@ -154,9 +154,9 @@
 
   <dialog id="void-dialog" class="modal-dialog">
     <form method="dialog" id="void-form">
-      <h3>Unieważnienie sprawy moderacyjnej</h3>
+      <h3 id="void-dialog-title">Unieważnienie sprawy moderacyjnej</h3>
       <p style="color:var(--muted); font-size:13px; margin: 8px 0 16px 0;">
-        Unieważnienie sprawy anuluje sankcję i rejestruje trwały powód w historii audytowej.
+        Unieważnienie sprawy unieważnia wyłącznie rekord w ewidencji i historii bazy danych. Nie cofa automatycznie aktywnego bana ani timeoutu w Discordzie – wymaga to oddzielnej czynności moderatorskiej.
       </p>
       <label class="field" style="display:flex; flex-direction:column; gap:6px;">
         <span>Powód unieważnienia:</span>

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use tracing_subscriber::EnvFilter;
-use zuckerbot::{AppState, config::Config};
+use rusty_discord_bot::{AppState, config::Config};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -9,7 +9,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("zuckerbot=info,serenity=info,songbird=info")),
+                .unwrap_or_else(|_| EnvFilter::new("rusty_discord_bot=info,serenity=info,songbird=info")),
         )
         .init();
 
@@ -31,11 +31,11 @@ async fn main() -> Result<()> {
     let web_shutdown_rx = shutdown_tx.subscribe();
     let discord_shutdown_rx = shutdown_tx.subscribe();
 
-    let web_handle = tokio::spawn(zuckerbot::web::serve_with_shutdown(
+    let web_handle = tokio::spawn(rusty_discord_bot::web::serve_with_shutdown(
         state.clone(),
         web_shutdown_rx,
     ));
-    let discord_handle = tokio::spawn(zuckerbot::discord::run_with_shutdown(
+    let discord_handle = tokio::spawn(rusty_discord_bot::discord::run_with_shutdown(
         state.clone(),
         discord_shutdown_rx,
     ));
@@ -102,7 +102,7 @@ async fn main() -> Result<()> {
         tracing::warn!("timed out waiting for background services to terminate during shutdown");
     }
 
-    tracing::info!("zuckerbot graceful shutdown complete");
+    tracing::info!("rusty-discord-bot graceful shutdown complete");
     result
 }
 

@@ -1,0 +1,4 @@
+{
+    "minimum_delay_seconds": 10,
+    "max_user_jobs": 10
+}

@@ -46,6 +46,10 @@ const state = {
   eventSource: null,
   requestHistory: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
   lastRequestsTotal: null,
+  lastRequestsTimestamp: null,
+  editingModuleId: null,
+  casesOffset: 0,
+  auditOffset: 0,
   pendingVoidCase: null,
 };
 
@@ -224,6 +228,10 @@ function initRealtimeStream() {
 
     sse.addEventListener("connected", () => {
       console.log("Realtime SSE połączony dla serwera:", state.guildId);
+      if (state.activeTab === "audit") {
+        loadAudit();
+      }
+      updateKpis();
     });
 
     sse.addEventListener("case_updated", () => {
@@ -242,9 +250,22 @@ function initRealtimeStream() {
       updateKpis();
     });
 
-    sse.addEventListener("module_updated", () => {
+    sse.addEventListener("module_updated", (evt) => {
+      let data = {};
+      try {
+        data = JSON.parse(evt.data || "{}");
+      } catch {}
+      if (state.activeTab === "audit") {
+        loadAudit();
+      }
       if (state.activeTab === "modules") {
-        loadModules();
+        if (data.module_id && state.editingModuleId === data.module_id) {
+          showToast(`⚠️ Moduł "${data.module_id}" został zmieniony w innej sesji.`, "warning", 5000);
+        } else if (data.module_id && state.editingModuleId !== data.module_id) {
+          updateSingleModuleCard(data.module_id);
+        } else if (!state.editingModuleId) {
+          loadModules();
+        }
       }
       updateKpis();
     });
@@ -322,6 +343,8 @@ async function loadLiveUptime() {
 
 async function updateKpis() {
   if (!state.guildId) return;
+  const gen = state.generationId;
+  const targetGuild = state.guildId;
 
   if (state.modulesData && state.modulesData.length > 0) {
     const enabled = state.modulesData.filter((m) => m.enabled).length;
@@ -333,13 +356,42 @@ async function updateKpis() {
   }
 
   try {
-    const cases = await request(`/api/guilds/${encodeURIComponent(state.guildId)}/cases`);
-    if (ui.kpiTotalCases) ui.kpiTotalCases.textContent = String(cases.length || 0);
+    const casesRes = await request(`/api/guilds/${encodeURIComponent(targetGuild)}/cases?limit=1`);
+    if (gen !== state.generationId || state.guildId !== targetGuild) return;
+    const total = casesRes.total !== undefined ? casesRes.total : (Array.isArray(casesRes) ? casesRes.length : 0);
+    if (ui.kpiTotalCases) ui.kpiTotalCases.textContent = String(total);
   } catch {}
 
   try {
-    const audit = await request(`/api/guilds/${encodeURIComponent(state.guildId)}/audit`);
-    if (ui.kpiAuditEvents) ui.kpiAuditEvents.textContent = String(audit.length || 0);
+    const auditRes = await request(`/api/guilds/${encodeURIComponent(targetGuild)}/audit?limit=1`);
+    if (gen !== state.generationId || state.guildId !== targetGuild) return;
+    const total = auditRes.total !== undefined ? auditRes.total : (Array.isArray(auditRes) ? auditRes.length : 0);
+    if (ui.kpiAuditEvents) ui.kpiAuditEvents.textContent = String(total);
+  } catch {}
+}
+
+async function updateSingleModuleCard(moduleId) {
+  const gen = state.generationId;
+  const targetGuild = state.guildId;
+  try {
+    const modules = await request(`/api/guilds/${encodeURIComponent(targetGuild)}/modules`);
+    if (gen !== state.generationId || state.guildId !== targetGuild) return;
+    state.modulesData = modules;
+    const updated = modules.find((m) => m.manifest.id === moduleId);
+    if (updated) {
+      const card = document.querySelector(`[data-module-id="${moduleId}"]`);
+      if (card && state.editingModuleId !== moduleId) {
+        const badge = card.querySelector(".badge");
+        if (badge) {
+          badge.textContent = updated.enabled ? "Włączony" : "Wyłączony";
+          badge.className = `badge ${updated.enabled ? "badge-active" : "badge-inactive"}`;
+        }
+        const toggle = card.querySelector(".module-toggle");
+        if (toggle) {
+          toggle.checked = updated.enabled;
+        }
+      }
+    }
   } catch {}
 }
 
@@ -493,6 +545,79 @@ function buildSchemaForm(container, manifest, config, onUpdate) {
       track.className = "switch-track";
       switchLabel.append(checkbox, track);
       field.append(switchLabel);
+    } else if (prop.type === "array" && prop.items && (prop.items.type === "object" || key === "role_rewards")) {
+      const arrayContainer = document.createElement("div");
+      arrayContainer.className = "object-array-container";
+      arrayContainer.style.display = "grid";
+      arrayContainer.style.gap = "8px";
+      arrayContainer.style.margin = "6px 0";
+
+      let list = Array.isArray(currentValue) ? JSON.parse(JSON.stringify(currentValue)) : [];
+
+      const renderRows = () => {
+        arrayContainer.replaceChildren();
+        list.forEach((item, idx) => {
+          const row = document.createElement("div");
+          row.style.display = "flex";
+          row.style.gap = "8px";
+          row.style.alignItems = "center";
+
+          const levelInput = document.createElement("input");
+          levelInput.type = "number";
+          levelInput.className = "text-input";
+          levelInput.style.width = "90px";
+          levelInput.placeholder = "Poziom";
+          levelInput.value = item.level !== undefined ? item.level : 1;
+          levelInput.addEventListener("input", () => {
+            list[idx].level = parseInt(levelInput.value, 10) || 1;
+            config[key] = list;
+            onUpdate(config);
+          });
+
+          const roleInput = document.createElement("input");
+          roleInput.type = "text";
+          roleInput.className = "text-input";
+          roleInput.style.flex = "1";
+          roleInput.placeholder = "ID roli (np. 123456789012345678)";
+          roleInput.value = item.role_id !== undefined ? String(item.role_id) : "";
+          roleInput.addEventListener("input", () => {
+            list[idx].role_id = roleInput.value.trim();
+            config[key] = list;
+            onUpdate(config);
+          });
+
+          const delBtn = document.createElement("button");
+          delBtn.type = "button";
+          delBtn.className = "case-action-btn btn-danger";
+          delBtn.textContent = "Usuń";
+          delBtn.addEventListener("click", () => {
+            list.splice(idx, 1);
+            config[key] = list;
+            onUpdate(config);
+            renderRows();
+          });
+
+          row.append(levelInput, roleInput, delBtn);
+          arrayContainer.append(row);
+        });
+
+        const addBtn = document.createElement("button");
+        addBtn.type = "button";
+        addBtn.className = "case-action-btn";
+        addBtn.style.justifySelf = "start";
+        addBtn.textContent = "+ Dodaj próg roli";
+        addBtn.addEventListener("click", () => {
+          const nextLevel = list.length > 0 ? (list[list.length - 1].level || 0) + 5 : 5;
+          list.push({ level: nextLevel, role_id: "" });
+          config[key] = list;
+          onUpdate(config);
+          renderRows();
+        });
+        arrayContainer.append(addBtn);
+      };
+
+      renderRows();
+      field.append(arrayContainer);
     } else if (prop.type === "array" && prop.items && prop.items.type === "string") {
       const chipsContainer = document.createElement("div");
       chipsContainer.className = "chips-container";
@@ -626,36 +751,51 @@ async function saveModule(card, moduleId, enabled, config, button) {
   }
 }
 
-async function loadCases() {
+async function loadCases(append = false) {
   clearStatus();
-  ui.casesList.replaceChildren(
-    messageCard("Ładowanie spraw", "Pobieranie rejestru moderacji...")
-  );
+  if (!append) {
+    state.casesOffset = 0;
+    ui.casesList.replaceChildren(
+      messageCard("Ładowanie spraw", "Pobieranie rejestru moderacji...")
+    );
+  }
 
   const gen = state.generationId;
   const targetGuild = state.guildId;
 
   try {
-    const cases = await request(
-      `/api/guilds/${encodeURIComponent(targetGuild)}/cases`
+    const res = await request(
+      `/api/guilds/${encodeURIComponent(targetGuild)}/cases?limit=25&offset=${state.casesOffset}`
     );
     if (gen !== state.generationId || state.guildId !== targetGuild) return;
-    renderCases(cases);
+    const items = Array.isArray(res) ? res : (res.items || []);
+    const total = res.total !== undefined ? res.total : items.length;
+    const nextOffset = res.next_offset !== undefined ? res.next_offset : null;
+
+    if (ui.kpiTotalCases) ui.kpiTotalCases.textContent = String(total);
+    renderCases(items, append, nextOffset);
   } catch (error) {
     if (gen !== state.generationId || state.guildId !== targetGuild) return;
-    ui.casesList.replaceChildren(
-      messageCard("Błąd pobierania spraw moderacyjnych", error.message)
-    );
+    if (!append) {
+      ui.casesList.replaceChildren(
+        messageCard("Błąd pobierania spraw moderacyjnych", error.message)
+      );
+    }
   }
 }
 
-function renderCases(cases) {
-  ui.casesList.replaceChildren();
-  if (!cases || cases.length === 0) {
-    ui.casesList.append(
-      messageCard("Brak spraw", "Ten serwer nie ma jeszcze żadnych zarejestrowanych spraw moderacyjnych.")
-    );
-    return;
+function renderCases(cases, append = false, nextOffset = null) {
+  const existingMoreBtn = ui.casesList.querySelector("#cases-load-more");
+  if (existingMoreBtn) existingMoreBtn.remove();
+
+  if (!append) {
+    ui.casesList.replaceChildren();
+    if (!cases || cases.length === 0) {
+      ui.casesList.append(
+        messageCard("Brak spraw", "Ten serwer nie ma jeszcze żadnych zarejestrowanych spraw moderacyjnych.")
+      );
+      return;
+    }
   }
 
   for (const c of cases) {
@@ -704,6 +844,22 @@ function renderCases(cases) {
     });
 
     ui.casesList.append(card);
+  }
+
+  if (nextOffset !== null) {
+    const moreBtn = document.createElement("button");
+    moreBtn.id = "cases-load-more";
+    moreBtn.className = "case-action-btn";
+    moreBtn.style.margin = "16px auto";
+    moreBtn.style.display = "block";
+    moreBtn.textContent = "Załaduj wcześniejsze sprawy";
+    moreBtn.addEventListener("click", async () => {
+      state.casesOffset = nextOffset;
+      moreBtn.disabled = true;
+      moreBtn.textContent = "Ładowanie...";
+      await loadCases(true);
+    });
+    ui.casesList.append(moreBtn);
   }
 }
 
@@ -881,7 +1037,7 @@ function setupVoidDialog() {
       });
       ui.voidDialog.close();
       state.pendingVoidCase = null;
-      setStatus(`Sprawa #${c.case_number} została pomyślnie unieważniona.`, "success");
+      setStatus(`Sprawa #${c.case_number} została unieważniona w bazie danych (kara w Discordzie wymaga osobnego cofnięcia).`, "success");
       await loadCases();
     } catch (err) {
       setStatus(`Błąd unieważnienia: ${err.message}`, "error");
@@ -892,91 +1048,135 @@ function setupVoidDialog() {
 function openVoidModal(caseItem) {
   state.pendingVoidCase = caseItem;
   if (ui.voidReasonInput) ui.voidReasonInput.value = "";
+  const titleEl = document.querySelector("#void-dialog-title");
+  if (titleEl) {
+    titleEl.textContent = `Unieważnienie sprawy #${caseItem.case_number} [${caseItem.kind}]`;
+  }
   if (ui.voidDialog && typeof ui.voidDialog.showModal === "function") {
     ui.voidDialog.showModal();
   }
 }
 
-async function loadAudit() {
+async function loadAudit(append = false) {
   clearStatus();
-  ui.auditList.replaceChildren(
-    messageCard("Ładowanie dziennika", "Pobieranie zdarzeń audytowych...")
-  );
+  if (!append) {
+    state.auditOffset = 0;
+    ui.auditList.replaceChildren(
+      messageCard("Ładowanie dziennika", "Pobieranie zdarzeń audytowych...")
+    );
+  }
 
   const gen = state.generationId;
   const targetGuild = state.guildId;
 
   try {
-    const events = await request(
-      `/api/guilds/${encodeURIComponent(targetGuild)}/audit`
+    const res = await request(
+      `/api/guilds/${encodeURIComponent(targetGuild)}/audit?limit=25&offset=${state.auditOffset}`
     );
     if (gen !== state.generationId || state.guildId !== targetGuild) return;
-    renderAudit(events);
+    const items = Array.isArray(res) ? res : (res.items || []);
+    const total = res.total !== undefined ? res.total : items.length;
+    const nextOffset = res.next_offset !== undefined ? res.next_offset : null;
+
+    if (ui.kpiAuditEvents) ui.kpiAuditEvents.textContent = String(total);
+    renderAudit(items, append, nextOffset);
   } catch (error) {
     if (gen !== state.generationId || state.guildId !== targetGuild) return;
-    ui.auditList.replaceChildren(
-      messageCard("Błąd pobierania audytu", error.message)
-    );
-  }
-}
-
-function renderAudit(events) {
-  ui.auditList.replaceChildren();
-  if (!events || events.length === 0) {
-    ui.auditList.append(
-      messageCard("Brak wpisów", "Brak zarejestrowanych zdarzeń audytowych dla tego serwera.")
-    );
-    return;
-  }
-
-  const table = document.createElement("table");
-  table.className = "audit-table";
-  table.innerHTML = `
-    <thead>
-      <tr>
-        <th>Data</th>
-        <th>Moduł</th>
-        <th>Zdarzenie</th>
-        <th>Aktor</th>
-        <th>Dane zdarzenia</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${events
-        .map(
-          (e) => `
-        <tr>
-          <td style="white-space:nowrap;">${formatDate(e.created_at)}</td>
-          <td><code>${escapeHtml(e.module_id)}</code></td>
-          <td><strong>${escapeHtml(e.event)}</strong></td>
-          <td>${e.actor_id ? `<code>${escapeHtml(e.actor_id)}</code>` : "<span style='color:var(--muted);'>System</span>"}</td>
-          <td><pre style="margin:0; font-size:11px; max-width:380px; overflow-x:auto;">${escapeHtml(JSON.stringify(e.data))}</pre></td>
-        </tr>
-      `
-        )
-        .join("")}
-    </tbody>
-  `;
-  ui.auditList.append(table);
-}
-
-async function loadAnalytics() {
-  try {
-    const ready = await request("/health/ready");
-    renderAnalytics(ready);
-  } catch (err) {
-    if (ui.analyticsDetails) {
-      ui.analyticsDetails.innerHTML = `<p style="padding:16px; color:var(--danger);">Nie można pobrać stanu gotowości: ${escapeHtml(err.message)}</p>`;
+    if (!append) {
+      ui.auditList.replaceChildren(
+        messageCard("Błąd pobierania audytu", error.message)
+      );
     }
   }
 }
 
-function renderAnalytics(readyData) {
-  const checks = readyData.checks || {};
+function renderAudit(events, append = false, nextOffset = null) {
+  const existingMoreBtn = ui.auditList.querySelector("#audit-load-more");
+  if (existingMoreBtn) existingMoreBtn.remove();
+
+  let tbody;
+  if (!append) {
+    ui.auditList.replaceChildren();
+    if (!events || events.length === 0) {
+      ui.auditList.append(
+        messageCard("Brak wpisów", "Brak zarejestrowanych zdarzeń audytowych dla tego serwera.")
+      );
+      return;
+    }
+
+    const table = document.createElement("table");
+    table.className = "audit-table";
+    table.innerHTML = `
+      <thead>
+        <tr>
+          <th>Data</th>
+          <th>Moduł</th>
+          <th>Zdarzenie</th>
+          <th>Aktor</th>
+          <th>Dane zdarzenia</th>
+        </tr>
+      </thead>
+      <tbody id="audit-tbody"></tbody>
+    `;
+    ui.auditList.append(table);
+    tbody = table.querySelector("#audit-tbody");
+  } else {
+    tbody = ui.auditList.querySelector("#audit-tbody");
+  }
+
+  if (tbody) {
+    for (const e of events) {
+      const row = document.createElement("tr");
+      row.innerHTML = `
+        <td style="white-space:nowrap;">${formatDate(e.created_at)}</td>
+        <td><code>${escapeHtml(e.module_id)}</code></td>
+        <td><strong>${escapeHtml(e.event)}</strong></td>
+        <td>${e.actor_id ? `<code>${escapeHtml(e.actor_id)}</code>` : "<span style='color:var(--muted);'>System</span>"}</td>
+        <td><pre style="margin:0; font-size:11px; max-width:380px; overflow-x:auto;">${escapeHtml(JSON.stringify(e.data))}</pre></td>
+      `;
+      tbody.append(row);
+    }
+  }
+
+  if (nextOffset !== null) {
+    const moreBtn = document.createElement("button");
+    moreBtn.id = "audit-load-more";
+    moreBtn.className = "case-action-btn";
+    moreBtn.style.margin = "16px auto";
+    moreBtn.style.display = "block";
+    moreBtn.textContent = "Załaduj wcześniejsze wpisy audytu";
+    moreBtn.addEventListener("click", async () => {
+      state.auditOffset = nextOffset;
+      moreBtn.disabled = true;
+      moreBtn.textContent = "Ładowanie...";
+      await loadAudit(true);
+    });
+    ui.auditList.append(moreBtn);
+  }
+}
+
+async function loadAnalytics() {
+  try {
+    const res = await fetch("/health/ready", { headers: { "Accept": "application/json" } });
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 200) {
+      renderAnalytics(data, true);
+    } else if (res.status === 503) {
+      renderAnalytics(data, false);
+    } else {
+      throw new Error(`HTTP ${res.status}`);
+    }
+  } catch (err) {
+    renderAnalyticsNetworkError(err);
+  }
+}
+
+function renderAnalytics(readyData, isHealthy = true) {
+  const checks = readyData.checks || readyData.subsystems || {};
   const entries = Object.entries(checks);
-  const okCount = entries.filter(([_, v]) => String(v).startsWith("ok")).length;
+  const okCount = entries.filter(([_, v]) => String(v).startsWith("ok") || v === true).length;
   const totalCount = Math.max(1, entries.length);
-  const ratio = okCount / totalCount;
+  const ratio = isHealthy && okCount > 0 ? okCount / totalCount : 0;
 
   if (ui.analyticsHealthDonut) {
     const size = 160;
@@ -984,7 +1184,7 @@ function renderAnalytics(readyData) {
     const radius = (size - stroke) / 2;
     const circ = 2 * Math.PI * radius;
     const offset = circ * (1 - ratio);
-    const strokeColor = ratio === 1 ? "var(--success)" : "var(--danger)";
+    const strokeColor = ratio > 0.8 ? "var(--success)" : ratio > 0.4 ? "var(--warning)" : "var(--danger)";
 
     ui.analyticsHealthDonut.innerHTML = `
       <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
@@ -1007,22 +1207,29 @@ function renderAnalytics(readyData) {
       ? readyData.dashboard_requests_total
       : null;
 
+  const now = Date.now();
   if (currentTotal !== null) {
-    if (state.lastRequestsTotal !== null && currentTotal >= state.lastRequestsTotal) {
-      const delta = currentTotal - state.lastRequestsTotal;
-      state.requestHistory.shift();
-      state.requestHistory.push(delta);
+    if (state.lastRequestsTotal !== null && state.lastRequestsTimestamp !== null && currentTotal >= state.lastRequestsTotal) {
+      const elapsedSeconds = (now - state.lastRequestsTimestamp) / 1000;
+      if (elapsedSeconds > 0 && elapsedSeconds < 60) {
+        const rps = Number(((currentTotal - state.lastRequestsTotal) / elapsedSeconds).toFixed(2));
+        state.requestHistory.shift();
+        state.requestHistory.push(rps);
+      } else {
+        state.requestHistory.shift();
+        state.requestHistory.push(0);
+      }
     } else {
-      state.requestHistory.shift();
-      state.requestHistory.push(0);
+      state.requestHistory = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     }
     state.lastRequestsTotal = currentTotal;
+    state.lastRequestsTimestamp = now;
   }
 
   if (ui.analyticsRequestsSparkline) {
     const width = 280;
     const height = 90;
-    const max = Math.max(...state.requestHistory, 10);
+    const max = Math.max(...state.requestHistory, 5);
     const step = width / (state.requestHistory.length - 1);
 
     const points = state.requestHistory.map((val, idx) => {
@@ -1040,6 +1247,10 @@ function renderAnalytics(readyData) {
           return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3" fill="var(--accent-strong)" />`;
         }).join("")}
       </svg>
+      <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--muted); margin-top:6px;">
+        <span>Ostatnie próbki</span>
+        <span>Maks: <strong>${max} żądań/s</strong></span>
+      </div>
     `;
   }
 
@@ -1068,6 +1279,28 @@ function renderAnalytics(readyData) {
       </tbody>
     `;
     ui.analyticsDetails.replaceChildren(table);
+  }
+}
+
+function renderAnalyticsNetworkError(err) {
+  if (ui.analyticsHealthDonut) {
+    const size = 160;
+    const stroke = 18;
+    const radius = (size - stroke) / 2;
+    ui.analyticsHealthDonut.innerHTML = `
+      <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+        <circle cx="${size/2}" cy="${size/2}" r="${radius}" fill="none" stroke="var(--border-soft)" stroke-width="${stroke}" />
+        <text x="50%" y="48%" text-anchor="middle" dominant-baseline="central" fill="var(--danger)" font-size="20" font-weight="800">
+          Błąd
+        </text>
+        <text x="50%" y="64%" text-anchor="middle" dominant-baseline="central" fill="var(--muted)" font-size="11">
+          Brak sieci
+        </text>
+      </svg>
+    `;
+  }
+  if (ui.analyticsDetails) {
+    ui.analyticsDetails.innerHTML = `<p style="padding:16px; color:var(--danger);">Błąd połączenia sieciowego z botem: ${escapeHtml(err.message)}</p>`;
   }
 }
 

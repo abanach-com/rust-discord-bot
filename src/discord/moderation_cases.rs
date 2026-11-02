@@ -10,6 +10,7 @@ use crate::{
     AppState,
     lua::ModerationCaseOperation,
     moderation_cases::{CaseFilter, CaseKind, CaseSeverity, CaseStatus, CreateCase, UpdateCase},
+    storage::ModerationExecutionIntent,
 };
 
 #[derive(Clone, Copy)]
@@ -191,12 +192,53 @@ pub async fn execute(
                     .map_err(|e| anyhow!("błąd Discord API podczas banowania: {e}"))?;
             } else if case_kind == CaseKind::Softban {
                 let softban_delete_days = delete_days.unwrap_or(1);
-                guild_id
+                let intent_id = uuid::Uuid::new_v4();
+                let intent = ModerationExecutionIntent {
+                    id: intent_id,
+                    interaction_id: None,
+                    guild_id: guild_id.get().to_string(),
+                    user_id: subject_user_id.clone(),
+                    kind: "softban".to_string(),
+                    step: "pending".to_string(),
+                    reason: Some(reason.clone()),
+                    error: None,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                };
+                let _ = state.storage.record_moderation_intent(&intent).await;
+
+                if let Err(ban_err) = guild_id
                     .ban_with_reason(&ctx.http, target_user_id, softban_delete_days, reason)
                     .await
-                    .map_err(|e| anyhow!("błąd Discord API podczas banowania (softban): {e}"))?;
+                {
+                    let _ = state
+                        .storage
+                        .update_moderation_intent_step(
+                            intent_id,
+                            "ban_failed",
+                            Some(&ban_err.to_string()),
+                        )
+                        .await;
+                    return Err(anyhow!(
+                        "błąd Discord API podczas banowania (softban): {ban_err}"
+                    ));
+                }
+
+                let _ = state
+                    .storage
+                    .update_moderation_intent_step(intent_id, "banned", None)
+                    .await;
 
                 if let Err(unban_err) = guild_id.unban(&ctx.http, target_user_id).await {
+                    let _ = state
+                        .storage
+                        .update_moderation_intent_step(
+                            intent_id,
+                            "unban_failed",
+                            Some(&unban_err.to_string()),
+                        )
+                        .await;
+
                     let _ = state
                         .storage
                         .record_audit(
@@ -238,6 +280,11 @@ pub async fn execute(
                         "błąd Discord API podczas odbanowywania (softban): {unban_err}"
                     ));
                 }
+
+                let _ = state
+                    .storage
+                    .update_moderation_intent_step(intent_id, "completed", None)
+                    .await;
             } else if case_kind == CaseKind::Unban {
                 guild_id
                     .unban(&ctx.http, target_user_id)

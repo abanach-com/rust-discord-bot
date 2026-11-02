@@ -1,0 +1,7 @@
+{
+    "xp_rate": 1.0,
+    "cooldown_seconds": 60,
+    "daily_min_coins": 50,
+    "daily_max_coins": 150,
+    "role_rewards": []
+}

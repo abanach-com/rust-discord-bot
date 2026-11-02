@@ -1,0 +1,6 @@
+{
+    "channel_id": null,
+    "message_template": "Witaj na serwerze, {user}! Życzymy miłego pobytu 🎉",
+    "autorole_id": null,
+    "dm_welcome": false
+}

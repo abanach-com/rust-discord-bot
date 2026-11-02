@@ -1,10 +1,12 @@
 use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
+use uuid::Uuid;
 
 use super::{
-    AuditLogEntry, CoinTransfer, CoinTransferOutcome, DailyClaimOutcome, GuildModuleSettings,
-    MemberProgress, ProgressMetric, ReputationGrantOutcome, XpAward, level_for_xp,
+    AdjustMemberProgressParams, AuditLogEntry, CoinTransfer, CoinTransferOutcome,
+    DailyClaimOutcome, GuildModuleSettings, MemberProgress, ModerationExecutionIntent,
+    ProgressMetric, ReputationGrantOutcome, XpAward, level_for_xp,
 };
 
 #[derive(Clone)]
@@ -416,6 +418,57 @@ impl PostgresStore {
         })
     }
 
+    pub async fn adjust_member_progress_with_audit(
+        &self,
+        params: AdjustMemberProgressParams<'_>,
+    ) -> anyhow::Result<MemberProgress> {
+        let mut transaction = self.pool.begin().await?;
+        ensure_profile(&mut transaction, params.guild_id, params.user_id).await?;
+        let mut profile = lock_profile(&mut transaction, params.guild_id, params.user_id).await?;
+        profile.xp = profile.xp.saturating_add(params.xp_delta).max(0);
+        profile.coins = profile.coins.saturating_add(params.coins_delta).max(0);
+        profile.reputation = profile
+            .reputation
+            .saturating_add(params.reputation_delta)
+            .max(0);
+        profile.level = level_for_xp(profile.xp);
+        let now = Utc::now();
+        profile.updated_at = now;
+        write_profile(&mut transaction, &profile).await?;
+
+        let audit_data = serde_json::json!({
+            "target_user_id": params.user_id,
+            "xp_delta": params.xp_delta,
+            "coins_delta": params.coins_delta,
+            "reputation_delta": params.reputation_delta,
+            "reason": params.reason,
+            "result": {
+                "xp": profile.xp,
+                "level": profile.level,
+                "coins": profile.coins,
+                "reputation": profile.reputation,
+            }
+        });
+
+        sqlx::query(
+            r#"
+            INSERT INTO audit_events (guild_id, actor_id, module_id, event, data, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+        )
+        .bind(params.guild_id)
+        .bind(params.actor_id)
+        .bind("progression")
+        .bind("progress_adjusted")
+        .bind(audit_data)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+
+        transaction.commit().await?;
+        Ok(profile)
+    }
+
     pub async fn adjust_member_progress(
         &self,
         guild_id: &str,
@@ -463,6 +516,124 @@ impl PostgresStore {
             .bind(i64::from(limit))
             .fetch_all(&self.pool)
             .await?)
+    }
+
+    pub async fn is_role_reward_granted(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_id: &str,
+    ) -> anyhow::Result<bool> {
+        let exists: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM member_role_rewards
+                WHERE guild_id = $1 AND user_id = $2 AND role_id = $3
+            )
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .bind(role_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(exists)
+    }
+
+    pub async fn record_role_reward_granted(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_id: &str,
+        level: i64,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO member_role_rewards (guild_id, user_id, role_id, level)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (guild_id, user_id, role_id) DO NOTHING
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .bind(role_id)
+        .bind(level)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn record_moderation_intent(
+        &self,
+        intent: &ModerationExecutionIntent,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO moderation_execution_intents (
+                id, interaction_id, guild_id, user_id, kind, step, reason, error, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            "#,
+        )
+        .bind(intent.id)
+        .bind(&intent.interaction_id)
+        .bind(&intent.guild_id)
+        .bind(&intent.user_id)
+        .bind(&intent.kind)
+        .bind(&intent.step)
+        .bind(&intent.reason)
+        .bind(&intent.error)
+        .bind(intent.created_at)
+        .bind(intent.updated_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn update_moderation_intent_step(
+        &self,
+        id: Uuid,
+        step: &str,
+        error: Option<&str>,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE moderation_execution_intents
+            SET step = $1, error = $2, updated_at = NOW()
+            WHERE id = $3
+            "#,
+        )
+        .bind(step)
+        .bind(error)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn list_pending_moderation_intents(
+        &self,
+        kind: &str,
+        step: &str,
+    ) -> anyhow::Result<Vec<ModerationExecutionIntent>> {
+        let results = sqlx::query_as::<_, ModerationExecutionIntent>(
+            r#"
+            SELECT id, interaction_id, guild_id, user_id, kind, step, reason, error, created_at, updated_at
+            FROM moderation_execution_intents
+            WHERE kind = $1 AND step = $2
+            ORDER BY created_at ASC
+            "#,
+        )
+        .bind(kind)
+        .bind(step)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(results)
     }
 }
 

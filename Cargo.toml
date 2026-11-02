@@ -1,13 +1,21 @@
 [package]
-name = "zuckerbot"
+name = "rusty-discord-bot"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
 authors = ["Adrian Banach"]
 license = "MIT"
-repository = "https://github.com/z-u-c-k-e-r/rust-discord-bot"
+repository = "https://github.com/abanach-com/rust-discord-bot"
 description = "A secure, Lua-scriptable Discord automation platform written in Rust."
 publish = false
+
+[lib]
+name = "rusty_discord_bot"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rusty-discord-bot"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "=1.0.104"

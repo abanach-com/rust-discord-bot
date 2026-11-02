@@ -1,4 +1,5 @@
 mod engine;
+pub mod install_xml;
 mod model;
 mod moderation_cases;
 mod progression;
@@ -6,6 +7,7 @@ mod scheduler;
 mod tickets;
 
 pub use engine::{LuaEngine, LuaEngineError, LuaLimits};
+pub use install_xml::{InstallManifest, InstallModuleEntry, InstallXmlError};
 pub use model::{
     LuaAction, LuaCommandDefinition, LuaCommandOption, LuaEventContext, LuaExecutionContext,
     LuaInstallationContext, LuaInteractionContext, LuaModuleManifest, LuaOptionKind,

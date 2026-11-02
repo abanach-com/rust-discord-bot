@@ -1,12 +1,14 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use chrono::{Duration, Utc};
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use serde_json::Value;
+use uuid::Uuid;
 
 use super::{
-    AuditLogEntry, CoinTransfer, CoinTransferOutcome, DailyClaimOutcome, GuildModuleSettings,
-    MemberProgress, ProgressMetric, ReputationGrantOutcome, XpAward, level_for_xp,
+    AdjustMemberProgressParams, AuditLogEntry, CoinTransfer, CoinTransferOutcome,
+    DailyClaimOutcome, GuildModuleSettings, MemberProgress, ModerationExecutionIntent,
+    ProgressMetric, ReputationGrantOutcome, XpAward, level_for_xp,
 };
 
 type ModuleKey = (String, String);
@@ -23,6 +25,8 @@ pub struct MemoryStore {
     progression: Arc<DashMap<MemberKey, MemberProgress>>,
     reputation_cooldowns: Arc<DashMap<ReputationKey, chrono::DateTime<Utc>>>,
     progression_lock: Arc<Mutex<()>>,
+    role_rewards: Arc<DashSet<(String, String, String)>>,
+    moderation_intents: Arc<DashMap<Uuid, ModerationExecutionIntent>>,
 }
 
 impl MemoryStore {
@@ -249,29 +253,24 @@ impl MemoryStore {
         sender_user_id: &str,
         recipient_user_id: &str,
         amount: i64,
-    ) -> CoinTransferOutcome {
+    ) -> anyhow::Result<CoinTransferOutcome> {
         if sender_user_id == recipient_user_id {
-            return CoinTransferOutcome::SameAccount;
+            return Ok(CoinTransferOutcome::SameAccount);
         }
 
         let _guard = self.progression_guard();
         let now = Utc::now();
         let mut sender = self.profile(guild_id, sender_user_id, now);
         if amount <= 0 || sender.coins < amount {
-            return CoinTransferOutcome::InsufficientFunds {
+            return Ok(CoinTransferOutcome::InsufficientFunds {
                 balance: sender.coins,
-            };
+            });
         }
 
         let mut recipient = self.profile(guild_id, recipient_user_id, now);
-        sender.coins -= amount;
-        recipient.coins = recipient.coins.saturating_add(amount);
-        sender.updated_at = now;
-        recipient.updated_at = now;
-        self.store_profile(sender.clone());
-        self.store_profile(recipient.clone());
 
-        let _ = self.record_audit(
+        // Attempt audit recording first inside atomic lock
+        self.record_audit(
             Some(guild_id),
             Some(sender_user_id),
             "progression",
@@ -279,16 +278,24 @@ impl MemoryStore {
             serde_json::json!({
                 "recipient_user_id": recipient_user_id,
                 "amount": amount,
-                "sender_balance": sender.coins,
-                "recipient_balance": recipient.coins,
+                "sender_balance": sender.coins - amount,
+                "recipient_balance": recipient.coins.saturating_add(amount),
             }),
-        );
+        )?;
 
-        CoinTransferOutcome::Completed(Box::new(CoinTransfer {
+        // Only commit profiles after audit write succeeds
+        sender.coins -= amount;
+        recipient.coins = recipient.coins.saturating_add(amount);
+        sender.updated_at = now;
+        recipient.updated_at = now;
+        self.store_profile(sender.clone());
+        self.store_profile(recipient.clone());
+
+        Ok(CoinTransferOutcome::Completed(Box::new(CoinTransfer {
             sender,
             recipient,
             amount,
-        }))
+        })))
     }
 
     pub fn give_reputation(
@@ -347,6 +354,49 @@ impl MemoryStore {
         profile
     }
 
+    pub fn adjust_member_progress_with_audit(
+        &self,
+        params: AdjustMemberProgressParams<'_>,
+    ) -> anyhow::Result<MemberProgress> {
+        let _guard = self.progression_guard();
+        let now = Utc::now();
+        let mut profile = self.profile(params.guild_id, params.user_id, now);
+        profile.xp = profile.xp.saturating_add(params.xp_delta).max(0);
+        profile.coins = profile.coins.saturating_add(params.coins_delta).max(0);
+        profile.reputation = profile
+            .reputation
+            .saturating_add(params.reputation_delta)
+            .max(0);
+        profile.level = level_for_xp(profile.xp);
+        profile.updated_at = now;
+
+        let audit_data = serde_json::json!({
+            "target_user_id": params.user_id,
+            "xp_delta": params.xp_delta,
+            "coins_delta": params.coins_delta,
+            "reputation_delta": params.reputation_delta,
+            "reason": params.reason,
+            "result": {
+                "xp": profile.xp,
+                "level": profile.level,
+                "coins": profile.coins,
+                "reputation": profile.reputation,
+            }
+        });
+
+        // Record audit first inside guard before saving profile to ensure atomic commit
+        self.record_audit(
+            Some(params.guild_id),
+            params.actor_id,
+            "progression",
+            "progress_adjusted",
+            audit_data,
+        )?;
+
+        self.store_profile(profile.clone());
+        Ok(profile)
+    }
+
     pub fn progression_leaderboard(
         &self,
         guild_id: &str,
@@ -370,6 +420,49 @@ impl MemoryStore {
         });
         profiles.truncate(usize::from(limit));
         profiles
+    }
+
+    pub fn is_role_reward_granted(&self, guild_id: &str, user_id: &str, role_id: &str) -> bool {
+        self.role_rewards
+            .contains(&(guild_id.to_owned(), user_id.to_owned(), role_id.to_owned()))
+    }
+
+    pub fn record_role_reward_granted(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_id: &str,
+        _level: i64,
+    ) {
+        self.role_rewards
+            .insert((guild_id.to_owned(), user_id.to_owned(), role_id.to_owned()));
+    }
+
+    pub fn record_moderation_intent(&self, intent: ModerationExecutionIntent) {
+        self.moderation_intents.insert(intent.id, intent);
+    }
+
+    pub fn update_moderation_intent_step(&self, id: Uuid, step: &str, error: Option<&str>) {
+        if let Some(mut entry) = self.moderation_intents.get_mut(&id) {
+            entry.step = step.to_owned();
+            entry.error = error.map(str::to_owned);
+            entry.updated_at = Utc::now();
+        }
+    }
+
+    pub fn list_pending_moderation_intents(
+        &self,
+        kind: &str,
+        step: &str,
+    ) -> Vec<ModerationExecutionIntent> {
+        let mut results: Vec<ModerationExecutionIntent> = self
+            .moderation_intents
+            .iter()
+            .filter(|entry| entry.kind == kind && entry.step == step)
+            .map(|entry| entry.value().clone())
+            .collect();
+        results.sort_by_key(|i| i.created_at);
+        results
     }
 
     fn progression_guard(&self) -> MutexGuard<'_, ()> {

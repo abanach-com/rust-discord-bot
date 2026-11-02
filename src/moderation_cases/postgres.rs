@@ -237,6 +237,12 @@ impl PostgresModerationCaseStore {
             None => {
                 let current =
                     fetch_case_in_transaction(&mut transaction, guild_id, case_number).await?;
+                if current.version != expected_version {
+                    return Err(CaseError::VersionConflict {
+                        expected: expected_version,
+                        actual: current.version,
+                    });
+                }
                 if current.status == CaseStatus::Voided {
                     return Err(CaseError::Validation(
                         "voided cases must be restored before editing".to_owned(),
@@ -393,6 +399,12 @@ impl PostgresModerationCaseStore {
             None => {
                 let current =
                     fetch_case_in_transaction(&mut transaction, guild_id, case_number).await?;
+                if current.version != expected_version {
+                    return Err(CaseError::VersionConflict {
+                        expected: expected_version,
+                        actual: current.version,
+                    });
+                }
                 if current.status == CaseStatus::Voided {
                     return Err(CaseError::Validation(
                         "moderation case is already voided".to_owned(),

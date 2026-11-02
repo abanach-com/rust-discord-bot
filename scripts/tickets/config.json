@@ -1,0 +1,7 @@
+{
+    "default_queue": "general",
+    "support_role_ids": [],
+    "ticket_category_id": null,
+    "archive_category_id": null,
+    "max_tickets_per_user": 3
+}

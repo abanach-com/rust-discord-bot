@@ -6,7 +6,7 @@
 #   docker compose up -d postgres
 #
 # Remember to point DATABASE_URL to 127.0.0.1:5432 in your .env file:
-#   DATABASE_URL=postgres://zuckerbot:zuckerbot@127.0.0.1:5432/zuckerbot
+#   DATABASE_URL=postgres://rusty_discord_bot:rusty_discord_bot@127.0.0.1:5432/rusty_discord_bot
 
 services:
   postgres:

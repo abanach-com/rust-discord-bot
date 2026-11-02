@@ -63,11 +63,12 @@ end
 
 local function matched_domain(content, config)
     local function clean_host(candidate)
-        candidate = string.match(candidate, "^([^/%?#:]+)") or candidate
+        candidate = string.match(candidate, "^([^/%?#]+)") or candidate
+        local after_at = string.match(candidate, "@([%w%._%-:]+)$")
+        if after_at then candidate = after_at end
+        candidate = string.match(candidate, "^([^:]+)") or candidate
         candidate = string.gsub(candidate, "^[%.,:;!?%s%-_]+", "")
         candidate = string.gsub(candidate, "[%.,:;!?%s%-_]+$", "")
-        local after_at = string.match(candidate, "@([%w%._%-]+)$")
-        if after_at then candidate = after_at end
         return lower(candidate)
     end
 
@@ -82,9 +83,20 @@ local function matched_domain(content, config)
         return true
     end
 
+    local function is_ip_address(host)
+        local a, b, c, d = string.match(host, "^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
+        if a and b and c and d then
+            local n1, n2, n3, n4 = tonumber(a), tonumber(b), tonumber(c), tonumber(d)
+            return n1 <= 255 and n2 <= 255 and n3 <= 255 and n4 <= 255
+        end
+        return false
+    end
+
     local function evaluate_host(host)
         host = clean_host(host)
-        if host == "" or not is_valid_domain(host) then return nil, nil end
+        if host == "" then return nil, nil end
+        local is_ip = is_ip_address(host)
+        if not is_ip and not is_valid_domain(host) then return nil, nil end
 
         if not host_allowed(host, config.allowed_domains) then
             if config.block_all_links == true then
@@ -107,17 +119,26 @@ local function matched_domain(content, config)
         return nil, nil
     end
 
-    for raw_url in string.gmatch(content, "https?://([^%s%c\"'<>()]+)") do
+    local remaining = content
+
+    -- 1. Scan and evaluate explicit URLs, then mask them out completely from remaining text
+    for full_url, raw_url in string.gmatch(content, "(https?://([^%s%c\"'<>()]+))") do
         local h, rule = evaluate_host(raw_url)
         if h then return h, rule end
+        local escaped_url = string.gsub(full_url, "[%(%)%.%%%+%-%*%?%[%]%^%$]", "%%%1")
+        remaining = string.gsub(remaining, escaped_url, " ", 1)
     end
 
-    for raw_email in string.gmatch(content, "[%w%._%-%+]+@([%w%._%-]+%.%a+)") do
-        local h, rule = evaluate_host(raw_email)
+    -- 2. Scan and evaluate emails, then mask them out
+    for raw_email, raw_domain in string.gmatch(remaining, "([%w%._%-%+]+@([%w%._%-]+%.%a+))") do
+        local h, rule = evaluate_host(raw_domain)
         if h then return h, rule end
+        local escaped_email = string.gsub(raw_email, "[%(%)%.%%%+%-%*%?%[%]%^%$]", "%%%1")
+        remaining = string.gsub(remaining, escaped_email, " ", 1)
     end
 
-    for candidate in string.gmatch(content, "([%w%-_]+%.[%w%-_%.]*%a%a+)") do
+    -- 3. Scan remaining text for naked domains (e.g. bit.ly, evil.example)
+    for candidate in string.gmatch(remaining, "([%w%-_]+%.[%w%-_%.]*%a%a+)") do
         local h, rule = evaluate_host(candidate)
         if h then return h, rule end
     end
@@ -260,7 +281,10 @@ local function build_actions(ctx, rule, evidence, is_edit)
     end
 
     if config.send_notice ~= false then
-        local notice = config.notice or "Wiadomość została usunięta przez AutoMod."
+        local default_notice = config.delete_messages == false
+            and "Wiadomość narusza zasady AutoMod ({rule})."
+            or "Wiadomość została usunięta przez AutoMod."
+        local notice = config.notice or default_notice
         notice = string.gsub(notice, "{user}", "<@" .. tostring(ctx.actor_id) .. ">")
         notice = string.gsub(notice, "{rule}", escaped(rule))
         table.insert(actions, {

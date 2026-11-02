@@ -1,0 +1,15 @@
+{
+    "blocked_words": [
+        "badword",
+        "scam",
+        "phishing",
+        "free-nitro"
+    ],
+    "delete_messages": true,
+    "send_notice": true,
+    "timeout_seconds": 300,
+    "mention_threshold": 5,
+    "caps_threshold": 70,
+    "block_invites": true,
+    "block_links": false
+}

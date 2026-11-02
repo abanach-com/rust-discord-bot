@@ -1,7 +1,10 @@
 local DISCORD_EPOCH_MS = 1420070400000
 
 local function lower(value)
-    return string.lower(value or "")
+    if type(value) == "string" then
+        return string.lower(value)
+    end
+    return ""
 end
 
 local function account_created_at(user_id)
@@ -79,7 +82,9 @@ return {
             minimum_hours = (tonumber(ctx.config.minimum_account_age_days) or 1) * 24
         end
 
-        local name = user.global_name or user.name or "Nieznany"
+        local name = (type(user.global_name) == "string" and user.global_name ~= "") and user.global_name
+            or (type(user.name) == "string" and user.name ~= "") and user.name
+            or "Nieznany"
         local fragment = suspicious_name(name, ctx.config.blocked_name_fragments)
         local has_avatar = user.has_avatar
         if has_avatar == nil and user.avatar ~= nil then

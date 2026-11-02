@@ -1,0 +1,6 @@
+{
+    "default_duration_minutes": 60,
+    "max_winners": 10,
+    "allow_self_entry": false,
+    "announcement_channel_id": null
+}

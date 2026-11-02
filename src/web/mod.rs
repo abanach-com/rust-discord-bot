@@ -74,6 +74,7 @@ pub async fn serve_with_shutdown(
         .route("/auth/discord/callback", get(auth::callback))
         .route("/api/session", get(auth::current_session))
         .route("/api/logout", post(auth::logout))
+        .route("/api/installer", get(routes::get_installer_manifest))
         .route("/api/modules", get(routes::list_modules))
         .route("/api/guilds/{guild_id}/modules", get(routes::guild_modules))
         .route(

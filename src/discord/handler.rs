@@ -6,7 +6,8 @@ use serde_json::{Map, Value, json};
 use serenity::{
     all::{
         ChannelId, CommandDataOption, CommandDataOptionValue, CommandInteraction, GuildId,
-        Interaction, Member, Message, MessageId, MessageUpdateEvent, Ready, User, VoiceState,
+        Interaction, Member, Message, MessageId, MessageUpdateEvent, Ready, User, UserId,
+        VoiceState,
     },
     async_trait,
     builder::{CreateAllowedMentions, CreateInteractionResponse, CreateInteractionResponseMessage},
@@ -57,6 +58,63 @@ impl EventHandler for Handler {
             self.commands_registered.store(false, Ordering::Release);
             tracing::error!(?error, "failed to register application commands");
         }
+
+        // Reconcile pending stuck softbans (#50)
+        let state = self.state.clone();
+        let http = ctx.http.clone();
+        tokio::spawn(async move {
+            let pending_banned = state
+                .storage
+                .list_pending_moderation_intents("softban", "banned")
+                .await
+                .unwrap_or_default();
+            let pending_failed = state
+                .storage
+                .list_pending_moderation_intents("softban", "unban_failed")
+                .await
+                .unwrap_or_default();
+
+            for intent in pending_banned.into_iter().chain(pending_failed) {
+                if let (Ok(guild_num), Ok(user_num)) = (
+                    intent.guild_id.parse::<u64>(),
+                    intent.user_id.parse::<u64>(),
+                ) {
+                    let g_id = GuildId::new(guild_num);
+                    let u_id = UserId::new(user_num);
+                    match g_id.unban(&http, u_id).await {
+                        Ok(()) => {
+                            let _ = state
+                                .storage
+                                .update_moderation_intent_step(intent.id, "completed", None)
+                                .await;
+                            tracing::info!(
+                                intent_id = %intent.id,
+                                guild_id = %intent.guild_id,
+                                user_id = %intent.user_id,
+                                "Stuck softban reconciled: user unbanned successfully"
+                            );
+                        }
+                        Err(err) => {
+                            let _ = state
+                                .storage
+                                .update_moderation_intent_step(
+                                    intent.id,
+                                    "unban_failed",
+                                    Some(&err.to_string()),
+                                )
+                                .await;
+                            tracing::warn!(
+                                intent_id = %intent.id,
+                                guild_id = %intent.guild_id,
+                                user_id = %intent.user_id,
+                                ?err,
+                                "Failed to reconcile stuck softban during startup"
+                            );
+                        }
+                    }
+                }
+            }
+        });
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
@@ -439,12 +497,72 @@ async fn handle_command(
     state: &AppState,
     command: &CommandInteraction,
 ) -> anyhow::Result<()> {
+    let deferred = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let responded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let defer_http = ctx.http.clone();
+    let defer_command = command.clone();
+    let defer_flag = deferred.clone();
+    let responded_flag = responded.clone();
+
+    let is_ephemeral_by_default = command.data.name.starts_with("admin")
+        || command.data.name == "staff"
+        || command.data.name == "moderate";
+
+    let defer_handle = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        if !responded_flag.load(Ordering::SeqCst) && !defer_flag.swap(true, Ordering::SeqCst) {
+            let _ = defer_command
+                .create_response(
+                    &defer_http,
+                    serenity::builder::CreateInteractionResponse::Defer(
+                        serenity::builder::CreateInteractionResponseMessage::new()
+                            .ephemeral(is_ephemeral_by_default),
+                    ),
+                )
+                .await;
+        }
+    });
+
+    let result = execute_command_inner(ctx, state, command, &deferred, &responded).await;
+    defer_handle.abort();
+
+    if let Err(err) = result {
+        tracing::error!(command = %command.data.name, error = %err, "Error executing command");
+        if deferred.load(Ordering::SeqCst) {
+            let _ = command
+                .edit_response(
+                    &ctx.http,
+                    serenity::builder::EditInteractionResponse::new().content(format!(
+                        "❌ Wystąpił błąd podczas przetwarzania polecenia: {err}"
+                    )),
+                )
+                .await;
+        } else if !responded.swap(true, Ordering::SeqCst) {
+            let _ = respond_ephemeral(ctx, command, &format!("❌ Wystąpił błąd: {err}")).await;
+        }
+    }
+
+    Ok(())
+}
+
+async fn execute_command_inner(
+    ctx: &Context,
+    state: &AppState,
+    command: &CommandInteraction,
+    deferred: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    responded: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> anyhow::Result<()> {
     let Some(module_id) = state.scripts.module_for_command(&command.data.name).await else {
-        respond_ephemeral(ctx, command, "Ta komenda nie jest już dostępna.").await?;
+        if !deferred.load(Ordering::SeqCst) && !responded.swap(true, Ordering::SeqCst) {
+            respond_ephemeral(ctx, command, "Ta komenda nie jest już dostępna.").await?;
+        }
         return Ok(());
     };
     let Some(manifest) = state.scripts.manifest(&module_id).await else {
-        respond_ephemeral(ctx, command, "Moduł tej komendy nie jest załadowany.").await?;
+        if !deferred.load(Ordering::SeqCst) && !responded.swap(true, Ordering::SeqCst) {
+            respond_ephemeral(ctx, command, "Moduł tej komendy nie jest załadowany.").await?;
+        }
         return Ok(());
     };
 
@@ -455,18 +573,26 @@ async fn handle_command(
             .await?
         {
             Some(settings) => (settings.enabled, settings.config),
-            None => (manifest.default_enabled, json!({})),
+            None => (
+                manifest.default_enabled,
+                state.scripts.default_config(&module_id).await,
+            ),
         },
-        None => (manifest.default_enabled, json!({})),
+        None => (
+            manifest.default_enabled,
+            state.scripts.default_config(&module_id).await,
+        ),
     };
 
     if !enabled {
-        respond_ephemeral(
-            ctx,
-            command,
-            "Ten moduł został wyłączony w panelu administracyjnym.",
-        )
-        .await?;
+        if !deferred.load(Ordering::SeqCst) && !responded.swap(true, Ordering::SeqCst) {
+            respond_ephemeral(
+                ctx,
+                command,
+                "Ten moduł został wyłączony w panelu administracyjnym.",
+            )
+            .await?;
+        }
         return Ok(());
     }
 
@@ -483,15 +609,17 @@ async fn handle_command(
             .rate_limit_throttled_total
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let retry_secs = rate_decision.reset_after.as_secs().max(1);
-        respond_ephemeral(
-            ctx,
-            command,
-            &format!(
-                "Osiągnięto limit wywołań komendy `/{}`. Spróbuj ponownie za {} s.",
-                command.data.name, retry_secs
-            ),
-        )
-        .await?;
+        if !deferred.load(Ordering::SeqCst) && !responded.swap(true, Ordering::SeqCst) {
+            respond_ephemeral(
+                ctx,
+                command,
+                &format!(
+                    "Osiągnięto limit wywołań komendy `/{}`. Spróbuj ponownie za {} s.",
+                    command.data.name, retry_secs
+                ),
+            )
+            .await?;
+        }
         return Ok(());
     }
 
@@ -540,7 +668,9 @@ async fn handle_command(
         .scripts
         .execute_command(&module_id, &command.data.name, execution_context)
         .await?;
-    executor::execute_command_actions(ctx, state, command, &module_id, &actions).await
+    let is_deferred = deferred.load(Ordering::SeqCst);
+    responded.store(true, Ordering::SeqCst);
+    executor::execute_command_actions(ctx, state, command, &module_id, &actions, is_deferred).await
 }
 
 async fn run_event(
@@ -569,7 +699,7 @@ async fn run_event(
                 }
                 Ok(Some(_)) => continue,
                 Ok(None) if manifest.default_enabled => {
-                    module_event.config = json!({});
+                    module_event.config = state.scripts.default_config(&module_id).await;
                 }
                 Ok(None) => continue,
                 Err(error) => {

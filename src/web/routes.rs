@@ -3,7 +3,7 @@ use std::sync::atomic::Ordering;
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{
         IntoResponse, Response,
@@ -252,6 +252,14 @@ pub async fn list_modules(
     Ok(Json(state.app.scripts.manifests().await))
 }
 
+pub async fn get_installer_manifest(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+) -> Result<Json<Option<crate::lua::InstallManifest>>, ApiError> {
+    authenticate(&state, &headers).await?;
+    Ok(Json(state.app.scripts.installer_manifest().await))
+}
+
 pub async fn guild_modules(
     State(state): State<WebState>,
     Path(guild_id): Path<String>,
@@ -278,13 +286,16 @@ pub async fn guild_modules(
                 configured: true,
                 updated_at: Some(settings.updated_at),
             },
-            None => ModuleView {
-                enabled: manifest.default_enabled,
-                manifest,
-                config: json!({}),
-                configured: false,
-                updated_at: None,
-            },
+            None => {
+                let default_cfg = state.app.scripts.default_config(&manifest.id).await;
+                ModuleView {
+                    enabled: manifest.default_enabled,
+                    manifest,
+                    config: default_cfg,
+                    configured: false,
+                    updated_at: None,
+                }
+            }
         });
     }
 
@@ -381,6 +392,18 @@ pub async fn update_guild_module(
             }),
         });
 
+    let _ = state
+        .app
+        .guild_events
+        .send(crate::state::GuildRealtimeEvent {
+            guild_id: guild_id.clone(),
+            event_type: "audit_entry".to_string(),
+            payload: json!({
+                "module_id": module_id,
+                "event": "module_settings_updated",
+            }),
+        });
+
     Ok(Json(ModuleView {
         manifest,
         enabled: settings.enabled,
@@ -390,17 +413,28 @@ pub async fn update_guild_module(
     }))
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct PaginationQuery {
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
 pub async fn guild_cases(
     State(state): State<WebState>,
     Path(guild_id): Path<String>,
+    Query(pagination): Query<PaginationQuery>,
     headers: HeaderMap,
-) -> Result<Json<Vec<crate::moderation_cases::ModerationCase>>, ApiError> {
+) -> Result<Json<Value>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
     ensure_guild_access(&state, &session, &guild_id).await?;
     let guild_u64 = guild_id
         .parse::<u64>()
         .map_err(|_| ApiError::bad_request("Niepoprawny identyfikator serwera."))?;
-    let cases = state
+
+    let limit = pagination.limit.unwrap_or(50).clamp(1, 200);
+    let offset = pagination.offset.unwrap_or(0);
+
+    let all_cases = state
         .app
         .moderation_cases
         .list_cases(
@@ -411,14 +445,26 @@ pub async fn guild_cases(
                 kind: None,
                 status: None,
                 visible_to_subject_only: false,
-                limit: 50,
+                limit: 10_000,
             },
             Utc::now(),
         )
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
 
-    Ok(Json(cases))
+    let total = all_cases.len();
+    let items: Vec<_> = all_cases.into_iter().skip(offset).take(limit).collect();
+    let next_offset = if offset + items.len() < total {
+        Some(offset + items.len())
+    } else {
+        None
+    };
+
+    Ok(Json(json!({
+        "items": items,
+        "total": total,
+        "next_offset": next_offset,
+    })))
 }
 
 pub async fn guild_case_details(
@@ -444,18 +490,35 @@ pub async fn guild_case_details(
 pub async fn guild_audit_events(
     State(state): State<WebState>,
     Path(guild_id): Path<String>,
+    Query(pagination): Query<PaginationQuery>,
     headers: HeaderMap,
-) -> Result<Json<Vec<crate::storage::AuditLogEntry>>, ApiError> {
+) -> Result<Json<Value>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
     ensure_guild_access(&state, &session, &guild_id).await?;
-    let events = state
+
+    let limit = pagination.limit.unwrap_or(50).clamp(1, 200);
+    let offset = pagination.offset.unwrap_or(0);
+
+    let all_events = state
         .app
         .storage
-        .list_audit_events(&guild_id, 100)
+        .list_audit_events(&guild_id, 10_000)
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
 
-    Ok(Json(events))
+    let total = all_events.len();
+    let items: Vec<_> = all_events.into_iter().skip(offset).take(limit).collect();
+    let next_offset = if offset + items.len() < total {
+        Some(offset + items.len())
+    } else {
+        None
+    };
+
+    Ok(Json(json!({
+        "items": items,
+        "total": total,
+        "next_offset": next_offset,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -523,7 +586,7 @@ pub async fn add_guild_case_note(
         .await
         .map_err(ApiError::from)?;
 
-    let _ = state
+    if state
         .app
         .storage
         .record_audit(
@@ -536,7 +599,21 @@ pub async fn add_guild_case_note(
                 "visible_to_subject": payload.visible_to_subject,
             }),
         )
-        .await;
+        .await
+        .is_ok()
+    {
+        let _ = state
+            .app
+            .guild_events
+            .send(crate::state::GuildRealtimeEvent {
+                guild_id: guild_id.clone(),
+                event_type: "audit_entry".to_string(),
+                payload: json!({
+                    "module_id": "dashboard",
+                    "event": "case_note_added",
+                }),
+            });
+    }
 
     let _ = state
         .app
@@ -613,7 +690,7 @@ pub async fn void_guild_case(
         .await
         .map_err(ApiError::from)?;
 
-    let _ = state
+    if state
         .app
         .storage
         .record_audit(
@@ -626,7 +703,21 @@ pub async fn void_guild_case(
                 "reason": trimmed,
             }),
         )
-        .await;
+        .await
+        .is_ok()
+    {
+        let _ = state
+            .app
+            .guild_events
+            .send(crate::state::GuildRealtimeEvent {
+                guild_id: guild_id.clone(),
+                event_type: "audit_entry".to_string(),
+                payload: json!({
+                    "module_id": "dashboard",
+                    "event": "case_voided",
+                }),
+            });
+    }
 
     let _ = state
         .app
@@ -637,18 +728,6 @@ pub async fn void_guild_case(
             payload: json!({
                 "case_number": case_number,
                 "action": "voided",
-            }),
-        });
-
-    let _ = state
-        .app
-        .guild_events
-        .send(crate::state::GuildRealtimeEvent {
-            guild_id: guild_id.clone(),
-            event_type: "audit_entry".to_string(),
-            payload: json!({
-                "module_id": "dashboard",
-                "event": "case_voided",
             }),
         });
 

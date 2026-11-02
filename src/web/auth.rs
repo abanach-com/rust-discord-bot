@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use super::{WebState, routes::ApiError};
 
-const SESSION_COOKIE: &str = "zuckerbot_session";
+const SESSION_COOKIE: &str = "rusty_discord_bot_session";
 const DISCORD_AUTHORIZE_URL: &str = "https://discord.com/oauth2/authorize";
 const DISCORD_TOKEN_URL: &str = "https://discord.com/api/v10/oauth2/token";
 const DISCORD_USER_URL: &str = "https://discord.com/api/v10/users/@me";

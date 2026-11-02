@@ -42,36 +42,46 @@ impl Metrics {
 
     pub fn render_prometheus(&self, active_sessions: usize) -> String {
         format!(
-            "# HELP zuckerbot_uptime_seconds Process uptime in seconds\n\
-             # TYPE zuckerbot_uptime_seconds gauge\n\
-             zuckerbot_uptime_seconds {}\n\
-             # HELP zuckerbot_discord_events_total Total number of received Discord gateway events\n\
-             # TYPE zuckerbot_discord_events_total counter\n\
-             zuckerbot_discord_events_total {}\n\
-             # HELP zuckerbot_lua_commands_total Total number of Lua commands executed\n\
-             # TYPE zuckerbot_lua_commands_total counter\n\
-             zuckerbot_lua_commands_total {}\n\
-             # HELP zuckerbot_lua_command_errors_total Total number of failed Lua commands\n\
-             # TYPE zuckerbot_lua_command_errors_total counter\n\
-             zuckerbot_lua_command_errors_total {}\n\
-             # HELP zuckerbot_scheduler_claimed_total Total number of scheduler jobs claimed\n\
-             # TYPE zuckerbot_scheduler_claimed_total counter\n\
-             zuckerbot_scheduler_claimed_total {}\n\
-             # HELP zuckerbot_scheduler_delivered_total Total number of successfully delivered scheduled jobs\n\
-             # TYPE zuckerbot_scheduler_delivered_total counter\n\
-             zuckerbot_scheduler_delivered_total {}\n\
-             # HELP zuckerbot_scheduler_failed_total Total number of failed scheduled jobs\n\
-             # TYPE zuckerbot_scheduler_failed_total counter\n\
-             zuckerbot_scheduler_failed_total {}\n\
-             # HELP zuckerbot_dashboard_requests_total Total number of HTTP requests processed by dashboard\n\
-             # TYPE zuckerbot_dashboard_requests_total counter\n\
-             zuckerbot_dashboard_requests_total {}\n\
-             # HELP zuckerbot_rate_limit_throttled_total Total number of operations rejected by abuse prevention / rate limiter\n\
-             # TYPE zuckerbot_rate_limit_throttled_total counter\n\
-             zuckerbot_rate_limit_throttled_total {}\n\
-             # HELP zuckerbot_active_sessions Current number of active dashboard sessions\n\
-             # TYPE zuckerbot_active_sessions gauge\n\
-             zuckerbot_active_sessions {}\n",
+            "# HELP rusty_discord_bot_uptime_seconds Process uptime in seconds\n\
+             # TYPE rusty_discord_bot_uptime_seconds gauge\n\
+             rusty_discord_bot_uptime_seconds {0}\n\
+             zuckerbot_uptime_seconds {0}\n\
+             # HELP rusty_discord_bot_discord_events_total Total number of received Discord gateway events\n\
+             # TYPE rusty_discord_bot_discord_events_total counter\n\
+             rusty_discord_bot_discord_events_total {1}\n\
+             zuckerbot_discord_events_total {1}\n\
+             # HELP rusty_discord_bot_lua_commands_total Total number of Lua commands executed\n\
+             # TYPE rusty_discord_bot_lua_commands_total counter\n\
+             rusty_discord_bot_lua_commands_total {2}\n\
+             zuckerbot_lua_commands_total {2}\n\
+             # HELP rusty_discord_bot_lua_command_errors_total Total number of failed Lua commands\n\
+             # TYPE rusty_discord_bot_lua_command_errors_total counter\n\
+             rusty_discord_bot_lua_command_errors_total {3}\n\
+             zuckerbot_lua_command_errors_total {3}\n\
+             # HELP rusty_discord_bot_scheduler_claimed_total Total number of scheduler jobs claimed\n\
+             # TYPE rusty_discord_bot_scheduler_claimed_total counter\n\
+             rusty_discord_bot_scheduler_claimed_total {4}\n\
+             zuckerbot_scheduler_claimed_total {4}\n\
+             # HELP rusty_discord_bot_scheduler_delivered_total Total number of successfully delivered scheduled jobs\n\
+             # TYPE rusty_discord_bot_scheduler_delivered_total counter\n\
+             rusty_discord_bot_scheduler_delivered_total {5}\n\
+             zuckerbot_scheduler_delivered_total {5}\n\
+             # HELP rusty_discord_bot_scheduler_failed_total Total number of failed scheduled jobs\n\
+             # TYPE rusty_discord_bot_scheduler_failed_total counter\n\
+             rusty_discord_bot_scheduler_failed_total {6}\n\
+             zuckerbot_scheduler_failed_total {6}\n\
+             # HELP rusty_discord_bot_dashboard_requests_total Total number of HTTP requests processed by dashboard\n\
+             # TYPE rusty_discord_bot_dashboard_requests_total counter\n\
+             rusty_discord_bot_dashboard_requests_total {7}\n\
+             zuckerbot_dashboard_requests_total {7}\n\
+             # HELP rusty_discord_bot_rate_limit_throttled_total Total number of operations rejected by abuse prevention / rate limiter\n\
+             # TYPE rusty_discord_bot_rate_limit_throttled_total counter\n\
+             rusty_discord_bot_rate_limit_throttled_total {8}\n\
+             zuckerbot_rate_limit_throttled_total {8}\n\
+             # HELP rusty_discord_bot_active_sessions Current number of active dashboard sessions\n\
+             # TYPE rusty_discord_bot_active_sessions gauge\n\
+             rusty_discord_bot_active_sessions {9}\n\
+             zuckerbot_active_sessions {9}\n",
             self.uptime_seconds(),
             self.discord_events_total.load(Ordering::Relaxed),
             self.lua_commands_total.load(Ordering::Relaxed),

@@ -1,5 +1,5 @@
 use chrono::{Duration, Utc};
-use zuckerbot::session::{
+use rusty_discord_bot::session::{
     DashboardGuild, DashboardUser, MemorySessionStore, SessionStore, hash_session_id,
 };
 

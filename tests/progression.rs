@@ -1,12 +1,13 @@
 use std::path::PathBuf;
 
 use serde_json::json;
-use zuckerbot::{
+use rusty_discord_bot::{
     lua::{
         LuaAction, LuaEngine, LuaEventContext, LuaExecutionContext, LuaLimits, ProgressionOperation,
     },
     storage::{
-        CoinTransferOutcome, DailyClaimOutcome, MemoryStore, ProgressMetric, ReputationGrantOutcome,
+        AdjustMemberProgressParams, CoinTransferOutcome, DailyClaimOutcome, MemoryStore,
+        ProgressMetric, ReputationGrantOutcome,
     },
 };
 
@@ -59,7 +60,9 @@ fn memory_store_transfers_coins_atomically() {
     let store = MemoryStore::default();
     store.adjust_member_progress("guild", "sender", 0, 500, 0);
 
-    let completed = store.transfer_coins("guild", "sender", "recipient", 200);
+    let completed = store
+        .transfer_coins("guild", "sender", "recipient", 200)
+        .expect("transfer should succeed");
     match completed {
         CoinTransferOutcome::Completed(transfer) => {
             assert_eq!(transfer.sender.coins, 300);
@@ -68,7 +71,9 @@ fn memory_store_transfers_coins_atomically() {
         other => panic!("unexpected transfer result: {other:?}"),
     }
 
-    let rejected = store.transfer_coins("guild", "sender", "recipient", 400);
+    let rejected = store
+        .transfer_coins("guild", "sender", "recipient", 400)
+        .expect("insufficient funds is an expected outcome");
     assert!(matches!(
         rejected,
         CoinTransferOutcome::InsufficientFunds { balance: 300 }
@@ -76,10 +81,72 @@ fn memory_store_transfers_coins_atomically() {
     assert_eq!(store.get_member_progress("guild", "sender").coins, 300);
     assert_eq!(store.get_member_progress("guild", "recipient").coins, 200);
 
+    // When audit writing is injected to fail, transfer must fail and balances remain rolled back!
+    store.inject_audit_failure(true);
+    let audit_fail = store.transfer_coins("guild", "sender", "recipient", 100);
+    assert!(
+        audit_fail.is_err(),
+        "transfer must fail when audit write fails"
+    );
+    assert_eq!(
+        store.get_member_progress("guild", "sender").coins,
+        300,
+        "sender balance must be rolled back"
+    );
+    assert_eq!(
+        store.get_member_progress("guild", "recipient").coins,
+        200,
+        "recipient balance must be rolled back"
+    );
+    store.inject_audit_failure(false);
+
     let events = store.list_audit_events("guild", 10);
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].event, "coins_transferred");
     assert_eq!(events[0].actor_id.as_deref(), Some("sender"));
+
+    // Test adjust_member_progress_with_audit atomicity and audit injection failure
+    store.inject_audit_failure(true);
+    let adjust_fail = store.adjust_member_progress_with_audit(AdjustMemberProgressParams {
+        guild_id: "guild",
+        user_id: "sender",
+        xp_delta: 500,
+        coins_delta: 250,
+        reputation_delta: 5,
+        actor_id: Some("admin"),
+        reason: Some("bonus"),
+    });
+    assert!(adjust_fail.is_err(), "adjust must fail when audit fails");
+    assert_eq!(
+        store.get_member_progress("guild", "sender").coins,
+        300,
+        "balance must not change when audit write fails"
+    );
+    assert_eq!(
+        store.get_member_progress("guild", "sender").xp,
+        0,
+        "xp must not change when audit write fails"
+    );
+
+    store.inject_audit_failure(false);
+    let adjust_success = store.adjust_member_progress_with_audit(AdjustMemberProgressParams {
+        guild_id: "guild",
+        user_id: "sender",
+        xp_delta: 500,
+        coins_delta: 250,
+        reputation_delta: 5,
+        actor_id: Some("admin"),
+        reason: Some("bonus"),
+    });
+    assert!(adjust_success.is_ok());
+    let sender_profile = store.get_member_progress("guild", "sender");
+    assert_eq!(sender_profile.xp, 500);
+    assert_eq!(sender_profile.coins, 550);
+    assert_eq!(sender_profile.reputation, 5);
+
+    let updated_events = store.list_audit_events("guild", 10);
+    assert_eq!(updated_events.len(), 2);
+    assert_eq!(updated_events[0].event, "progress_adjusted");
 }
 
 #[test]

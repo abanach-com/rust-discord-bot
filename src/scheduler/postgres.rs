@@ -387,22 +387,30 @@ impl PostgresSchedulerStore {
     ) -> anyhow::Result<Vec<ScheduledJob>> {
         let _ = sqlx::query(
             r#"
-            UPDATE scheduled_jobs
+            WITH expired AS (
+                SELECT id
+                FROM scheduled_jobs
+                WHERE status = 'processing'
+                  AND locked_at < $2
+                  AND attempts >= max_attempts
+                FOR UPDATE SKIP LOCKED
+                LIMIT 50
+            )
+            UPDATE scheduled_jobs AS jobs
             SET status = 'failed',
                 last_error = 'worker lease expired after reaching maximum attempts',
                 completed_at = $1,
                 locked_by = NULL,
                 locked_at = NULL,
                 updated_at = $1
-            WHERE status = 'processing'
-              AND locked_at < $2
-              AND attempts >= max_attempts
+            FROM expired
+            WHERE jobs.id = expired.id
             "#,
         )
         .bind(now)
         .bind(stale_before)
         .execute(&self.pool)
-        .await?;
+        .await;
 
         Ok(sqlx::query_as::<_, ScheduledJob>(
             r#"

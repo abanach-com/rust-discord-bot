@@ -1,0 +1,5 @@
+{
+    "max_tags_per_guild": 100,
+    "max_tag_length": 2000,
+    "restrict_creation_to_roles": []
+}

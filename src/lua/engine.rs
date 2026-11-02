@@ -15,9 +15,12 @@ use mlua::{
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-use super::model::{
-    LuaAction, LuaCommandOption, LuaEventContext, LuaExecutionContext, LuaModuleManifest,
-    LuaOptionKind,
+use super::{
+    install_xml::{InstallManifest, InstallModuleEntry},
+    model::{
+        LuaAction, LuaCommandOption, LuaEventContext, LuaExecutionContext, LuaModuleManifest,
+        LuaOptionKind,
+    },
 };
 
 const MAX_ACTIONS_PER_EXECUTION: usize = 25;
@@ -43,6 +46,8 @@ struct Registry {
     modules: BTreeMap<String, Arc<LoadedModule>>,
     command_to_module: HashMap<String, String>,
     event_to_modules: HashMap<String, Vec<String>>,
+    installer_manifest: Option<InstallManifest>,
+    default_configs: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Clone)]
@@ -51,10 +56,16 @@ struct LoadedModule {
     source: Arc<str>,
     display_name: Arc<str>,
     config_validator: Arc<jsonschema::Validator>,
+    #[allow(dead_code)]
+    default_config: serde_json::Value,
+    #[allow(dead_code)]
+    installer_entry: Option<InstallModuleEntry>,
 }
 
 #[derive(Debug, Error)]
 pub enum LuaEngineError {
+    #[error("invalid install.xml at {path}: {message}")]
+    InvalidInstallXml { path: PathBuf, message: String },
     #[error("cannot read Lua scripts from {path}: {source}")]
     Io {
         path: PathBuf,
@@ -154,6 +165,29 @@ impl LuaEngine {
             .modules
             .get(module_id)
             .map(|module| module.manifest.clone())
+    }
+
+    pub async fn installer_manifest(&self) -> Option<InstallManifest> {
+        self.registry.read().await.installer_manifest.clone()
+    }
+
+    pub async fn default_config(&self, module_id: &str) -> serde_json::Value {
+        self.registry
+            .read()
+            .await
+            .default_configs
+            .get(module_id)
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}))
+    }
+
+    pub async fn is_module_enabled_in_installer(&self, module_id: &str) -> bool {
+        let reg = self.registry.read().await;
+        if let Some(installer) = &reg.installer_manifest {
+            installer.is_module_enabled(module_id)
+        } else {
+            true
+        }
     }
 
     pub async fn validate_module_config(
@@ -260,20 +294,123 @@ impl LuaEngine {
 }
 
 fn build_registry(scripts_dir: &Path, limits: LuaLimits) -> Result<Registry, LuaEngineError> {
-    let mut paths = Vec::new();
-    collect_lua_files(scripts_dir, &mut paths)?;
-    paths.sort();
+    let install_xml_path = scripts_dir.join("install.xml");
+    let installer_manifest = if install_xml_path.is_file() {
+        let content = fs::read_to_string(&install_xml_path).map_err(|source| LuaEngineError::Io {
+            path: install_xml_path.clone(),
+            source,
+        })?;
+        let manifest =
+            InstallManifest::parse(&content).map_err(|err| LuaEngineError::InvalidInstallXml {
+                path: install_xml_path.clone(),
+                message: err.to_string(),
+            })?;
+        Some(manifest)
+    } else {
+        None
+    };
 
-    let mut registry = Registry::default();
+    let mut registry = Registry {
+        installer_manifest: installer_manifest.clone(),
+        ..Default::default()
+    };
 
-    for path in paths {
+    let candidate_paths: Vec<(PathBuf, Option<InstallModuleEntry>, serde_json::Value)> =
+        if let Some(ref installer) = installer_manifest {
+            let mut items = Vec::new();
+            for module_entry in &installer.modules {
+                if !module_entry.enabled {
+                    tracing::info!(
+                        module_id = %module_entry.id,
+                        "skipping module disabled in install.xml"
+                    );
+                    continue;
+                }
+
+                let folder_dir = scripts_dir.join(&module_entry.folder);
+                let primary = folder_dir.join(&module_entry.entry);
+                let fallback_module = folder_dir.join("module.lua");
+                let fallback_named = folder_dir.join(format!("{}.lua", module_entry.id));
+                let flat_fallback = scripts_dir.join(format!("{}.lua", module_entry.id));
+
+                let path = if primary.is_file() {
+                    primary
+                } else if fallback_module.is_file() {
+                    fallback_module
+                } else if fallback_named.is_file() {
+                    fallback_named
+                } else if flat_fallback.is_file() {
+                    flat_fallback
+                } else {
+                    return Err(LuaEngineError::InvalidModule {
+                        script: primary.display().to_string(),
+                        message: format!("module entry file not found for '{}'", module_entry.id),
+                    });
+                };
+
+                let config_file = module_entry
+                    .config
+                    .as_ref()
+                    .map(|c| folder_dir.join(c))
+                    .unwrap_or_else(|| folder_dir.join("config.json"));
+
+                let default_config = if config_file.is_file() {
+                    match fs::read_to_string(&config_file) {
+                        Ok(text) => {
+                            serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({}))
+                        }
+                        Err(_) => serde_json::json!({}),
+                    }
+                } else {
+                    serde_json::json!({})
+                };
+
+                items.push((path, Some(module_entry.clone()), default_config));
+            }
+            items
+        } else {
+            let mut paths = Vec::new();
+            collect_lua_files(scripts_dir, &mut paths)?;
+            paths.sort();
+            paths
+                .into_iter()
+                .map(|p| {
+                    let config_path = p.parent().map(|dir| dir.join("config.json"));
+                    let default_config = if let Some(cfg) = config_path {
+                        if cfg.is_file() {
+                            match fs::read_to_string(&cfg) {
+                                Ok(text) => serde_json::from_str(&text)
+                                    .unwrap_or_else(|_| serde_json::json!({})),
+                                Err(_) => serde_json::json!({}),
+                            }
+                        } else {
+                            serde_json::json!({})
+                        }
+                    } else {
+                        serde_json::json!({})
+                    };
+                    (p, None, default_config)
+                })
+                .collect()
+        };
+
+    for (path, installer_entry, default_config) in candidate_paths {
         let source = fs::read_to_string(&path).map_err(|source| LuaEngineError::Io {
             path: path.clone(),
             source,
         })?;
         let display_name = path.display().to_string();
-        let manifest = inspect_manifest(&source, &display_name, limits)?;
+        let mut manifest = inspect_manifest(&source, &display_name, limits)?;
         validate_manifest(&manifest, &display_name)?;
+
+        if let Some(ref entry) = installer_entry {
+            if manifest.author.is_none() {
+                manifest.author = entry.author.clone();
+            }
+            if manifest.folder.is_none() {
+                manifest.folder = Some(entry.folder.display().to_string());
+            }
+        }
 
         if registry.modules.contains_key(&manifest.id) {
             return Err(LuaEngineError::DuplicateModule(manifest.id));
@@ -305,6 +442,10 @@ fn build_registry(scripts_dir: &Path, limits: LuaLimits) -> Result<Registry, Lua
                 }
             })?;
 
+        registry
+            .default_configs
+            .insert(manifest.id.clone(), default_config.clone());
+
         registry.modules.insert(
             manifest.id.clone(),
             Arc::new(LoadedModule {
@@ -312,6 +453,8 @@ fn build_registry(scripts_dir: &Path, limits: LuaLimits) -> Result<Registry, Lua
                 source: Arc::from(source),
                 display_name: Arc::from(display_name),
                 config_validator: Arc::new(config_validator),
+                default_config,
+                installer_entry,
             }),
         );
     }
@@ -399,6 +542,39 @@ fn inspect_manifest(
         })
 }
 
+fn json_to_lua(lua: &Lua, value: serde_json::Value) -> Result<Value, MluaError> {
+    match value {
+        serde_json::Value::Null => Ok(Value::Nil),
+        serde_json::Value::Bool(b) => Ok(Value::Boolean(b)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(Value::Integer(i))
+            } else if let Some(f) = n.as_f64() {
+                Ok(Value::Number(f))
+            } else {
+                Ok(Value::Nil)
+            }
+        }
+        serde_json::Value::String(s) => Ok(Value::String(lua.create_string(&s)?)),
+        serde_json::Value::Array(arr) => {
+            let table = lua.create_table()?;
+            for (idx, item) in arr.into_iter().enumerate() {
+                table.raw_set(idx + 1, json_to_lua(lua, item)?)?;
+            }
+            Ok(Value::Table(table))
+        }
+        serde_json::Value::Object(map) => {
+            let table = lua.create_table()?;
+            for (key, val) in map {
+                if !val.is_null() {
+                    table.set(key, json_to_lua(lua, val)?)?;
+                }
+            }
+            Ok(Value::Table(table))
+        }
+    }
+}
+
 fn execute_handler<T: serde::Serialize>(
     module: &LoadedModule,
     limits: LuaLimits,
@@ -432,12 +608,15 @@ fn execute_handler<T: serde::Serialize>(
                 script: module.display_name.to_string(),
                 source,
             })?;
-    let context = lua
-        .to_value(arguments.1)
-        .map_err(|source| LuaEngineError::Runtime {
-            script: module.display_name.to_string(),
-            source,
-        })?;
+
+    let json_arg = serde_json::to_value(arguments.1).map_err(|err| LuaEngineError::Runtime {
+        script: module.display_name.to_string(),
+        source: MluaError::external(err),
+    })?;
+    let context = json_to_lua(&lua, json_arg).map_err(|source| LuaEngineError::Runtime {
+        script: module.display_name.to_string(),
+        source,
+    })?;
     let output: Value =
         handler
             .call((arguments.0, context))
@@ -518,6 +697,7 @@ fn sandboxed_lua(limits: LuaLimits) -> mlua::Result<Lua> {
             Ok(seconds)
         })?,
     )?;
+    globals.set("rustybot", api.clone())?;
     globals.set("zuckerbot", api)?;
 
     let remaining = AtomicI64::new(limits.instruction_limit);

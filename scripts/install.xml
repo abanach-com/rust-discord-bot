@@ -1,0 +1,241 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Rusty Discord Bot - Master Plugin & Module Registry -->
+<installer version="1.0.0">
+    <bot name="rusty-discord-bot" min_engine_version="0.2.0" author="Adrian Banach" />
+    <modules>
+        <module id="core" enabled="true" version="1.0.0">
+            <name>Core System</name>
+            <description>Podstawowe komendy diagnostyczne, ping, informacja o platformie i spis modułów.</description>
+            <category>platform</category>
+            <folder>core</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="moderation" enabled="true" version="1.2.0">
+            <name>Moderation</name>
+            <description>Kompleksowe zarządzanie sankcjami: kick, ban, softban, timeout, purge, warn.</description>
+            <category>moderation</category>
+            <folder>moderation</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="automod" enabled="true" version="1.1.0">
+            <name>AutoMod</name>
+            <description>Automatyczna ochrona czatu: filtry słów, anty-spam, anty-caps, linki i invite guard.</description>
+            <category>moderation</category>
+            <folder>automod</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="tickets" enabled="true" version="1.0.0">
+            <name>Tickets</name>
+            <description>Wielokanałowy system ticketów wsparcia technicznego i transkrypcji.</description>
+            <category>community</category>
+            <folder>tickets</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="scheduler" enabled="true" version="1.0.0">
+            <name>Scheduler</name>
+            <description>Harmonogram zadań cyklicznych oraz osobiste przypomnienia użytkowników.</description>
+            <category>utility</category>
+            <folder>scheduler</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="progression" enabled="true" version="1.0.0">
+            <name>Progression</name>
+            <description>System poziomów, punktów doświadczenia (XP), waluty i nagród za rangi.</description>
+            <category>progression</category>
+            <folder>progression</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="music" enabled="true" version="1.0.0">
+            <name>Music</name>
+            <description>Odtwarzacz audio bazujący na silniku Songbird z obsługą kolejki i streamingu.</description>
+            <category>multimedia</category>
+            <folder>music</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="community" enabled="true" version="1.0.0">
+            <name>Community</name>
+            <description>Narzędzia społecznościowe: ankiety, skrzynka propozycji i zgłoszenia naruszeń.</description>
+            <category>community</category>
+            <folder>community</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="welcome" enabled="true" version="1.0.0">
+            <name>Welcome</name>
+            <description>Automatyczne wiadomości powitalne dla nowych członków i nadawanie roli startowej.</description>
+            <category>management</category>
+            <folder>welcome</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="join_guard" enabled="true" version="1.0.0">
+            <name>Join Guard</name>
+            <description>Zaawansowana ochrona anty-raid, weryfikacja wieku konta i izolacja spamerów.</description>
+            <category>security</category>
+            <folder>join_guard</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="roles" enabled="true" version="1.0.0">
+            <name>Roles</name>
+            <description>Zarządzanie rolami użytkowników z poziomu komend i panelu.</description>
+            <category>management</category>
+            <folder>roles</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="fun" enabled="true" version="1.0.0">
+            <name>Fun</name>
+            <description>Zestaw rozrywkowych komend: rzuty kośćmi, 8ball, losowania i zabawy tekstowe.</description>
+            <category>fun</category>
+            <folder>fun</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="games" enabled="true" version="1.0.0">
+            <name>Games</name>
+            <description>Gry tekstowe, quizy Trivia, papier-kamień-nożyce oraz zgadywanki liczbowe.</description>
+            <category>fun</category>
+            <folder>games</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="utility" enabled="true" version="1.0.0">
+            <name>Utility</name>
+            <description>Narzędzia serwerowe: kalkulator matematyczny, avatary i informacje o profilach.</description>
+            <category>utility</category>
+            <folder>utility</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="staff_tools" enabled="true" version="1.0.0">
+            <name>Staff Tools</name>
+            <description>Narzędzia dla administracji: tryb powolny (slowmode), lockdown i ogłoszenia.</description>
+            <category>administration</category>
+            <folder>staff_tools</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="server_info" enabled="true" version="1.0.0">
+            <name>Server Info</name>
+            <description>Szczegółowe statystyki serwera, lista ról, kanałów oraz publikacja regulaminu.</description>
+            <category>information</category>
+            <folder>server_info</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="economy" enabled="true" version="1.0.0">
+            <name>Economy System</name>
+            <description>Wirtualna ekonomia: portfel, praca, zlecenia crime, sklep serwerowy, ekwipunek i przelewy.</description>
+            <category>economy</category>
+            <folder>economy</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="giveaway" enabled="true" version="1.0.0">
+            <name>Giveaway System</name>
+            <description>Zarządzanie konkursami i losowaniami nagród na serwerze z automatycznym wyborem zwycięzców.</description>
+            <category>community</category>
+            <folder>giveaway</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="starboard" enabled="true" version="1.0.0">
+            <name>Starboard</name>
+            <description>Automatyczna tablica chwały: wyróżnianie najlepszych wiadomości oznaczonych gwiazdkami.</description>
+            <category>community</category>
+            <folder>starboard</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="afk" enabled="true" version="1.0.0">
+            <name>AFK System</name>
+            <description>Zarządzanie statusem nieobecności AFK i automatyczne powiadomienia na czacie.</description>
+            <category>utility</category>
+            <folder>afk</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="tags" enabled="true" version="1.0.0">
+            <name>Custom Tags</name>
+            <description>Własne szablony, notatki i komendy tekstowe z szybkim przywoływaniem na serwerze.</description>
+            <category>utility</category>
+            <folder>tags</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="birthdays" enabled="true" version="1.0.0">
+            <name>Birthday Tracker</name>
+            <description>Śledzenie urodzin członków serwera, życzenia i dedykowana ranga jubileuszowa.</description>
+            <category>community</category>
+            <folder>birthdays</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="logging" enabled="true" version="1.0.0">
+            <name>Audit Logging</name>
+            <description>Dedykowany rejestr zdarzeń serwerowych: usunięcia wiadomości, zmiany ról i dołączenia.</description>
+            <category>security</category>
+            <folder>logging</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="reaction_roles" enabled="true" version="1.0.0">
+            <name>Reaction Roles</name>
+            <description>Interaktywny wybór ról poprzez reakcje pod wiadomościami na serwerze.</description>
+            <category>management</category>
+            <folder>reaction_roles</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="quotes" enabled="true" version="1.0.0">
+            <name>Server Quotes</name>
+            <description>Złote myśli i pamiętne cytaty użytkowników z losowaniem i numeracją.</description>
+            <category>fun</category>
+            <folder>quotes</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="achievements" enabled="true" version="1.0.0">
+            <name>Achievements & Badges</name>
+            <description>System odznak i osiągnięć serwerowych nagradzający aktywnych użytkowników.</description>
+            <category>progression</category>
+            <folder>achievements</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+    </modules>
+</installer>

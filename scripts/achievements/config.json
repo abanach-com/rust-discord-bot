@@ -1,0 +1,39 @@
+{
+    "badges": [
+        {
+            "id": "first_message",
+            "name": "Pierwszy krok",
+            "description": "Napisz pierwszą wiadomość na serwerze",
+            "coins": 50,
+            "xp": 100
+        },
+        {
+            "id": "level_5",
+            "name": "Doświadczony",
+            "description": "Osiągnij 5 poziom doświadczenia",
+            "coins": 150,
+            "xp": 250
+        },
+        {
+            "id": "rich",
+            "name": "Milioner",
+            "description": "Zgromadź 1,000 monet w ekonomii",
+            "coins": 300,
+            "xp": 500
+        },
+        {
+            "id": "trivia_master",
+            "name": "Mistrz Quizu",
+            "description": "Wygraj 5 gier w Trivia",
+            "coins": 200,
+            "xp": 350
+        },
+        {
+            "id": "night_owl",
+            "name": "Nocny Marek",
+            "description": "Bądź aktywny po północy",
+            "coins": 100,
+            "xp": 150
+        }
+    ]
+}

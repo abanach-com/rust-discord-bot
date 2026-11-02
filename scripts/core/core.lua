@@ -15,7 +15,7 @@ return {
             },
             {
                 name = "about",
-                description = "Pokazuje informacje o ZuckerBocie.",
+                description = "Pokazuje informacje o Rusty Discord Bot.",
                 integration_types = { "guild", "user" },
                 contexts = { "guild", "bot_dm", "private_channel" },
             },
@@ -50,7 +50,7 @@ return {
             return {
                 {
                     type = "reply",
-                    content = "ZuckerBot to modułowa platforma Discord: bezpieczny rdzeń Rust, logika Lua, panel WWW, PostgreSQL, audyt i obsługa głosu.",
+                    content = "Rusty Discord Bot to modułowa platforma Discord: bezpieczny rdzeń Rust, logika Lua, panel WWW, PostgreSQL, audyt i obsługa głosu.",
                     ephemeral = true,
                 },
             }

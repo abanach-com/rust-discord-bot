@@ -1,6 +1,6 @@
 use std::{collections::HashSet, net::SocketAddr, path::PathBuf, time::Duration};
 
-use zuckerbot::{AppState, config::Config};
+use rusty_discord_bot::{AppState, config::Config};
 
 fn test_config(bind: SocketAddr) -> Config {
     Config {
@@ -39,7 +39,7 @@ async fn test_health_endpoints_metrics_and_graceful_shutdown() {
         .expect("bootstrap should succeed");
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
-    let serve_handle = tokio::spawn(zuckerbot::web::serve_with_shutdown(
+    let serve_handle = tokio::spawn(rusty_discord_bot::web::serve_with_shutdown(
         state.clone(),
         shutdown_rx,
     ));
@@ -119,7 +119,7 @@ async fn test_busy_port_fails_to_bind_with_error() {
     let state = AppState::bootstrap(config).await.expect("bootstrap");
 
     let (_tx, rx) = tokio::sync::broadcast::channel(1);
-    let res = zuckerbot::web::serve_with_shutdown(state, rx).await;
+    let res = rusty_discord_bot::web::serve_with_shutdown(state, rx).await;
     assert!(
         res.is_err(),
         "binding to already occupied port must return Err"
@@ -138,7 +138,7 @@ async fn test_online_readiness_requires_gateway_ready() {
 
     let state = AppState::bootstrap(config).await.expect("bootstrap");
     let (_shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
-    let _serve = tokio::spawn(zuckerbot::web::serve_with_shutdown(
+    let _serve = tokio::spawn(rusty_discord_bot::web::serve_with_shutdown(
         state.clone(),
         shutdown_rx,
     ));

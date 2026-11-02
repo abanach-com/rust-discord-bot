@@ -23,6 +23,10 @@ pub struct LuaModuleManifest {
     pub events: Vec<String>,
     #[serde(default = "empty_object")]
     pub config_schema: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -1,7 +1,7 @@
 use chrono::{Duration, Utc};
 use serde_json::json;
 use uuid::Uuid;
-use zuckerbot::{
+use rusty_discord_bot::{
     moderation_cases::{CaseKind, CaseSeverity, CreateCase, ModerationCaseStore},
     scheduler::{
         CreateJobOutcome, JobMutation, JobMutationOutcome, NewScheduledJob, SchedulerStore,

@@ -7,9 +7,9 @@ use axum::{
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use zuckerbot::AppState;
-use zuckerbot::config::Config;
-use zuckerbot::discord::music::validate_source;
+use rusty_discord_bot::AppState;
+use rusty_discord_bot::config::Config;
+use rusty_discord_bot::discord::music::validate_source;
 
 #[derive(Clone, Default)]
 struct MockMediaServerState {
