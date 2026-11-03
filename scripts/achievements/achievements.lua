@@ -1,33 +1,35 @@
+local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
+
 return {
     manifest = {
         id = "achievements",
-        name = "Achievements & Badges",
+        name = t("modules.achievements.name"),
         version = "1.0.0",
-        description = "Odznaki i trofea za aktywność na czacie, gry, ekonomię i staż.",
+        description = t("modules.achievements.description"),
         category = "progression",
         default_enabled = true,
         commands = {
             {
                 name = "achievements",
-                description = "Przeglądaj i odbieraj odznaki za osiągnięcia na serwerze.",
+                description = t("modules.achievements.commands.achievements.description"),
                 integration_types = { "guild" },
                 contexts = { "guild" },
                 options = {
                     {
                         type = "subcommand",
                         name = "list",
-                        description = "Zobacz pełną listę wszystkich dostępnych odznak.",
+                        description = t("modules.achievements.commands.achievements.options.list.description"),
                         options = {},
                     },
                     {
                         type = "subcommand",
                         name = "view",
-                        description = "Sprawdź odznaki zdobyte przez użytkownika.",
+                        description = t("modules.achievements.commands.achievements.options.view.description"),
                         options = {
                             {
                                 type = "user",
                                 name = "user",
-                                description = "Użytkownik do sprawdzenia.",
+                                description = t("modules.achievements.commands.achievements.options.user.description"),
                                 required = false,
                             },
                         },
@@ -35,12 +37,12 @@ return {
                     {
                         type = "subcommand",
                         name = "claim",
-                        description = "Odbierz nagrodę monetarną i XP za odblokowane osiągnięcie.",
+                        description = t("modules.achievements.commands.achievements.options.claim.description"),
                         options = {
                             {
                                 type = "string",
                                 name = "badge_id",
-                                description = "Identyfikator odznaki do odebrania.",
+                                description = t("modules.achievements.commands.achievements.options.badge_id.description"),
                                 required = true,
                             },
                         },
@@ -67,17 +69,10 @@ return {
         local user_id = ctx.user_id
 
         if sub == "list" then
-            local text = "🏆 **Dostępne Osiągnięcia i Odznaki Serwerowe:**\n\n" ..
-                "1. 👣 **Pierwszy krok** (`first_message`) — Nagroda: 50 monet, 100 XP\n" ..
-                "2. 🎖️ **Doświadczony** (`level_5`) — Nagroda: 150 monet, 250 XP\n" ..
-                "3. 💰 **Milioner** (`rich`) — Nagroda: 300 monet, 500 XP\n" ..
-                "4. 🧠 **Mistrz Quizu** (`trivia_master`) — Nagroda: 200 monet, 350 XP\n" ..
-                "5. 🦉 **Nocny Marek** (`night_owl`) — Nagroda: 100 monet, 150 XP\n\n" ..
-                "Użyj `/achievements claim badge_id:nazwa` aby odebrać nagrodę!"
             return {
                 {
                     type = "reply",
-                    content = text,
+                    content = t("modules.achievements.list_reply", ctx),
                     ephemeral = false,
                 },
             }
@@ -88,7 +83,7 @@ return {
             return {
                 {
                     type = "reply",
-                    content = string.format("🎖️ **Odznaki użytkownika <@%s>:**\n• 👣 Pierwszy krok (Odblokowane!)\n• 🦉 Nocny Marek (Odblokowane!)\n• 🎖️ Doświadczony (W toku — 3/5)", target),
+                    content = t("modules.achievements.view_reply", { user = target }, ctx),
                     ephemeral = false,
                 },
             }
@@ -105,12 +100,12 @@ return {
                         xp_delta = 100,
                         coins_delta = 50,
                         reputation_delta = 1,
-                        reason = "Osiągnięcie: " .. bid,
+                        reason = "Achievement: " .. bid,
                     },
                 },
                 {
                     type = "reply",
-                    content = string.format("🎉 Gratulacje! Odebrałeś nagrodę za odznakę **%s**: +50 monet 🪙, +100 XP 🌟, +1 Reputacja ✨!", bid),
+                    content = t("modules.achievements.claim_reply", { badge = bid }, ctx),
                     ephemeral = false,
                 },
                 {

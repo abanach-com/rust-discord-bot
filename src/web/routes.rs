@@ -93,7 +93,7 @@ impl ApiError {
         tracing::error!(%message, "dashboard internal error");
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: "Wewnętrzny błąd panelu.".to_owned(),
+            message: "Internal dashboard error.".to_owned(),
             details: None,
         }
     }
@@ -102,7 +102,7 @@ impl ApiError {
         tracing::warn!(?error, "Discord OAuth2/API request failed");
         Self {
             status: StatusCode::BAD_GATEWAY,
-            message: "Discord nie odpowiedział poprawnie podczas komunikacji z API.".to_owned(),
+            message: "Discord did not respond properly during API communication.".to_owned(),
             details: None,
         }
     }
@@ -112,16 +112,16 @@ impl From<crate::moderation_cases::CaseError> for ApiError {
     fn from(error: crate::moderation_cases::CaseError) -> Self {
         match error {
             crate::moderation_cases::CaseError::NotFound => {
-                Self::not_found("Sprawa moderacyjna nie została znaleziona.")
+                Self::not_found("Moderation case was not found.")
             }
             crate::moderation_cases::CaseError::VersionConflict { expected, actual } => {
                 Self::conflict(format!(
-                    "Konflikt wersji sprawy: oczekiwano {expected}, aktualna wersja to {actual}. Odśwież widok."
+                    "Case version conflict: expected {expected}, current version is {actual}. Refresh view."
                 ))
             }
             crate::moderation_cases::CaseError::Validation(msg) => Self::bad_request(msg),
             crate::moderation_cases::CaseError::Database(err) => {
-                Self::internal(format!("Błąd bazy danych sprawy: {err}"))
+                Self::internal(format!("Case database error: {err}"))
             }
         }
     }
@@ -325,7 +325,7 @@ pub async fn update_guild_module(
             .rate_limit_throttled_total
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return Err(ApiError::too_many_requests(format!(
-            "Zbyt częste zmiany konfiguracji modułów. Odczekaj {} s.",
+            "Module configuration changes are too frequent. Please wait {} s.",
             decision.reset_after.as_secs().max(1)
         )));
     }
@@ -335,11 +335,11 @@ pub async fn update_guild_module(
         .scripts
         .manifest(&module_id)
         .await
-        .ok_or_else(|| ApiError::not_found("Nie znaleziono modułu Lua."))?;
+        .ok_or_else(|| ApiError::not_found("Lua module not found."))?;
 
     if !payload.config.is_object() {
         return Err(ApiError::bad_request(
-            "Konfiguracja modułu musi być obiektem JSON.",
+            "Module configuration must be a JSON object.",
         ));
     }
     let serialized_size = serde_json::to_vec(&payload.config)
@@ -347,7 +347,7 @@ pub async fn update_guild_module(
         .len();
     if serialized_size > 64 * 1024 {
         return Err(ApiError::bad_request(
-            "Konfiguracja modułu nie może przekraczać 64 KiB.",
+            "Module configuration must not exceed 64 KiB.",
         ));
     }
 
@@ -358,7 +358,7 @@ pub async fn update_guild_module(
         .await
     {
         return Err(ApiError::validation(
-            "Konfiguracja modułu jest niezgodna ze schematem JSON.",
+            "Module configuration violates JSON schema.",
             validation_errors,
         ));
     }
@@ -430,7 +430,7 @@ pub async fn guild_cases(
     ensure_guild_access(&state, &session, &guild_id).await?;
     let guild_u64 = guild_id
         .parse::<u64>()
-        .map_err(|_| ApiError::bad_request("Niepoprawny identyfikator serwera."))?;
+        .map_err(|_| ApiError::bad_request("Invalid server ID."))?;
 
     let limit = pagination.limit.unwrap_or(50).clamp(1, 200);
     let offset = pagination.offset.unwrap_or(0);
@@ -477,7 +477,7 @@ pub async fn guild_case_details(
     ensure_guild_access(&state, &session, &guild_id).await?;
     let guild_u64 = guild_id
         .parse::<u64>()
-        .map_err(|_| ApiError::bad_request("Niepoprawny identyfikator serwera."))?;
+        .map_err(|_| ApiError::bad_request("Invalid server ID."))?;
     let details = state
         .app
         .moderation_cases
@@ -559,18 +559,18 @@ pub async fn add_guild_case_note(
     let trimmed = payload.body.trim();
     if trimmed.is_empty() || trimmed.chars().count() > crate::moderation_cases::MAX_NOTE_LENGTH {
         return Err(ApiError::bad_request(
-            "Treść notatki nie może być pusta ani przekraczać 2000 znaków.",
+            "Note content cannot be empty or exceed 2000 characters.",
         ));
     }
 
     let guild_u64 = guild_id
         .parse::<u64>()
-        .map_err(|_| ApiError::bad_request("Niepoprawny identyfikator serwera."))?;
+        .map_err(|_| ApiError::bad_request("Invalid server ID."))?;
     let actor_u64 = session
         .user
         .id
         .parse::<u64>()
-        .map_err(|_| ApiError::bad_request("Niepoprawny identyfikator użytkownika."))?;
+        .map_err(|_| ApiError::bad_request("Invalid user ID."))?;
 
     let now = Utc::now();
     let note = state
@@ -644,23 +644,23 @@ pub async fn void_guild_case(
     let trimmed = payload.reason.trim();
     if trimmed.is_empty() || trimmed.chars().count() > crate::moderation_cases::MAX_REASON_LENGTH {
         return Err(ApiError::bad_request(
-            "Powód unieważnienia nie może być pusty ani przekraczać 2000 znaków.",
+            "Void reason cannot be empty or exceed 2000 characters.",
         ));
     }
 
     let guild_u64 = guild_id
         .parse::<u64>()
-        .map_err(|_| ApiError::bad_request("Niepoprawny identyfikator serwera."))?;
+        .map_err(|_| ApiError::bad_request("Invalid server ID."))?;
     let actor_u64 = session
         .user
         .id
         .parse::<u64>()
-        .map_err(|_| ApiError::bad_request("Niepoprawny identyfikator użytkownika."))?;
+        .map_err(|_| ApiError::bad_request("Invalid user ID."))?;
 
     let now = Utc::now();
     if payload.expected_version <= 0 {
         return Err(ApiError::bad_request(
-            "Wymagane jest dodatnie expected_version do kontroli wersji.",
+            "Positive expected_version is required for concurrency control.",
         ));
     }
     let version = payload.expected_version;
@@ -735,17 +735,17 @@ pub async fn update_guild_case(
 
     let guild_u64 = guild_id
         .parse::<u64>()
-        .map_err(|_| ApiError::bad_request("Niepoprawny identyfikator serwera."))?;
+        .map_err(|_| ApiError::bad_request("Invalid server ID."))?;
     let actor_u64 = session
         .user
         .id
         .parse::<u64>()
-        .map_err(|_| ApiError::bad_request("Niepoprawny identyfikator użytkownika."))?;
+        .map_err(|_| ApiError::bad_request("Invalid user ID."))?;
 
     let now = Utc::now();
     if payload.expected_version <= 0 {
         return Err(ApiError::bad_request(
-            "Wymagane jest dodatnie expected_version do kontroli wersji.",
+            "Positive expected_version is required for concurrency control.",
         ));
     }
     let version = payload.expected_version;
@@ -864,13 +864,13 @@ pub async fn get_setup_wizard(
         {
             "id": "gaming",
             "name": "Serwer Gamingowy",
-            "description": "Układ pod rozgrywki, LFG, boty muzyczne, kanały głosowe i role gier.",
+            "description": "Layout for gaming, LFG, music bots, voice channels, and game roles.",
             "recommended_channels": [
                 {"name": "regulamin", "type": "text"},
                 {"name": "ogloszenia", "type": "announcement"},
                 {"name": "szukam-grupy-lfg", "type": "text"},
                 {"name": "czat-ogolny", "type": "text"},
-                {"name": "Poczekalnia Głosowa", "type": "voice"},
+                {"name": "Voice Lounge", "type": "voice"},
                 {"name": "Gramy 1", "type": "voice"}
             ],
             "recommended_roles": ["Admin", "Moderator", "Gamer", "Nowy"],
@@ -883,8 +883,8 @@ pub async fn get_setup_wizard(
         },
         {
             "id": "community",
-            "name": "Społeczność & Twórca",
-            "description": "Dla kanałów YouTube, streamerów Twitch, społeczności dyskusyjnych i forów.",
+            "name": "Community & Creator",
+            "description": "For YouTube channels, Twitch streamers, discussion communities, and forums.",
             "recommended_channels": [
                 {"name": "powitania", "type": "text"},
                 {"name": "zasady", "type": "text"},
@@ -892,9 +892,9 @@ pub async fn get_setup_wizard(
                 {"name": "pogaduchy", "type": "text"},
                 {"name": "tworczosc-i-memy", "type": "text"},
                 {"name": "starboard", "type": "text"},
-                {"name": "Scena Główna", "type": "stage"}
+                {"name": "Main Stage", "type": "stage"}
             ],
-            "recommended_roles": ["Właściciel", "Ekipa", "VIP / Subskrybent", "Członek"],
+            "recommended_roles": ["Owner", "Staff", "VIP / Subscriber", "Member"],
             "required_intents": ["ServerMembers", "MessageContent"],
             "minimal_permissions": [
                 "MANAGE_ROLES", "MANAGE_CHANNELS", "VIEW_CHANNEL", "SEND_MESSAGES",
@@ -904,8 +904,8 @@ pub async fn get_setup_wizard(
         },
         {
             "id": "support",
-            "name": "Centrum Pomocy & Ticketów",
-            "description": "Środowisko zgłoszeń serwisowych, Modmail, rekrutacji i bezpośredniego wsparcia.",
+            "name": "Help & Support Center",
+            "description": "Environment for service inquiries, Modmail, recruitment, and direct support.",
             "recommended_channels": [
                 {"name": "otworz-ticket", "type": "text"},
                 {"name": "pomoc-faq", "type": "text"},
@@ -1048,7 +1048,7 @@ pub async fn publish_guild_module_draft(
         .get_module_draft(&guild_id, &module_id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
-        .ok_or_else(|| ApiError::not_found("Brak wersji roboczej (draft) dla tego modułu."))?;
+        .ok_or_else(|| ApiError::not_found("No draft version found for this module."))?;
 
     let current = state
         .app
@@ -1144,12 +1144,12 @@ pub async fn get_guild_privacy_summary(
             "retention_days_progression": "permanent_until_erasure_request"
         },
         "stored_entities": [
-            {"entity": "Sprawy moderacyjne", "purpose": "Ewidencja sankcji i bezpieczeństwo serwera", "retention": "365 dni"},
-            {"entity": "Postępy i XP", "purpose": "Ranking aktywności i nagrody poziomów", "retention": "Trwałe do żądania usunięcia"},
-            {"entity": "Transkrypcje ticketów", "purpose": "Obsługa zgłoszeń pomocy", "retention": "90 dni"},
-            {"entity": "Dziennik zdarzeń audytowych", "purpose": "Kontrola uprawnień i transparentność zmian", "retention": "45 dni"}
+            {"entity": "Moderation cases", "purpose": "Sanctions audit and server security", "retention": "365 days"},
+            {"entity": "Progression & XP", "purpose": "Activity leaderboard and level rewards", "retention": "Permanent until erasure request"},
+            {"entity": "Ticket transcripts", "purpose": "Help desk processing", "retention": "90 days"},
+            {"entity": "Audit event log", "purpose": "Permissions monitoring and transparency", "retention": "45 days"}
         ],
-        "gdpr_rights": ["Prawo dostępu do danych (Eksport)", "Prawo do bycia zapomnianym (Usunięcie)"]
+        "gdpr_rights": ["Right of access (Export)", "Right to be forgotten (Erasure)"]
     })))
 }
 
@@ -1165,7 +1165,7 @@ pub async fn export_user_privacy_data(
     let user_id = payload.user_id.trim();
     if user_id.is_empty() {
         return Err(ApiError::bad_request(
-            "Nie podano identyfikatora użytkownika.",
+            "User ID was not provided.",
         ));
     }
 
@@ -1222,7 +1222,7 @@ pub async fn delete_user_privacy_data(
     let user_id = payload.user_id.trim();
     if user_id.is_empty() {
         return Err(ApiError::bad_request(
-            "Nie podano identyfikatora użytkownika.",
+            "User ID was not provided.",
         ));
     }
 
@@ -1268,13 +1268,13 @@ pub async fn submit_moderation_appeal(
     let reason = payload.reason.trim();
     if reason.is_empty() || reason.len() > 2000 {
         return Err(ApiError::bad_request(
-            "Uzasadnienie odwołania musi mieć od 1 do 2000 znaków.",
+            "Appeal justification must be between 1 and 2000 characters.",
         ));
     }
 
     let parsed_guild: u64 = guild_id
         .parse()
-        .map_err(|_| ApiError::bad_request("Nieprawidłowy guild_id"))?;
+        .map_err(|_| ApiError::bad_request("Invalid guild_id"))?;
     let details = state
         .app
         .moderation_cases
@@ -1285,7 +1285,7 @@ pub async fn submit_moderation_appeal(
 
     if case.subject_user_id.to_string() != session.user.id {
         return Err(ApiError::forbidden(
-            "Możesz złożyć odwołanie wyłącznie do sprawy dotyczącej Twojej osoby.",
+            "You can only submit an appeal for a case concerning yourself.",
         ));
     }
 
@@ -1365,7 +1365,7 @@ pub async fn decide_moderation_appeal(
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     if !updated {
-        return Err(ApiError::not_found("Odwołanie nie istnieje."));
+        return Err(ApiError::not_found("Appeal does not exist."));
     }
 
     Ok(Json(json!({
@@ -1406,7 +1406,7 @@ pub async fn simulate_automod(
             "matched": true,
             "winning_rule": "automod.invite_guard",
             "expected_action": "delete_message_and_warn",
-            "reason": "Wykryto zaproszenie do zewnętrznego serwera Discord.",
+            "reason": "Detected invite to external Discord server.",
             "spam_score": 0.95,
             "raid_detected": false
         })));
@@ -1421,7 +1421,7 @@ pub async fn simulate_automod(
             "matched": true,
             "winning_rule": "automod.phishing_link_guard",
             "expected_action": "delete_message_and_quarantine",
-            "reason": "Wykryto podejrzany link wyłudzający dane (phishing).",
+            "reason": "Detected suspicious phishing link.",
             "spam_score": 0.99,
             "raid_detected": false
         })));
@@ -1433,7 +1433,7 @@ pub async fn simulate_automod(
             "matched": true,
             "winning_rule": "join_guard.raid_burst",
             "expected_action": "trigger_lockdown_and_quarantine",
-            "reason": "Wykryto skoordynowany napływ kont (rajd).",
+            "reason": "Detected coordinated raid influx.",
             "spam_score": 0.90,
             "raid_detected": true
         })));
@@ -1446,7 +1446,7 @@ pub async fn simulate_automod(
             "matched": true,
             "winning_rule": "join_guard.fresh_suspicious_account",
             "expected_action": "require_verification_captcha",
-            "reason": "Konto utworzone poniżej 24h bez awatara.",
+            "reason": "Account created under 24h ago without avatar.",
             "spam_score": 0.70,
             "raid_detected": false
         })));
@@ -1457,7 +1457,7 @@ pub async fn simulate_automod(
         "matched": false,
         "winning_rule": null,
         "expected_action": "allow",
-        "reason": "Wiadomość i konto spełniają kryteria bezpieczeństwa.",
+        "reason": "Message and account satisfy security criteria.",
         "spam_score": 0.05,
         "raid_detected": false
     })))

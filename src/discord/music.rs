@@ -26,7 +26,7 @@ pub async fn execute(
     let validated_play_query = if matches!(operation, MusicOperation::Play) {
         let q = query
             .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| anyhow!("brakuje tytułu albo adresu utworu"))?
+            .ok_or_else(|| anyhow!("missing song title or URL"))?
             .trim();
         validate_source(state, q)?;
         Some(q)
@@ -47,11 +47,11 @@ pub async fn execute(
         match operation {
             MusicOperation::Leave => {
                 let _ = manager.remove(guild_id).await;
-                return Ok("Bot nie jest połączony z kanałem głosowym.".to_owned());
+                return Ok("The bot is not connected to a voice channel.".to_owned());
             }
             MusicOperation::Queue => {
                 return Ok(
-                    "Kolejka jest pusta. Bot nie jest połączony z kanałem głosowym.".to_owned(),
+                    "The queue is empty. The bot is not connected to a voice channel.".to_owned(),
                 );
             }
             MusicOperation::Play => {
@@ -59,7 +59,7 @@ pub async fn execute(
             }
             _ => {
                 let _ = manager.remove(guild_id).await;
-                return Err(anyhow!("Bot nie jest połączony z kanałem głosowym."));
+                return Err(anyhow!("The bot is not connected to a voice channel."));
             }
         }
     }
@@ -84,14 +84,14 @@ pub async fn execute(
                 && user_channel != bot_channel
             {
                 return Err(anyhow!(
-                    "musisz znajdować się na tym samym kanale głosowym co bot"
+                    "you must be in the same voice channel as the bot"
                 ));
             }
         }
 
         if matches!(operation, MusicOperation::Leave) {
             manager.remove(guild_id).await?;
-            return Ok("Rozłączono bota z kanałem głosowym.".to_owned());
+            return Ok("Disconnected bot from the voice channel.".to_owned());
         }
 
         handler
@@ -102,7 +102,7 @@ pub async fn execute(
             Ok(h) => h,
             Err(err) => {
                 let _ = manager.remove(guild_id).await;
-                return Err(err).context("nie udało się dołączyć do kanału głosowego");
+                return Err(err).context("failed to join the voice channel");
             }
         }
     };
@@ -114,7 +114,7 @@ pub async fn execute(
 
             if handler.queue().len() >= MAX_QUEUE_SIZE {
                 return Err(anyhow!(
-                    "kolejka odtwarzania osiągnęła maksymalny limit {MAX_QUEUE_SIZE} utworów"
+                    "playback queue reached maximum limit of {MAX_QUEUE_SIZE} tracks"
                 ));
             }
 
@@ -125,7 +125,7 @@ pub async fn execute(
             };
             handler.enqueue_input(source.into()).await;
             Ok(format!(
-                "Dodano do kolejki. Liczba utworów: {}.",
+                "Added to queue. Track count: {}.",
                 handler.queue().len()
             ))
         }
@@ -134,13 +134,13 @@ pub async fn execute(
                 .and_then(|q| q.trim().parse::<f32>().ok())
                 .filter(|&v| (0.0..=150.0).contains(&v))
                 .ok_or_else(|| {
-                    anyhow!("poziom głośności musi być liczbą w zakresie od 0 do 150")
+                    anyhow!("volume level must be a number between 0 and 150")
                 })?;
             let factor = level / 100.0;
             if let Some(track) = handler.queue().current() {
                 let _ = track.set_volume(factor);
             }
-            Ok(format!("Ustawiono głośność odtwarzacza na {level:.0}%."))
+            Ok(format!("Player volume set to {level:.0}%."))
         }
         MusicOperation::Loop => {
             if let Some(track) = handler.queue().current() {
@@ -156,32 +156,32 @@ pub async fn execute(
                     }
                 };
                 Ok(if enabled {
-                    "Włączono zapętlanie bieżącego utworu.".to_owned()
+                    "Enabled looping for current track.".to_owned()
                 } else {
-                    "Wyłączono zapętlanie bieżącego utworu.".to_owned()
+                    "Disabled looping for current track.".to_owned()
                 })
             } else {
-                Err(anyhow!("brak aktywnego utworu do zapętlenia"))
+                Err(anyhow!("no active track to loop"))
             }
         }
         MusicOperation::Pause => {
             handler.queue().pause()?;
-            Ok("Wstrzymano odtwarzanie.".to_owned())
+            Ok("Paused playback.".to_owned())
         }
         MusicOperation::Resume => {
             handler.queue().resume()?;
-            Ok("Wznowiono odtwarzanie.".to_owned())
+            Ok("Resumed playback.".to_owned())
         }
         MusicOperation::Skip => {
             handler.queue().skip()?;
-            Ok("Pominięto bieżący utwór.".to_owned())
+            Ok("Skipped current track.".to_owned())
         }
         MusicOperation::Stop => {
             handler.queue().stop();
-            Ok("Zatrzymano odtwarzanie i wyczyszczono kolejkę.".to_owned())
+            Ok("Stopped playback and cleared the queue.".to_owned())
         }
         MusicOperation::Queue => Ok(format!(
-            "W kolejce znajduje się {} utworów.",
+            "The queue contains {} tracks.",
             handler.queue().len()
         )),
         MusicOperation::Leave => unreachable!("leave is handled before taking the call lock"),
@@ -196,13 +196,13 @@ fn user_voice_channel(
     let guild = ctx
         .cache
         .guild(guild_id)
-        .ok_or_else(|| anyhow!("serwer nie znajduje się jeszcze w pamięci podręcznej"))?;
+        .ok_or_else(|| anyhow!("server is not yet in cache"))?;
 
     guild
         .voice_states
         .get(&user_id)
         .and_then(|voice_state| voice_state.channel_id)
-        .ok_or_else(|| anyhow!("najpierw dołącz do kanału głosowego"))
+        .ok_or_else(|| anyhow!("join a voice channel first"))
 }
 
 pub fn is_blocked_ip(ip: std::net::IpAddr) -> bool {

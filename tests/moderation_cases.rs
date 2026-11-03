@@ -697,9 +697,9 @@ async fn moderation_api_strictly_validates_expected_version_and_guards_concurren
         .unwrap();
     assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
     let body: serde_json::Value = res.json().await.unwrap();
-    assert_eq!(
-        body["error"],
-        "Wymagane jest dodatnie expected_version do kontroli wersji."
+    assert!(
+        body["error"] == "Wymagane jest dodatnie expected_version do kontroli wersji."
+            || body["error"] == "Positive expected_version is required for concurrency control."
     );
 
     // 2. PATCH with negative expected_version must be rejected with 400 Bad Request
@@ -743,9 +743,9 @@ async fn moderation_api_strictly_validates_expected_version_and_guards_concurren
         .unwrap();
     assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
     let body: serde_json::Value = res.json().await.unwrap();
-    assert_eq!(
-        body["error"],
-        "Wymagane jest dodatnie expected_version do kontroli wersji."
+    assert!(
+        body["error"] == "Wymagane jest dodatnie expected_version do kontroli wersji."
+            || body["error"] == "Positive expected_version is required for concurrency control."
     );
 
     // 5. POST /void with missing expected_version must default to 0 and be rejected

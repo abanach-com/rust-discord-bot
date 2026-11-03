@@ -62,10 +62,10 @@ pub async fn execute(
 ) -> Result<Option<String>> {
     let guild_id = execution
         .guild_id
-        .ok_or_else(|| anyhow!("system spraw moderacyjnych działa wyłącznie na serwerze"))?;
+        .ok_or_else(|| anyhow!("moderation cases system operates exclusively within a server"))?;
     let actor_id = execution
         .actor_id
-        .ok_or_else(|| anyhow!("ta operacja wymaga kontekstu użytkownika"))?;
+        .ok_or_else(|| anyhow!("this operation requires user context"))?;
     let now = Utc::now();
     let is_mod = is_moderator(execution.actor_permissions);
 
@@ -81,12 +81,12 @@ pub async fn execute(
             delete_days,
         } => {
             if !is_mod {
-                return Err(anyhow!("brak uprawnień moderatorskich do tworzenia spraw"));
+                return Err(anyhow!("missing moderator permissions to create cases"));
             }
 
             let subject_u64 = subject_user_id
                 .parse::<u64>()
-                .map_err(|_| anyhow!("niepoprawne ID użytkownika"))?;
+                .map_err(|_| anyhow!("invalid user ID"))?;
             let target_user_id = UserId::new(subject_u64);
 
             let case_kind = match kind.as_str() {
@@ -166,7 +166,7 @@ pub async fn execute(
                 if let Some(secs) = duration_seconds {
                     if *secs == 0 || *secs > 2_419_200 {
                         return Err(anyhow!(
-                            "czas wyciszenia musi wynosić od 1 do 2419200 sekund (28 dni)"
+                            "timeout duration must be between 1 and 2419200 seconds (28 days)"
                         ));
                     }
                     let until = (now + Duration::seconds(*secs as i64)).to_rfc3339();
@@ -177,19 +177,19 @@ pub async fn execute(
                             EditMember::new().disable_communication_until(until),
                         )
                         .await
-                        .map_err(|e| anyhow!("błąd Discord API podczas wyciszania: {e}"))?;
+                        .map_err(|e| anyhow!("Discord API error while timing out member: {e}"))?;
                 }
             } else if case_kind == CaseKind::Kick {
                 guild_id
                     .kick_with_reason(&ctx.http, target_user_id, reason)
                     .await
-                    .map_err(|e| anyhow!("błąd Discord API podczas wyrzucania członka: {e}"))?;
+                    .map_err(|e| anyhow!("Discord API error while kicking member: {e}"))?;
             } else if case_kind == CaseKind::Ban {
                 let ban_delete_days = delete_days.unwrap_or(0);
                 guild_id
                     .ban_with_reason(&ctx.http, target_user_id, ban_delete_days, reason)
                     .await
-                    .map_err(|e| anyhow!("błąd Discord API podczas banowania: {e}"))?;
+                    .map_err(|e| anyhow!("Discord API error while banning member: {e}"))?;
             } else if case_kind == CaseKind::Softban {
                 let softban_delete_days = delete_days.unwrap_or(1);
                 let intent_id = uuid::Uuid::new_v4();
@@ -220,7 +220,7 @@ pub async fn execute(
                         )
                         .await;
                     return Err(anyhow!(
-                        "błąd Discord API podczas banowania (softban): {ban_err}"
+                        "Discord API error while banning (softban): {ban_err}"
                     ));
                 }
 
@@ -250,7 +250,7 @@ pub async fn execute(
                                 "subject_user_id": subject_user_id,
                                 "delete_days": softban_delete_days,
                                 "error": unban_err.to_string(),
-                                "alert": "Użytkownik został zbanowany, ale odbanowanie nie powiodło się; wymagana ręczna interwencja zespołu.",
+                                "alert": "User was banned, but unbanning failed; manual team intervention required.",
                             }),
                         )
                         .await;
@@ -277,7 +277,7 @@ pub async fn execute(
                         .await;
 
                     return Err(anyhow!(
-                        "błąd Discord API podczas odbanowywania (softban): {unban_err}"
+                        "Discord API error while unbanning (softban): {unban_err}"
                     ));
                 }
 
@@ -289,7 +289,7 @@ pub async fn execute(
                 guild_id
                     .unban(&ctx.http, target_user_id)
                     .await
-                    .map_err(|e| anyhow!("błąd Discord API podczas odbanowywania: {e}"))?;
+                    .map_err(|e| anyhow!("Discord API error while unbanning: {e}"))?;
             }
 
             let created = state
@@ -310,7 +310,7 @@ pub async fn execute(
                     now,
                 )
                 .await
-                .map_err(|err| anyhow!("błąd zapisu sprawy: {err}"))?;
+                .map_err(|err| anyhow!("case save error: {err}"))?;
 
             let _ = state
                 .storage
@@ -342,7 +342,7 @@ pub async fn execute(
             });
 
             Ok(Some(format!(
-                "⚖️ Zarejestrowano sprawę moderacyjną **#{case_number}** dla <@{subject_user_id}> [{kind} | {severity} | punkty: {points}]: {reason}",
+                "⚖️ Registered moderation case **#{case_number}** for <@{subject_user_id}> [{kind} | {severity} | points: {points}]: {reason}",
                 case_number = created.case_number,
             )))
         }
@@ -352,22 +352,22 @@ pub async fn execute(
                 .moderation_cases
                 .get_case(guild_id.get(), *case_number, now)
                 .await
-                .map_err(|err| anyhow!("sprawa #{case_number} nie została znaleziona: {err}"))?;
+                .map_err(|err| anyhow!("case #{case_number} was not found: {err}"))?;
 
             if !is_mod
                 && (details.case.subject_user_id != actor_id.get()
                     || !details.case.visible_to_subject)
             {
                 return Err(anyhow!(
-                    "brak uprawnień do przeglądania sprawy #{case_number}"
+                    "insufficient permissions to view case #{case_number}"
                 ));
             }
 
             let c = &details.case;
             let status_label = match c.status {
                 CaseStatus::Active => "Aktywna",
-                CaseStatus::Expired => "Wygasła",
-                CaseStatus::Voided => "Unieważniona",
+                CaseStatus::Expired => "Expired",
+                CaseStatus::Voided => "Voided",
             };
 
             let expiry_info = match c.expires_at {
@@ -376,7 +376,7 @@ pub async fn execute(
             };
 
             let mut message = format!(
-                "📋 **Sprawa #{case_number}** [{kind:?} | {severity:?}] — Status: **{status}**\n• Cel: <@{subject}> | Moderator: <@{actor}>\n• Punkty: {points} | {expiry_info}\n• Powód: {reason}\n• Utworzono: {created}",
+                "📋 **Case #{case_number}** [{kind:?} | {severity:?}] — Status: **{status}**\n• Target: <@{subject}> | Moderator: <@{actor}>\n• Points: {points} | {expiry_info}\n• Reason: {reason}\n• Created: {created}",
                 case_number = c.case_number,
                 kind = c.kind,
                 severity = c.severity,
@@ -390,7 +390,7 @@ pub async fn execute(
 
             if let Some(void_reason) = &c.void_reason {
                 message.push_str(&format!(
-                    "\n• ⚠️ Unieważniono przez <@{}>: {}",
+                    "\n• ⚠️ Voided by <@{}>: {}",
                     c.voided_by_user_id.unwrap_or(0),
                     void_reason
                 ));
@@ -457,7 +457,7 @@ pub async fn execute(
                     now,
                 )
                 .await
-                .map_err(|err| anyhow!("błąd pobierania listy spraw: {err}"))?;
+                .map_err(|err| anyhow!("error fetching cases list: {err}"))?;
 
             if cases.is_empty() {
                 return Ok(Some(
@@ -483,7 +483,7 @@ pub async fn execute(
         } => {
             if !is_mod {
                 return Err(anyhow!(
-                    "brak uprawnień moderatorskich do dodawania notatek"
+                    "missing moderator permissions to add notes"
                 ));
             }
 
@@ -498,7 +498,7 @@ pub async fn execute(
                     now,
                 )
                 .await
-                .map_err(|err| anyhow!("błąd dodawania notatki: {err}"))?;
+                .map_err(|err| anyhow!("error adding note: {err}"))?;
 
             let _ = state
                 .storage
@@ -515,7 +515,7 @@ pub async fn execute(
                 )
                 .await;
 
-            Ok(Some(format!("Dodano notatkę do sprawy #{case_number}.")))
+            Ok(Some(format!("Added note to case #{case_number}.")))
         }
 
         ModerationCaseOperation::AddEvidence {
@@ -525,7 +525,7 @@ pub async fn execute(
         } => {
             if !is_mod {
                 return Err(anyhow!(
-                    "brak uprawnień moderatorskich do dodawania dowodów"
+                    "missing moderator permissions to add evidence"
                 ));
             }
 
@@ -540,7 +540,7 @@ pub async fn execute(
                     now,
                 )
                 .await
-                .map_err(|err| anyhow!("błąd dodawania dowodu: {err}"))?;
+                .map_err(|err| anyhow!("error adding evidence: {err}"))?;
 
             let _ = state
                 .storage
@@ -558,7 +558,7 @@ pub async fn execute(
                 .await;
 
             Ok(Some(format!(
-                "Dodano dowód [{label}] do sprawy #{case_number}."
+                "Added evidence [{label}] to case #{case_number}."
             )))
         }
 
@@ -569,7 +569,7 @@ pub async fn execute(
         } => {
             if !is_mod {
                 return Err(anyhow!(
-                    "brak uprawnień moderatorskich do unieważniania spraw"
+                    "missing moderator permissions to void cases"
                 ));
             }
 
@@ -595,7 +595,7 @@ pub async fn execute(
                     now,
                 )
                 .await
-                .map_err(|err| anyhow!("błąd unieważniania sprawy: {err}"))?;
+                .map_err(|err| anyhow!("error voiding case: {err}"))?;
 
             let _ = state
                 .storage
@@ -612,7 +612,7 @@ pub async fn execute(
                 .await;
 
             Ok(Some(format!(
-                "Sprawa #{case_number} została unieważniona. Powód: {reason}"
+                "Case #{case_number} has been voided. Reason: {reason}"
             )))
         }
 
@@ -626,7 +626,7 @@ pub async fn execute(
             duration_seconds,
         } => {
             if !is_mod {
-                return Err(anyhow!("brak uprawnień moderatorskich do edycji spraw"));
+                return Err(anyhow!("missing moderator permissions to edit cases"));
             }
 
             let version = if *expected_version <= 0 {
@@ -671,7 +671,7 @@ pub async fn execute(
                     now,
                 )
                 .await
-                .map_err(|err| anyhow!("błąd aktualizacji sprawy: {err}"))?;
+                .map_err(|err| anyhow!("error updating case: {err}"))?;
 
             let _ = state
                 .storage
@@ -691,7 +691,7 @@ pub async fn execute(
                 .await;
 
             Ok(Some(format!(
-                "✏️ Zaktualizowano sprawę moderacyjną **#{case_number}** (wersja {version}).",
+                "✏️ Updated moderation case **#{case_number}** (version {version}).",
                 version = updated.version
             )))
         }
@@ -702,7 +702,7 @@ pub async fn execute(
         } => {
             if !is_mod {
                 return Err(anyhow!(
-                    "brak uprawnień moderatorskich do przywracania spraw"
+                    "missing moderator permissions to restore cases"
                 ));
             }
 
@@ -721,7 +721,7 @@ pub async fn execute(
                 .moderation_cases
                 .restore_case(guild_id.get(), *case_number, actor_id.get(), version, now)
                 .await
-                .map_err(|err| anyhow!("błąd przywracania sprawy: {err}"))?;
+                .map_err(|err| anyhow!("error restoring case: {err}"))?;
 
             let _ = state
                 .storage
@@ -737,7 +737,7 @@ pub async fn execute(
                 .await;
 
             Ok(Some(format!(
-                "Sprawa #{case_number} została przywrócona (Status: {:?}).",
+                "Case #{case_number} has been restored (Status: {:?}).",
                 restored.status
             )))
         }
@@ -745,7 +745,7 @@ pub async fn execute(
         ModerationCaseOperation::Stats { moderator_user_id } => {
             if !is_mod {
                 return Err(anyhow!(
-                    "brak uprawnień moderatorskich do przeglądania statystyk"
+                    "missing moderator permissions to view statistics"
                 ));
             }
 
@@ -757,10 +757,10 @@ pub async fn execute(
                 .moderation_cases
                 .stats(guild_id.get(), mod_id, now)
                 .await
-                .map_err(|err| anyhow!("błąd pobierania statystyk: {err}"))?;
+                .map_err(|err| anyhow!("error fetching statistics: {err}"))?;
 
             Ok(Some(format!(
-                "📊 **Statystyki moderacji**:\n• Wszystkich spraw: {}\n• Aktywnych: {}\n• Wygasłych: {}\n• Unieważnionych: {}",
+                "📊 **Moderation Statistics**:\n• Total cases: {}\n• Active: {}\n• Expired: {}\n• Voided: {}",
                 stats.total_cases, stats.active_cases, stats.expired_cases, stats.voided_cases
             )))
         }

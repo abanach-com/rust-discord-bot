@@ -1,21 +1,23 @@
+local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
+
 return {
     manifest = {
         id = "core",
-        name = "Core",
+        name = t("modules.core.name"),
         version = "0.2.0",
-        description = "Podstawowe komendy diagnostyczne i informacje o platformie.",
+        description = t("modules.core.description"),
         category = "platform",
         default_enabled = true,
         commands = {
             {
                 name = "ping",
-                description = "Sprawdza, czy bot i silnik Lua odpowiadają.",
+                description = t("modules.core.commands.ping.description"),
                 integration_types = { "guild", "user" },
                 contexts = { "guild", "bot_dm", "private_channel" },
             },
             {
                 name = "about",
-                description = "Pokazuje informacje o Rusty Discord Bot.",
+                description = t("modules.core.commands.about.description"),
                 integration_types = { "guild", "user" },
                 contexts = { "guild", "bot_dm", "private_channel" },
             },
@@ -32,7 +34,7 @@ return {
             return {
                 {
                     type = "reply",
-                    content = "Pong. Rust core i sandbox Lua działają poprawnie.",
+                    content = t("modules.core.commands.ping.reply", ctx),
                     ephemeral = true,
                 },
                 {
@@ -50,7 +52,7 @@ return {
             return {
                 {
                     type = "reply",
-                    content = "Rusty Discord Bot to modułowa platforma Discord: bezpieczny rdzeń Rust, logika Lua, panel WWW, PostgreSQL, audyt i obsługa głosu.",
+                    content = t("modules.core.commands.about.reply", ctx),
                     ephemeral = true,
                 },
             }

@@ -1,15 +1,17 @@
+local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
+
 return {
     manifest = {
         id = "giveaway",
         name = "Giveaway System",
         version = "1.0.0",
-        description = "Zarządzanie konkursami, losowaniami nagród i wyborem zwycięzców.",
+        description = t("modules.giveaway.description"),
         category = "community",
         default_enabled = true,
         commands = {
             {
                 name = "giveaway",
-                description = "Twórz i zarządzaj konkursami z nagrodami na serwerze.",
+                description = "Create and manage prize giveaways on the server.",
                 integration_types = { "guild" },
                 contexts = { "guild" },
                 options = {
@@ -35,7 +37,7 @@ return {
                             {
                                 type = "integer",
                                 name = "winners",
-                                description = "Liczba zwycięzców.",
+                                description = "Number of winners.",
                                 required = false,
                                 min_value = 1,
                                 max_value = 20,
@@ -45,7 +47,7 @@ return {
                     {
                         type = "subcommand",
                         name = "reroll",
-                        description = "Wylosuj ponownie zwycięzcę zakończonego konkursu.",
+                        description = "Reroll winner for a concluded giveaway.",
                         options = {
                             {
                                 type = "string",
@@ -58,7 +60,7 @@ return {
                     {
                         type = "subcommand",
                         name = "end",
-                        description = "Zakończ konkurs przed czasem.",
+                        description = "End a giveaway early.",
                         options = {
                             {
                                 type = "string",
@@ -92,24 +94,24 @@ return {
         local sub = options.subcommand or "start"
 
         if sub == "start" then
-            local prize = options.prize or "Wspaniała nagroda"
+            local prize = options.prize or "Awesome Prize"
             local duration = options.duration_minutes or 60
             local winners = options.winners or 1
 
             local text = string.format(
                 "🎉 **NOWY KONKURS (GIVEAWAY)!** 🎉\n\n" ..
                 "🎁 **Nagroda:** %s\n" ..
-                "👥 **Liczba zwycięzców:** %d\n" ..
+                "👥 **Number of winners:** %d\n" ..
                 "⏳ **Czas trwania:** %d min\n" ..
                 "Host: <@%s>\n\n" ..
-                "Zareaguj 🎉 aby wziąć udział!",
+                "React with 🎉 to enter!",
                 prize, winners, duration, ctx.user_id
             )
 
             return {
                 {
                     type = "reply",
-                    content = "Twój konkurs został pomyślnie utworzony i ogłoszony!",
+                    content = "Your giveaway was created and announced successfully!",
                     ephemeral = true,
                 },
                 {
@@ -135,7 +137,7 @@ return {
             return {
                 {
                     type = "reply",
-                    content = string.format("🎲 Ponowne losowanie dla konkursu `%s` zostało zakończone! Nowy zwycięzca został wyłoniony.", gid),
+                    content = string.format("🎲 Reroll for giveaway `%s` is complete! A new winner has been selected.", gid),
                     ephemeral = false,
                 },
             }
@@ -146,7 +148,7 @@ return {
             return {
                 {
                     type = "reply",
-                    content = string.format("🏁 Konkurs `%s` został zakończony przez organizatora.", gid),
+                    content = string.format("🏁 Giveaway `%s` has been ended by the organizer.", gid),
                     ephemeral = false,
                 },
             }

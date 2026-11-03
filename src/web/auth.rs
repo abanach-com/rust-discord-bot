@@ -75,7 +75,7 @@ impl LoginRateLimiter {
             } else {
                 if *count >= MAX_LOGIN_REQUESTS_PER_MINUTE_PER_IP {
                     return Err(ApiError::too_many_requests(
-                        "Zbyt wiele prób logowania z Twojego adresu IP. Odczekaj chwilę.",
+                        "Too many login attempts from your IP address. Please wait a moment.",
                     ));
                 }
                 *count = count.saturating_add(1);
@@ -97,7 +97,7 @@ impl LoginRateLimiter {
                     *count = count.saturating_sub(1);
                 }
                 return Err(ApiError::too_many_requests(
-                    "Zbyt wiele prób logowania na serwerze. Spróbuj ponownie za chwilę.",
+                    "Too many login attempts on the server. Please try again shortly.",
                 ));
             }
             self.global.store(current + 1, Ordering::SeqCst);
@@ -153,7 +153,7 @@ pub async fn login(
             .unwrap_or(0);
         if pending_after >= MAX_PENDING_OAUTH_STATES {
             return Err(ApiError::too_many_requests(
-                "Osiągnięto limit oczekujących prób logowania. Spróbuj ponownie za chwilę.",
+                "Pending login attempts limit reached. Please try again shortly.",
             ));
         }
     }
@@ -191,7 +191,7 @@ pub async fn callback(
         .map_err(|e| ApiError::internal(e.to_string()))?;
     if !valid_state {
         return Err(ApiError::bad_request(
-            "Nieprawidłowy stan logowania OAuth2 lub sesja wygasła.",
+            "Invalid OAuth2 login state or session expired.",
         ));
     }
 
@@ -317,14 +317,14 @@ pub async fn authenticate(
     headers: &HeaderMap,
 ) -> Result<(String, Session), ApiError> {
     let session_id = cookie_value(headers, SESSION_COOKIE)
-        .ok_or_else(|| ApiError::unauthorized("Zaloguj się przez Discord."))?;
+        .ok_or_else(|| ApiError::unauthorized("Please log in via Discord."))?;
     let session = state
         .app
         .sessions
         .get_session(&session_id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
-        .ok_or_else(|| ApiError::unauthorized("Sesja wygasła. Zaloguj się ponownie."))?;
+        .ok_or_else(|| ApiError::unauthorized("Session expired. Please log in again."))?;
 
     Ok((session_id, session))
 }
@@ -334,7 +334,7 @@ pub fn verify_csrf(headers: &HeaderMap, session: &Session) -> Result<(), ApiErro
         .get("x-csrf-token")
         .and_then(|value| value.to_str().ok());
     if provided != Some(session.csrf_token.as_str()) {
-        return Err(ApiError::forbidden("Nieprawidłowy token CSRF."));
+        return Err(ApiError::forbidden("Invalid CSRF token."));
     }
     Ok(())
 }
@@ -346,7 +346,7 @@ pub async fn ensure_guild_access(
 ) -> Result<(), ApiError> {
     if !session.guilds.iter().any(|guild| guild.id == guild_id) {
         return Err(ApiError::forbidden(
-            "Nie masz uprawnień do zarządzania tym serwerem.",
+            "You do not have permission to manage this server.",
         ));
     }
 
@@ -360,7 +360,7 @@ pub async fn ensure_guild_access(
             return Ok(());
         } else {
             return Err(ApiError::forbidden(
-                "Uprawnienia do zarządzania tym serwerem zostały cofnięte.",
+                "Permissions to manage this server have been revoked.",
             ));
         }
     }
@@ -378,7 +378,7 @@ pub async fn ensure_guild_access(
         Ok(())
     } else {
         Err(ApiError::forbidden(
-            "Uprawnienia do zarządzania tym serwerem zostały cofnięte.",
+            "Permissions to manage this server have been revoked.",
         ))
     }
 }
@@ -409,7 +409,7 @@ pub async fn revalidate_guild_permission(
 
         if response.status() == StatusCode::UNAUTHORIZED {
             return Err(ApiError::unauthorized(
-                "Token autoryzacyjny Discord wygasł lub został odwołany. Zaloguj się ponownie.",
+                "Discord authorization token expired or was revoked. Please log in again.",
             ));
         }
 
@@ -809,7 +809,7 @@ mod tests {
         assert_eq!(err.status, StatusCode::FORBIDDEN);
         assert_eq!(
             err.message,
-            "Uprawnienia do zarządzania tym serwerem zostały cofnięte."
+            "Permissions to manage this server have been revoked."
         );
 
         // 7. Verify cache now records can_manage = false

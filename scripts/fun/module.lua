@@ -1,18 +1,20 @@
+local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
+
 local memes = {
-    "Programista: naprawiłem błąd. Tester: który? Programista: ten, który widziałem.",
-    "Kod działa. Nikt nie wie dlaczego. Nie dotykać przed wdrożeniem.",
-    "To nie bug. To nieudokumentowana mechanika serwera.",
-    "Najkrótszy horror programisty: działało na moim komputerze.",
-    "Administrator nie śpi. Administrator czeka na kolejny alert.",
+    "Developer: I fixed the bug. QA: Which one? Developer: The one I saw.",
+    "Code works. Nobody knows why. Do not touch before deploy.",
+    "It is not a bug. It is an undocumented server feature.",
+    "Shortest developer horror story: It worked on my machine.",
+    "Admin does not sleep. Admin waits for the next alert.",
 }
 
 local answers = {
-    "Zdecydowanie tak.",
-    "Raczej tak.",
-    "Wygląda obiecująco.",
-    "Zapytaj ponownie później.",
-    "Nie liczyłbym na to.",
-    "Zdecydowanie nie.",
+    "Definitely yes.",
+    "Most likely.",
+    "Looks promising.",
+    "Ask again later.",
+    "Do not count on it.",
+    "Definitely no.",
 }
 
 return {
@@ -20,7 +22,7 @@ return {
         id = "fun",
         name = "Fun and Memes",
         version = "0.2.0",
-        description = "Memy tekstowe, losowanie, wybór i odpowiedzi społecznościowe.",
+        description = t("modules.fun.description"),
         category = "engagement",
         default_enabled = true,
         commands = {
@@ -32,14 +34,14 @@ return {
             },
             {
                 name = "roll",
-                description = "Losuje liczbę od 1 do podanego maksimum.",
+                description = "Rolls a random number from 1 to specified maximum.",
                 integration_types = { "guild", "user" },
                 contexts = { "guild", "bot_dm", "private_channel" },
                 options = {
                     {
                         type = "integer",
                         name = "max",
-                        description = "Najwyższa możliwa liczba.",
+                        description = "Maximum possible number.",
                         required = false,
                         min_value = 2,
                         max_value = 1000000,
@@ -48,14 +50,14 @@ return {
             },
             {
                 name = "choose",
-                description = "Wybiera jedną pozycję z listy rozdzielonej przecinkami.",
+                description = "Picks one item from a comma-separated list.",
                 integration_types = { "guild", "user" },
                 contexts = { "guild", "bot_dm", "private_channel" },
                 options = {
                     {
                         type = "string",
                         name = "options",
-                        description = "Na przykład: tank, healer, damage.",
+                        description = "For example: tank, healer, damage.",
                         required = true,
                         min_length = 3,
                         max_length = 500,
@@ -71,7 +73,7 @@ return {
                     {
                         type = "string",
                         name = "question",
-                        description = "Pytanie, na które ma odpowiedzieć bot.",
+                        description = "Question for the bot to answer.",
                         required = true,
                         min_length = 2,
                         max_length = 300,
@@ -106,7 +108,7 @@ return {
             return {
                 {
                     type = "reply",
-                    content = string.format("%s wylosował(a): **%d** (1–%d)", zuckerbot.escape_mentions(ctx.user_name), math.random(maximum), maximum),
+                    content = string.format("%s rolled: **%d** (1–%d)", zuckerbot.escape_mentions(ctx.user_name), math.random(maximum), maximum),
                     ephemeral = false,
                 },
             }

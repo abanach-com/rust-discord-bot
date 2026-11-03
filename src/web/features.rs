@@ -119,10 +119,10 @@ pub async fn get_snapshot(
         .get_server_snapshot(snapshot_id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
-        .ok_or_else(|| ApiError::not_found("Snapshot nie został znaleziony."))?;
+        .ok_or_else(|| ApiError::not_found("Snapshot was not found."))?;
 
     if snapshot.guild_id != guild_id {
-        return Err(ApiError::forbidden("Snapshot nie należy do tej gildii."));
+        return Err(ApiError::forbidden("Snapshot does not belong to this guild."));
     }
     Ok(Json(snapshot))
 }
@@ -159,7 +159,7 @@ pub async fn diff_snapshot(
         .get_server_snapshot(snapshot_id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
-        .ok_or_else(|| ApiError::not_found("Snapshot nie został znaleziony."))?;
+        .ok_or_else(|| ApiError::not_found("Snapshot was not found."))?;
 
     // Generate structural diff without altering Discord state
     Ok(Json(json!({
@@ -190,7 +190,7 @@ pub async fn restore_snapshot(
         .get_server_snapshot(snapshot_id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
-        .ok_or_else(|| ApiError::not_found("Snapshot nie został znaleziony."))?;
+        .ok_or_else(|| ApiError::not_found("Snapshot was not found."))?;
 
     // Controlled restore building ID remap table
     let id_remap = json!({
@@ -203,7 +203,7 @@ pub async fn restore_snapshot(
         "snapshot_id": snapshot.id,
         "guild_id": guild_id,
         "id_remap": id_remap,
-        "message": "Struktura serwera została pomyślnie zrekonstruowana."
+        "message": "Server structure successfully restored."
     })))
 }
 
@@ -511,7 +511,7 @@ pub async fn get_poll(
         .get_community_poll(poll_id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
-        .ok_or_else(|| ApiError::not_found("Ankieta nie została znaleziona."))?;
+        .ok_or_else(|| ApiError::not_found("Poll was not found."))?;
 
     Ok(Json(poll))
 }
@@ -536,7 +536,7 @@ pub async fn vote_poll(
         .vote_community_poll(poll_id, payload.option_idx)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
-        .ok_or_else(|| ApiError::not_found("Ankieta nie została znaleziona."))?;
+        .ok_or_else(|| ApiError::not_found("Poll was not found."))?;
 
     Ok(Json(poll))
 }
@@ -599,7 +599,7 @@ pub async fn get_giveaway(
         .get_giveaway(giveaway_id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
-        .ok_or_else(|| ApiError::not_found("Losowanie nie zostało znalezione."))?;
+        .ok_or_else(|| ApiError::not_found("Giveaway was not found."))?;
 
     Ok(Json(ga))
 }
@@ -928,10 +928,10 @@ pub async fn get_event_ics(
         .get_scheduled_event(event_id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
-        .ok_or_else(|| ApiError::not_found("Wydarzenie nie zostało znalezione."))?;
+        .ok_or_else(|| ApiError::not_found("Event was not found."))?;
 
     if ev.guild_id != guild_id {
-        return Err(ApiError::forbidden("Wydarzenie nie należy do tej gildii."));
+        return Err(ApiError::forbidden("Event does not belong to this guild."));
     }
 
     let ics_content = generate_icalendar_event(&ev);
@@ -1485,7 +1485,7 @@ pub async fn verify_game_account(
 
     if !verified {
         return Err(ApiError::bad_request(
-            "Nieprawidłowy kod weryfikacyjny lub link wygasł.",
+            "Invalid verification code or link has expired.",
         ));
     }
 
@@ -1842,7 +1842,7 @@ pub async fn query_ai_assistant(
     if q.contains("regulamin") || q.contains("rules") || q.contains("pomoc") || q.contains("help") {
         Ok(Json(json!({
             "answered": true,
-            "response": "Zgodnie z sekcją #regulamin pkt 3, prosimy o zachowanie kultury oraz przestrzeganie netykiety.",
+            "response": "According to rule 3, please maintain respectful conduct and follow netiquette.",
             "citations": ["#regulamin", "docs/COMMUNITY_RULES.md"],
             "escalated_to_staff": false
         })))
@@ -1850,7 +1850,7 @@ pub async fn query_ai_assistant(
         // Hallucination guard: when corpus is insufficient, defer to human staff
         Ok(Json(json!({
             "answered": false,
-            "response": "Przepraszam, nasza baza wiedzy nie zawiera jednoznacznej odpowiedzi na to pytanie. Przekazano do zespołu moderatorów.",
+            "response": "Sorry, our knowledge base does not contain an answer to this query. Forwarded to moderators.",
             "citations": [],
             "escalated_to_staff": true
         })))

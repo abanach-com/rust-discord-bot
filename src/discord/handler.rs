@@ -141,7 +141,7 @@ impl EventHandler for Handler {
             let _ = respond_ephemeral(
                 &ctx,
                 &command,
-                "Wewnętrzny błąd bota. Szczegóły zostały zapisane w logach.",
+                &crate::translations::t(&command.locale, "system.internal_error"),
             )
             .await;
         }
@@ -529,17 +529,20 @@ async fn handle_command(
 
     if let Err(err) = result {
         tracing::error!(command = %command.data.name, error = %err, "Error executing command");
+        let err_text = crate::translations::t_args(
+            &command.locale,
+            "system.command_error",
+            &[("error", &err.to_string())],
+        );
         if deferred.load(Ordering::SeqCst) {
             let _ = command
                 .edit_response(
                     &ctx.http,
-                    serenity::builder::EditInteractionResponse::new().content(format!(
-                        "❌ Wystąpił błąd podczas przetwarzania polecenia: {err}"
-                    )),
+                    serenity::builder::EditInteractionResponse::new().content(&err_text),
                 )
                 .await;
         } else if !responded.swap(true, Ordering::SeqCst) {
-            let _ = respond_ephemeral(ctx, command, &format!("❌ Wystąpił błąd: {err}")).await;
+            let _ = respond_ephemeral(ctx, command, &err_text).await;
         }
     }
 
@@ -555,13 +558,23 @@ async fn execute_command_inner(
 ) -> anyhow::Result<()> {
     let Some(module_id) = state.scripts.module_for_command(&command.data.name).await else {
         if !deferred.load(Ordering::SeqCst) && !responded.swap(true, Ordering::SeqCst) {
-            respond_ephemeral(ctx, command, "Ta komenda nie jest już dostępna.").await?;
+            respond_ephemeral(
+                ctx,
+                command,
+                &crate::translations::t(&command.locale, "system.command_unavailable"),
+            )
+            .await?;
         }
         return Ok(());
     };
     let Some(manifest) = state.scripts.manifest(&module_id).await else {
         if !deferred.load(Ordering::SeqCst) && !responded.swap(true, Ordering::SeqCst) {
-            respond_ephemeral(ctx, command, "Moduł tej komendy nie jest załadowany.").await?;
+            respond_ephemeral(
+                ctx,
+                command,
+                &crate::translations::t(&command.locale, "system.module_not_loaded"),
+            )
+            .await?;
         }
         return Ok(());
     };
@@ -589,7 +602,7 @@ async fn execute_command_inner(
             respond_ephemeral(
                 ctx,
                 command,
-                "Ten moduł został wyłączony w panelu administracyjnym.",
+                &crate::translations::t(&command.locale, "system.module_disabled"),
             )
             .await?;
         }
@@ -610,15 +623,15 @@ async fn execute_command_inner(
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let retry_secs = rate_decision.reset_after.as_secs().max(1);
         if !deferred.load(Ordering::SeqCst) && !responded.swap(true, Ordering::SeqCst) {
-            respond_ephemeral(
-                ctx,
-                command,
-                &format!(
-                    "Osiągnięto limit wywołań komendy `/{}`. Spróbuj ponownie za {} s.",
-                    command.data.name, retry_secs
-                ),
-            )
-            .await?;
+            let msg = crate::translations::t_args(
+                &command.locale,
+                "system.rate_limited",
+                &[
+                    ("command", &command.data.name),
+                    ("seconds", &retry_secs.to_string()),
+                ],
+            );
+            respond_ephemeral(ctx, command, &msg).await?;
         }
         return Ok(());
     }

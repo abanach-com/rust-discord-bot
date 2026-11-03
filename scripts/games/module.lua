@@ -1,3 +1,5 @@
+local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
+
 local function reply(content, ephemeral)
     return {
         {
@@ -51,53 +53,53 @@ return {
         id = "games",
         name = "Community Games",
         version = "1.0.0",
-        description = "Lekkie gry społecznościowe, losowania i generatory bez waluty ani prawdziwych stawek.",
+        description = t("modules.games.description"),
         category = "fun",
         default_enabled = true,
         commands = {
             {
                 name = "coinflip",
-                description = "Rzuca wirtualną monetą.",
+                description = "Flip a virtual coin.",
                 dm_permission = true,
             },
             {
                 name = "dice",
-                description = "Rzuca wybraną liczbą kostek.",
+                description = "Roll dice with custom sides and count.",
                 dm_permission = true,
                 options = {
                     { type = "integer", name = "count", description = "Liczba kostek.", required = false, min_value = 1, max_value = 20 },
-                    { type = "integer", name = "sides", description = "Liczba ścian każdej kostki.", required = false, min_value = 2, max_value = 100 },
+                    { type = "integer", name = "sides", description = "Number of sides per die.", required = false, min_value = 2, max_value = 100 },
                 },
             },
             {
                 name = "rps",
-                description = "Gra w papier, kamień, nożyce przeciwko botowi.",
+                description = "Play rock, paper, scissors against the bot.",
                 dm_permission = true,
                 options = {
                     {
                         type = "string",
                         name = "choice",
-                        description = "Twój wybór.",
+                        description = "Your choice.",
                         required = true,
                         choices = {
-                            { name = "Kamień", value = "rock" },
-                            { name = "Papier", value = "paper" },
-                            { name = "Nożyce", value = "scissors" },
+                            { name = "Rock", value = "rock" },
+                            { name = "Paper", value = "paper" },
+                            { name = "Scissors", value = "scissors" },
                         },
                     },
                 },
             },
             {
                 name = "rate",
-                description = "Wystawia stabilną ocenę od 0 do 100 procent.",
+                description = "Gives a stable rating from 0 to 100 percent.",
                 dm_permission = true,
                 options = {
-                    { type = "string", name = "subject", description = "Co mamy ocenić?", required = true, min_length = 1, max_length = 200 },
+                    { type = "string", name = "subject", description = "What should we rate?", required = true, min_length = 1, max_length = 200 },
                 },
             },
             {
                 name = "ship",
-                description = "Oblicza zabawne dopasowanie dwóch nazw.",
+                description = "Calculates a fun match between two names.",
                 dm_permission = true,
                 options = {
                     { type = "string", name = "first", description = "Pierwsza nazwa.", required = true, min_length = 1, max_length = 64 },
@@ -106,24 +108,24 @@ return {
             },
             {
                 name = "teams",
-                description = "Dzieli listę osób na losowe drużyny.",
+                description = "Splits player list into random teams.",
                 dm_permission = true,
                 options = {
                     { type = "string", name = "players", description = "Nazwy rozdzielone przecinkami.", required = true, min_length = 3, max_length = 1000 },
-                    { type = "integer", name = "count", description = "Liczba drużyn.", required = false, min_value = 2, max_value = 10 },
+                    { type = "integer", name = "count", description = "Number of teams.", required = false, min_value = 2, max_value = 10 },
                 },
             },
             {
                 name = "duel",
-                description = "Rozstrzyga towarzyski pojedynek dwóch użytkowników.",
+                description = "Settles a friendly duel between two users.",
                 dm_permission = false,
                 options = {
-                    { type = "user", name = "opponent", description = "Twój przeciwnik.", required = true },
+                    { type = "user", name = "opponent", description = "Your opponent.", required = true },
                 },
             },
             {
                 name = "lootdrop",
-                description = "Generuje losowy fantastyczny łup bez wartości ekonomicznej.",
+                description = "Generates random fantasy loot with no economy value.",
                 dm_permission = true,
             },
         },
@@ -141,7 +143,7 @@ return {
 
         if command == "coinflip" then
             seed(ctx, command)
-            local result = math.random(2) == 1 and "🪙 Orzeł" or "🪙 Reszka"
+            local result = math.random(2) == 1 and "🪙 Heads" or "🪙 Tails"
             return reply(result, ephemeral)
         end
 
@@ -162,7 +164,7 @@ return {
         end
 
         if command == "rps" then
-            local labels = { rock = "🪨 Kamień", paper = "📄 Papier", scissors = "✂️ Nożyce" }
+            local labels = { rock = "🪨 Rock", paper = "📄 Paper", scissors = "✂️ Scissors" }
             local choices = { "rock", "paper", "scissors" }
             seed(ctx, "rps")
             local bot = choices[math.random(#choices)]
@@ -173,7 +175,7 @@ return {
             elseif (user == "rock" and bot == "scissors")
                 or (user == "paper" and bot == "rock")
                 or (user == "scissors" and bot == "paper") then
-                outcome = "Wygrywasz!"
+                outcome = "Winner issz!"
             else
                 outcome = "Bot wygrywa."
             end
@@ -200,10 +202,10 @@ return {
             local people = split_people(ctx.options.players)
             local team_count = math.tointeger(ctx.options.count or 2) or 2
             if #people < team_count then
-                return reply("Liczba różnych osób musi być co najmniej równa liczbie drużyn.", true)
+                return reply("Number of people must be at least equal to number of teams.", true)
             end
             if #people > 40 then
-                return reply("Jednorazowo można podzielić maksymalnie 40 osób.", true)
+                return reply("Maximum 40 people can be split at once.", true)
             end
 
             seed(ctx, table.concat(people, ":"))
@@ -216,19 +218,19 @@ return {
 
             local lines = {}
             for index, team in ipairs(teams) do
-                table.insert(lines, "**Drużyna " .. index .. ":** " .. table.concat(team, ", "))
+                table.insert(lines, "**Team " .. index .. ":** " .. table.concat(team, ", "))
             end
             return reply(table.concat(lines, "\n"), ephemeral)
         end
 
         if command == "duel" then
             local opponent = ctx.options.opponent
-            if opponent == ctx.user_id then return reply("Nie możesz pojedynkować się sam ze sobą.", true) end
+            if opponent == ctx.user_id then return reply("You cannot duel yourself.", true) end
             seed(ctx, opponent)
             local first_wins = math.random(2) == 1
             local winner = first_wins and ctx.user_id or opponent
             local loser = first_wins and opponent or ctx.user_id
-            local moves = { "potężnym ciosem", "perfekcyjnym unikiem", "sprytną kontrą", "krytycznym trafieniem" }
+            local moves = { "a powerful strike", "a perfect dodge", "a clever counter", "a critical hit" }
             return reply(string.format("⚔️ <@%s> pokonuje <@%s> %s!", winner, loser, moves[math.random(#moves)]), ephemeral)
         end
 
@@ -240,10 +242,10 @@ return {
             elseif roll >= 990 then rarity = "🟧 Legendarny"
             elseif roll >= 930 then rarity = "🟪 Epicki"
             elseif roll >= 750 then rarity = "🟦 Rzadki"
-            elseif roll >= 400 then rarity = "🟩 Niezwykły"
-            else rarity = "⬜ Zwykły" end
-            local prefixes = { "Pradawny", "Runiczny", "Płonący", "Lodowy", "Astralny", "Przeklęty", "Królewski" }
-            local items = { "Miecz", "Łuk", "Pierścień", "Amulet", "Hełm", "Tarcza", "Kostur", "Sztylet" }
+            elseif roll >= 400 then rarity = "🟩 Uncommon"
+            else rarity = "⬜ Common" end
+            local prefixes = { "Ancient", "Runic", "Flaming", "Frozen", "Astral", "Cursed", "Royal" }
+            local items = { "Sword", "Bow", "Ring", "Amulet", "Helmet", "Shield", "Staff", "Dagger" }
             return reply("🎁 Zdobywasz: **" .. rarity .. " " .. prefixes[math.random(#prefixes)] .. " " .. items[math.random(#items)] .. "**", ephemeral)
         end
 

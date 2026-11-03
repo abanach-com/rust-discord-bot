@@ -1,9 +1,11 @@
+local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
+
 return {
     manifest = {
         id = "welcome",
         name = "Welcome and Goodbye",
         version = "1.0.0",
-        description = "Konfigurowalne powitania, pożegnania, automatyczne role i wiadomości prywatne dla nowych członków.",
+        description = t("modules.welcome.description"),
         category = "automation",
         default_enabled = false,
         events = {
@@ -16,44 +18,44 @@ return {
             properties = {
                 channel_id = {
                     type = "string",
-                    title = "ID kanału powitalnego",
+                    title = "Welcome channel ID",
                 },
                 message = {
                     type = "string",
-                    title = "Treść powitania",
-                    default = "Witaj {user} na serwerze {server}! Jesteś naszym {member_count}. członkiem.",
+                    title = "Welcome message content",
+                    default = "Welcome {user} to {server}! You are member #{member_count}.",
                     maxLength = 1800,
                 },
                 dm_welcome = {
                     type = "boolean",
-                    title = "Wysyłaj powitanie w wiadomości prywatnej (DM)",
+                    title = "Send welcome in direct message (DM)",
                     default = false,
                 },
                 dm_message = {
                     type = "string",
-                    title = "Treść powitania w DM",
-                    default = "Witaj na serwerze {server}! Zapoznaj się z regulaminem i miłego pobytu.",
+                    title = "Welcome message content w DM",
+                    default = "Welcome to {server}! Please review the rules and enjoy your stay.",
                     maxLength = 1800,
                 },
                 auto_roles = {
                     type = "array",
-                    title = "Role automatycznie nadawane po dołączeniu",
+                    title = "Roles automatically granted on join",
                     items = { type = "string" },
                     maxItems = 10,
                 },
                 send_goodbye = {
                     type = "boolean",
-                    title = "Wysyłaj wiadomości pożegnalne",
+                    title = "Send goodbye messages",
                     default = false,
                 },
                 goodbye_channel_id = {
                     type = "string",
-                    title = "ID kanału pożegnalnego",
+                    title = "Goodbye channel ID",
                 },
                 goodbye_message = {
                     type = "string",
-                    title = "Treść pożegnania",
-                    default = "Żegnaj {username}. Będziemy tęsknić!",
+                    title = "Goodbye message content",
+                    default = "Goodbye {username}. We will miss you!",
                     maxLength = 1800,
                 },
             },
@@ -83,7 +85,7 @@ return {
                 return zuckerbot.truncate(content, 2000)
             end
 
-            -- Kanał powitalny
+            -- Welcome Channel
             if ctx.config.channel_id and ctx.config.channel_id ~= "" then
                 local template = ctx.config.message or "Witaj {user} na serwerze {server}."
                 table.insert(actions, {
@@ -101,9 +103,9 @@ return {
                 })
             end
 
-            -- Wiadomość prywatna (DM)
+            -- Direct message (DM)
             if ctx.config.dm_welcome == true and not user.bot then
-                local dm_template = ctx.config.dm_message or "Witaj na serwerze {server}! Zapoznaj się z regulaminem i miłego pobytu."
+                local dm_template = ctx.config.dm_message or "Welcome to {server}! Please review the rules and enjoy your stay."
                 table.insert(actions, {
                     type = "send_direct_message",
                     user_id = user_id,
@@ -111,7 +113,7 @@ return {
                 })
             end
 
-            -- Automatyczne role dla nowego członka
+            -- Auto roles for new member
             if type(ctx.config.auto_roles) == "table" then
                 for _, role_id in ipairs(ctx.config.auto_roles) do
                     local rid = tostring(role_id or "")
@@ -120,7 +122,7 @@ return {
                             type = "add_role",
                             user_id = user_id,
                             role_id = rid,
-                            reason = "Automatyczna rola powitalna dla nowego członka",
+                            reason = "Auto welcome role for new member",
                         })
                     end
                 end
@@ -144,10 +146,10 @@ return {
             local member_count = tostring(ctx.data.member_count or "")
             local raw_goodbye_display = (type(user.global_name) == "string" and user.global_name ~= "") and user.global_name
                 or (type(user.name) == "string" and user.name ~= "") and user.name
-                or "użytkowniku"
+                or "member"
             local safe_name = zuckerbot.escape_mentions(raw_goodbye_display)
 
-            local template = ctx.config.goodbye_message or "Żegnaj {username}. Będziemy tęsknić!"
+            local template = ctx.config.goodbye_message or "Goodbye {username}. We will miss you!"
             local content = string.gsub(template, "{username}", function() return safe_name end)
             content = string.gsub(content, "{server}", function() return server_name end)
             content = string.gsub(content, "{member_count}", function() return member_count end)

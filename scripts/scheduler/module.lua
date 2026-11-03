@@ -1,3 +1,5 @@
+local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
+
 local ADMINISTRATOR = 8
 local MANAGE_GUILD = 32
 
@@ -57,13 +59,13 @@ return {
         id = "scheduler",
         name = "Scheduler and Reminders",
         version = "1.0.0",
-        description = "Trwałe przypomnienia użytkowników oraz jednorazowe i cykliczne wiadomości serwera.",
+        description = "Persistent user reminders as well as one-time and recurring server messages.",
         category = "automation",
         default_enabled = true,
         commands = {
             {
                 name = "remind",
-                description = "Tworzy trwałe przypomnienie na tym kanale.",
+                description = "Create persistent reminder in this channel.",
                 integration_types = { "guild" },
                 contexts = { "guild" },
                 options = {
@@ -78,7 +80,7 @@ return {
                     {
                         type = "string",
                         name = "message",
-                        description = "Treść przypomnienia.",
+                        description = "Reminder message content.",
                         required = true,
                         min_length = 1,
                         max_length = 1800,
@@ -86,14 +88,14 @@ return {
                     {
                         type = "boolean",
                         name = "mention",
-                        description = "Czy bot ma oznaczyć autora przy wysłaniu.",
+                        description = "Whether bot mentions author upon dispatch.",
                         required = false,
                     },
                 },
             },
             {
                 name = "reminders",
-                description = "Wyświetla twoje aktywne przypomnienia.",
+                description = "Display your active reminders.",
                 integration_types = { "guild" },
                 contexts = { "guild" },
             },
@@ -111,13 +113,13 @@ return {
                         choices = {
                             { name = "Anuluj", value = "cancel" },
                             { name = "Wstrzymaj", value = "pause" },
-                            { name = "Wznów", value = "resume" },
+                            { name = "Resume", value = "resume" },
                         },
                     },
                     {
                         type = "string",
                         name = "id",
-                        description = "Pełny identyfikator UUID zadania.",
+                        description = "Full task UUID.",
                         required = true,
                         min_length = 36,
                         max_length = 36,
@@ -126,7 +128,7 @@ return {
             },
             {
                 name = "schedulemessage",
-                description = "Planuje jednorazową albo cykliczną wiadomość serwera.",
+                description = "Schedule one-off or recurring server message.",
                 integration_types = { "guild" },
                 contexts = { "guild" },
                 default_member_permissions = "32",
@@ -142,7 +144,7 @@ return {
                     {
                         type = "string",
                         name = "message",
-                        description = "Treść zaplanowanej wiadomości.",
+                        description = "Scheduled message content.",
                         required = true,
                         min_length = 1,
                         max_length = 1800,
@@ -150,13 +152,13 @@ return {
                     {
                         type = "channel",
                         name = "channel",
-                        description = "Kanał docelowy należący do tego serwera.",
+                        description = "Destination channel on this server.",
                         required = true,
                     },
                     {
                         type = "string",
                         name = "repeat",
-                        description = "Opcjonalny interwał, np. 1h, 1d albo 1w.",
+                        description = "Optional interval, e.g. 1h, 1d, or 1w.",
                         required = false,
                         min_length = 2,
                         max_length = 64,
@@ -164,7 +166,7 @@ return {
                     {
                         type = "integer",
                         name = "runs",
-                        description = "Łączna liczba wykonań; brak oznacza cykl bez końca.",
+                        description = "Total run count; empty means endless cycle.",
                         required = false,
                         min_value = 2,
                         max_value = 10000,
@@ -172,21 +174,21 @@ return {
                     {
                         type = "boolean",
                         name = "mention_creator",
-                        description = "Czy oznaczyć autora harmonogramu przy wysłaniu.",
+                        description = "Whether to mention schedule author on dispatch.",
                         required = false,
                     },
                 },
             },
             {
                 name = "schedules",
-                description = "Wyświetla aktywne zadania całego serwera.",
+                description = "Display active tasks across the entire server.",
                 integration_types = { "guild" },
                 contexts = { "guild" },
                 default_member_permissions = "32",
             },
             {
                 name = "schedulecontrol",
-                description = "Zarządza dowolnym zadaniem harmonogramu serwera.",
+                description = "Manage any server schedule task.",
                 integration_types = { "guild" },
                 contexts = { "guild" },
                 default_member_permissions = "32",
@@ -199,13 +201,13 @@ return {
                         choices = {
                             { name = "Anuluj", value = "cancel" },
                             { name = "Wstrzymaj", value = "pause" },
-                            { name = "Wznów", value = "resume" },
+                            { name = "Resume", value = "resume" },
                         },
                     },
                     {
                         type = "string",
                         name = "id",
-                        description = "Pełny identyfikator UUID zadania.",
+                        description = "Full task UUID.",
                         required = true,
                         min_length = 36,
                         max_length = 36,
@@ -260,7 +262,7 @@ return {
     on_command = function(command, ctx)
         if command == "remind" then
             if ctx.config.user_reminders_enabled == false then
-                return reply("Przypomnienia użytkowników są wyłączone na tym serwerze.")
+                return reply("User reminders are disabled on this server.")
             end
 
             local minimum_delay, maximum_delay, maximum_jobs = limits(ctx.config, false)
@@ -293,10 +295,10 @@ return {
 
         if command == "schedulemessage" then
             if not has_manage_guild(ctx) then
-                return reply("Ta komenda wymaga uprawnienia Zarządzanie serwerem.")
+                return reply("This command requires Manage Server permission.")
             end
             if ctx.options.runs and not ctx.options["repeat"] then
-                return reply("Liczba wykonań wymaga podania interwału repeat.")
+                return reply("Execution count requires a repeat interval.")
             end
 
             local minimum_delay, maximum_delay, maximum_jobs = limits(ctx.config, true)
@@ -320,7 +322,7 @@ return {
 
         if command == "schedules" then
             if not has_manage_guild(ctx) then
-                return reply("Ta komenda wymaga uprawnienia Zarządzanie serwerem.")
+                return reply("This command requires Manage Server permission.")
             end
             return scheduler({
                 type = "list",
@@ -331,7 +333,7 @@ return {
 
         if command == "schedulecontrol" then
             if not has_manage_guild(ctx) then
-                return reply("Ta komenda wymaga uprawnienia Zarządzanie serwerem.")
+                return reply("This command requires Manage Server permission.")
             end
             local operation = control_operation(ctx.options.action, ctx.options.id)
             if not operation then return reply("Nieznana operacja.") end

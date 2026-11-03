@@ -1,3 +1,5 @@
+local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
+
 local ADMINISTRATOR = 8
 local MANAGE_GUILD = 32
 
@@ -56,7 +58,7 @@ return {
         id = "progression",
         name = "Progression and Economy",
         version = "1.0.0",
-        description = "Trwały leveling, XP, monety, daily streak, transfery, reputacja i rankingi.",
+        description = "Persistent leveling, XP, coins, daily streaks, transfers, reputation, and leaderboards.",
         category = "engagement",
         default_enabled = false,
         events = {
@@ -65,25 +67,25 @@ return {
         commands = {
             {
                 name = "rank",
-                description = "Wyświetla poziom, XP i pełny profil aktywności.",
+                description = "Display level, XP, and full activity profile.",
                 integration_types = { "guild" },
                 contexts = { "guild" },
                 options = {
-                    { type = "user", name = "user", description = "Opcjonalny użytkownik.", required = false },
+                    { type = "user", name = "user", description = "Optional user.", required = false },
                 },
             },
             {
                 name = "balance",
-                description = "Wyświetla saldo monet i serię nagród daily.",
+                description = "Display coins balance and daily reward streak.",
                 integration_types = { "guild" },
                 contexts = { "guild" },
                 options = {
-                    { type = "user", name = "user", description = "Opcjonalny użytkownik.", required = false },
+                    { type = "user", name = "user", description = "Optional user.", required = false },
                 },
             },
             {
                 name = "leaderboard",
-                description = "Wyświetla ranking aktywności, monet albo reputacji.",
+                description = "Display activity, coins, or reputation leaderboard.",
                 integration_types = { "guild" },
                 contexts = { "guild" },
                 options = {
@@ -96,7 +98,7 @@ return {
                             { name = "XP", value = "xp" },
                             { name = "Monety", value = "coins" },
                             { name = "Reputacja", value = "reputation" },
-                            { name = "Wiadomości", value = "messages" },
+                            { name = "Messages", value = "messages" },
                         },
                     },
                     { type = "integer", name = "limit", description = "Liczba pozycji od 1 do 25.", required = false, min_value = 1, max_value = 25 },
@@ -104,41 +106,41 @@ return {
             },
             {
                 name = "daily",
-                description = "Odbiera codzienną nagrodę i zwiększa serię.",
+                description = "Claim daily reward and increment streak.",
                 integration_types = { "guild" },
                 contexts = { "guild" },
             },
             {
                 name = "pay",
-                description = "Przekazuje własne monety innemu użytkownikowi.",
+                description = "Transfer coins to another user.",
                 integration_types = { "guild" },
                 contexts = { "guild" },
                 options = {
-                    { type = "user", name = "user", description = "Odbiorca monet.", required = true },
+                    { type = "user", name = "user", description = "Recipient of coins.", required = true },
                     { type = "integer", name = "amount", description = "Kwota transferu.", required = true, min_value = 1, max_value = 1000000000 },
                 },
             },
             {
                 name = "rep",
-                description = "Przyznaje reputację pomocnemu członkowi społeczności.",
+                description = "Award reputation to a helpful community member.",
                 integration_types = { "guild" },
                 contexts = { "guild" },
                 options = {
-                    { type = "user", name = "user", description = "Użytkownik otrzymujący reputację.", required = true },
+                    { type = "user", name = "user", description = "User receiving reputation.", required = true },
                 },
             },
             {
                 name = "progressadmin",
-                description = "Koryguje XP, monety albo reputację użytkownika.",
+                description = "Adjust user XP, coins, or reputation.",
                 integration_types = { "guild" },
                 contexts = { "guild" },
                 default_member_permissions = "32",
                 options = {
-                    { type = "user", name = "user", description = "Użytkownik do aktualizacji.", required = true },
+                    { type = "user", name = "user", description = "User to update.", required = true },
                     { type = "integer", name = "xp", description = "Zmiana XP; dopuszczalna jest liczba ujemna.", required = false, max_value = 1000000000 },
-                    { type = "integer", name = "coins", description = "Zmiana monet; dopuszczalna jest liczba ujemna.", required = false, max_value = 1000000000 },
-                    { type = "integer", name = "reputation", description = "Zmiana reputacji; może być ujemna.", required = false, max_value = 1000000000 },
-                    { type = "string", name = "reason", description = "Powód korekty do audytu.", required = false, max_length = 512 },
+                    { type = "integer", name = "coins", description = "Zmiana coins; dopuszczalna jest liczba ujemna.", required = false, max_value = 1000000000 },
+                    { type = "integer", name = "reputation", description = "Reputation change; may be negative.", required = false, max_value = 1000000000 },
+                    { type = "string", name = "reason", description = "Reason for adjustment audit.", required = false, max_length = 512 },
                 },
             },
         },
@@ -165,7 +167,7 @@ return {
                 level_up_message = {
                     type = "string",
                     maxLength = 500,
-                    default = "🎉 {user} awansuje na poziom **{level}**! Łączne XP: **{xp}**.",
+                    default = "🎉 {user} has reached level **{level}**! Total XP: **{xp}**.",
                 },
                 role_rewards = {
                     type = "array",
@@ -240,19 +242,19 @@ return {
 
         if command == "progressadmin" then
             if not has_manage_guild(ctx) then
-                return reply("Nie masz uprawnienia Zarządzanie serwerem.")
+                return reply("You lack the Manage Server permission.")
             end
 
             local xp = math.tointeger(ctx.options.xp or 0) or 0
             local coins = math.tointeger(ctx.options.coins or 0) or 0
             local reputation = math.tointeger(ctx.options.reputation or 0) or 0
             if xp == 0 and coins == 0 and reputation == 0 then
-                return reply("Podaj co najmniej jedną niezerową zmianę.")
+                return reply("Specify at least one non-zero adjustment.")
             end
             if math.abs(xp) > 1000000000
                 or math.abs(coins) > 1000000000
                 or math.abs(reputation) > 1000000000 then
-                return reply("Jedna korekta nie może przekraczać miliarda w żadnym kierunku.")
+                return reply("Adjustment cannot exceed one billion.")
             end
 
             return action({

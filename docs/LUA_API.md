@@ -324,13 +324,27 @@ Moderation cases manage persistent case history, staff notes, and points with Di
 
 ## Built-in helper API
 
-The global `zuckerbot` table contains safe pure helpers:
+The global `rustybot` (or `zuckerbot` for backwards compatibility) table contains safe pure helpers and translation utilities:
 
 ```lua
-zuckerbot.api_version
-zuckerbot.escape_mentions(text)
-zuckerbot.truncate(text, max_characters)
-zuckerbot.unix_time()
+rustybot.api_version
+rustybot.escape_mentions(text)
+rustybot.truncate(text, max_characters)
+rustybot.unix_time()
+rustybot.t(key, [args/ctx], [locale])
+```
+
+The global `t(key, [args/ctx], [locale])` and `translate(...)` functions are also directly exposed in the module environment:
+
+```lua
+-- Simple lookup (defaults to English or ctx.locale if ctx is passed):
+local msg = t("modules.core.replies.ping_pong")
+
+-- Lookup with formatted args:
+local msg = t("modules.welcome.embed_description", { user = ctx.user_name, guild = ctx.guild_name }, ctx)
+
+-- Explicit locale override:
+local msg = t("modules.core.replies.ping_pong", nil, "de")
 ```
 
 `escape_mentions` inserts a zero-width separator after `@`. Use it whenever untrusted display names or user-provided strings are included in output.

@@ -1,27 +1,29 @@
+local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
+
 return {
     manifest = {
         id = "birthdays",
-        name = "Birthday Tracker",
+        name = t("modules.birthdays.name"),
         version = "1.0.0",
-        description = "Kalendarz urodzin, automatyczne życzenia i okolicznościowa rola.",
+        description = t("modules.birthdays.description"),
         category = "community",
         default_enabled = true,
         commands = {
             {
                 name = "birthday",
-                description = "Zapisz swoje urodziny i sprawdzaj nadchodzące święta członków serwera.",
+                description = t("modules.birthdays.commands.birthday.description"),
                 integration_types = { "guild" },
                 contexts = { "guild" },
                 options = {
                     {
                         type = "subcommand",
                         name = "set",
-                        description = "Zapisz swoją datę urodzin.",
+                        description = t("modules.birthdays.commands.birthday.options.set.description"),
                         options = {
                             {
                                 type = "integer",
                                 name = "day",
-                                description = "Dzień miesiąca (1-31).",
+                                description = t("modules.birthdays.commands.birthday.options.day.description"),
                                 required = true,
                                 min_value = 1,
                                 max_value = 31,
@@ -29,7 +31,7 @@ return {
                             {
                                 type = "integer",
                                 name = "month",
-                                description = "Miesiąc (1-12).",
+                                description = t("modules.birthdays.commands.birthday.options.month.description"),
                                 required = true,
                                 min_value = 1,
                                 max_value = 12,
@@ -39,12 +41,12 @@ return {
                     {
                         type = "subcommand",
                         name = "check",
-                        description = "Sprawdź kiedy urodziny obchodzi wybrany użytkownik.",
+                        description = t("modules.birthdays.commands.birthday.options.check.description"),
                         options = {
                             {
                                 type = "user",
                                 name = "user",
-                                description = "Użytkownik do sprawdzenia.",
+                                description = t("modules.birthdays.commands.birthday.options.user.description"),
                                 required = false,
                             },
                         },
@@ -52,7 +54,7 @@ return {
                     {
                         type = "subcommand",
                         name = "upcoming",
-                        description = "Pokaż najbliższe urodziny na serwerze.",
+                        description = t("modules.birthdays.commands.birthday.options.upcoming.description"),
                         options = {},
                     },
                 },
@@ -62,9 +64,8 @@ return {
             type = "object",
             additionalProperties = false,
             properties = {
-                announcement_channel_id = { type = { "string", "null" } },
-                birthday_role_id = { type = { "string", "null" } },
-                celebration_message = { type = "string", default = "Sto lat {user}! Wszystkiego najlepszego z okazji urodzin! 🎉🎂" },
+                announcement_channel_id = { type = "string" },
+                birthday_role_id = { type = "string" },
             },
         },
     },
@@ -75,7 +76,8 @@ return {
         end
 
         local options = ctx.options or {}
-        local sub = options.subcommand or "upcoming"
+        local sub = options.subcommand or "check"
+        local user_id = ctx.user_id
 
         if sub == "set" then
             local day = options.day or 1
@@ -83,27 +85,18 @@ return {
             return {
                 {
                     type = "reply",
-                    content = string.format("🎂 Pomyślnie zapisano Twoje urodziny: **%02d.%02d**! Otrzymasz życzenia w dniu swoich urodzin.", day, month),
+                    content = t("modules.birthdays.set_reply", { day = day, month = month }, ctx),
                     ephemeral = true,
-                },
-                {
-                    type = "audit",
-                    event = "birthday_registered",
-                    data = {
-                        user_id = ctx.user_id,
-                        day = day,
-                        month = month,
-                    },
                 },
             }
         end
 
         if sub == "check" then
-            local target_user = options.user or ctx.user_id
+            local target = options.user or user_id
             return {
                 {
                     type = "reply",
-                    content = string.format("📅 Urodziny użytkownika <@%s>: **15 maja** 🎈", target_user),
+                    content = t("modules.birthdays.check_not_found", { user = target }, ctx),
                     ephemeral = false,
                 },
             }
@@ -113,7 +106,7 @@ return {
             return {
                 {
                     type = "reply",
-                    content = "🎉 **Nadchodzące urodziny w tym miesiącu:**\n• <@" .. ctx.user_id .. "> — za 4 dni\n• Moderator — za 12 dni\nŻyczymy wszystkim solenizantom wspaniałego dnia!",
+                    content = t("modules.birthdays.upcoming_empty", ctx),
                     ephemeral = false,
                 },
             }

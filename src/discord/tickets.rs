@@ -64,24 +64,24 @@ pub(super) async fn execute(
 ) -> Result<Option<String>> {
     if module_id != "tickets" {
         return Err(anyhow!(
-            "operacje ticketów są zarezerwowane dla zaufanego modułu tickets"
+            "ticket operations are reserved for the trusted tickets module"
         ));
     }
     if !execution.command_context {
         return Err(anyhow!(
-            "ticketami można zarządzać wyłącznie przez komendy użytkowników"
+            "tickets can only be managed through user commands"
         ));
     }
 
     let guild_id = execution
         .guild_id
-        .ok_or_else(|| anyhow!("system ticketów działa wyłącznie na serwerze"))?;
+        .ok_or_else(|| anyhow!("ticket system operates exclusively on a server"))?;
     let channel_id = execution
         .channel_id
-        .ok_or_else(|| anyhow!("operacja ticketu wymaga kanału"))?;
+        .ok_or_else(|| anyhow!("ticket operation requires a channel"))?;
     let actor_id = execution
         .actor_id
-        .ok_or_else(|| anyhow!("operacja ticketu wymaga użytkownika"))?;
+        .ok_or_else(|| anyhow!("ticket operation requires a user"))?;
     let guild_key = guild_id.get().to_string();
     let actor_key = actor_id.get().to_string();
 
@@ -122,7 +122,7 @@ pub(super) async fn execute(
                 .await?
             {
                 return Err(anyhow!(
-                    "lista wszystkich ticketów wymaga roli wsparcia lub uprawnienia Zarządzanie kanałami"
+                    "listing all tickets requires support role or Manage Channels permission"
                 ));
             }
             let tickets = state
@@ -156,13 +156,13 @@ pub(super) async fn execute(
                     send_system_message(
                         ctx,
                         channel_id,
-                        &format!("🧑‍💻 Ticket przejął <@{}>.", actor_id.get()),
+                        &format!("🧑‍💻 Ticket claimed by <@{}>.", actor_id.get()),
                         Some(actor_id),
                     )
                     .await?;
                     audit_ticket(state, &updated, Some(&actor_key), "ticket_claimed").await?;
                     Ok(Some(format!(
-                        "✅ Przejęto ticket **#{}**.",
+                        "✅ Claimed ticket **#{}**.",
                         updated.display_number()
                     )))
                 }
@@ -190,7 +190,7 @@ pub(super) async fn execute(
                     send_system_message(
                         ctx,
                         channel_id,
-                        &format!("↩️ <@{}> zwolnił ticket.", actor_id.get()),
+                        &format!("↩️ <@{}> released the ticket.", actor_id.get()),
                         Some(actor_id),
                     )
                     .await?;
@@ -236,7 +236,7 @@ pub(super) async fn execute(
             let ticket = require_current_ticket(state, guild_id, channel_id).await?;
             if ticket.status != STATUS_CLOSED {
                 return Ok(Some(format!(
-                    "Ticket ma stan **{}**, więc nie można go ponownie otworzyć.",
+                    "Ticket status is **{}**, so it cannot be reopened.",
                     status_label(&ticket.status)
                 )));
             }
@@ -281,7 +281,7 @@ pub(super) async fn execute(
                     send_system_message(
                         ctx,
                         channel_id,
-                        &format!("🔓 Ticket ponownie otworzył <@{}>.", actor_id.get()),
+                        &format!("🔓 Ticket reopened by <@{}>.", actor_id.get()),
                         Some(actor_id),
                     )
                     .await?;
@@ -351,7 +351,7 @@ pub(super) async fn execute(
             .await?;
             if !staff && !(*creator_can_rename && ticket.creator_user_id == actor_key) {
                 return Err(anyhow!(
-                    "zmiana nazwy wymaga roli wsparcia albo uprawnienia właściciela ticketu"
+                    "renaming requires support role or ticket owner permission"
                 ));
             }
             let sanitized_name = sanitize_channel_name(name);
@@ -367,7 +367,7 @@ pub(super) async fn execute(
                 TicketMutationOutcome::Updated(updated) => {
                     audit_ticket(state, &updated, Some(&actor_key), "ticket_renamed").await?;
                     Ok(Some(format!(
-                        "✅ Nazwa ticketu została zmieniona na `{sanitized_name}`."
+                        "✅ Ticket name changed to `{sanitized_name}`."
                     )))
                 }
                 outcome => {
@@ -458,7 +458,7 @@ pub(super) async fn execute(
             )
             .await?;
             Ok(Some(format!(
-                "✅ Utworzono transkrypcję `{}` zawierającą **{}** wiadomości.",
+                "✅ Created transcript `{}` containing **{}** messages.",
                 transcript.id, transcript.message_count
             )))
         }
@@ -512,7 +512,7 @@ async fn open_ticket(
             active_count,
         } => {
             return Ok(Some(format!(
-                "Masz już **{active_count}** aktywnych ticketów. Limit na użytkownika wynosi **{limit}**."
+                "You already have **{active_count}** active tickets. Limit per user is **{limit}**."
             )));
         }
     };
@@ -575,7 +575,7 @@ async fn open_ticket(
                     ),
                 )
                 .await;
-            return Err(anyhow!("nie udało się aktywować rekordu ticketu"));
+            return Err(anyhow!("failed to activate ticket record"));
         }
     };
 
@@ -638,12 +638,12 @@ async fn close_ticket(
     .await?;
     if !staff && !(policy.creator_can_close && ticket.creator_user_id == actor_key) {
         return Err(anyhow!(
-            "zamknięcie ticketu wymaga roli wsparcia albo uprawnienia właściciela ticketu"
+            "closing requires support role or ticket owner permission"
         ));
     }
     if !ticket.is_open() {
         return Ok(Some(format!(
-            "Ticket ma stan **{}** i nie może zostać zamknięty.",
+            "Ticket status is **{}** and cannot be closed.",
             status_label(&ticket.status)
         )));
     }
@@ -711,7 +711,7 @@ async fn close_ticket(
                     .await;
             }
             let closed_message = format!(
-                "🔒 Ticket zamknął <@{}>. Powód: {}",
+                "🔒 Ticket closed by <@{}>. Reason: {}",
                 actor_id.get(),
                 reason.unwrap_or("nie podano")
             );
@@ -719,7 +719,7 @@ async fn close_ticket(
             audit_ticket(state, &updated, Some(&actor_key), "ticket_closed").await?;
             if let Some(log_channel) = log_channel {
                 let log_message = format!(
-                    "🔒 Zamknięto ticket **#{}** przez <@{}>. Powód: {}{}",
+                    "🔒 Ticket **#{}** closed by <@{}>. Reason: {}{}",
                     updated.display_number(),
                     actor_id.get(),
                     reason.unwrap_or("nie podano"),
@@ -735,7 +735,7 @@ async fn close_ticket(
                 }
             }
             Ok(Some(format!(
-                "✅ Zamknięto ticket **#{}**.",
+                "✅ Closed ticket **#{}**.",
                 updated.display_number()
             )))
         }
@@ -764,7 +764,7 @@ async fn manage_participant(
         actor_is_staff(ctx, guild_id, actor_id, actor_permissions, support_role_ids).await?;
     if !staff && !(creator_can_manage && ticket.creator_user_id == actor_key) {
         return Err(anyhow!(
-            "zarządzanie uczestnikami wymaga roli wsparcia albo uprawnienia właściciela ticketu"
+            "participant management requires support role or ticket owner permission"
         ));
     }
 
@@ -772,9 +772,9 @@ async fn manage_participant(
     let member = guild_id
         .member(&ctx.http, target_id)
         .await
-        .context("użytkownik nie należy do tego serwera")?;
+        .context("user does not belong to this server")?;
     if member.user.bot {
-        return Err(anyhow!("bot nie może zostać uczestnikiem ticketu"));
+        return Err(anyhow!("bot cannot be added as ticket participant"));
     }
 
     // Resolve the domain state before changing Discord overwrites. Otherwise an idempotent
@@ -811,7 +811,7 @@ async fn manage_participant(
                 send_system_message(
                     ctx,
                     channel_id,
-                    &format!("➕ <@{}> został dodany do ticketu.", target_id.get()),
+                    &format!("➕ <@{}> has been added to the ticket.", target_id.get()),
                     Some(target_id),
                 )
                 .await?;
@@ -841,7 +841,7 @@ async fn manage_participant(
                 send_system_message(
                     ctx,
                     channel_id,
-                    &format!("➖ <@{}> został usunięty z ticketu.", target_id.get()),
+                    &format!("➖ <@{}> has been removed from the ticket.", target_id.get()),
                     Some(target_id),
                 )
                 .await?;
@@ -853,7 +853,7 @@ async fn manage_participant(
                 )
                 .await?;
                 Ok(Some(format!(
-                    "✅ Usunięto <@{}> z ticketu.",
+                    "✅ Removed <@{}> from ticket.",
                     target_id.get()
                 )))
             }
@@ -874,7 +874,7 @@ async fn require_current_ticket(
         .tickets
         .get_by_channel(&guild_id.get().to_string(), &channel_id.get().to_string())
         .await?
-        .ok_or_else(|| anyhow!("ten kanał nie jest zarejestrowanym ticketem"))
+        .ok_or_else(|| anyhow!("this channel is not a registered ticket"))
 }
 
 async fn ensure_ticket_access(
@@ -901,7 +901,7 @@ async fn ensure_ticket_access(
     {
         return Ok(());
     }
-    Err(anyhow!("nie masz dostępu do tego ticketu"))
+    Err(anyhow!("you do not have access to this ticket"))
 }
 
 async fn ensure_staff(
@@ -915,7 +915,7 @@ async fn ensure_staff(
         Ok(())
     } else {
         Err(anyhow!(
-            "ta operacja wymaga roli wsparcia lub uprawnienia Zarządzanie kanałami"
+            "this operation requires support role or Manage Channels permission"
         ))
     }
 }
@@ -958,7 +958,7 @@ async fn validate_support_roles(
         let role_id = RoleId::new(parse_snowflake(value)?);
         if role_id.get() == guild_id.get() {
             return Err(anyhow!(
-                "rola @everyone nie może być rolą wsparcia, ponieważ ujawniłaby prywatne tickety"
+                "@everyone role cannot be a support role as it would expose private tickets"
             ));
         }
         if !guild.roles.contains_key(&role_id) {
@@ -979,9 +979,9 @@ async fn ensure_category(ctx: &Context, guild_id: GuildId, category_id: &str) ->
             Ok(category_id)
         }
         Channel::Guild(_) => Err(anyhow!(
-            "skonfigurowana kategoria musi należeć do tego serwera i mieć typ Category"
+            "configured category must belong to this server and have Category type"
         )),
-        _ => Err(anyhow!("kanał prywatny nie może być kategorią ticketów")),
+        _ => Err(anyhow!("private channel cannot be a ticket category")),
     }
 }
 
@@ -1002,10 +1002,10 @@ async fn resolve_optional_log_channel(
             Ok(Some(channel_id))
         }
         Channel::Guild(_) => Err(anyhow!(
-            "kanał logów ticketów musi być kanałem tekstowym tego serwera"
+            "ticket log channel must be a text channel on this server"
         )),
         _ => Err(anyhow!(
-            "kanał prywatny nie może być kanałem logów ticketów"
+            "private channel cannot be a ticket log channel"
         )),
     }
 }
@@ -1036,7 +1036,7 @@ fn build_open_permissions(
     for role_id in support_role_ids {
         let role_id = RoleId::new(parse_snowflake(role_id)?);
         if role_id.get() == guild_id.get() {
-            return Err(anyhow!("@everyone nie może otrzymać dostępu do ticketów"));
+            return Err(anyhow!("@everyone cannot be granted ticket access"));
         }
         permissions.push(PermissionOverwrite {
             allow: staff_permissions(),
@@ -1105,7 +1105,7 @@ fn ensure_bot_permissions(actual: Permissions, required: Permissions) -> Result<
         Ok(())
     } else {
         Err(anyhow!(
-            "bot nie ma wymaganych uprawnień do obsługi ticketu: {required:?}"
+            "bot lacks required permissions to manage ticket: {required:?}"
         ))
     }
 }
@@ -1121,7 +1121,7 @@ async fn create_and_store_transcript(
         ticket
             .channel_id
             .as_deref()
-            .ok_or_else(|| anyhow!("ticket nie ma kanału"))?,
+            .ok_or_else(|| anyhow!("ticket has no channel"))?,
     )?);
     let (content, message_count) = build_transcript(ctx, channel_id, max_messages).await?;
     state
@@ -1261,7 +1261,7 @@ async fn send_transcript(
             &ctx.http,
             CreateMessage::new()
                 .content(format!(
-                    "📄 Transkrypcja ticketu **#{}** — {} wiadomości.",
+                    "📄 Ticket transcript **#{}** — {} messages.",
                     ticket.display_number(),
                     transcript.message_count
                 ))
@@ -1333,14 +1333,14 @@ fn format_welcome_message(ticket: &TicketRecord, custom: Option<&str>) -> String
         ticket.subject,
         ticket.description,
         custom.unwrap_or(
-            "Zespół wsparcia odpowie w tym kanale. Nie publikuj haseł, tokenów ani innych sekretów."
+            "Support team will respond in this channel. Do not post passwords, tokens, or secrets."
         ),
     )
 }
 
 fn format_ticket_list(tickets: &[TicketRecord], include_owner: bool) -> String {
     if tickets.is_empty() {
-        return "Brak aktywnych ticketów w wybranym zakresie.".to_owned();
+        return "No active tickets found in the selected range.".to_owned();
     }
     let mut lines = vec![format!("🎫 **Aktywne tickety ({})**", tickets.len())];
     for ticket in tickets {
@@ -1376,7 +1376,7 @@ fn format_ticket_info(
         .claimed_by_user_id
         .as_deref()
         .map(|id| format!("<@{id}>"))
-        .unwrap_or_else(|| "nieprzejęty".to_owned());
+        .unwrap_or_else(|| "unclaimed".to_owned());
     let participant_list = if participants.is_empty() {
         "brak".to_owned()
     } else {
@@ -1397,7 +1397,7 @@ fn format_ticket_info(
             .join(" → ")
     };
     format!(
-        "🎫 **Ticket #{}** (`{}`)\n**Stan:** {}\n**Priorytet:** {} {}\n**Kolejka:** `{}`\n**Właściciel:** <@{}>\n**Obsługuje:** {}\n**Uczestnicy:** {}\n**Utworzono:** <t:{}:F>\n**Ostatnia aktywność:** <t:{}:R>\n**Temat:** {}\n**Ostatnie zdarzenia:** {}",
+        "🎫 **Ticket #{}** (`{}`)\n**Status:** {}\n**Priority:** {} {}\n**Queue:** `{}`\n**Owner:** <@{}>\n**Handler:** {}\n**Participants:** {}\n**Created:** <t:{}:F>\n**Last activity:** <t:{}:R>\n**Subject:** {}\n**Recent events:** {}",
         ticket.display_number(),
         ticket.short_id(),
         status_label(&ticket.status),
@@ -1422,13 +1422,13 @@ fn format_mutation_outcome(outcome: TicketMutationOutcome) -> String {
             status_label(&ticket.status)
         ),
         TicketMutationOutcome::NotFound => "Nie znaleziono ticketu.".to_owned(),
-        TicketMutationOutcome::Forbidden => "Nie masz uprawnień do zmiany tego ticketu.".to_owned(),
+        TicketMutationOutcome::Forbidden => "You do not have permission to modify this ticket.".to_owned(),
         TicketMutationOutcome::InvalidState { current_status } => format!(
             "Ta operacja nie jest dozwolona dla ticketu w stanie **{}**.",
             status_label(&current_status)
         ),
         TicketMutationOutcome::Conflict { message } => {
-            format!("Nie można wykonać operacji: {message}.")
+            format!("Cannot execute operation: {message}.")
         }
     }
 }
@@ -1436,19 +1436,19 @@ fn format_mutation_outcome(outcome: TicketMutationOutcome) -> String {
 fn format_participant_outcome(outcome: ParticipantMutationOutcome) -> String {
     match outcome {
         ParticipantMutationOutcome::Added(participant) => {
-            format!("<@{}> jest już uczestnikiem.", participant.user_id)
+            format!("<@{}> is already a participant.", participant.user_id)
         }
-        ParticipantMutationOutcome::Removed => "Uczestnik został usunięty.".to_owned(),
+        ParticipantMutationOutcome::Removed => "Participant was removed.".to_owned(),
         ParticipantMutationOutcome::NotFound => "Nie znaleziono uczestnika lub ticketu.".to_owned(),
         ParticipantMutationOutcome::AlreadyPresent => {
-            "Ten użytkownik jest już uczestnikiem ticketu.".to_owned()
+            "This user is already a ticket participant.".to_owned()
         }
         ParticipantMutationOutcome::CreatorProtected => {
-            "Właściciel ticketu nie może zostać usunięty ani dodany jako zwykły uczestnik."
+            "Ticket owner cannot be removed or added as a regular participant."
                 .to_owned()
         }
         ParticipantMutationOutcome::InvalidState { current_status } => format!(
-            "Nie można zmieniać uczestników ticketu w stanie **{}**.",
+            "Cannot change participants for ticket in **{}** status.",
             status_label(&current_status)
         ),
     }
@@ -1531,9 +1531,9 @@ fn status_label(status: &str) -> &str {
     match status {
         STATUS_PROVISIONING => "tworzenie",
         STATUS_OPEN => "otwarty",
-        STATUS_CLAIMED => "przejęty",
-        STATUS_CLOSED => "zamknięty",
-        STATUS_FAILED => "błąd",
+        STATUS_CLAIMED => "claimed",
+        STATUS_CLOSED => "closed",
+        STATUS_FAILED => "error",
         _ => status,
     }
 }
@@ -1567,7 +1567,7 @@ fn parse_snowflake(value: &str) -> Result<u64> {
         .parse::<u64>()
         .with_context(|| format!("{value:?} nie jest identyfikatorem Discorda"))?;
     if value == 0 {
-        return Err(anyhow!("identyfikator Discorda nie może być zerem"));
+        return Err(anyhow!("Discord ID cannot be zero"));
     }
     Ok(value)
 }

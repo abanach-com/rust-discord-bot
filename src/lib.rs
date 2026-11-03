@@ -10,6 +10,7 @@ pub mod session;
 pub mod state;
 pub mod storage;
 pub mod tickets;
+pub mod translations;
 pub mod web;
 
 pub use state::AppState;

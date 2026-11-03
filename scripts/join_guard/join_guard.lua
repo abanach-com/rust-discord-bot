@@ -1,3 +1,5 @@
+local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
+
 local DISCORD_EPOCH_MS = 1420070400000
 
 local function lower(value)
@@ -30,7 +32,7 @@ return {
         id = "join_guard",
         name = "Join Guard & Anti-Raid",
         version = "1.1.0",
-        description = "Wykrywa nowe konta, brak awatara, podejrzane nazwy oraz bursty dołączeń w trybie Anti-Raid.",
+        description = "Detects new accounts, missing avatars, suspicious names, and join bursts in Anti-Raid mode.",
         category = "safety",
         default_enabled = false,
         events = {
@@ -41,8 +43,8 @@ return {
             additionalProperties = false,
             required = { "alert_channel_id" },
             properties = {
-                alert_channel_id = { type = "string", title = "Kanał alertów bezpieczeństwa" },
-                join_log_channel_id = { type = "string", title = "Opcjonalny kanał logów wejść" },
+                alert_channel_id = { type = "string", title = "Security Alerts Channel" },
+                join_log_channel_id = { type = "string", title = "Optional Join Logs Channel" },
                 minimum_account_age_hours = { type = "integer", minimum = 0, maximum = 87600, default = 24 },
                 alert_for_no_avatar = { type = "boolean", default = true },
                 alert_for_bots = { type = "boolean", default = true },
@@ -100,16 +102,16 @@ return {
             if age_hours == 0 then
                 table.insert(reasons, string.format("nowe konto (utworzone %d min temu)", age_minutes))
             else
-                table.insert(reasons, string.format("młode konto (%d godz. / %d dni)", age_hours, age_days))
+                table.insert(reasons, string.format("young account (%d hrs / %d days)", age_hours, age_days))
             end
         end
 
         if has_avatar == false and ctx.config.alert_for_no_avatar ~= false then
-            table.insert(reasons, "brak awatara (domyślny awatar Discorda)")
+            table.insert(reasons, "missing avatar (default Discord avatar)")
         end
 
         if user.bot == true and ctx.config.alert_for_bots ~= false then
-            table.insert(reasons, "dołączyło konto bota")
+            table.insert(reasons, "bot account joined")
         end
 
         if fragment then
@@ -117,7 +119,7 @@ return {
         end
 
         if is_raid then
-            table.insert(reasons, string.format("🚨 WYKRYTO BURST / RAJD (%d wejść w oknie 60 s!)", recent_joins))
+            table.insert(reasons, string.format("🚨 BURST / RAID DETECTED (%d joins in 60s window!)", recent_joins))
         end
 
         local actions = {}
@@ -149,17 +151,17 @@ return {
         end
 
         if #reasons > 0 and ctx.config.alert_channel_id and ctx.config.alert_channel_id ~= "" then
-            local prefix = is_raid and "@here 🚨 **Join Guard: ALARM OCHRONY PRZED RAJDEM**\n" or "🛡️ **Join Guard: konto wymaga uwagi**\n"
+            local prefix = is_raid and "@here 🚨 **Join Guard: ALARM OCHRONY PRZED RAJDEM**\n" or "🛡️ **Join Guard: account requires attention**\n"
             table.insert(actions, {
                 type = "send_message",
                 channel_id = ctx.config.alert_channel_id,
                 content = string.format(
-                    "%sUżytkownik: %s\nUtworzenie konta: <t:%d:F> (<t:%d:R>)\nAwatar: %s\nPowody: %s",
+                    "%sUser: %s\nAccount created: <t:%d:F> (<t:%d:R>)\nAvatar: %s\nReasons: %s",
                     prefix,
                     identity,
                     created_at,
                     created_at,
-                    has_avatar == false and "❌ Brak (domyślny)" or "✅ Ustawiony",
+                    has_avatar == false and "❌ Missing (default)" or "✅ Set",
                     zuckerbot.escape_mentions(table.concat(reasons, "; "))
                 ),
             })
@@ -171,12 +173,12 @@ return {
                 type = "send_message",
                 channel_id = log_channel,
                 content = string.format(
-                    "➡️ **Nowy członek**: %s\nWiek konta: **%d godz. (%d dni)**\nAwatar: %s\nOcena: **%s**",
+                    "➡️ **New member**: %s\nAccount age: **%d godz. (%d dni)**\nAvatar: %s\nAssessment: **%s**",
                     identity,
                     age_hours,
                     age_days,
                     has_avatar == false and "Brak" or "Jest",
-                    #reasons > 0 and "wymaga uwagi" or "bez alertów"
+                    #reasons > 0 and "requires attention" or "clean"
                 ),
             })
         end

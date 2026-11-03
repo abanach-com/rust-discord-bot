@@ -50,25 +50,25 @@ pub(super) async fn execute(
 ) -> Result<Option<String>> {
     if module_id != "scheduler" {
         return Err(anyhow!(
-            "operacje harmonogramu są zarezerwowane dla zaufanego modułu scheduler"
+            "scheduler operations are reserved for the trusted scheduler module"
         ));
     }
     if !execution.command_context {
         return Err(anyhow!(
-            "zadania harmonogramu mogą być tworzone i zmieniane tylko przez komendy użytkowników"
+            "scheduler tasks can only be created and modified through user commands"
         ));
     }
 
     let guild_id = execution
         .guild_id
-        .ok_or_else(|| anyhow!("harmonogram działa wyłącznie na serwerze"))?;
+        .ok_or_else(|| anyhow!("scheduler operates exclusively on a server"))?;
     let actor_id = execution
         .actor_id
-        .ok_or_else(|| anyhow!("operacja harmonogramu wymaga użytkownika"))?;
+        .ok_or_else(|| anyhow!("scheduler operation requires a user"))?;
     let can_manage_guild = has_manage_guild(execution.actor_permissions);
     if operation.requires_manage_guild() && !can_manage_guild {
         return Err(anyhow!(
-            "ta operacja harmonogramu wymaga uprawnienia Zarządzanie serwerem"
+            "this scheduler operation requires Manage Server permission"
         ));
     }
 
@@ -90,7 +90,7 @@ pub(super) async fn execute(
             let now = chrono::Utc::now();
             let run_at =
                 parse_schedule_time(when, now, *minimum_delay_seconds, *maximum_delay_seconds)
-                    .map_err(|error| anyhow!("nieprawidłowy termin: {error}"))?;
+                    .map_err(|error| anyhow!("invalid schedule deadline: {error}"))?;
 
             let target_channel = match channel_id {
                 Some(channel_id) => {
@@ -100,14 +100,14 @@ pub(super) async fn execute(
                 }
                 None => execution
                     .channel_id
-                    .ok_or_else(|| anyhow!("brakuje kanału docelowego"))?,
+                    .ok_or_else(|| anyhow!("missing destination channel"))?,
             };
 
             let repeat_every_seconds = repeat
                 .as_deref()
                 .map(parse_repeat_interval)
                 .transpose()
-                .map_err(|error| anyhow!("nieprawidłowy interwał powtarzania: {error}"))?;
+                .map_err(|error| anyhow!("invalid repeat interval: {error}"))?;
             let remaining_runs = if repeat_every_seconds.is_some() {
                 repeat_count.map(i64::from)
             } else {
@@ -148,7 +148,7 @@ pub(super) async fn execute(
                         .await?;
 
                     Ok(Some(format!(
-                        "✅ Utworzono zadanie `{}`.\nKanał: <#{}>\nWykonanie: <t:{}:F> (<t:{}:R>)\nTryb: {}",
+                        "✅ Created task `{}`.\nChannel: <#{}>\nExecution: <t:{}:F> (<t:{}:R>)\nMode: {}",
                         job.id,
                         job.channel_id,
                         job.run_at.timestamp(),
@@ -157,7 +157,7 @@ pub(super) async fn execute(
                     )))
                 }
                 CreateJobOutcome::LimitReached { limit } => Ok(Some(format!(
-                    "Osiągnięto limit **{limit}** aktywnych zadań dla tego użytkownika."
+                    "Reached limit of **{limit}** active tasks for this user."
                 ))),
             }
         }
@@ -249,7 +249,7 @@ async fn mutate_job(
             "Nie znaleziono zadania o podanym identyfikatorze na tym serwerze.".to_owned(),
         )),
         JobMutationOutcome::Forbidden => Ok(Some(
-            "Możesz zarządzać tylko własnymi zadaniami. Moderator z uprawnieniem Zarządzanie serwerem może zarządzać wszystkimi."
+            "You can only manage your own tasks. A moderator with Manage Server can manage all."
                 .to_owned(),
         )),
         JobMutationOutcome::InvalidState { current_status } => Ok(Some(format!(
@@ -278,7 +278,7 @@ async fn ensure_channel_belongs_to_guild(
 
 fn format_job_list(jobs: &[ScheduledJob], include_owner: bool) -> String {
     if jobs.is_empty() {
-        return "Brak aktywnych, wstrzymanych lub wykonywanych zadań.".to_owned();
+        return "No active, paused, or running tasks.".to_owned();
     }
 
     let mut lines = Vec::with_capacity(jobs.len() + 1);
@@ -311,8 +311,8 @@ fn recurrence_description(job: &ScheduledJob) -> String {
         return "jednorazowo".to_owned();
     };
     match job.remaining_runs {
-        Some(runs) => format!("co {seconds} s, łącznie {runs} wykonań"),
-        None => format!("co {seconds} s, bez limitu wykonań"),
+        Some(runs) => format!("every {seconds}s, {runs} runs total"),
+        None => format!("every {seconds}s, unlimited runs"),
     }
 }
 
@@ -321,7 +321,7 @@ fn status_label(status: &str) -> &str {
         "active" => "aktywne",
         "paused" => "wstrzymane",
         "processing" => "wykonywane",
-        "completed" => "ukończone",
+        "completed" => "completed",
         "cancelled" => "anulowane",
         "failed" => "nieudane",
         _ => status,
@@ -338,7 +338,7 @@ fn parse_snowflake(value: &str) -> Result<u64> {
         .parse::<u64>()
         .with_context(|| format!("{value:?} nie jest identyfikatorem Discorda"))?;
     if value == 0 {
-        return Err(anyhow!("identyfikator Discorda nie może być zerem"));
+        return Err(anyhow!("Discord ID cannot be zero"));
     }
     Ok(value)
 }

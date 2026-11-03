@@ -1,49 +1,50 @@
+local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
+
 return {
     manifest = {
         id = "quotes",
-        name = "Server Quotes",
+        name = t("modules.quotes.name"),
         version = "1.0.0",
-        description = "Baza pamiętnych cytatów serwera z możliwością losowania i wyszukiwania.",
+        description = t("modules.quotes.description"),
         category = "fun",
         default_enabled = true,
         commands = {
             {
                 name = "quote",
-                description = "Zapisuj i przywołuj najlepsze cytaty członków serwera.",
+                description = t("modules.quotes.commands.quote.description"),
                 integration_types = { "guild" },
                 contexts = { "guild" },
                 options = {
                     {
                         type = "subcommand",
                         name = "random",
-                        description = "Wylosuj losowy cytat z bazy serwera.",
+                        description = t("modules.quotes.commands.quote.options.random.description"),
                         options = {},
                     },
                     {
                         type = "subcommand",
                         name = "add",
-                        description = "Dodaj nowy cytat do księgi cytatów.",
+                        description = t("modules.quotes.commands.quote.options.add.description"),
                         options = {
                             {
-                                type = "string",
-                                name = "content",
-                                description = "Treść cytatu.",
+                                type = "user",
+                                name = "author",
+                                description = t("modules.quotes.commands.quote.options.author.description"),
                                 required = true,
-                                max_length = 500,
                             },
                             {
                                 type = "string",
-                                name = "author",
-                                description = "Autor cytatu.",
+                                name = "text",
+                                description = t("modules.quotes.commands.quote.options.text.description"),
                                 required = true,
-                                max_length = 100,
+                                max_length = 500,
                             },
                         },
                     },
                     {
                         type = "subcommand",
                         name = "list",
-                        description = "Pokaż ostatnio dodane cytaty.",
+                        description = t("modules.quotes.commands.quote.options.list.description"),
                         options = {},
                     },
                 },
@@ -52,10 +53,7 @@ return {
         config_schema = {
             type = "object",
             additionalProperties = false,
-            properties = {
-                max_quotes = { type = "integer", minimum = 10, maximum = 2000, default = 500 },
-                allow_user_quotes = { type = "boolean", default = true },
-            },
+            properties = {},
         },
     },
 
@@ -68,38 +66,21 @@ return {
         local sub = options.subcommand or "random"
 
         if sub == "random" then
-            local quotes = {
-                '"Działa na moim komputerze!" — Anonimowy Deweloper',
-                '"Jeszcze tylko jedna linijka kodu i idę spać." — Każdy Programista',
-                '"To nie bug, to ficzer." — Starszy Architekt',
-                '"Zróbmy deploy w piątek o 17:00, co może pójść nie tak?" — Sysadmin'
-            }
-            local q = quotes[1]
             return {
                 {
                     type = "reply",
-                    content = string.format("💬 **Złota myśl serwera:**\n%s", q),
+                    content = t("modules.quotes.no_quotes", ctx),
                     ephemeral = false,
                 },
             }
         end
 
         if sub == "add" then
-            local text = options.content or ""
-            local author = options.author or "Anonim"
             return {
                 {
                     type = "reply",
-                    content = string.format("📜 Dodano nowy cytat do bazy!\n> *%s* — **%s**", text, author),
-                    ephemeral = false,
-                },
-                {
-                    type = "audit",
-                    event = "quote_added",
-                    data = {
-                        submitted_by = ctx.user_id,
-                        author = author,
-                    },
+                    content = t("modules.quotes.added", ctx),
+                    ephemeral = true,
                 },
             }
         end
@@ -108,8 +89,8 @@ return {
             return {
                 {
                     type = "reply",
-                    content = "📖 **Ostatnie cytaty w bazie:**\n#1: Działa na moim komputerze! — Anonim\n#2: Rust to przyszłość! — Adrian\n#3: Kto zjadł całą pizzę? — Moderator",
-                    ephemeral = true,
+                    content = t("modules.quotes.no_quotes", ctx),
+                    ephemeral = false,
                 },
             }
         end

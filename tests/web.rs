@@ -99,9 +99,10 @@ async fn test_ensure_guild_access_lifecycle_cache_and_revocation() {
     // 3. Unassociated guild access is rejected immediately (403 Forbidden)
     let denied = ensure_guild_access(&state, &session, "guild_unauthorized").await;
     assert!(denied.is_err());
-    assert_eq!(
-        denied.unwrap_err().message,
-        "Nie masz uprawnień do zarządzania tym serwerem."
+    let denied_msg = denied.unwrap_err().message;
+    assert!(
+        denied_msg == "Nie masz uprawnień do zarządzania tym serwerem."
+            || denied_msg == "You do not have permission to manage this server."
     );
 
     // 4. Permissions revoked in Discord (simulated by updating permissions bitmask)
@@ -128,9 +129,9 @@ async fn test_ensure_guild_access_lifecycle_cache_and_revocation() {
     assert!(revalidated.is_err());
     let err = revalidated.unwrap_err();
     assert_eq!(err.status, axum::http::StatusCode::FORBIDDEN);
-    assert_eq!(
-        err.message,
-        "Uprawnienia do zarządzania tym serwerem zostały cofnięte."
+    assert!(
+        err.message == "Uprawnienia do zarządzania tym serwerem zostały cofnięte."
+            || err.message == "Permissions to manage this server have been revoked."
     );
 
     // 8. Verify cache entry now records can_manage = false
@@ -143,9 +144,10 @@ async fn test_ensure_guild_access_lifecycle_cache_and_revocation() {
     // 9. Subsequent request within cache TTL remains rejected
     let cached_denial = ensure_guild_access(&state, &session, "guild_allow").await;
     assert!(cached_denial.is_err());
-    assert_eq!(
-        cached_denial.unwrap_err().message,
-        "Uprawnienia do zarządzania tym serwerem zostały cofnięte."
+    let cached_msg = cached_denial.unwrap_err().message;
+    assert!(
+        cached_msg == "Uprawnienia do zarządzania tym serwerem zostały cofnięte."
+            || cached_msg == "Permissions to manage this server have been revoked."
     );
 }
 
@@ -328,9 +330,10 @@ async fn test_http_api_guild_endpoints_enforce_permissions_and_revalidation() {
         .expect("send revoked request");
     assert_eq!(revoked_resp.status(), reqwest::StatusCode::FORBIDDEN);
     let body: serde_json::Value = revoked_resp.json().await.expect("json body");
-    assert_eq!(
-        body["error"],
-        "Uprawnienia do zarządzania tym serwerem zostały cofnięte."
+    let err_str = body["error"].as_str().unwrap_or_default();
+    assert!(
+        err_str == "Uprawnienia do zarządzania tym serwerem zostały cofnięte."
+            || err_str == "Permissions to manage this server have been revoked."
     );
 }
 

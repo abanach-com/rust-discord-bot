@@ -57,19 +57,19 @@ pub(super) async fn execute(
     } = execution;
     if module_id != "progression" {
         return Err(anyhow!(
-            "operacje progression są zarezerwowane dla zaufanego modułu progression"
+            "progression operations are reserved for the trusted progression module"
         ));
     }
     if operation.requires_manage_guild()
         && (!command_context || !has_manage_guild(actor_permissions))
     {
         return Err(anyhow!(
-            "korekta progression wymaga komendy użytkownika z uprawnieniem Zarządzanie serwerem"
+            "progression adjustment requires a user command with Manage Server permission"
         ));
     }
 
     let guild_id = guild_id.ok_or_else(|| anyhow!("ta operacja wymaga serwera"))?;
-    let actor_id = actor_id.ok_or_else(|| anyhow!("ta operacja wymaga użytkownika"))?;
+    let actor_id = actor_id.ok_or_else(|| anyhow!("this operation requires a user"))?;
     let guild_key = guild_id.get().to_string();
     let actor_key = actor_id.get().to_string();
 
@@ -124,7 +124,7 @@ pub(super) async fn execute(
                             guild_id,
                             actor_id,
                             role_snowflake,
-                            Some("Osiągnięto poziom w systemie levelingu"),
+                            Some("Level reached in progression system"),
                         )
                         .await
                     {
@@ -133,7 +133,7 @@ pub(super) async fn execute(
                             user_id = %actor_id,
                             role_id = %reward.role_id,
                             error = %err,
-                            "Nie udało się nadać roli za awans"
+                            "Failed to assign level-up reward role"
                         );
                     } else {
                         granted_roles.push(reward.role_id.clone());
@@ -183,7 +183,7 @@ pub(super) async fn execute(
 
                 if *announce_level_up && let Some(channel_id) = channel_id {
                     let template = level_up_message.as_deref().unwrap_or(
-                        "🎉 {user} awansuje na poziom **{level}**! Łączne XP: **{xp}**.",
+                        "🎉 {user} has reached level **{level}**! Total XP: **{xp}**.",
                     );
                     let mut content = template
                         .replace("{user}", &format!("<@{}>", actor_id.get()))
@@ -223,7 +223,7 @@ pub(super) async fn execute(
             let bar = render_progress_bar(current_progress, required_progress, 10);
 
             Ok(Some(format!(
-                "👤 **Profil <@{target}>**\nPoziom: **{}** {bar}\nXP: **{}** / **{}** do kolejnego poziomu (pozostało: **{}** XP)\nMonety: **{}**\nReputacja: **{}**\nWiadomości: **{}**\nSeria daily: **{}**",
+                "👤 **Profile of <@{target}>**\nLevel: **{}** {bar}\nXP: **{}** / **{}** to next level (**{}** XP remaining)\nCoins: **{}**\nReputation: **{}**\nMessages: **{}**\nDaily streak: **{}**",
                 profile.level,
                 current_progress,
                 required_progress,
@@ -257,7 +257,7 @@ pub(super) async fn execute(
             }
 
             let mut lines = Vec::with_capacity(profiles.len() + 1);
-            lines.push(format!("🏆 **Ranking według {}**", metric.label()));
+            lines.push(format!("🏆 **Leaderboard by {}**", metric.label()));
             for (index, profile) in profiles.iter().enumerate() {
                 let position = match index {
                     0 => "🥇".to_owned(),
@@ -311,7 +311,7 @@ pub(super) async fn execute(
                         )
                         .await?;
                     Ok(Some(format!(
-                        "🎁 Odbierasz **{reward}** monet.\nSaldo: **{}**\nSeria: **{} dni**\nNastępny daily: <t:{}:R>",
+                        "🎁 You claimed **{reward}** coins.\nBalance: **{}**\nStreak: **{} days**\nNext daily: <t:{}:R>",
                         profile.coins,
                         profile.daily_streak,
                         next_claim_at.timestamp(),
@@ -321,14 +321,14 @@ pub(super) async fn execute(
                     profile,
                     next_claim_at,
                 } => Ok(Some(format!(
-                    "Daily jest jeszcze niedostępny. Następna nagroda: <t:{}:R>.\nAktualne saldo: **{}** monet.",
+                    "Daily is not yet available. Next reward: <t:{}:R>.\nCurrent balance: **{}** coins.",
                     next_claim_at.timestamp(),
                     profile.coins,
                 ))),
             }
         }
         ProgressionOperation::Transfer { user_id, amount } => {
-            let amount = i64::try_from(*amount).map_err(|_| anyhow!("kwota jest zbyt duża"))?;
+            let amount = i64::try_from(*amount).map_err(|_| anyhow!("amount is too large"))?;
             match state
                 .storage
                 .transfer_coins(&guild_key, &actor_key, user_id, amount)
@@ -344,15 +344,15 @@ pub(super) async fn execute(
                         }),
                     });
                     Ok(Some(format!(
-                        "✅ Przekazano **{}** monet użytkownikowi <@{}>. Twoje saldo: **{}**.",
+                        "✅ Transferred **{}** coins to <@{}>. Your balance: **{}**.",
                         transfer.amount, user_id, transfer.sender.coins,
                     )))
                 }
                 CoinTransferOutcome::InsufficientFunds { balance } => Ok(Some(format!(
-                    "Masz za mało monet. Aktualne saldo: **{balance}**."
+                    "Insufficient coins. Current balance: **{balance}**."
                 ))),
                 CoinTransferOutcome::SameAccount => {
-                    Ok(Some("Nie możesz wysłać monet samemu sobie.".to_owned()))
+                    Ok(Some("You cannot send coins to yourself.".to_owned()))
                 }
             }
         }
@@ -392,17 +392,17 @@ pub(super) async fn execute(
                         )
                         .await?;
                     Ok(Some(format!(
-                        "💚 Dodano **{amount}** reputacji użytkownikowi <@{user_id}>. Łączna reputacja: **{}**.\nKolejna możliwość: <t:{}:R>.",
+                        "💚 Added **{amount}** reputation to <@{user_id}>. Total reputation: **{}**.\nNext reputation grant: <t:{}:R>.",
                         profile.reputation,
                         next_available_at.timestamp(),
                     )))
                 }
                 ReputationGrantOutcome::Cooldown { next_available_at } => Ok(Some(format!(
-                    "Reputację możesz przyznać ponownie <t:{}:R>.",
+                    "You can give reputation again <t:{}:R>.",
                     next_available_at.timestamp(),
                 ))),
                 ReputationGrantOutcome::SameAccount => Ok(Some(
-                    "Nie możesz przyznać reputacji samemu sobie.".to_owned(),
+                    "You cannot give reputation to yourself.".to_owned(),
                 )),
             }
         }

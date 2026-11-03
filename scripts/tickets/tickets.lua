@@ -1,3 +1,5 @@
+local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
+
 local ADMINISTRATOR = 8
 local MANAGE_CHANNELS = 16
 local MANAGE_GUILD = 32
@@ -122,7 +124,7 @@ end
 
 local function require_categories(config)
     if not optional_id(config.open_category_id) then
-        return "Administrator musi najpierw ustawić `open_category_id` modułu tickets w panelu WWW."
+        return "Administrator must configure `open_category_id` for tickets in dashboard."
     end
     return nil
 end
@@ -138,7 +140,7 @@ return {
         commands = {
             {
                 name = "ticket",
-                description = "Tworzy i obsługuje prywatne tickety wsparcia.",
+                description = t("modules.tickets.description"),
                 integration_types = { "guild" },
                 contexts = { "guild" },
                 options = {
@@ -150,7 +152,7 @@ return {
                             {
                                 type = "string",
                                 name = "subject",
-                                description = "Krótki temat zgłoszenia.",
+                                description = "Short ticket subject.",
                                 required = true,
                                 min_length = 1,
                                 max_length = 100,
@@ -158,7 +160,7 @@ return {
                             {
                                 type = "string",
                                 name = "description",
-                                description = "Dokładny opis problemu lub prośby.",
+                                description = "Detailed description of the issue or request.",
                                 required = true,
                                 min_length = 1,
                                 max_length = 1800,
@@ -176,7 +178,7 @@ return {
                     {
                         type = "subcommand",
                         name = "list",
-                        description = "Pokazuje aktywne tickety użytkownika lub serwera.",
+                        description = "Show active tickets for user or server.",
                         options = {
                             {
                                 type = "string",
@@ -193,27 +195,27 @@ return {
                     {
                         type = "subcommand",
                         name = "info",
-                        description = "Pokazuje stan bieżącego ticketu i ostatnie zdarzenia.",
+                        description = "Display current ticket status and recent events.",
                     },
                     {
                         type = "subcommand",
                         name = "claim",
-                        description = "Przejmuje bieżący ticket jako członek zespołu wsparcia.",
+                        description = "Claim current ticket as support team member.",
                     },
                     {
                         type = "subcommand",
                         name = "unclaim",
-                        description = "Zwalnia przejęty ticket.",
+                        description = "Release claimed ticket.",
                     },
                     {
                         type = "subcommand",
                         name = "close",
-                        description = "Zamyka, archiwizuje i opcjonalnie zapisuje transkrypcję.",
+                        description = "Close, archive, and optionally save transcript.",
                         options = {
                             {
                                 type = "string",
                                 name = "reason",
-                                description = "Powód zamknięcia ticketu.",
+                                description = "Ticket close reason.",
                                 required = false,
                                 min_length = 1,
                                 max_length = 512,
@@ -223,17 +225,17 @@ return {
                     {
                         type = "subcommand",
                         name = "reopen",
-                        description = "Ponownie otwiera zamknięty ticket.",
+                        description = "Reopen closed ticket.",
                     },
                     {
                         type = "subcommand",
                         name = "add",
-                        description = "Dodaje użytkownika jako uczestnika bieżącego ticketu.",
+                        description = "Add user as participant to current ticket.",
                         options = {
                             {
                                 type = "user",
                                 name = "user",
-                                description = "Użytkownik, który otrzyma dostęp.",
+                                description = "User who will receive access.",
                                 required = true,
                             },
                         },
@@ -241,12 +243,12 @@ return {
                     {
                         type = "subcommand",
                         name = "remove",
-                        description = "Usuwa uczestnika z bieżącego ticketu.",
+                        description = "Remove participant from current ticket.",
                         options = {
                             {
                                 type = "user",
                                 name = "user",
-                                description = "Użytkownik, któremu odebrać dostęp.",
+                                description = "User whose access will be removed.",
                                 required = true,
                             },
                         },
@@ -254,12 +256,12 @@ return {
                     {
                         type = "subcommand",
                         name = "rename",
-                        description = "Zmienia nazwę kanału bieżącego ticketu.",
+                        description = "Rename current ticket channel.",
                         options = {
                             {
                                 type = "string",
                                 name = "name",
-                                description = "Nowa nazwa kanału.",
+                                description = "New channel name.",
                                 required = true,
                                 min_length = 2,
                                 max_length = 100,
@@ -269,7 +271,7 @@ return {
                     {
                         type = "subcommand",
                         name = "priority",
-                        description = "Ustawia priorytet bieżącego ticketu.",
+                        description = "Set priority of current ticket.",
                         options = {
                             {
                                 type = "string",
@@ -288,12 +290,12 @@ return {
                     {
                         type = "subcommand",
                         name = "transcript",
-                        description = "Tworzy i zapisuje transkrypcję bieżącego ticketu.",
+                        description = "Generate and save transcript for current ticket.",
                         options = {
                             {
                                 type = "integer",
                                 name = "messages",
-                                description = "Maksymalna liczba najnowszych wiadomości.",
+                                description = "Maximum number of recent messages.",
                                 required = false,
                                 min_value = 1,
                                 max_value = 1000,
@@ -311,7 +313,7 @@ return {
                     type = { "string", "null" },
                     pattern = "^[0-9]+$",
                     default = nil,
-                    description = "ID kategorii dla otwartych ticketów.",
+                    description = "Category ID for open tickets.",
                 },
                 archive_category_id = {
                     type = { "string", "null" },
@@ -323,7 +325,7 @@ return {
                     type = { "string", "null" },
                     pattern = "^[0-9]+$",
                     default = nil,
-                    description = "Opcjonalny kanał audytu i transkrypcji.",
+                    description = "Optional audit and transcript channel.",
                 },
                 support_role_ids = {
                     type = "array",
@@ -408,7 +410,7 @@ return {
                 normalize_identifier(config.default_queue, "support")
             )
             if not value_in_array(queue, config.allowed_queues) then
-                return reply("Ta kolejka nie jest dozwolona przez konfigurację serwera.")
+                return reply("This queue is not allowed by server configuration.")
             end
             return ticket({
                 type = "open",
@@ -422,7 +424,7 @@ return {
         if options.list then
             local scope = options.list.scope or "mine"
             if scope == "all" and not is_staff(ctx, roles) then
-                return reply("Lista wszystkich ticketów jest dostępna tylko dla zespołu wsparcia.")
+                return reply("Listing all tickets is restricted to support team.")
             end
             return ticket({
                 type = "list",
@@ -438,7 +440,7 @@ return {
 
         if options.claim then
             if not is_staff(ctx, roles) then
-                return reply("Przejęcie ticketu jest dostępne tylko dla zespołu wsparcia.")
+                return reply("Claiming a ticket is restricted to support team.")
             end
             return ticket({
                 type = "claim",
@@ -448,7 +450,7 @@ return {
 
         if options.unclaim then
             if not is_staff(ctx, roles) then
-                return reply("Zwolnienie ticketu jest dostępne tylko dla zespołu wsparcia.")
+                return reply("Releasing a ticket is restricted to support team.")
             end
             return ticket({
                 type = "unclaim",
@@ -468,7 +470,7 @@ return {
             local configuration_error = require_categories(config)
             if configuration_error then return reply(configuration_error) end
             if not is_staff(ctx, roles) then
-                return reply("Ponowne otwarcie ticketu jest dostępne tylko dla zespołu wsparcia.")
+                return reply("Reopening a ticket is restricted to support team.")
             end
             return ticket({
                 type = "reopen",
@@ -506,7 +508,7 @@ return {
 
         if options.priority then
             if not is_staff(ctx, roles) then
-                return reply("Priorytet ticketu może zmienić tylko zespół wsparcia.")
+                return reply("Changing ticket priority is restricted to support team.")
             end
             return ticket({
                 type = "set_priority",
@@ -530,6 +532,6 @@ return {
             })
         end
 
-        return reply("Wybierz jedną z podkomend `/ticket`.")
+        return reply("Choose one of `/ticket` subcommands.")
     end,
 }

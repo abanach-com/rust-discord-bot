@@ -1,3 +1,5 @@
+local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
+
 local function reply(content)
     return {
         {
@@ -15,7 +17,7 @@ end
 local function destination(ctx, key, label)
     local value = ctx.config[key]
     if not value or value == "" then
-        return nil, reply("Moduł nie ma skonfigurowanego kanału dla: " .. label .. ".")
+        return nil, reply(t("modules.community.no_channel", { label = label }, ctx))
     end
     return value, nil
 end
@@ -45,16 +47,16 @@ return {
         id = "community",
         name = "Community Hub",
         version = "1.0.0",
-        description = "Sugestie, prywatne zgłoszenia, feedback, podania oraz raporty błędów.",
+        description = t("modules.community.description"),
         category = "community",
         default_enabled = false,
         commands = {
             {
                 name = "suggest",
-                description = "Przekazuje sugestię na skonfigurowany kanał społeczności.",
+                description = "Forward suggestion to configured community channel.",
                 dm_permission = false,
                 options = {
-                    { type = "string", name = "text", description = "Treść sugestii.", required = true, min_length = 5, max_length = 1500 },
+                    { type = "string", name = "text", description = "Suggestion content.", required = true, min_length = 5, max_length = 1500 },
                     {
                         type = "string",
                         name = "category",
@@ -71,51 +73,51 @@ return {
             },
             {
                 name = "report",
-                description = "Wysyła prywatne zgłoszenie do zespołu serwera.",
+                description = "Send private report to server staff team.",
                 dm_permission = false,
                 options = {
-                    { type = "string", name = "reason", description = "Powód zgłoszenia.", required = true, min_length = 5, max_length = 1200 },
-                    { type = "user", name = "user", description = "Opcjonalnie zgłaszany użytkownik.", required = false },
-                    { type = "string", name = "evidence", description = "Link, ID wiadomości albo dodatkowy kontekst.", required = false, max_length = 500 },
+                    { type = "string", name = "reason", description = "Reason for report.", required = true, min_length = 5, max_length = 1200 },
+                    { type = "user", name = "user", description = "Optionally reported user.", required = false },
+                    { type = "string", name = "evidence", description = "Link, message ID, or extra context.", required = false, max_length = 500 },
                 },
             },
             {
                 name = "feedback",
-                description = "Przekazuje ocenę i opinię administratorom.",
+                description = "Send rating and feedback to administrators.",
                 dm_permission = false,
                 options = {
                     { type = "integer", name = "rating", description = "Ocena od 1 do 5.", required = true, min_value = 1, max_value = 5 },
-                    { type = "string", name = "message", description = "Treść opinii.", required = true, min_length = 3, max_length = 1200 },
+                    { type = "string", name = "message", description = "Feedback content.", required = true, min_length = 3, max_length = 1200 },
                 },
             },
             {
                 name = "apply",
-                description = "Składa podanie do wybranego działu albo zespołu.",
+                description = "Submit an application to selected department or team.",
                 dm_permission = false,
                 options = {
-                    { type = "string", name = "topic", description = "Stanowisko, dział albo typ podania.", required = true, min_length = 2, max_length = 80 },
-                    { type = "string", name = "application", description = "Treść podania.", required = true, min_length = 20, max_length = 1500 },
+                    { type = "string", name = "topic", description = "Role, department, or application type.", required = true, min_length = 2, max_length = 80 },
+                    { type = "string", name = "application", description = "Application content.", required = true, min_length = 20, max_length = 1500 },
                 },
             },
             {
                 name = "bugreport",
-                description = "Zgłasza błąd wraz z krokami jego odtworzenia.",
+                description = "Report a bug with reproduction steps.",
                 dm_permission = false,
                 options = {
                     {
                         type = "string",
                         name = "severity",
-                        description = "Wpływ błędu.",
+                        description = "Bug severity impact.",
                         required = true,
                         choices = {
                             { name = "Niski", value = "low" },
-                            { name = "Średni", value = "medium" },
+                            { name = "Medium", value = "medium" },
                             { name = "Wysoki", value = "high" },
                             { name = "Krytyczny", value = "critical" },
                         },
                     },
-                    { type = "string", name = "description", description = "Co nie działa?", required = true, min_length = 5, max_length = 900 },
-                    { type = "string", name = "steps", description = "Jak odtworzyć problem?", required = false, max_length = 700 },
+                    { type = "string", name = "description", description = "What is not working?", required = true, min_length = 5, max_length = 900 },
+                    { type = "string", name = "steps", description = "How to reproduce the problem?", required = false, max_length = 700 },
                 },
             },
         },
@@ -123,11 +125,11 @@ return {
             type = "object",
             additionalProperties = false,
             properties = {
-                suggestion_channel_id = { type = "string", title = "Kanał sugestii" },
-                report_channel_id = { type = "string", title = "Prywatny kanał zgłoszeń" },
-                feedback_channel_id = { type = "string", title = "Kanał feedbacku" },
-                application_channel_id = { type = "string", title = "Kanał podań" },
-                bug_channel_id = { type = "string", title = "Kanał raportów błędów" },
+                suggestion_channel_id = { type = "string", title = "Suggestions Channel" },
+                report_channel_id = { type = "string", title = "Private Reports Channel" },
+                feedback_channel_id = { type = "string", title = "Feedback Channel" },
+                application_channel_id = { type = "string", title = "Applications Channel" },
+                bug_channel_id = { type = "string", title = "Bug Reports Channel" },
             },
         },
     },
@@ -139,29 +141,29 @@ return {
             local category = ctx.options.category or "other"
             local text = safe(ctx.options.text)
             return accepted(
-                "Sugestia została przekazana. Dziękujemy!",
+                "Suggestion has been submitted. Thank you!",
                 channel_id,
                 "suggestion_created",
                 {
-                    message = string.format("💡 **Nowa sugestia**\nAutor: <@%s> (`%s`)\nKategoria: `%s`\n\n%s", ctx.user_id, ctx.user_id, category, text),
+                    message = string.format("💡 **Nowa sugestia**\nAuthor: <@%s> (`%s`)\nKategoria: `%s`\n\n%s", ctx.user_id, ctx.user_id, category, text),
                     audit = { author_id = ctx.user_id, category = category },
                 }
             )
         end
 
         if command == "report" then
-            local channel_id, error_reply = destination(ctx, "report_channel_id", "zgłoszenia")
+            local channel_id, error_reply = destination(ctx, "report_channel_id", "reports")
             if not channel_id then return error_reply end
             local target = ctx.options.user
             local target_line = target and ("<@" .. target .. "> (`" .. target .. "`)") or "Nie wskazano"
             local evidence = safe(ctx.options.evidence or "Nie podano", 500)
             local reason = safe(ctx.options.reason, 1200)
             return accepted(
-                "Zgłoszenie zostało bezpiecznie przekazane zespołowi.",
+                "Report has been safely delivered to staff.",
                 channel_id,
                 "user_report_created",
                 {
-                    message = string.format("🚨 **Prywatne zgłoszenie**\nZgłaszający: <@%s> (`%s`)\nCel: %s\nDowody/kontekst: %s\n\n**Powód:**\n%s", ctx.user_id, ctx.user_id, target_line, evidence, reason),
+                    message = string.format("🚨 **Private Report**\nReporter: <@%s> (`%s`)\nTarget: %s\nEvidence/context: %s\n\n**Reason:**\n%s", ctx.user_id, ctx.user_id, target_line, evidence, reason),
                     audit = { reporter_id = ctx.user_id, target_user_id = target, has_evidence = ctx.options.evidence ~= nil },
                 }
             )
@@ -174,11 +176,11 @@ return {
             local stars = string.rep("⭐", rating)
             local message = safe(ctx.options.message, 1200)
             return accepted(
-                "Opinia została przekazana. Dziękujemy!",
+                "Feedback has been delivered. Thank you!",
                 channel_id,
                 "feedback_created",
                 {
-                    message = string.format("📝 **Nowy feedback**\nAutor: <@%s> (`%s`)\nOcena: %s (`%d/5`)\n\n%s", ctx.user_id, ctx.user_id, stars, rating, message),
+                    message = string.format("📝 **Nowy feedback**\nAuthor: <@%s> (`%s`)\nOcena: %s (`%d/5`)\n\n%s", ctx.user_id, ctx.user_id, stars, rating, message),
                     audit = { author_id = ctx.user_id, rating = rating },
                 }
             )
@@ -190,28 +192,28 @@ return {
             local topic = safe(ctx.options.topic, 80)
             local application = safe(ctx.options.application, 1500)
             return accepted(
-                "Podanie zostało przekazane do rozpatrzenia.",
+                "Application has been submitted for review.",
                 channel_id,
                 "application_created",
                 {
-                    message = string.format("📨 **Nowe podanie**\nKandydat: <@%s> (`%s`)\nTemat: **%s**\n\n%s", ctx.user_id, ctx.user_id, topic, application),
+                    message = string.format("📨 **Nowe podanie**\nApplicant: <@%s> (`%s`)\nTemat: **%s**\n\n%s", ctx.user_id, ctx.user_id, topic, application),
                     audit = { applicant_id = ctx.user_id, topic = topic },
                 }
             )
         end
 
         if command == "bugreport" then
-            local channel_id, error_reply = destination(ctx, "bug_channel_id", "raporty błędów")
+            local channel_id, error_reply = destination(ctx, "bug_channel_id", "bug reports")
             if not channel_id then return error_reply end
             local severity = ctx.options.severity
             local description = safe(ctx.options.description, 900)
             local steps = safe(ctx.options.steps or "Nie podano", 700)
             return accepted(
-                "Raport błędu został przekazany.",
+                "Bug report has been submitted.",
                 channel_id,
                 "bug_report_created",
                 {
-                    message = string.format("🐞 **Raport błędu**\nAutor: <@%s> (`%s`)\nWażność: `%s`\n\n**Opis:**\n%s\n\n**Kroki odtworzenia:**\n%s", ctx.user_id, ctx.user_id, severity, description, steps),
+                    message = string.format("🐞 **Bug Report**\nAuthor: <@%s> (`%s`)\nSeverity: `%s`\n\n**Description:**\n%s\n\n**Kroki odtworzenia:**\n%s", ctx.user_id, ctx.user_id, severity, description, steps),
                     audit = { author_id = ctx.user_id, severity = severity },
                 }
             )

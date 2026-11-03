@@ -698,6 +698,63 @@ fn sandboxed_lua(limits: LuaLimits) -> mlua::Result<Lua> {
             Ok(seconds)
         })?,
     )?;
+    api.set(
+        "t",
+        lua.create_function(
+            |_, (key, arg2, arg3): (String, Option<Value>, Option<Value>)| {
+                let mut locale = "en".to_owned();
+                let mut args_map: HashMap<String, String> = HashMap::new();
+
+                let parse_arg =
+                    |val: Value, loc: &mut String, map: &mut HashMap<String, String>| match val {
+                        Value::String(s) => {
+                            if let Ok(str_val) = s.to_str() {
+                                *loc = str_val.to_owned();
+                            }
+                        }
+                        Value::Table(tbl) => {
+                            if let Ok(l) = tbl.get::<String>("locale") {
+                                *loc = l;
+                            }
+                            for pair in tbl.pairs::<Value, Value>().flatten() {
+                                if let (Value::String(k), v) = pair {
+                                    if let Ok(k_str) = k.to_str() {
+                                        if k_str != "locale" {
+                                            let val_str = match v {
+                                                Value::String(s) => {
+                                                    s.to_str().map(|s| s.to_owned()).unwrap_or_default()
+                                                }
+                                                Value::Integer(i) => i.to_string(),
+                                                Value::Number(n) => n.to_string(),
+                                                Value::Boolean(b) => b.to_string(),
+                                                _ => String::new(),
+                                            };
+                                            map.insert(k_str.to_owned(), val_str);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    };
+
+                if let Some(a2) = arg2 {
+                    parse_arg(a2, &mut locale, &mut args_map);
+                }
+                if let Some(a3) = arg3 {
+                    parse_arg(a3, &mut locale, &mut args_map);
+                }
+
+                if args_map.is_empty() {
+                    Ok(crate::translations::t(&locale, &key))
+                } else {
+                    Ok(crate::translations::t_map(&locale, &key, &args_map))
+                }
+            },
+        )?,
+    )?;
+    api.set("translate", api.get::<Value>("t")?)?;
+    globals.set("t", api.get::<Value>("t")?)?;
     globals.set("rustybot", api.clone())?;
     globals.set("zuckerbot", api)?;
 
@@ -831,4 +888,45 @@ fn invalid<T>(script: &str, message: &str) -> Result<T, LuaEngineError> {
         script: script.to_owned(),
         message: message.to_owned(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rustybot_t_in_lua() {
+        let limits = LuaLimits {
+            memory_bytes: 2 * 1024 * 1024,
+            instruction_limit: 100_000,
+            hook_granularity: 100,
+        };
+        let lua = sandboxed_lua(limits).expect("sandbox init");
+
+        let res_en: String = lua
+            .load(r#"return rustybot.t("system.command_executed")"#)
+            .eval()
+            .expect("eval");
+        assert_eq!(res_en, "Command executed successfully.");
+
+        let res_pl: String = lua
+            .load(r#"
+                local ctx = { locale = "pl" }
+                return rustybot.t("system.command_executed", ctx)
+            "#)
+            .eval()
+            .expect("eval");
+        assert_eq!(res_pl, "Polecenie zostało wykonane.");
+
+        let res_de: String = lua
+            .load(r#"
+                return t("system.rate_limited", { command = "help", seconds = "10" }, "de")
+            "#)
+            .eval()
+            .expect("eval");
+        assert_eq!(
+            res_de,
+            "Ratenbegrenzung für Befehl `/help` überschritten. Bitte in 10 s erneut versuchen."
+        );
+    }
 }

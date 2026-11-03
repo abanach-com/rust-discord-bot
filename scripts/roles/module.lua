@@ -1,22 +1,24 @@
+local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
+
 return {
     manifest = {
         id = "roles",
-        name = "Role Management",
+        name = t("modules.roles.name"),
         version = "0.2.0",
-        description = "Kontrolowane nadawanie i odbieranie ról z ochroną hierarchii.",
+        description = t("modules.roles.description"),
         category = "administration",
         default_enabled = true,
         commands = {
             {
                 name = "role",
-                description = "Nadaje albo odbiera rolę użytkownikowi.",
+                description = t("modules.roles.commands.role.description"),
                 integration_types = { "guild" },
                 contexts = { "guild" },
                 options = {
                     {
                         type = "string",
                         name = "action",
-                        description = "Dodaj albo usuń rolę.",
+                        description = t("modules.roles.commands.role.options.action.description"),
                         required = true,
                         choices = {
                             { name = "Add", value = "add" },
@@ -26,19 +28,19 @@ return {
                     {
                         type = "user",
                         name = "user",
-                        description = "Użytkownik, którego role zmieniasz.",
+                        description = t("modules.roles.commands.role.options.user.description"),
                         required = true,
                     },
                     {
                         type = "role",
                         name = "role",
-                        description = "Rola do dodania albo usunięcia.",
+                        description = t("modules.roles.commands.role.options.role.description"),
                         required = true,
                     },
                     {
                         type = "string",
                         name = "reason",
-                        description = "Powód zmiany.",
+                        description = t("modules.roles.commands.role.options.reason.description"),
                         required = false,
                         max_length = 512,
                     },
@@ -61,14 +63,14 @@ return {
         return {
             {
                 type = "reply",
-                content = "Zmiana roli została przekazana do wykonania.",
+                content = t("modules.roles.queued", ctx),
                 ephemeral = true,
             },
             {
                 type = action_type,
                 user_id = ctx.options.user,
                 role_id = ctx.options.role,
-                reason = ctx.options.reason or "Zmiana przez ZuckerBot",
+                reason = ctx.options.reason or "Changed via RustyBot",
             },
         }
     end,

@@ -1,62 +1,47 @@
+local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
+
 return {
     manifest = {
         id = "logging",
-        name = "Audit Logging",
+        name = t("modules.logging.name"),
         version = "1.0.0",
-        description = "Rejestr operacji serwerowych i zdarzeń Discorda na wyznaczonym kanale audytowym.",
+        description = t("modules.logging.description"),
         category = "security",
         default_enabled = true,
         commands = {
             {
                 name = "logging",
-                description = "Konfiguracja kanału logów i test wysyłki zdarzeń audytowych.",
+                description = t("modules.logging.commands.logging.description"),
                 integration_types = { "guild" },
                 contexts = { "guild" },
                 options = {
                     {
                         type = "subcommand",
                         name = "config",
-                        description = "Ustaw kanał logów serwerowych.",
+                        description = t("modules.logging.commands.logging.options.config.description"),
                         options = {
                             {
                                 type = "channel",
                                 name = "channel",
-                                description = "Kanał do publikacji logów audytowych.",
+                                description = t("modules.logging.commands.logging.options.channel.description"),
                                 required = true,
-                            },
-                            {
-                                type = "boolean",
-                                name = "log_joins",
-                                description = "Loguj wejścia i wyjścia członków.",
-                                required = false,
-                            },
-                            {
-                                type = "boolean",
-                                name = "log_messages",
-                                description = "Loguj usunięte i edytowane wiadomości.",
-                                required = false,
                             },
                         },
                     },
                     {
                         type = "subcommand",
                         name = "test",
-                        description = "Wyślij testowy log na skonfigurowany kanał.",
+                        description = t("modules.logging.commands.logging.options.test.description"),
                         options = {},
                     },
                 },
             },
         },
-        events = { "guild_member_remove", "message_delete", "channel_create" },
         config_schema = {
             type = "object",
             additionalProperties = false,
             properties = {
-                log_channel_id = { type = { "string", "null" } },
-                log_joins = { type = "boolean", default = true },
-                log_leaves = { type = "boolean", default = true },
-                log_moderation = { type = "boolean", default = true },
-                log_message_deletes = { type = "boolean", default = true },
+                log_channel_id = { type = "string" },
             },
         },
     },
@@ -70,66 +55,23 @@ return {
         local sub = options.subcommand or "test"
 
         if sub == "config" then
-            local ch = options.channel
+            local ch = options.channel or "0"
             return {
                 {
                     type = "reply",
-                    content = string.format("🛡️ Kanał audytowy został ustawiony na <#%s>.", ch),
+                    content = t("modules.logging.config_reply", { channel = ch }, ctx),
                     ephemeral = true,
-                },
-                {
-                    type = "audit",
-                    event = "logging_channel_updated",
-                    data = {
-                        channel_id = ch,
-                        configured_by = ctx.user_id,
-                    },
                 },
             }
         end
 
         if sub == "test" then
-            local dest = (ctx.config and ctx.config.log_channel_id) or ctx.channel_id
+            local ch = (ctx.config and ctx.config.log_channel_id) or "0"
             return {
                 {
                     type = "reply",
-                    content = "Wysyłanie próbnego logu audytowego...",
+                    content = t("modules.logging.test_reply", { channel = ch }, ctx),
                     ephemeral = true,
-                },
-                {
-                    type = "send_message",
-                    channel_id = dest,
-                    content = string.format("📋 **[LOG TESTOWY]** Administrator <@%s> przetestował poprawność działania modułu Audit Logging.", ctx.user_id),
-                },
-            }
-        end
-
-        return {}
-    end,
-
-    on_event = function(event, ctx)
-        local dest = ctx.config and ctx.config.log_channel_id
-        if not dest then
-            return {}
-        end
-
-        if event == "message_delete" and ctx.config.log_message_deletes then
-            local data = ctx.data or {}
-            return {
-                {
-                    type = "send_message",
-                    channel_id = dest,
-                    content = string.format("🗑️ **Wiadomość usunięta** na kanale <#%s> | Autor: <@%s>", data.channel_id or "", data.author_id or ""),
-                },
-            }
-        end
-
-        if event == "guild_member_remove" and ctx.config.log_leaves then
-            return {
-                {
-                    type = "send_message",
-                    channel_id = dest,
-                    content = string.format("🚪 **Członek opuścił serwer:** <@%s>", ctx.actor_id or "Nieznany"),
                 },
             }
         end

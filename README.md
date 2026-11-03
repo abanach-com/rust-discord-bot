@@ -61,32 +61,54 @@ Modules can be toggled on/off globally by setting `enabled="true"` or `enabled="
 
 | Category | Module Folder | Feature Summary |
 | --- | --- | --- |
-| **Platform** | `scripts/core/` | `/ping`, `/about` — diagnostyka i stan silnika |
-| **Safety** | `scripts/moderation/` | `/warn`, `/moderate`, `/case` — sankcje, unieważnienia i trwała ewidencja spraw |
-| **Safety** | `scripts/automod/` | Filtry słów, anty-spam, anty-caps, link guard i blokada zaproszeń |
-| **Support** | `scripts/tickets/` | `/ticket` — prywatne kanały pomocy, kolejki wsparcia i transkrypcje |
-| **Utility** | `scripts/scheduler/` | `/remind`, `/schedule` — terminowe przypomnienia i zadania cykliczne |
-| **Progression**| `scripts/progression/`| `/rank`, `/leaderboard`, `/daily`, `/rep` — poziomy XP i role za level |
-| **Economy** | `scripts/economy/` | `/economy` — portfel, praca, zlecenia crime, sklep serwerowy, ekwipunek i przelewy |
-| **Giveaway** | `scripts/giveaway/` | `/giveaway` — konkursy, losowania nagród i wybór zwycięzców |
-| **Social** | `scripts/starboard/` | `/starboard` — tablica chwały dla wiadomości wyróżnionych gwiazdkami |
-| **Utility** | `scripts/afk/` | `/afk` — statusy nieobecności z automatycznym powiadomieniem wzmiankujących |
-| **Utility** | `scripts/tags/` | `/tag` — własne komendy tekstowe, szablony i skróty |
-| **Community** | `scripts/birthdays/` | `/birthday` — kalendarz urodzin serwera i życzenia |
-| **Security** | `scripts/logging/` | `/logging` — rejestr zdarzeń serwerowych i usuniętych wiadomości |
-| **Management**| `scripts/reaction_roles/`| `/reactionrole` — samodzielny wybór ról poprzez reakcje pod wiadomościami |
-| **Fun** | `scripts/quotes/` | `/quote` — baza złotych myśli i pamiętnych cytatów serwera |
-| **Progression**| `scripts/achievements/`| `/achievements` — system odznak i osiągnięć serwerowych z nagrodami |
-| **Multimedia** | `scripts/music/` | `/music` — odtwarzacz audio Songbird ze wsparciem kolejki |
-| **Community** | `scripts/community/` | `/poll`, `/suggest`, `/report` — ankiety, sugestie i zgłoszenia |
-| **Management** | `scripts/welcome/` | Powitania nowych użytkowników i automatyczne nadawanie roli |
-| **Security** | `scripts/join_guard/`| `/joinguard` — ochrona anty-raid i weryfikacja wieku kont |
-| **Management** | `scripts/roles/` | `/role` — komendy przydzielania i odbierania ról |
-| **Fun** | `scripts/fun/` | `/roll`, `/8ball`, `/choose`, `/reverse` — rozrywka tekstowa |
-| **Fun** | `scripts/games/` | `/coinflip`, `/trivia`, `/rps`, `/guess` — quizy i mini-gry |
-| **Utility** | `scripts/utility/` | `/userinfo`, `/avatar`, `/serverinfo`, `/calculate` |
-| **Management** | `scripts/staff_tools/`| `/slowmode`, `/lockdown`, `/unlock`, `/announce` |
-| **Information**| `scripts/server_info/`| `/server`, `/channel`, `/rules` |
+| **Platform** | `scripts/core/` | `/ping`, `/about` — platform status, engine diagnostics, module catalog |
+| **Safety** | `scripts/moderation/` | `/warn`, `/moderate`, `/case` — sanctions, voiding and persistent case logs |
+| **Safety** | `scripts/automod/` | Word filter, anti-spam, anti-caps, link guard and invite blocker |
+| **Support** | `scripts/tickets/` | `/ticket` — private support channels, staff queues and HTML transcripts |
+| **Utility** | `scripts/scheduler/` | `/remind`, `/schedule` — timed reminders and recurring background tasks |
+| **Progression**| `scripts/progression/`| `/rank`, `/leaderboard`, `/daily`, `/rep` — XP progression, levels and role rewards |
+| **Economy** | `scripts/economy/` | `/economy` — wallet, work, crime jobs, guild shop, inventory and coin transfers |
+| **Giveaway** | `scripts/giveaway/` | `/giveaway` — giveaways, random draws and winner selection |
+| **Social** | `scripts/starboard/` | `/starboard` — message highlight hall of fame with custom emoji stars |
+| **Utility** | `scripts/afk/` | `/afk` — AFK status with auto-replies for user mentions |
+| **Utility** | `scripts/tags/` | `/tag` — custom server text tags, snippets and macros |
+| **Community** | `scripts/birthdays/` | `/birthday` — server birthday calendar and automated announcements |
+| **Security** | `scripts/logging/` | `/logging` — server event logging and deleted message audits |
+| **Management**| `scripts/reaction_roles/`| `/reactionrole` — self-assignable roles via message reactions |
+| **Fun** | `scripts/quotes/` | `/quote` — server quote repository and memorable quips |
+| **Progression**| `scripts/achievements/`| `/achievements` — server badge and achievement system with rewards |
+| **Multimedia** | `scripts/music/` | `/music` — Songbird voice audio player with track queue |
+| **Community** | `scripts/community/` | `/poll`, `/suggest`, `/report` — polls, community suggestions and user reports |
+| **Management** | `scripts/welcome/` | Welcomes new members with customizable cards and auto-roles |
+| **Security** | `scripts/join_guard/`| `/joinguard` — anti-raid burst protection and new account age validation |
+| **Management** | `scripts/roles/` | `/role` — role assignment and removal management commands |
+| **Fun** | `scripts/fun/` | `/roll`, `/8ball`, `/choose`, `/reverse` — text entertainment |
+| **Fun** | `scripts/games/` | `/coinflip`, `/trivia`, `/rps`, `/guess` — trivia quizzes and mini-games |
+| **Utility** | `scripts/utility/` | `/userinfo`, `/avatar`, `/serverinfo`, `/calculate` — diagnostic utilities |
+| **Management** | `scripts/staff_tools/`| `/slowmode`, `/lockdown`, `/unlock`, `/announce` — emergency moderation tools |
+| **Information**| `scripts/server_info/`| `/server`, `/channel`, `/rules` — server information display |
+
+## Centralized Translations & Internationalization (i18n)
+
+The platform defaults to **English (`en`)** with out-of-the-box multilingual support for **Polish (`pl`)** and **German (`de`)**. All localized strings across Discord slash commands, options, interactive responses, Rust host error/audit messages, and the Web UI are maintained in the centralized `translations/` directory.
+
+### Translation Catalog
+- `translations/en.json` — English (Default base reference)
+- `translations/pl.json` — Polish (`Polski`)
+- `translations/de.json` — German (`Deutsch`)
+
+### Key Architecture & Features
+1. **Compile-time Embedding with Zero Overhead**: Translations are bundled into the compiled binary via `include_str!`. At startup, the engine also inspects the runtime `translations/` folder to allow on-the-fly hot-updates without recompiling.
+2. **Native Discord Slash Command Localization**: Command names and option descriptions automatically map localized strings using Discord's official `description_localized` API. Discord displays commands in the user's client language automatically.
+3. **Lua Translation API**: In any Lua module, call `t(key, [args/ctx], [locale])` or `rustybot.t(key, ...)` to look up translated text with parameter interpolation:
+   ```lua
+   -- Context-aware locale lookup with variable interpolation:
+   local greeting = t("modules.welcome.embed_description", { user = ctx.user_name, guild = ctx.guild_name }, ctx)
+   ```
+4. **Adding New Languages**: To add a new language (e.g., Spanish `es`, French `fr`):
+   1. Create `translations/<lang_code>.json` (e.g. `translations/es.json`).
+   2. Copy the structure from `translations/en.json` and translate the values.
+   3. The translation loader automatically registers any `.json` file in `translations/` matching `<lang_code>.json`. Discord slash command localizations and Lua calls will instantly support the new locale code!
 
 ## Architecture
 

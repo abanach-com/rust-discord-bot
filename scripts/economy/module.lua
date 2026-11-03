@@ -1,3 +1,5 @@
+local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
+
 return {
     manifest = {
         id = "economy",
@@ -9,20 +11,20 @@ return {
         commands = {
             {
                 name = "economy",
-                description = "Zarządzaj swoim portfelem, pracuj, kupuj w sklepie i sprawdzaj ekwipunek.",
+                description = t("modules.economy.description"),
                 integration_types = { "guild" },
                 contexts = { "guild" },
                 options = {
                     {
                         type = "subcommand",
                         name = "balance",
-                        description = "Sprawdź stan portfela, konta bankowego i wartość netto.",
+                        description = "Check wallet, bank balance, and net worth.",
                         options = {},
                     },
                     {
                         type = "subcommand",
                         name = "work",
-                        description = "Wykonaj zmianę w pracy i zarób monety.",
+                        description = "Work a shift and earn coins.",
                         options = {},
                     },
                     {
@@ -34,7 +36,7 @@ return {
                     {
                         type = "subcommand",
                         name = "shop",
-                        description = "Przeglądaj sklep z przedmiotami i rolami na serwerze.",
+                        description = "Browse items and roles available in server shop.",
                         options = {},
                     },
                     {
@@ -59,7 +61,7 @@ return {
                     {
                         type = "subcommand",
                         name = "transfer",
-                        description = "Przelej monety innemu użytkownikowi.",
+                        description = "Transfer coins to another user.",
                         options = {
                             {
                                 type = "user",
@@ -70,7 +72,7 @@ return {
                             {
                                 type = "integer",
                                 name = "amount",
-                                description = "Liczba monet do przesłania.",
+                                description = "Amount of coins to transfer.",
                                 required = true,
                                 min_value = 1,
                             },
@@ -113,7 +115,7 @@ return {
                 },
                 {
                     type = "reply",
-                    content = string.format("💳 **Portfel użytkownika <@%s>**\nSprawdzanie stanu konta i salda monet...", user_id),
+                    content = string.format("💳 **Wallet of user <@%s>**\nChecking account balance and coins...", user_id),
                     ephemeral = true,
                 },
             }
@@ -122,7 +124,7 @@ return {
         if sub == "work" then
             local jobs = {
                 "Programista Rust", "Barista w Cyber Cafe", "Moderator Discorda",
-                "Kierowca rakiety", "Inżynier AI", "Detektyw serwerowy"
+                "Rocket Pilot", "AI Engineer", "Server Detective"
             }
             local min_p = (ctx.config and ctx.config.min_work_payout) or 50
             local max_p = (ctx.config and ctx.config.max_work_payout) or 250
@@ -132,7 +134,7 @@ return {
             return {
                 {
                     type = "reply",
-                    content = string.format("💼 Przepracowałeś zmianę jako **%s** i zarobiłeś **%d monet**! 🪙", job, earnings),
+                    content = string.format("💼 You worked a shift as **%s** and earned **%d coins**! 🪙", job, earnings),
                     ephemeral = false,
                 },
                 {
@@ -152,7 +154,7 @@ return {
             return {
                 {
                     type = "reply",
-                    content = string.format("🕵️ Przeprowadziłeś udany skok na cyber-skarbiec! Zdobyłeś **%d monet**! 💰", gain),
+                    content = string.format("🕵️ You pulled off a heist on the cyber-vault! You scored **%d coins**! 💰", gain),
                     ephemeral = false,
                 },
                 {
@@ -169,12 +171,12 @@ return {
 
         if sub == "shop" then
             local content = "🛍️ **Sklep Serwerowy Rusty Discord Bot**\n\n" ..
-                "1. `vip_pass` — **VIP Pass** (500 monet) — Dostęp do strefy VIP\n" ..
-                "2. `xp_booster` — **XP Booster** (300 monet) — Przyspiesza zdobywanie poziomów\n" ..
-                "3. `custom_color` — **Custom Color** (200 monet) — Własny kolor nicku\n" ..
-                "4. `mystery_box` — **Mystery Box** (150 monet) — Niespodzianka ze skrzyni\n" ..
-                "5. `trophy` — **Diamond Trophy** (1000 monet) — Prestiżowe trofeum\n\n" ..
-                "Aby kupić przedmiot, użyj: `/economy buy item:nazwa`"
+                "1. `vip_pass` — **VIP Pass** (500 coins) — Access to VIP zone\n" ..
+                "2. `xp_booster` — **XP Booster** (300 coins) — Accelerates leveling\n" ..
+                "3. `custom_color` — **Custom Color** (200 coins) — Custom nickname color\n" ..
+                "4. `mystery_box` — **Mystery Box** (150 coins) — Niespodzianka ze skrzyni\n" ..
+                "5. `trophy` — **Diamond Trophy** (1000 coins) — Prestigious trophy\n\n" ..
+                "To buy an item, use: `/economy buy item:name`"
             return {
                 {
                     type = "reply",
@@ -189,7 +191,7 @@ return {
             return {
                 {
                     type = "reply",
-                    content = string.format("🛒 Pomyślnie zakupiono przedmiot **%s**! Został dodany do Twojego ekwipunku `/economy inventory`.", item_id),
+                    content = string.format("🛒 Successfully purchased item **%s**! Added to your inventory `/economy inventory`.", item_id),
                     ephemeral = true,
                 },
                 {
@@ -220,7 +222,7 @@ return {
                 return {
                     {
                         type = "reply",
-                        content = "Musisz wskazać odbiorcę przelewu.",
+                        content = t("modules.economy.pay_no_recipient", ctx),
                         ephemeral = true,
                     },
                 }
@@ -237,7 +239,7 @@ return {
                 },
                 {
                     type = "reply",
-                    content = string.format("💸 Przelano **%d monet** użytkownikowi <@%s>!", amount, recipient),
+                    content = t("modules.economy.pay_success", { amount = amount, recipient = recipient }, ctx),
                     ephemeral = false,
                 },
                 {

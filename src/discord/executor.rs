@@ -121,7 +121,7 @@ pub async fn execute_command_actions(
                 .edit_response(
                     &ctx.http,
                     serenity::builder::EditInteractionResponse::new()
-                        .content("Polecenie zostało wykonane.")
+                        .content(crate::translations::t(&command.locale, "system.command_executed"))
                         .allowed_mentions(CreateAllowedMentions::new()),
                 )
                 .await?;
@@ -159,7 +159,7 @@ pub async fn execute_command_actions(
                 &ctx.http,
                 CreateInteractionResponse::Message(
                     CreateInteractionResponseMessage::new()
-                        .content("Polecenie zostało przyjęte.")
+                        .content(crate::translations::t(&command.locale, "system.command_accepted"))
                         .ephemeral(true)
                         .allowed_mentions(CreateAllowedMentions::new()),
                 ),
@@ -287,6 +287,11 @@ pub async fn execute_event_actions(
                     content.replace(
                         "została usunięta przez AutoMod",
                         "narusza zasady AutoMod (usunięcie zablokowane)",
+                    )
+                } else if content.contains("was removed by AutoMod") {
+                    content.replace(
+                        "was removed by AutoMod",
+                        "violates AutoMod rules (deletion blocked)",
                     )
                 } else {
                     content.clone()
@@ -883,7 +888,7 @@ fn has_permission(actual: Permissions, required: Permissions) -> bool {
 fn require_guild(origin: &ActionOrigin) -> Result<GuildId> {
     origin
         .guild_id
-        .ok_or_else(|| anyhow!("ta akcja może zostać wykonana wyłącznie na serwerze"))
+        .ok_or_else(|| anyhow!("this action can only be performed on a server"))
 }
 
 pub async fn resolve_and_validate_channel(
@@ -896,13 +901,13 @@ pub async fn resolve_and_validate_channel(
         Some(value) => ChannelId::new(parse_snowflake(value)?),
         None => origin
             .channel_id
-            .ok_or_else(|| anyhow!("brakuje kanału dla tej akcji"))?,
+            .ok_or_else(|| anyhow!("missing channel for this action"))?,
     };
 
     let channel = channel_id
         .to_channel(ctx)
         .await
-        .with_context(|| format!("nie można odczytać danych o kanale {channel_id}"))?;
+        .with_context(|| format!("cannot read data for channel {channel_id}"))?;
 
     match channel {
         serenity::model::channel::Channel::Guild(guild_channel) => {
@@ -910,7 +915,7 @@ pub async fn resolve_and_validate_channel(
                 && guild_channel.guild_id != expected_guild_id
             {
                 return Err(anyhow!(
-                    "kanał docelowy {channel_id} należy do obcego serwera {}",
+                    "target channel {channel_id} belongs to a different server {}",
                     guild_channel.guild_id
                 ));
             }
@@ -918,13 +923,13 @@ pub async fn resolve_and_validate_channel(
             match purpose {
                 ChannelPurpose::SendMessage => {
                     if guild_channel.kind == ChannelType::Category {
-                        return Err(anyhow!("kategoria kanałów nie może być celem wiadomości"));
+                        return Err(anyhow!("channel categories cannot be the target of messages"));
                     }
                 }
                 ChannelPurpose::ManageMessages => {
                     if guild_channel.kind == ChannelType::Category {
                         return Err(anyhow!(
-                            "kategoria kanałów nie może być celem usuwania wiadomości"
+                            "channel categories cannot be the target of message deletions"
                         ));
                     }
                 }
@@ -958,14 +963,14 @@ pub async fn resolve_and_validate_channel(
                     ChannelPurpose::SendMessage => {
                         if !perms.contains(Permissions::SEND_MESSAGES) {
                             return Err(anyhow!(
-                                "brak uprawnień użytkownika do wysyłania wiadomości w kanale {channel_id}"
+                                "missing user permissions to send messages in channel {channel_id}"
                             ));
                         }
                     }
                     ChannelPurpose::ManageMessages => {
                         if !perms.contains(Permissions::MANAGE_MESSAGES) {
                             return Err(anyhow!(
-                                "brak uprawnień użytkownika do zarządzania wiadomościami w kanale {channel_id}"
+                                "missing user permissions to manage messages in channel {channel_id}"
                             ));
                         }
                     }
@@ -977,21 +982,21 @@ pub async fn resolve_and_validate_channel(
         serenity::model::channel::Channel::Private(private_channel) => {
             if origin.guild_id.is_some() {
                 return Err(anyhow!(
-                    "kanał prywatny {channel_id} nie należy do tego serwera"
+                    "private channel {channel_id} does not belong to this server"
                 ));
             }
             Ok(private_channel.id)
         }
-        _ => Err(anyhow!("nieobsługiwany typ kanału {channel_id}")),
+        _ => Err(anyhow!("unsupported channel type {channel_id}")),
     }
 }
 
 pub(crate) fn parse_snowflake(value: &str) -> Result<u64> {
     let parsed = value
         .parse::<u64>()
-        .with_context(|| format!("{value:?} nie jest prawidłowym identyfikatorem Discorda"))?;
+        .with_context(|| format!("{value:?} is not a valid Discord identifier"))?;
     if parsed == 0 {
-        return Err(anyhow!("identyfikator Discorda nie może być zerem"));
+        return Err(anyhow!("Discord identifier cannot be zero"));
     }
     Ok(parsed)
 }
@@ -1004,7 +1009,7 @@ pub async fn ensure_member_hierarchy(
 ) -> Result<()> {
     let guild = guild_id.to_partial_guild(&ctx.http).await?;
     if target_id == guild.owner_id {
-        return Err(anyhow!("właściciel serwera nie może zostać moderowany"));
+        return Err(anyhow!("the server owner cannot be moderated"));
     }
 
     let target = guild_id.member(&ctx.http, target_id).await?;
@@ -1026,19 +1031,19 @@ pub async fn ensure_member_hierarchy(
 
     if !rank_is_higher(bot_rank, target_rank) {
         return Err(anyhow!(
-            "najwyższa rola bota musi znajdować się nad rolą użytkownika"
+            "the bot's highest role must be higher than the target member's role"
         ));
     }
 
     if let Some(actor_id) = actor_id {
         if actor_id == target_id {
-            return Err(anyhow!("nie możesz wykonać tej akcji na sobie"));
+            return Err(anyhow!("you cannot perform this action on yourself"));
         }
         if actor_id != guild.owner_id {
             let actor = guild_id.member(&ctx.http, actor_id).await?;
             if !rank_is_higher(member_rank(&actor, &guild.roles), target_rank) {
                 return Err(anyhow!(
-                    "twoja najwyższa rola musi znajdować się nad rolą użytkownika"
+                    "your highest role must be higher than the target member's role"
                 ));
             }
         }
@@ -1057,10 +1062,10 @@ async fn ensure_role_hierarchy(
     let role = guild
         .roles
         .get(&role_id)
-        .ok_or_else(|| anyhow!("rola nie istnieje na tym serwerze"))?;
+        .ok_or_else(|| anyhow!("role does not exist on this server"))?;
     if role.managed {
         return Err(anyhow!(
-            "nie można modyfikować ról zarządzanych przez Discorda/integracje"
+            "managed roles cannot be manually modified"
         ));
     }
     let target_rank = role_rank(role);
@@ -1080,7 +1085,7 @@ async fn ensure_role_hierarchy(
     let bot = guild_id.member(&ctx.http, bot_id).await?;
     if !rank_is_higher(member_rank(&bot, &guild.roles), target_rank) {
         return Err(anyhow!(
-            "najwyższa rola bota musi znajdować się nad zarządzaną rolą"
+            "the bot's highest role must be above the managed role"
         ));
     }
 

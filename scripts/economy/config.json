@@ -9,31 +9,31 @@
             "id": "vip_pass",
             "name": "VIP Pass",
             "price": 500,
-            "description": "Dostęp do kanałów VIP"
+            "description": "Access to VIP channels"
         },
         {
             "id": "xp_booster",
             "name": "XP Booster",
             "price": 300,
-            "description": "Mnożnik XP +50%"
+            "description": "XP Multiplier +50%"
         },
         {
             "id": "custom_color",
             "name": "Custom Color",
             "price": 200,
-            "description": "Wybór koloru nicku"
+            "description": "Custom nickname color"
         },
         {
             "id": "mystery_box",
             "name": "Mystery Box",
             "price": 150,
-            "description": "Losowa nagroda ze skrzyni"
+            "description": "Random chest reward"
         },
         {
             "id": "trophy",
             "name": "Diamond Trophy",
             "price": 1000,
-            "description": "Prestiżowe trofeum na profilu"
+            "description": "Prestigious profile trophy"
         }
     ]
 }

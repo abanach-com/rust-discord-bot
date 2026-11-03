@@ -1,27 +1,29 @@
+local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
+
 return {
     manifest = {
         id = "afk",
-        name = "AFK System",
+        name = t("modules.afk.name"),
         version = "1.0.0",
-        description = "Statusy nieobecności (Away From Keyboard) z automatyczną odpowiedzią na wzmianki.",
+        description = t("modules.afk.description"),
         category = "utility",
         default_enabled = true,
         commands = {
             {
                 name = "afk",
-                description = "Ustaw lub wyczyść swój status nieobecności AFK.",
+                description = t("modules.afk.commands.afk.description"),
                 integration_types = { "guild" },
                 contexts = { "guild" },
                 options = {
                     {
                         type = "subcommand",
                         name = "set",
-                        description = "Ustaw status AFK z opcjonalnym powodem.",
+                        description = t("modules.afk.commands.afk.options.set.description"),
                         options = {
                             {
                                 type = "string",
                                 name = "reason",
-                                description = "Powód nieobecności.",
+                                description = t("modules.afk.commands.afk.options.reason.description"),
                                 required = false,
                                 max_length = 256,
                             },
@@ -30,13 +32,13 @@ return {
                     {
                         type = "subcommand",
                         name = "clear",
-                        description = "Wyczyść swój status AFK.",
+                        description = t("modules.afk.commands.afk.options.clear.description"),
                         options = {},
                     },
                     {
                         type = "subcommand",
                         name = "status",
-                        description = "Sprawdź swój aktualny status AFK.",
+                        description = t("modules.afk.commands.afk.options.status.description"),
                         options = {},
                     },
                 },
@@ -64,11 +66,11 @@ return {
         local user_id = ctx.user_id
 
         if sub == "set" then
-            local reason = options.reason or "Zaraz wracam"
+            local reason = options.reason or t("modules.afk.default_reason", ctx)
             return {
                 {
                     type = "reply",
-                    content = string.format("💤 <@%s> jest teraz AFK: *%s*", user_id, reason),
+                    content = t("modules.afk.set_reply", { user = user_id, reason = reason }, ctx),
                     ephemeral = false,
                 },
                 {
@@ -86,7 +88,7 @@ return {
             return {
                 {
                     type = "reply",
-                    content = string.format("👋 Witaj z powrotem <@%s>! Twój status AFK został wyłączony.", user_id),
+                    content = t("modules.afk.clear_reply", { user = user_id }, ctx),
                     ephemeral = true,
                 },
             }
@@ -96,7 +98,7 @@ return {
             return {
                 {
                     type = "reply",
-                    content = string.format("ℹ️ Status AFK dla <@%s>: Aktywny na serwerze.", user_id),
+                    content = t("modules.afk.status_reply", { user = user_id }, ctx),
                     ephemeral = true,
                 },
             }
@@ -106,12 +108,6 @@ return {
     end,
 
     on_event = function(event, ctx)
-        if event == "message_create" then
-            local data = ctx.data or {}
-            local mentions = data.mentions or {}
-            -- If user returns, greet them if configured
-            return {}
-        end
         return {}
     end,
 }

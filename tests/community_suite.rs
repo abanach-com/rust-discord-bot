@@ -148,7 +148,7 @@ async fn staff_tools_reject_users_without_permissions() {
         Some(LuaAction::Reply {
             content,
             ephemeral: true,
-        }) if content.contains("uprawnień")
+        }) if content.contains("uprawnień") || content.contains("permission")
     ));
 }
 
@@ -262,7 +262,7 @@ async fn automod_intercepts_message_update_with_discord_invite() {
     ));
     assert!(actions.iter().any(|action| matches!(
         action,
-        LuaAction::SendMessage { content, .. } if content.contains("edycji wiadomości")
+        LuaAction::SendMessage { content, .. } if content.contains("edycji wiadomości") || content.contains("message edit")
     )));
     assert!(matches!(
         actions.last(),
@@ -471,7 +471,7 @@ async fn join_guard_detects_raid_burst_and_triggers_lockdown() {
     )));
     assert!(actions.iter().any(|action| matches!(
         action,
-        LuaAction::SendMessage { content, .. } if content.contains("ALARM OCHRONY PRZED RAJDEM")
+        LuaAction::SendMessage { content, .. } if content.contains("ALARM OCHRONY PRZED RAJDEM") || content.contains("RAID PROTECTION ALERT")
     )));
 }
 

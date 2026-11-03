@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="pl">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -10,7 +10,7 @@
   <script src="/assets/app.js" defer></script>
 </head>
 <body>
-  <a href="#main-content" class="skip-link">Przejdź do treści</a>
+  <a href="#main-content" class="skip-link">Skip to main content</a>
   <div class="shell">
     <aside class="sidebar">
       <a class="brand" href="/" aria-label="Rusty Discord Bot Control">
@@ -21,13 +21,13 @@
         </span>
       </a>
 
-      <nav class="nav" aria-label="Nawigacja" role="tablist">
-        <a class="nav-item active" href="#modules" id="nav-modules" role="tab" aria-selected="true" aria-controls="view-modules">Moduły</a>
-        <a class="nav-item" href="#moderation" id="nav-moderation" role="tab" aria-selected="false" aria-controls="view-moderation">Moderacja</a>
-        <a class="nav-item" href="#audit" id="nav-audit" role="tab" aria-selected="false" aria-controls="view-audit">Dziennik audytu</a>
-        <a class="nav-item" href="#analytics" id="nav-analytics" role="tab" aria-selected="false" aria-controls="view-analytics">Analityka</a>
-        <span class="nav-item disabled">Automatyzacje</span>
-        <span class="nav-item disabled">Muzyka</span>
+      <nav class="nav" aria-label="Navigation" role="tablist">
+        <a class="nav-item active" href="#modules" id="nav-modules" role="tab" aria-selected="true" aria-controls="view-modules">Modules</a>
+        <a class="nav-item" href="#moderation" id="nav-moderation" role="tab" aria-selected="false" aria-controls="view-moderation">Moderation</a>
+        <a class="nav-item" href="#audit" id="nav-audit" role="tab" aria-selected="false" aria-controls="view-audit">Audit Log</a>
+        <a class="nav-item" href="#analytics" id="nav-analytics" role="tab" aria-selected="false" aria-controls="view-analytics">Analytics</a>
+        <span class="nav-item disabled">Automations</span>
+        <span class="nav-item disabled">Music</span>
       </nav>
 
       <div class="sidebar-footer">
@@ -35,15 +35,15 @@
           <span class="runtime-dot"></span>
           <span>Rust core + Lua modules</span>
         </div>
-        <button id="logout-button" class="text-button hidden" type="button">Wyloguj</button>
+        <button id="logout-button" class="text-button hidden" type="button">Log out</button>
       </div>
     </aside>
 
     <main class="content" id="main-content">
       <header class="topbar">
         <div>
-          <p class="eyebrow">Panel administracyjny</p>
-          <h1>Konfiguracja serwera</h1>
+          <p class="eyebrow">Admin Control Panel</p>
+          <h1>Server Configuration</h1>
         </div>
         <div id="account" class="account hidden">
           <div>
@@ -55,23 +55,23 @@
 
       <section id="login-view" class="login-panel">
         <div class="login-copy">
-          <p class="eyebrow">Bezpieczny dostęp</p>
-          <h2>Zarządzaj Rusty Discord Botem przez Discord</h2>
-          <p>Panel pokaże wyłącznie serwery, których jesteś właścicielem albo na których masz uprawnienie Zarządzanie serwerem.</p>
-          <a class="primary-button" href="/auth/discord">Zaloguj przez Discord</a>
+          <p class="eyebrow">Secure Access</p>
+          <h2>Manage Rusty Discord Bot via Discord</h2>
+          <p>The dashboard only displays servers where you are the owner or have the Manage Server permission.</p>
+          <a class="primary-button" href="/auth/discord">Log in with Discord</a>
         </div>
         <div class="login-proof">
           <div>
             <span>OAuth2</span>
-            <strong>Token bota nigdy nie trafia do przeglądarki</strong>
+            <strong>Bot token never touches the browser</strong>
           </div>
           <div>
             <span>Lua sandbox</span>
-            <strong>Skrypty wykonują tylko dozwolone akcje</strong>
+            <strong>Scripts only execute authorized sandboxed actions</strong>
           </div>
           <div>
             <span>Audit trail</span>
-            <strong>Zmiany konfiguracji są rejestrowane</strong>
+            <strong>Configuration changes are fully audited</strong>
           </div>
         </div>
       </section>
@@ -79,25 +79,25 @@
       <section id="dashboard-view" class="hidden">
         <div class="toolbar">
           <label class="field">
-            <span>Serwer</span>
+            <span>Server</span>
             <select id="guild-select"></select>
           </label>
           <div class="toolbar-meta">
-            <span id="module-count">0 modułów</span>
+            <span id="module-count">0 modules</span>
             <span id="save-status" role="status" aria-live="polite"></span>
           </div>
         </div>
 
         <div class="kpi-grid">
           <div class="kpi-card">
-            <span class="kpi-label">Aktywne moduły</span>
+            <span class="kpi-label">Active Modules</span>
             <span class="kpi-value" id="kpi-active-modules">0 / 0</span>
-            <span class="kpi-hint" id="kpi-modules-hint">Gotowe do działania</span>
+            <span class="kpi-hint" id="kpi-modules-hint">Operational</span>
           </div>
           <div class="kpi-card">
-            <span class="kpi-label">Sprawy moderacyjne</span>
+            <span class="kpi-label">Moderation Cases</span>
             <span class="kpi-value" id="kpi-total-cases">0</span>
-            <span class="kpi-hint">Zarejestrowane sankcje</span>
+            <span class="kpi-hint">Recorded sanctions</span>
           </div>
           <div class="kpi-card">
             <span class="kpi-label">Zdarzenia audytu</span>
@@ -117,7 +117,7 @@
 
         <section id="view-moderation" class="tab-pane hidden" role="tabpanel" aria-labelledby="nav-moderation">
           <div class="panel-header">
-            <h2>Sprawy moderacyjne</h2>
+            <h2>Moderation Cases</h2>
             <p>Trwały rejestr sankcji, ostrzeżeń, notatek zespołu i dowodów z kontrolą wersji.</p>
           </div>
           <div id="cases-list" class="cases-grid" aria-live="polite"></div>
@@ -154,17 +154,17 @@
 
   <dialog id="void-dialog" class="modal-dialog">
     <form method="dialog" id="void-form">
-      <h3 id="void-dialog-title">Unieważnienie sprawy moderacyjnej</h3>
+      <h3 id="void-dialog-title">Void Moderation Case</h3>
       <p style="color:var(--muted); font-size:13px; margin: 8px 0 16px 0;">
         Unieważnienie sprawy unieważnia wyłącznie rekord w ewidencji i historii bazy danych. Nie cofa automatycznie aktywnego bana ani timeoutu w Discordzie – wymaga to oddzielnej czynności moderatorskiej.
       </p>
       <label class="field" style="display:flex; flex-direction:column; gap:6px;">
-        <span>Powód unieważnienia:</span>
-        <textarea id="void-reason-input" class="text-input" rows="3" required placeholder="Wyjaśnij powód unieważnienia (np. pomyłka, odwołanie uznane)..."></textarea>
+        <span>Void Reason:</span>
+        <textarea id="void-reason-input" class="text-input" rows="3" required placeholder="Explain void reason (e.g. mistake, appeal granted)..."></textarea>
       </label>
       <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:20px;">
-        <button type="button" class="case-action-btn" id="void-cancel-btn">Anuluj</button>
-        <button type="submit" class="case-action-btn btn-danger">Potwierdź unieważnienie</button>
+        <button type="button" class="case-action-btn" id="void-cancel-btn">Cancel</button>
+        <button type="submit" class="case-action-btn btn-danger">Confirm Void</button>
       </div>
     </form>
   </dialog>
@@ -182,7 +182,7 @@
         <label class="switch">
           <input class="module-enabled" type="checkbox">
           <span class="switch-track" aria-hidden="true"></span>
-          <span class="sr-only">Włącz moduł</span>
+          <span class="sr-only">Enable module</span>
         </label>
       </div>
       <div class="module-meta">
@@ -191,23 +191,23 @@
       </div>
 
       <div class="mode-toggle">
-        <button type="button" class="mode-btn active" data-mode="form">Formularz wizualny</button>
-        <button type="button" class="mode-btn" data-mode="json">Edytor JSON</button>
+        <button type="button" class="mode-btn active" data-mode="form">Visual Form</button>
+        <button type="button" class="mode-btn" data-mode="json">JSON Editor</button>
       </div>
 
       <div class="module-form-container"></div>
 
       <details class="json-details hidden">
-        <summary>Surowy JSON konfiguracji</summary>
+        <summary>Raw Configuration JSON</summary>
         <label class="json-label">
-          <span class="sr-only">Konfiguracja modułu JSON</span>
+          <span class="sr-only">Module JSON Configuration</span>
           <textarea class="module-config" spellcheck="false"></textarea>
         </label>
       </details>
 
       <div class="module-footer">
         <span class="module-state"></span>
-        <button class="save-button" type="button">Zapisz zmiany</button>
+        <button class="save-button" type="button">Save Changes</button>
       </div>
     </article>
   </template>

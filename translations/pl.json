@@ -1,0 +1,1678 @@
+{
+  "meta": {
+    "language": "pl",
+    "name": "Polski",
+    "is_default": false
+  },
+  "system": {
+    "internal_error": "Wewnętrzny błąd bota. Szczegóły zostały zapisane w logach.",
+    "command_error": "Wystąpił błąd podczas przetwarzania polecenia: {error}",
+    "generic_error": "Wystąpił błąd: {error}",
+    "command_unavailable": "Ta komenda nie jest już dostępna.",
+    "module_not_loaded": "Moduł tej komendy nie jest załadowany.",
+    "module_disabled": "Ten moduł został wyłączony w panelu administracyjnym.",
+    "rate_limited": "Osiągnięto limit wywołań komendy `/{command}`. Spróbuj ponownie za {seconds} s.",
+    "command_executed": "Polecenie zostało wykonane.",
+    "command_accepted": "Polecenie zostało przyjęte.",
+    "guild_only": "Ta akcja może zostać wykonana wyłącznie na serwerze.",
+    "missing_channel": "Brakuje kanału dla tej akcji.",
+    "cannot_read_channel": "Nie można odczytać danych o kanale {channel_id}.",
+    "foreign_channel": "Kanał docelowy {channel_id} należy do obcego serwera {guild_id}.",
+    "category_cannot_be_target": "Kategoria kanałów nie może być celem wiadomości.",
+    "category_cannot_be_purge": "Kategoria kanałów nie może być celem usuwania wiadomości.",
+    "no_send_perms": "Brak uprawnień użytkownika do wysyłania wiadomości w kanale {channel_id}.",
+    "no_manage_msgs_perms": "Brak uprawnień użytkownika do zarządzania wiadomościami w kanale {channel_id}.",
+    "private_channel_foreign": "Kanał prywatny {channel_id} nie należy do tego serwera.",
+    "unsupported_channel_type": "Nieobsługiwany typ kanału {channel_id}.",
+    "invalid_snowflake": "{value} nie jest prawidłowym identyfikatorem Discorda.",
+    "snowflake_zero": "Identyfikator Discorda nie może być zerem.",
+    "cannot_moderate_owner": "Właściciel serwera nie może zostać moderowany.",
+    "bot_hierarchy_error": "Najwyższa rola bota musi znajdować się nad rolą użytkownika.",
+    "cannot_moderate_self": "Nie możesz wykonać tej akcji na sobie.",
+    "actor_hierarchy_error": "Twoja najwyższa rola musi znajdować się nad rolą użytkownika.",
+    "role_bot_hierarchy_error": "Najwyższa rola bota musi znajdować się nad nadawaną lub odbieraną rolą.",
+    "role_actor_hierarchy_error": "Twoja najwyższa rola musi znajdować się nad nadawaną lub odbieraną rolą.",
+    "role_managed_error": "Rola zarządzana przez integrację, bota lub boosterów nie może być modyfikowana ręcznie.",
+    "role_not_found": "Rola {role_id} nie istnieje na tym serwerze.",
+    "channel_not_found": "Kanał {channel_id} nie został znaleziony.",
+    "user_not_found": "Użytkownik {user_id} nie został znaleziony.",
+    "automod_blocked_notice": "Wiadomość została usunięta przez AutoMod ({rule}).",
+    "automod_blocked_notice_no_delete": "Wiadomość narusza zasady AutoMod ({rule}).",
+    "automod_blocked_deletion_failed": "narusza zasady AutoMod (usunięcie zablokowane)",
+    "automod_alert": "🛡️ **AutoMod zadziałał**{edit_badge}\nUżytkownik: <@{user_id}> (`{user_id}`)\nKanał: <#{channel_id}>\nReguła: `{rule}`\nDowód: `{evidence}`\nWiadomość: `{message}`",
+    "media_too_many_redirects": "Zbyt wiele przekierowań w odtwarzaczu mediów.",
+    "media_must_be_https": "Przekierowanie w odtwarzaczu mediów musi używać protokołu HTTPS.",
+    "media_blocked_private_ip": "Przekierowanie do zablokowanego prywatnego adresu IP."
+  },
+  "web": {
+    "internal_error": "Wewnętrzny błąd panelu.",
+    "discord_api_error": "Discord nie odpowiedział poprawnie podczas komunikacji z API.",
+    "case_not_found": "Sprawa moderacyjna nie została znaleziona.",
+    "case_version_conflict": "Konflikt wersji sprawy: oczekiwano {expected}, aktualna wersja to {actual}. Odśwież widok i spróbuj ponownie.",
+    "case_db_error": "Błąd bazy danych sprawy: {error}",
+    "config_rate_limited": "Zbyt częste zmiany konfiguracji modułów. Odczekaj {seconds} s.",
+    "module_not_found": "Nie znaleziono modułu Lua.",
+    "config_must_be_json": "Konfiguracja modułu musi być obiektem JSON.",
+    "config_too_large": "Konfiguracja modułu nie może przekraczać 64 KiB.",
+    "config_schema_invalid": "Konfiguracja modułu jest niezgodna ze schematem JSON.",
+    "note_invalid_length": "Treść notatki nie może być pusta ani przekraczać 2000 znaków.",
+    "invalid_user_id": "Niepoprawny identyfikator użytkownika.",
+    "void_reason_invalid_length": "Powód unieważnienia nie może być pusty ani przekraczać 2000 znaków.",
+    "too_many_login_attempts": "Zbyt wiele prób logowania. Spróbuj ponownie za chwilę.",
+    "missing_manage_server": "Nie masz uprawnień do zarządzania tym serwerem.",
+    "permissions_revoked": "Uprawnienia do zarządzania tym serwerem zostały cofnięte."
+  },
+  "music": {
+    "missing_query": "Brakuje tytułu albo adresu utworu.",
+    "not_in_voice": "Bot nie jest połączony z kanałem głosowym.",
+    "queue_empty": "Kolejka jest pusta. Bot nie jest połączony z kanałem głosowym.",
+    "different_voice_channel": "Musisz znajdować się na tym samym kanale głosowym co bot.",
+    "disconnected": "Rozłączono bota z kanałem głosowym.",
+    "join_failed": "Nie udało się dołączyć do kanału głosowego.",
+    "queue_limit_reached": "Kolejka odtwarzania osiągnęła maksymalny limit {limit} utworów.",
+    "added_to_queue": "Dodano do kolejki. Liczba utworów: {count}.",
+    "invalid_volume": "Poziom głośności musi być liczbą w zakresie od 0 do 150.",
+    "volume_set": "Ustawiono głośność odtwarzacza na {level}%.",
+    "loop_enabled": "Włączono zapętlanie bieżącego utworu.",
+    "loop_disabled": "Wyłączono zapętlanie bieżącego utworu.",
+    "no_active_track": "Brak aktywnego utworu do zapętlenia.",
+    "skipped": "Pominięto bieżący utwór.",
+    "missing_play_query": "Dla akcji play podaj tytuł albo dozwolony adres HTTPS.",
+    "missing_volume_level": "Dla akcji volume podaj poziom głośności w procentach (np. 50, 100, 150).",
+    "command_accepted": "Polecenie muzyczne zostało przyjęte."
+  },
+  "tickets": {
+    "trusted_module_only": "Operacje ticketów są zarezerwowane dla zaufanego modułu tickets.",
+    "commands_only": "Ticketami można zarządzać wyłącznie przez komendy użytkowników.",
+    "guild_only": "System ticketów działa wyłącznie na serwerze.",
+    "channel_required": "Operacja ticketu wymaga kanału.",
+    "user_required": "Operacja ticketu wymaga użytkownika.",
+    "staff_or_manage_required": "Lista wszystkich ticketów wymaga roli wsparcia lub uprawnienia Zarządzanie kanałami.",
+    "claimed_by": "🧑‍💻 Ticket przejął <@{actor_id}>.",
+    "claimed_success": "✅ Przejęto ticket **#{id}**.",
+    "released_by": "↩️ <@{actor_id}> zwolnił ticket.",
+    "released_success": "✅ Zwolniono ticket **#{id}**.",
+    "reopen_invalid_status": "Ticket ma stan **{status}**, więc nie można go ponownie otworzyć.",
+    "reopened_by": "🔓 Ticket ponownie otworzył <@{actor_id}>.",
+    "reopened_success": "✅ Ponownie otwarto ticket **#{id}**.",
+    "rename_permission_required": "Zmiana nazwy wymaga roli wsparcia albo uprawnienia właściciela ticketu.",
+    "renamed_success": "✅ Nazwa ticketu została zmieniona na `{name}`.",
+    "transcript_created": "✅ Utworzono transkrypcję `{id}` zawierającą **{count}** wiadomości.",
+    "quota_reached": "Masz już **{count}** aktywnych ticketów. Limit na użytkownika wynosi **{limit}**.",
+    "closed_by": "🔒 Ticket został zamknięty przez <@{actor_id}>.",
+    "closed_success": "✅ Zamknięto ticket **#{id}**."
+  },
+  "moderation": {
+    "guild_only": "System spraw moderacyjnych działa wyłącznie na serwerze.",
+    "user_context_required": "Ta operacja wymaga kontekstu użytkownika.",
+    "staff_required": "Brak uprawnień moderatorskich do tworzenia spraw.",
+    "invalid_user_id": "Niepoprawne ID użytkownika.",
+    "timeout_duration_invalid": "Czas wyciszenia musi wynosić od 1 do 2419200 sekund (28 dni).",
+    "timeout_api_error": "Błąd Discord API podczas wyciszania: {error}",
+    "kick_api_error": "Błąd Discord API podczas wyrzucania członka: {error}",
+    "ban_api_error": "Błąd Discord API podczas banowania: {error}",
+    "softban_ban_error": "Błąd Discord API podczas banowania (softban): {error}",
+    "softban_unban_failed_alert": "Użytkownik został zbanowany, ale odbanowanie nie powiodło się; wymagane ręczne odbanowanie: {error}",
+    "softban_unban_failed_reason": "{reason} [UWAGA: odbanowanie nie powiodło się: {error}]",
+    "softban_unban_error": "Błąd Discord API podczas odbanowywania (softban): {error}",
+    "unban_api_error": "Błąd Discord API podczas odbanowywania: {error}",
+    "case_save_error": "Błąd zapisu sprawy: {error}",
+    "case_registered": "⚖️ Zarejestrowano sprawę moderacyjną **#{case_number}** dla <@{user_id}> [{kind} | {severity} | {points} pkt]: {reason}",
+    "warn_reason_empty": "Powód ostrzeżenia nie może być pusty.",
+    "warn_registered": "⚠️ Udzielono ostrzeżenia **#{case_number}** dla <@{user_id}>: {reason}"
+  },
+  "progression": {
+    "guild_only": "System poziomów działa wyłącznie na serwerze.",
+    "user_required": "Operacja poziomów wymaga kontekstu użytkownika.",
+    "level_up": "🎉 Gratulacje <@{user_id}>! Osiągnąłeś **Poziom {level}**!",
+    "rank_card": "🏆 Karta rangi użytkownika **{username}**\nPoziom: **{level}** | XP: **{xp}/{next_xp}**\nRanga: **#{rank}** | Saldo: **{balance} monet**",
+    "leaderboard_header": "📊 **Ranking serwera** (Top 10)\n",
+    "daily_reward_claimed": "💰 Odebrano dzienną nagrodę w wysokości **{amount} monet** i **{xp} XP**!",
+    "daily_reward_cooldown": "⏳ Odebrałeś już dzisiaj swoją nagrodę. Wróć za {hours}h {minutes}m."
+  },
+  "scheduler": {
+    "guild_only": "Operacje harmonogramu można wykonywać wyłącznie na serwerze.",
+    "staff_required": "Zarządzanie harmonogramem wymaga uprawnień administracyjnych lub moderatorskich.",
+    "scheduled_success": "⏰ Zaplanowano zadanie `{name}` na `{time}`.",
+    "cancelled_success": "🗑️ Anulowano zadanie `{id}`.",
+    "job_not_found": "Nie znaleziono zadania `{id}`.",
+    "reminder_set": "⏰ Ustawiono przypomnienie na `{time}`: {message}",
+    "reminder_alert": "🔔 **Przypomnienie:** {message}"
+  },
+  "modules": {
+    "achievements": {
+      "name": "Osiągnięcia i Odznaki",
+      "description": "Odznaki i trofea za aktywność na czacie, gry, ekonomię i staż.",
+      "commands": {
+        "achievements": {
+          "description": "Przeglądaj i odbieraj odznaki za osiągnięcia na serwerze.",
+          "options": {
+            "list": {
+              "description": "Zobacz pełną listę wszystkich dostępnych odznak."
+            },
+            "view": {
+              "description": "Sprawdź odznaki zdobyte przez użytkownika."
+            },
+            "claim": {
+              "description": "Odbierz nagrodę monetarną i XP za odblokowane osiągnięcie."
+            },
+            "user": {
+              "description": "Użytkownik do sprawdzenia."
+            },
+            "badge_id": {
+              "description": "Identyfikator odznaki do odebrania."
+            }
+          }
+        },
+        "list": {
+          "description": "Zobacz pełną listę wszystkich dostępnych odznak."
+        },
+        "view": {
+          "description": "Sprawdź odznaki zdobyte przez użytkownika."
+        },
+        "user": {
+          "description": "Użytkownik do sprawdzenia."
+        },
+        "claim": {
+          "description": "Odbierz nagrodę monetarną i XP za odblokowane osiągnięcie."
+        },
+        "badge_id": {
+          "description": "Identyfikator odznaki do odebrania."
+        }
+      },
+      "list_reply": "🏆 **Dostępne Osiągnięcia i Odznaki Serwerowe:**\n\n1. 👣 **Pierwszy krok** (`first_message`) — Nagroda: 50 monet, 100 XP\n2. 🎖️ **Doświadczony** (`level_5`) — Nagroda: 150 monet, 250 XP\n3. 💰 **Milioner** (`rich`) — Nagroda: 300 monet, 500 XP\n4. 🧠 **Mistrz Quizu** (`trivia_master`) — Nagroda: 200 monet, 350 XP\n5. 🦉 **Nocny Marek** (`night_owl`) — Nagroda: 100 monet, 150 XP\n\nUżyj `/achievements claim badge_id:nazwa` aby odebrać nagrodę!",
+      "view_reply": "🎖️ **Odznaki użytkownika <@{user}>:**\n• 👣 Pierwszy krok (Odblokowane!)\n• 🦉 Nocny Marek (Odblokowane!)\n• 🎖️ Doświadczony (W toku — 3/5)",
+      "claim_reply": "🎉 Gratulacje! Odebrałeś nagrodę za odznakę **{badge}**: +50 monet 🪙, +100 XP 🌟, +1 Reputacja ✨!"
+    },
+    "afk": {
+      "name": "System AFK",
+      "description": "Statusy nieobecności (Away From Keyboard) z automatyczną odpowiedzią na wzmianki.",
+      "commands": {
+        "afk": {
+          "description": "Ustaw lub wyczyść swój status nieobecności AFK.",
+          "options": {
+            "set": {
+              "description": "Ustaw status AFK z opcjonalnym powodem."
+            },
+            "clear": {
+              "description": "Wyczyść swój status AFK."
+            },
+            "status": {
+              "description": "Sprawdź swój aktualny status AFK."
+            },
+            "reason": {
+              "description": "Powód nieobecności."
+            }
+          }
+        },
+        "set": {
+          "description": "Ustaw status AFK z opcjonalnym powodem."
+        },
+        "reason": {
+          "description": "Powód nieobecności."
+        },
+        "clear": {
+          "description": "Wyczyść swój status AFK."
+        },
+        "status": {
+          "description": "Sprawdź swój aktualny status AFK."
+        }
+      },
+      "set": "Twój status to teraz AFK: {reason}",
+      "cleared": "Witaj z powrotem! Twój status AFK został wyczyszczony.",
+      "mention": "{user} jest obecnie AFK: {reason}",
+      "set_reply": "💤 <@{user}> jest teraz AFK: *{reason}*",
+      "clear_reply": "👋 Witaj z powrotem <@{user}>! Twój status AFK został wyłączony.",
+      "status_reply": "ℹ️ Status AFK dla <@{user}>: Aktywny na serwerze.",
+      "default_reason": "Zaraz wracam"
+    },
+    "ai_mcp": {
+      "name": "Bramka AI + MCP",
+      "description": "Bramka AI z twardym budżetem tokenów, RAG ACL i protokołem MCP.",
+      "commands": {
+        "ai": {
+          "description": "Komenda modułu AI + MCP Gateway.",
+          "options": {
+            "action": {
+              "description": "Akcja do wykonania."
+            }
+          }
+        },
+        "action": {
+          "description": "Akcja do wykonania."
+        },
+        "mcp": {
+          "description": "Komenda modułu AI + MCP Gateway.",
+          "options": {
+            "action": {
+              "description": "Akcja do wykonania."
+            }
+          }
+        }
+      },
+      "active_reply": "Moduł AI + MCP Gateway aktywny. Wywołano komendę: {cmd}"
+    },
+    "automod": {
+      "name": "Automatyczna Moderacja",
+      "description": "Filtrowanie fraz, ochrona przed spamem wzmianek, phishingiem i podejrzanymi linkami.",
+      "commands": {},
+      "rule_mentions": "użytkownik oznaczony {count} razy",
+      "action_delete": "Wiadomość narusza zasady AutoMod ({rule}).",
+      "action_delete_fallback": "Wiadomość została usunięta przez AutoMod.",
+      "edit_badge": " *(wykryto podczas edycji wiadomości)*",
+      "alert_message": "🛡️ **AutoMod zadziałał**{edit_badge}\nUżytkownik: <@%s> (`%s`)\nKanał: <#%s>\nReguła: `%s`\nDowód: `%s`\nWiadomość: %s"
+    },
+    "birthdays": {
+      "name": "Kalendarz Urodzin",
+      "description": "Kalendarz urodzin, automatyczne życzenia i okolicznościowa rola.",
+      "commands": {
+        "birthday": {
+          "description": "Zapisz swoje urodziny i sprawdzaj nadchodzące święta członków serwera.",
+          "options": {
+            "set": {
+              "description": "Zapisz swoją datę urodzin."
+            },
+            "check": {
+              "description": "Sprawdź kiedy urodziny obchodzi wybrany użytkownik."
+            },
+            "upcoming": {
+              "description": "Pokaż najbliższe urodziny na serwerze."
+            },
+            "day": {
+              "description": "Dzień miesiąca (1-31)."
+            },
+            "month": {
+              "description": "Miesiąc (1-12)."
+            },
+            "user": {
+              "description": "Użytkownik do sprawdzenia."
+            }
+          }
+        },
+        "set": {
+          "description": "Zapisz swoją datę urodzin."
+        },
+        "day": {
+          "description": "Dzień miesiąca (1-31)."
+        },
+        "month": {
+          "description": "Miesiąc (1-12)."
+        },
+        "check": {
+          "description": "Sprawdź kiedy urodziny obchodzi wybrany użytkownik."
+        },
+        "user": {
+          "description": "Użytkownik do sprawdzenia."
+        },
+        "upcoming": {
+          "description": "Pokaż najbliższe urodziny na serwerze."
+        }
+      },
+      "set_reply": "🎂 Zapisano Twoją datę urodzin: **{day}.{month}**!",
+      "check_found": "🎉 <@{user}> obchodzi urodziny **{day}.{month}**!",
+      "check_not_found": "ℹ️ Użytkownik <@{user}> nie ma jeszcze zapisanej daty urodzin.",
+      "upcoming_empty": "📅 Brak nadchodzących urodzin w najbliższym czasie."
+    },
+    "community": {
+      "name": "Biurko Społeczności",
+      "description": "Sugestie, prywatne zgłoszenia, feedback, podania oraz raporty błędów.",
+      "commands": {
+        "suggest": {
+          "description": "Przekazuje sugestię na skonfigurowany kanał społeczności.",
+          "options": {
+            "text": {
+              "description": "Treść sugestii."
+            }
+          }
+        },
+        "text": {
+          "description": "Treść sugestii."
+        },
+        "category": {
+          "description": "Kategoria sugestii."
+        },
+        "report": {
+          "description": "Wysyła prywatne zgłoszenie do zespołu serwera.",
+          "options": {
+            "target": {
+              "description": "Użytkownik, kanał albo temat zgłoszenia."
+            },
+            "reason": {
+              "description": "Powód zgłoszenia i dowody."
+            }
+          }
+        },
+        "reason": {
+          "description": "Powód zgłoszenia."
+        },
+        "user": {
+          "description": "Opcjonalnie zgłaszany użytkownik."
+        },
+        "evidence": {
+          "description": "Link, ID wiadomości albo dodatkowy kontekst."
+        },
+        "feedback": {
+          "description": "Przekazuje ocenę i opinię administratorom."
+        },
+        "rating": {
+          "description": "Ocena od 1 do 5."
+        },
+        "message": {
+          "description": "Treść opinii."
+        },
+        "apply": {
+          "description": "Składa podanie do wybranego działu albo zespołu."
+        },
+        "topic": {
+          "description": "Stanowisko, dział albo typ podania."
+        },
+        "application": {
+          "description": "Treść podania."
+        },
+        "bugreport": {
+          "description": "Zgłasza błąd wraz z krokami jego odtworzenia."
+        },
+        "severity": {
+          "description": "Wpływ błędu."
+        },
+        "description": {
+          "description": "Co nie działa?"
+        },
+        "steps": {
+          "description": "Jak odtworzyć problem?"
+        },
+        "bug": {
+          "description": "Zgłasza błąd techniczny lub usterkę bota do zespołu.",
+          "options": {
+            "title": {
+              "description": "Krótki tytuł problemu."
+            },
+            "description": {
+              "description": "Dokładny opis błędu i kroki do powtórzenia."
+            },
+            "severity": {
+              "description": "Poziom powagi problemu."
+            }
+          }
+        }
+      },
+      "no_channel": "Moduł nie ma skonfigurowanego kanału dla: {label}.",
+      "suggest_success": "✅ Twoja sugestia została opublikowana na kanale <#{channel}>!",
+      "report_success": "🛡️ Twoje zgłoszenie zostało przekazane zespołowi serwera.",
+      "bug_success": "🐞 Zgłoszenie błędu #{id} zostało zarejestrowane. Dziękujemy!"
+    },
+    "core": {
+      "name": "Core",
+      "description": "Podstawowe komendy diagnostyczne i informacje o platformie.",
+      "commands": {
+        "ping": {
+          "description": "Sprawdza, czy bot i silnik Lua odpowiadają.",
+          "reply": "Pong. Rdzeń Rust i piaskownica Lua działają poprawnie."
+        },
+        "about": {
+          "description": "Pokazuje informacje o platformie Rusty Discord Bot.",
+          "reply": "Rusty Discord Bot to modułowa platforma Discord: bezpieczny rdzeń Rust, logika Lua, panel WWW, PostgreSQL, audyt i obsługa głosu."
+        }
+      }
+    },
+    "economy": {
+      "name": "Ekonomia Serwerowa",
+      "description": "Zarządzaj swoim portfelem, pracuj, kupuj w sklepie i sprawdzaj ekwipunek.",
+      "commands": {
+        "economy": {
+          "description": "Zarządzaj portfelem, pracuj i przeglądaj sklep serwerowy.",
+          "options": {
+            "balance": {
+              "description": "Sprawdź stan portfela, konta bankowego i wartość netto."
+            },
+            "work": {
+              "description": "Wykonaj zmianę w pracy i zarób monety."
+            },
+            "shop": {
+              "description": "Przeglądaj sklep z przedmiotami i rolami na serwerze."
+            },
+            "pay": {
+              "description": "Przelej monety innemu użytkownikowi."
+            },
+            "recipient": {
+              "description": "Odbiorca przelewu."
+            },
+            "amount": {
+              "description": "Liczba monet do przelania."
+            },
+            "user": {
+              "description": "Użytkownik do sprawdzenia."
+            }
+          }
+        },
+        "balance": {
+          "description": "Sprawdź stan portfela, konta bankowego i wartość netto."
+        },
+        "work": {
+          "description": "Wykonaj zmianę w pracy i zarób monety."
+        },
+        "crime": {
+          "description": "Podejmij ryzykowne zlecenie o wysoki zysk."
+        },
+        "shop": {
+          "description": "Przeglądaj sklep z przedmiotami i rolami na serwerze."
+        },
+        "buy": {
+          "description": "Kup przedmiot ze sklepu serwerowego."
+        },
+        "item": {
+          "description": "Identyfikator lub nazwa przedmiotu do zakupu."
+        },
+        "inventory": {
+          "description": "Zobacz swoje zakupione przedmioty i trofea."
+        },
+        "transfer": {
+          "description": "Przelej monety innemu użytkownikowi."
+        },
+        "recipient": {
+          "description": "Odbiorca przelewu."
+        },
+        "amount": {
+          "description": "Liczba monet do przesłania."
+        }
+      },
+      "balance": "Portfel: **{wallet}** monet | Bank: **{bank}** monet | Wartość netto: **{net}** monet",
+      "work": "Pracowałeś jako {job} i zarobiłeś **{amount}** monet!",
+      "crime_success": "Wykonałeś {crime} i zdobyłeś **{amount}** monet!",
+      "crime_fail": "Zostałeś przyłapany na {crime} i zapłaciłeś grzywnę **{amount}** monet!",
+      "balance_reply": "💳 **Portfel użytkownika <@{user}>**\nPortfel: **{wallet}** monet | Bank: **{bank}** monet | Wartość netto: **{net}** monet",
+      "work_reply": "💼 Przepracowałeś zmianę jako **{job}** i zarobiłeś **{amount} monet**! 🪙",
+      "pay_success": "💸 Przelano **{amount} monet** użytkownikowi <@{recipient}>!",
+      "pay_no_recipient": "Musisz wskazać odbiorcę przelewu."
+    },
+    "fun": {
+      "name": "Zabawa i Memy",
+      "description": "Memy tekstowe, losowanie, wybór i odpowiedzi społecznościowe.",
+      "commands": {
+        "meme": {
+          "description": "Losuje mem tekstowy."
+        },
+        "roll": {
+          "description": "Losuje liczbę od 1 do podanego maksimum."
+        },
+        "max": {
+          "description": "Najwyższa możliwa liczba."
+        },
+        "choose": {
+          "description": "Wybiera jedną pozycję z listy rozdzielonej przecinkami."
+        },
+        "options": {
+          "description": "Na przykład: tank, healer, damage."
+        },
+        "eightball": {
+          "description": "Odpowiada na pytanie jak magiczna kula."
+        },
+        "question": {
+          "description": "Pytanie, na które ma odpowiedzieć bot."
+        },
+        "fun": {
+          "description": "Komendy humorystyczne, memy i losowania.",
+          "options": {
+            "meme": {
+              "description": "Wyświetla losowy mem programistyczny."
+            },
+            "8ball": {
+              "description": "Zadaj pytanie magicznej kuli 8-ball."
+            },
+            "choose": {
+              "description": "Pozwól botowi wybrać z podanych opcji."
+            },
+            "question": {
+              "description": "Twoje pytanie."
+            },
+            "options": {
+              "description": "Opcje rozdzielone przecinkami."
+            }
+          }
+        }
+      },
+      "ball_reply": "🎱 **Pytanie:** {question}\n**Odpowiedź:** {answer}",
+      "choose_reply": "🤔 Mój wybór to: **{choice}**!"
+    },
+    "games": {
+      "name": "Gry Społecznościowe",
+      "description": "Lekkie gry społecznościowe, losowania i generatory bez waluty ani prawdziwych stawek.",
+      "commands": {
+        "coinflip": {
+          "description": "Rzuca wirtualną monetą."
+        },
+        "dice": {
+          "description": "Rzuca wybraną liczbą kostek."
+        },
+        "count": {
+          "description": "Liczba drużyn."
+        },
+        "sides": {
+          "description": "Liczba ścian każdej kostki."
+        },
+        "rps": {
+          "description": "Gra w papier, kamień, nożyce przeciwko botowi.",
+          "options": {
+            "choice": {
+              "description": "Twój wybór (kamień, papier lub nożyce)."
+            }
+          }
+        },
+        "choice": {
+          "description": "Twój wybór."
+        },
+        "rate": {
+          "description": "Wystawia stabilną ocenę od 0 do 100 procent."
+        },
+        "subject": {
+          "description": "Co mamy ocenić?"
+        },
+        "ship": {
+          "description": "Oblicza zabawne dopasowanie dwóch nazw."
+        },
+        "first": {
+          "description": "Pierwsza nazwa."
+        },
+        "second": {
+          "description": "Druga nazwa."
+        },
+        "teams": {
+          "description": "Dzieli listę osób na losowe drużyny."
+        },
+        "players": {
+          "description": "Nazwy rozdzielone przecinkami."
+        },
+        "duel": {
+          "description": "Rozstrzyga towarzyski pojedynek dwóch użytkowników."
+        },
+        "opponent": {
+          "description": "Twój przeciwnik."
+        },
+        "lootdrop": {
+          "description": "Generuje losowy fantastyczny łup bez wartości ekonomicznej."
+        },
+        "roll": {
+          "description": "Rzuca wybraną liczbą kostek.",
+          "options": {
+            "dice": {
+              "description": "Liczba kostek (1-10)."
+            },
+            "sides": {
+              "description": "Liczba ścian każdej kostki."
+            }
+          }
+        }
+      },
+      "coinflip_heads": "Orzeł",
+      "coinflip_tails": "Reszka",
+      "coinflip_reply": "🪙 Wynik rzutu monetą: **{result}**!",
+      "roll_reply": "🎲 Rzut {dice}d{sides}: **{total}** (Wyniki: {details})",
+      "rps_win": "Wygrywasz!",
+      "rps_lose": "Bot wygrywa!",
+      "rps_draw": "Remis!",
+      "rps_reply": "✂️ Wybrałeś **{user}**, bot wybrał **{bot}**. {result}"
+    },
+    "gaming_hub": {
+      "name": "Centrum Gier",
+      "description": "Agregacja statusów serwerów gier, PoE1/PoE2 oraz międzyplatformowe LFG.",
+      "commands": {
+        "games": {
+          "description": "Komenda modułu Gaming Hub.",
+          "options": {
+            "action": {
+              "description": "Akcja do wykonania."
+            }
+          }
+        },
+        "action": {
+          "description": "Akcja do wykonania."
+        }
+      },
+      "active_reply": "Moduł Gaming Hub aktywny. Wywołano komendę: {cmd}"
+    },
+    "github_devops": {
+      "name": "GitHub DevOps",
+      "description": "Zdarzenia Git, workflowy CI/CD i mapowanie wątków forum.",
+      "commands": {
+        "github": {
+          "description": "Komenda modułu GitHub DevOps.",
+          "options": {
+            "action": {
+              "description": "Akcja do wykonania."
+            }
+          }
+        },
+        "action": {
+          "description": "Akcja do wykonania."
+        }
+      },
+      "active_reply": "Moduł GitHub DevOps aktywny. Wywołano komendę: {cmd}"
+    },
+    "gitlab_devops": {
+      "name": "GitLab DevOps",
+      "description": "Integracja gitlab.com oraz self-hosted z kontrolą domen i SSRF.",
+      "commands": {
+        "gitlab": {
+          "description": "Komenda modułu GitLab DevOps.",
+          "options": {
+            "action": {
+              "description": "Akcja do wykonania."
+            }
+          }
+        },
+        "action": {
+          "description": "Akcja do wykonania."
+        }
+      },
+      "active_reply": "Moduł GitLab DevOps aktywny. Wywołano komendę: {cmd}"
+    },
+    "giveaway": {
+      "name": "Konkursy i Losowania",
+      "description": "Zarządzanie konkursami, losowaniami nagród i wyborem zwycięzców.",
+      "commands": {
+        "giveaway": {
+          "description": "Twórz i zarządzaj konkursami z nagrodami na serwerze.",
+          "options": {
+            "start": {
+              "description": "Rozpocznij nowy konkurs."
+            },
+            "reroll": {
+              "description": "Wylosuj ponownie zwycięzcę zakończonego konkursu."
+            },
+            "end": {
+              "description": "Zakończ konkurs przed czasem."
+            },
+            "prize": {
+              "description": "Nazwa lub opis nagrody."
+            },
+            "winners": {
+              "description": "Liczba zwycięzców."
+            },
+            "duration": {
+              "description": "Czas trwania w sekundach."
+            },
+            "message_id": {
+              "description": "ID wiadomości z konkursem."
+            }
+          }
+        },
+        "start": {
+          "description": "Rozpocznij nowy konkurs."
+        },
+        "prize": {
+          "description": "Nagroda w konkursie."
+        },
+        "duration_minutes": {
+          "description": "Czas trwania w minutach."
+        },
+        "winners": {
+          "description": "Liczba zwycięzców."
+        },
+        "reroll": {
+          "description": "Wylosuj ponownie zwycięzcę zakończonego konkursu."
+        },
+        "giveaway_id": {
+          "description": "Identyfikator konkursu."
+        },
+        "end": {
+          "description": "Zakończ konkurs przed czasem."
+        }
+      },
+      "started": "🎉 **ROZPOCZĘTO KONKURS!**\nNagroda: **{prize}**\nLiczba zwycięzców: **{winners}**\nKoniec: <t:{ends_at}:R>!\nZareaguj 🎉 aby wziąć udział!",
+      "rerolled": "🎉 Nowy zwycięzca konkursu o **{prize}**: Gratulacje <@{winner}>!",
+      "ended": "🎉 Konkurs o **{prize}** został zakończony!"
+    },
+    "integrations_core": {
+      "name": "Integracje i OAuth",
+      "description": "Fundament providerów, autoryzacja OAuth2 oraz webhooki.",
+      "commands": {
+        "integrations": {
+          "description": "Komenda modułu Integration Core & OAuth.",
+          "options": {
+            "action": {
+              "description": "Akcja do wykonania."
+            }
+          }
+        },
+        "action": {
+          "description": "Akcja do wykonania."
+        }
+      },
+      "active_reply": "Moduł Integration Core & OAuth aktywny. Wywołano komendę: {cmd}"
+    },
+    "join_guard": {
+      "name": "Ochrona Dołączania",
+      "description": "Weryfikacja wieku kont, awatarów, detekcja rajdów i automatyczny lockdown.",
+      "commands": {},
+      "young_account": "młode konto ({hours} godz. / {days} dni)",
+      "burst_raid": "🚨 WYKRYTO BURST / RAJD ({count} wejść w oknie 60 s!)",
+      "kick_reason": "Ochrona Join Guard: {reasons}",
+      "raid_alert": "🚨 **ALARM OCHRONY PRZED RAJDEM**\nSerwer: **%s**\nWykryto nagły napływ kont. Zastosowano automatyczny lockdown ochronny.\nAkcja: %s"
+    },
+    "kick_live": {
+      "name": "Integracja Kick",
+      "description": "Powiadomienia o transmisjach na żywo i integracja z Kick.com.",
+      "commands": {
+        "kick": {
+          "description": "Komenda modułu Kick Integration.",
+          "options": {
+            "action": {
+              "description": "Akcja do wykonania."
+            }
+          }
+        },
+        "action": {
+          "description": "Akcja do wykonania."
+        }
+      },
+      "active_reply": "Moduł Kick Integration aktywny. Wywołano komendę: {cmd}"
+    },
+    "logging": {
+      "name": "Dziennik Audytu",
+      "description": "Rejestr operacji serwerowych i zdarzeń Discorda na wyznaczonym kanale audytowym.",
+      "commands": {
+        "logging": {
+          "description": "Konfiguracja kanału logów i test wysyłki zdarzeń audytowych.",
+          "options": {
+            "config": {
+              "description": "Ustaw kanał logów serwerowych."
+            },
+            "test": {
+              "description": "Wyślij testowe zdarzenie audytowe."
+            },
+            "channel": {
+              "description": "Docelowy kanał logów audytowych."
+            }
+          }
+        },
+        "config": {
+          "description": "Ustaw kanał logów serwerowych."
+        },
+        "channel": {
+          "description": "Kanał do publikacji logów audytowych."
+        },
+        "log_joins": {
+          "description": "Loguj wejścia i wyjścia członków."
+        },
+        "log_messages": {
+          "description": "Loguj usunięte i edytowane wiadomości."
+        },
+        "test": {
+          "description": "Wyślij testowy log na skonfigurowany kanał."
+        }
+      },
+      "config_reply": "📝 Skonfigurowano kanał logów audytowych: <#{channel}>",
+      "test_reply": "✅ Wysłano testowe zdarzenie audytowe do kanału <#{channel}>."
+    },
+    "moderation": {
+      "name": "Pakiet Moderacyjny",
+      "description": "Kompleksowe sankcje: kick, ban, softban, timeout, purge, warn i historia spraw.",
+      "commands": {
+        "moderate": {
+          "description": "Wykonuje timeout, kick, ban, softban, unban albo czyszczenie wiadomości.",
+          "options": {
+            "action": {
+              "description": "Operacja na sprawach moderacyjnych."
+            },
+            "user": {
+              "description": "Użytkownik (dla listy spraw lub statystyk)."
+            },
+            "seconds": {
+              "description": "Czas timeoutu w sekundach."
+            },
+            "delete_days": {
+              "description": "Dni historii wiadomości do usunięcia (0-7, dla softban i ban)."
+            },
+            "amount": {
+              "description": "Liczba wiadomości do usunięcia."
+            },
+            "reason": {
+              "description": "Powód ostrzeżenia."
+            }
+          }
+        },
+        "action": {
+          "description": "Operacja na sprawach moderacyjnych."
+        },
+        "user": {
+          "description": "Użytkownik (dla listy spraw lub statystyk)."
+        },
+        "seconds": {
+          "description": "Czas timeoutu w sekundach."
+        },
+        "delete_days": {
+          "description": "Dni historii wiadomości do usunięcia (0-7, dla softban i ban)."
+        },
+        "amount": {
+          "description": "Liczba wiadomości do usunięcia."
+        },
+        "reason": {
+          "description": "Powód ostrzeżenia."
+        },
+        "severity": {
+          "description": "Poziom powagi sprawy."
+        },
+        "points": {
+          "description": "Punkty karne (domyślnie 1)."
+        },
+        "warn": {
+          "description": "Nakłada oficjalne ostrzeżenie i rejestruje sprawę moderacyjną.",
+          "options": {
+            "user": {
+              "description": "Użytkownik do ostrzeżenia."
+            },
+            "reason": {
+              "description": "Powód ostrzeżenia."
+            },
+            "severity": {
+              "description": "Poziom powagi sprawy."
+            },
+            "points": {
+              "description": "Punkty karne (domyślnie 1)."
+            }
+          }
+        },
+        "case": {
+          "description": "Zarządzanie sprawami moderacyjnymi: podgląd, notatki, unieważnianie, statystyki.",
+          "options": {
+            "case_number": {
+              "description": "Numer sprawy."
+            },
+            "text": {
+              "description": "Treść notatki lub powód unieważnienia."
+            },
+            "visible": {
+              "description": "Czy notatka ma być widoczna dla ukaranego użytkownika."
+            },
+            "version": {
+              "description": "Wersja sprawy (dla void/restore)."
+            }
+          }
+        },
+        "case_number": {
+          "description": "Numer sprawy."
+        },
+        "text": {
+          "description": "Treść notatki lub powód unieważnienia."
+        },
+        "visible": {
+          "description": "Czy notatka ma być widoczna dla ukaranego użytkownika."
+        },
+        "version": {
+          "description": "Wersja sprawy (dla void/restore)."
+        }
+      },
+      "accepted": "Akcja moderacyjna została przyjęta."
+    },
+    "music": {
+      "name": "Music",
+      "description": "Odtwarzanie, kolejka, pętla i sterowanie głosem przez izolowane akcje Lua.",
+      "commands": {
+        "music": {
+          "description": "Steruje odtwarzaniem muzyki na kanale głosowym."
+        }
+      },
+      "missing_play_query": "Dla akcji play podaj tytuł albo dozwolony adres HTTPS.",
+      "missing_volume_level": "Dla akcji volume podaj poziom głośności w procentach (np. 50, 100, 150).",
+      "accepted": "Polecenie muzyczne zostało przyjęte."
+    },
+    "plugin_marketplace": {
+      "name": "Katalog Wtyczek",
+      "description": "Rejestr skryptów społeczności, weryfikacja manifestów i przeładowywanie modułów.",
+      "commands": {
+        "plugin": {
+          "description": "Komenda modułu Plugin Marketplace.",
+          "options": {
+            "action": {
+              "description": "Akcja do wykonania."
+            }
+          }
+        },
+        "action": {
+          "description": "Akcja do wykonania."
+        }
+      },
+      "active_reply": "Moduł Plugin Marketplace aktywny. Wywołano komendę: {cmd}"
+    },
+    "progression": {
+      "name": "Progression and Economy",
+      "description": "Trwały leveling, XP, monety, daily streak, transfery, reputacja i rankingi.",
+      "commands": {
+        "rank": {
+          "description": "Wyświetla poziom, XP i pełny profil aktywności."
+        },
+        "user": {
+          "description": "Użytkownik do aktualizacji."
+        },
+        "balance": {
+          "description": "Wyświetla saldo monet i serię nagród daily."
+        },
+        "leaderboard": {
+          "description": "Wyświetla ranking aktywności, monet albo reputacji."
+        },
+        "metric": {
+          "description": "Kryterium rankingu."
+        },
+        "limit": {
+          "description": "Liczba pozycji od 1 do 25."
+        },
+        "daily": {
+          "description": "Odbiera codzienną nagrodę i zwiększa serię."
+        },
+        "pay": {
+          "description": "Przekazuje własne monety innemu użytkownikowi."
+        },
+        "amount": {
+          "description": "Kwota transferu."
+        },
+        "rep": {
+          "description": "Przyznaje reputację pomocnemu członkowi społeczności."
+        },
+        "progressadmin": {
+          "description": "Koryguje XP, monety albo reputację użytkownika."
+        },
+        "xp": {
+          "description": "Zmiana XP; dopuszczalna jest liczba ujemna."
+        },
+        "coins": {
+          "description": "Zmiana monet; dopuszczalna jest liczba ujemna."
+        },
+        "reputation": {
+          "description": "Zmiana reputacji; może być ujemna."
+        },
+        "reason": {
+          "description": "Powód korekty do audytu."
+        }
+      }
+    },
+    "quotes": {
+      "name": "Cytaty Serwera",
+      "description": "Baza pamiętnych cytatów serwera z możliwością losowania i wyszukiwania.",
+      "commands": {
+        "quote": {
+          "description": "Zapisuj i przywołuj najlepsze cytaty członków serwera.",
+          "options": {
+            "random": {
+              "description": "Wylosuj losowy cytat z bazy serwera."
+            },
+            "add": {
+              "description": "Dodaj nowy pamiętny cytat do bazy."
+            },
+            "list": {
+              "description": "Wyświetl listę ostatnich cytatów."
+            },
+            "author": {
+              "description": "Autor cytatu."
+            },
+            "text": {
+              "description": "Treść cytatu."
+            }
+          }
+        },
+        "random": {
+          "description": "Wylosuj losowy cytat z bazy serwera."
+        },
+        "add": {
+          "description": "Dodaj nowy cytat do księgi cytatów."
+        },
+        "content": {
+          "description": "Treść cytatu."
+        },
+        "author": {
+          "description": "Autor cytatu."
+        },
+        "list": {
+          "description": "Pokaż ostatnio dodane cytaty."
+        }
+      },
+      "random_quote": "💬 *\"{text}\"*\n— <@{author}>",
+      "added": "✅ Dodano nowy cytat do bazy serwera!",
+      "no_quotes": "ℹ️ Na tym serwerze nie zapisano jeszcze żadnych cytatów."
+    },
+    "reaction_roles": {
+      "name": "Role za Reakcje",
+      "description": "System samodzielnego przydzielania ról poprzez reakcje pod wiadomościami.",
+      "commands": {
+        "reactionrole": {
+          "description": "Konfiguruj wiadomości z wyborem ról za pomocą reakcji.",
+          "options": {
+            "create": {
+              "description": "Powiąż emotkę na wiadomości z nadawaną rolą."
+            },
+            "remove": {
+              "description": "Usuń powiązanie reakcji z rolą."
+            },
+            "message_id": {
+              "description": "ID wiadomości."
+            },
+            "emoji": {
+              "description": "Emotka reakcji."
+            },
+            "role": {
+              "description": "Rola do przypisania."
+            }
+          }
+        },
+        "create": {
+          "description": "Powiąż emotkę na wiadomości z nadawaną rolą."
+        },
+        "message_id": {
+          "description": "ID wiadomości."
+        },
+        "emoji": {
+          "description": "Emotka."
+        },
+        "role": {
+          "description": "Rola do nadania."
+        },
+        "list": {
+          "description": "Pokaż wszystkie aktywne powiązania ról i reakcji."
+        },
+        "remove": {
+          "description": "Usuń powiązanie roli z emotki."
+        }
+      },
+      "created": "✅ Skonfigurowano rolę za reakcję: reakcja {emoji} nadaje rolę <@&{role}>.",
+      "removed": "✅ Usunięto powiązanie roli dla reakcji {emoji}."
+    },
+    "reddit_feed": {
+      "name": "Kanał Reddit",
+      "description": "Automatyczny monitoring wpisów z wybranych subredditów.",
+      "commands": {
+        "reddit": {
+          "description": "Komenda modułu Reddit Feed.",
+          "options": {
+            "action": {
+              "description": "Akcja do wykonania."
+            }
+          }
+        },
+        "action": {
+          "description": "Akcja do wykonania."
+        }
+      },
+      "active_reply": "Moduł Reddit Feed aktywny. Wywołano komendę: {cmd}"
+    },
+    "roles": {
+      "name": "Zarządzanie Rolami",
+      "description": "Kontrolowane nadawanie i odbieranie ról z ochroną hierarchii.",
+      "commands": {
+        "role": {
+          "description": "Nadaje albo odbiera rolę użytkownikowi.",
+          "options": {
+            "action": {
+              "description": "Dodaj albo usuń rolę."
+            },
+            "user": {
+              "description": "Użytkownik, którego role zmieniasz."
+            },
+            "role": {
+              "description": "Rola do dodania albo usunięcia."
+            },
+            "reason": {
+              "description": "Powód zmiany roli."
+            }
+          }
+        },
+        "action": {
+          "description": "Dodaj albo usuń rolę."
+        },
+        "user": {
+          "description": "Użytkownik, którego role zmieniasz."
+        },
+        "reason": {
+          "description": "Powód zmiany."
+        }
+      },
+      "queued": "Zmiana roli została przekazana do wykonania."
+    },
+    "scheduler": {
+      "name": "Harmonogram Zadań",
+      "description": "Harmonogram zadań cyklicznych, przypomnień i automatycznych komunikatów.",
+      "commands": {
+        "remind": {
+          "description": "Ustawia przypomnienie dla użytkownika z powiadomieniem na wybranym kanale.",
+          "options": {
+            "in": {
+              "description": "Termin przypomnienia (np. za 10m, za 2h, jutro o 15:00)."
+            },
+            "list": {
+              "description": "Wyświetla twoje aktywne przypomnienia."
+            },
+            "cancel": {
+              "description": "Anuluje zaplanowane przypomnienie."
+            },
+            "time": {
+              "description": "Określenie czasu."
+            },
+            "message": {
+              "description": "Treść przypomnienia."
+            },
+            "task_id": {
+              "description": "Identyfikator zadania."
+            }
+          }
+        },
+        "when": {
+          "description": "Np. 15m, 1d 2h, Unix timestamp albo RFC 3339."
+        },
+        "message": {
+          "description": "Treść zaplanowanej wiadomości."
+        },
+        "mention": {
+          "description": "Czy bot ma oznaczyć autora przy wysłaniu."
+        },
+        "reminders": {
+          "description": "Wyświetla twoje aktywne przypomnienia."
+        },
+        "remindcontrol": {
+          "description": "Anuluje, wstrzymuje albo wznawia twoje przypomnienie."
+        },
+        "action": {
+          "description": "Operacja do wykonania."
+        },
+        "id": {
+          "description": "Pełny identyfikator UUID zadania."
+        },
+        "schedulemessage": {
+          "description": "Planuje jednorazową albo cykliczną wiadomość serwera."
+        },
+        "channel": {
+          "description": "Kanał docelowy należący do tego serwera."
+        },
+        "repeat": {
+          "description": "Opcjonalny interwał, np. 1h, 1d albo 1w."
+        },
+        "runs": {
+          "description": "Łączna liczba wykonań; brak oznacza cykl bez końca."
+        },
+        "mention_creator": {
+          "description": "Czy oznaczyć autora harmonogramu przy wysłaniu."
+        },
+        "schedules": {
+          "description": "Wyświetla aktywne zadania całego serwera."
+        },
+        "schedulecontrol": {
+          "description": "Zarządza dowolnym zadaniem harmonogramu serwera."
+        }
+      },
+      "created": "✅ Zaplanowano przypomnienie na <t:{time}:F> (<t:{time}:R>): *{message}*",
+      "cancelled": "✅ Anulowano zadanie przypomnienia `{task_id}`.",
+      "empty": "ℹ️ Nie masz żadnych aktywnych przypomnień."
+    },
+    "server_info": {
+      "name": "Centrum Informacji o Serwerze",
+      "description": "Konfigurowalne komendy z regulaminem, FAQ, linkami, personelem i harmonogramem.",
+      "commands": {
+        "rules": {
+          "description": "Wyświetla regulamin serwera."
+        },
+        "faq": {
+          "description": "Wyświetla najczęstsze pytania i odpowiedzi."
+        },
+        "links": {
+          "description": "Wyświetla oficjalne linki społeczności."
+        },
+        "supportinfo": {
+          "description": "Wyświetla instrukcję uzyskania pomocy."
+        },
+        "staff": {
+          "description": "Wyświetla informacje o zespole serwera."
+        },
+        "schedule": {
+          "description": "Wyświetla harmonogram wydarzeń albo aktywności."
+        },
+        "aboutserver": {
+          "description": "Wyświetla opis i najważniejsze informacje o serwerze."
+        }
+      },
+      "not_filled": "Administratorzy nie uzupełnili jeszcze sekcji: **{heading}**."
+    },
+    "social_publisher": {
+      "name": "Publikator Społecznościowy",
+      "description": "Wieloplatformowy kompozytor wpisów z harmonogramem i zatwierdzeniami.",
+      "commands": {
+        "publish": {
+          "description": "Komenda modułu Social Publisher.",
+          "options": {
+            "action": {
+              "description": "Akcja do wykonania."
+            }
+          }
+        },
+        "action": {
+          "description": "Akcja do wykonania."
+        }
+      },
+      "active_reply": "Moduł Social Publisher aktywny. Wywołano komendę: {cmd}"
+    },
+    "staff_tools": {
+      "name": "Narzędzia Zespołu",
+      "description": "Ogłoszenia, broadcasty, alerty zespołu, komunikaty techniczne i notatki audytowe.",
+      "commands": {
+        "announce": {
+          "description": "Publikuje sformatowane ogłoszenie na wybranym kanale.",
+          "options": {
+            "channel": {
+              "description": "Kanał docelowy."
+            },
+            "title": {
+              "description": "Tytuł ogłoszenia."
+            },
+            "message": {
+              "description": "Treść ogłoszenia."
+            }
+          }
+        },
+        "channel": {
+          "description": "Kanał z regulaminem."
+        },
+        "title": {
+          "description": "Tytuł ogłoszenia."
+        },
+        "message": {
+          "description": "Treść alertu."
+        },
+        "footer": {
+          "description": "Opcjonalna stopka."
+        },
+        "broadcast": {
+          "description": "Wysyła komunikat na wszystkie skonfigurowane kanały broadcastu.",
+          "options": {
+            "message": {
+              "description": "Treść broadcastu."
+            }
+          }
+        },
+        "staffalert": {
+          "description": "Wysyła oznaczony alert na prywatny kanał zespołu."
+        },
+        "severity": {
+          "description": "Poziom alertu."
+        },
+        "maintenance": {
+          "description": "Publikuje status prac technicznych."
+        },
+        "status": {
+          "description": "Aktualny status."
+        },
+        "details": {
+          "description": "Szczegóły notatki."
+        },
+        "rulespost": {
+          "description": "Publikuje skonfigurowany regulamin na wybranym kanale."
+        },
+        "auditnote": {
+          "description": "Dodaje ręczną notatkę administracyjną do audytu bota."
+        },
+        "subject": {
+          "description": "Temat notatki."
+        },
+        "alert": {
+          "description": "Wysyła alert o wysokim priorytecie na wewnętrzny kanał zespołu.",
+          "options": {
+            "severity": {
+              "description": "Poziom powagi alertu."
+            },
+            "text": {
+              "description": "Treść alertu."
+            }
+          }
+        }
+      },
+      "no_permission": "Nie masz uprawnień wymaganych do użycia tej komendy.",
+      "announce_success": "Ogłoszenie zostało opublikowane.",
+      "broadcast_none": "Nie skonfigurowano kanałów broadcastu.",
+      "broadcast_success": "Broadcast został przekazany na {count} kanałów.",
+      "alert_no_channel": "Nie skonfigurowano prywatnego kanału zespołu.",
+      "alert_success": "Alert zespołu został wysłany."
+    },
+    "starboard": {
+      "name": "Tablica Gwiazdek",
+      "description": "Wyróżnianie najlepszych wiadomości na kanale gwiazdek (Starboard).",
+      "commands": {
+        "starboard": {
+          "description": "Konfiguracja i statystyki tablicy wyróżnionych wiadomości Starboard.",
+          "options": {
+            "config": {
+              "description": "Ustaw kanał i próg gwiazdek dla Starboard."
+            },
+            "stats": {
+              "description": "Zobacz statystyki najpopularniejszych wiadomości Starboard."
+            },
+            "channel": {
+              "description": "Docelowy kanał Starboard."
+            },
+            "threshold": {
+              "description": "Minimalna liczba gwiazdek do wyróżnienia."
+            }
+          }
+        },
+        "config": {
+          "description": "Ustaw kanał i próg gwiazdek dla Starboard."
+        },
+        "channel": {
+          "description": "Docelowy kanał Starboard."
+        },
+        "threshold": {
+          "description": "Minimalna liczba gwiazdek wymagana do wpisu."
+        },
+        "stats": {
+          "description": "Zobacz statystyki najpopularniejszych wiadomości Starboard."
+        }
+      },
+      "config_reply": "⭐ Skonfigurowano Starboard: kanał <#{channel}> z progiem **{threshold}** gwiazdek.",
+      "stats_reply": "⭐ **Statystyki Starboard:**\n• Próg: **{threshold}** ⭐\n• Kanał docelowy: <#{channel}>"
+    },
+    "steam_extended": {
+      "name": "Integracja Steam",
+      "description": "Profile Steam, gry, osiągnięcia i grupy LFG.",
+      "commands": {
+        "steam": {
+          "description": "Komenda modułu Steam Extended.",
+          "options": {
+            "action": {
+              "description": "Akcja do wykonania."
+            }
+          }
+        },
+        "action": {
+          "description": "Akcja do wykonania."
+        }
+      },
+      "active_reply": "Moduł Steam Extended aktywny. Wywołano komendę: {cmd}"
+    },
+    "tags": {
+      "name": "Własne Tagi",
+      "description": "Własne tagi, skróty i szablony wiadomości ze wsparciem serwerowym.",
+      "commands": {
+        "tag": {
+          "description": "Zarządzaj szybkimi tagami i szablonami odpowiedzi.",
+          "options": {
+            "get": {
+              "description": "Wyświetl treść zapisanego tagu."
+            },
+            "create": {
+              "description": "Utwórz nowy tag na serwerze."
+            },
+            "delete": {
+              "description": "Usuń tag z serwera."
+            },
+            "name": {
+              "description": "Nazwa tagu."
+            },
+            "content": {
+              "description": "Treść wiadomości tagu."
+            }
+          }
+        },
+        "get": {
+          "description": "Wyświetl treść zapisanego tagu."
+        },
+        "name": {
+          "description": "Nazwa tagu do usunięcia."
+        },
+        "create": {
+          "description": "Utwórz nowy tag na serwerze."
+        },
+        "content": {
+          "description": "Nowa treść tagu."
+        },
+        "edit": {
+          "description": "Zaktualizuj istniejący tag."
+        },
+        "delete": {
+          "description": "Usuń wybrany tag."
+        },
+        "list": {
+          "description": "Wyświetl listę wszystkich dostępnych tagów."
+        }
+      },
+      "created": "✅ Tag `{name}` został pomyślnie utworzony.",
+      "not_found": "❌ Tag `{name}` nie został znaleziony.",
+      "deleted": "🗑️ Tag `{name}` został usunięty."
+    },
+    "telegram_bridge": {
+      "name": "Mostek Telegram",
+      "description": "Dwukierunkowy przekaźnik wiadomości z filtrem pętli i mapowaniem.",
+      "commands": {
+        "telegram": {
+          "description": "Komenda modułu Telegram Bridge.",
+          "options": {
+            "action": {
+              "description": "Akcja do wykonania."
+            }
+          }
+        },
+        "action": {
+          "description": "Akcja do wykonania."
+        }
+      },
+      "active_reply": "Moduł Telegram Bridge aktywny. Wywołano komendę: {cmd}"
+    },
+    "tickets": {
+      "name": "Tickets and Support",
+      "description": "Prywatne tickety, kolejki wsparcia, claim, uczestnicy, priorytety, archiwizacja i transkrypcje.",
+      "commands": {
+        "ticket": {
+          "description": "Zarządzaj ticketami pomocy technicznej i obsługi."
+        }
+      },
+      "queue_not_allowed": "Kolejka `{queue}` nie jest dozwolona na tym serwerze.",
+      "ticket_created": "✅ Utworzono ticket #{number}: <#{channel_id}>"
+    },
+    "twitch_extended": {
+      "name": "Integracja Twitch",
+      "description": "Powiadomienia o transmisjach, klipy i alerty dla twórców z Twitch.tv.",
+      "commands": {
+        "twitch": {
+          "description": "Komenda modułu Twitch Extended.",
+          "options": {
+            "action": {
+              "description": "Akcja do wykonania."
+            }
+          }
+        },
+        "action": {
+          "description": "Akcja do wykonania."
+        }
+      },
+      "active_reply": "Moduł Twitch Extended aktywny. Wywołano komendę: {cmd}"
+    },
+    "unified_identity": {
+      "name": "Zintegrowana Tożsamość",
+      "description": "Centralne dobrowolne powiązania kont Discord z zewnętrznymi profilami.",
+      "commands": {
+        "identity": {
+          "description": "Komenda modułu Unified Identity.",
+          "options": {
+            "action": {
+              "description": "Akcja do wykonania."
+            }
+          }
+        },
+        "action": {
+          "description": "Akcja do wykonania."
+        }
+      },
+      "active_reply": "Moduł Unified Identity aktywny. Wywołano komendę: {cmd}"
+    },
+    "utility": {
+      "name": "Narzędzia Pomocnicze",
+      "description": "Kalkulator, konwersje, timestampy, snowflake, identyfikatory i narzędzia tekstowe.",
+      "commands": {
+        "calculate": {
+          "description": "Wykonuje bezpieczne podstawowe działanie matematyczne."
+        },
+        "a": {
+          "description": "Pierwsza liczba."
+        },
+        "operation": {
+          "description": "Działanie matematyczne."
+        },
+        "b": {
+          "description": "Druga liczba."
+        },
+        "convert": {
+          "description": "Konwertuje popularne jednostki."
+        },
+        "value": {
+          "description": "Wartość do przeliczenia."
+        },
+        "unit": {
+          "description": "Kierunek konwersji."
+        },
+        "snowflake": {
+          "description": "Odczytuje datę utworzenia z identyfikatora Discord Snowflake.",
+          "options": {
+            "id": {
+              "description": "Identyfikator Discord Snowflake."
+            }
+          }
+        },
+        "id": {
+          "description": "Identyfikator użytkownika, roli, kanału albo wiadomości."
+        },
+        "timestamp": {
+          "description": "Tworzy gotowy znacznik czasu Discorda."
+        },
+        "offset": {
+          "description": "Przesunięcie od teraz w sekundach; dopuszczalne są wartości ujemne."
+        },
+        "style": {
+          "description": "Styl znacznika."
+        },
+        "randomnumber": {
+          "description": "Losuje liczbę całkowitą z wybranego zakresu."
+        },
+        "minimum": {
+          "description": "Dolna granica; może być ujemna."
+        },
+        "maximum": {
+          "description": "Górna granica; może być ujemna."
+        },
+        "texttool": {
+          "description": "Przekształca tekst albo mierzy jego długość."
+        },
+        "action": {
+          "description": "Operacja na tekście."
+        },
+        "text": {
+          "description": "Tekst wejściowy."
+        },
+        "ids": {
+          "description": "Pokazuje wybrane identyfikatory Discorda."
+        },
+        "user": {
+          "description": "Opcjonalny użytkownik."
+        },
+        "role": {
+          "description": "Opcjonalna rola."
+        },
+        "channel": {
+          "description": "Opcjonalny kanał."
+        },
+        "color": {
+          "description": "Sprawdza i normalizuje kolor zapisany jako HEX."
+        },
+        "hex": {
+          "description": "Kolor, np. #5865F2."
+        },
+        "calc": {
+          "description": "Wykonuje bezpieczne podstawowe działanie matematyczne.",
+          "options": {
+            "operation": {
+              "description": "Działanie matematyczne."
+            },
+            "a": {
+              "description": "Pierwsza liczba."
+            },
+            "b": {
+              "description": "Druga liczba."
+            }
+          }
+        },
+        "poll": {
+          "description": "Tworzy prostą ankietę z opcjami i reakcjami do głosowania.",
+          "options": {
+            "question": {
+              "description": "Pytanie ankiety."
+            },
+            "options": {
+              "description": "Opcje rozdzielone średnikami (maks. 10)."
+            }
+          }
+        }
+      },
+      "calc_result": "Wynik: `{result}`",
+      "calc_error": "Błąd obliczeń: `{error}`",
+      "poll_created": "📊 **Ankieta:** {question}",
+      "div_zero": "Nie można dzielić przez zero.",
+      "overflow": "Wartości dla potęgowania są zbyt duże.",
+      "unknown_op": "Nieznane działanie.",
+      "invalid_snowflake": "To nie jest prawidłowy identyfikator Discorda."
+    },
+    "vk_community": {
+      "name": "Integracja VKontakte",
+      "description": "Społeczności VKontakte Callback API i powiadomienia o postach.",
+      "commands": {
+        "vk": {
+          "description": "Komenda modułu VK Integration.",
+          "options": {
+            "action": {
+              "description": "Akcja do wykonania."
+            }
+          }
+        },
+        "action": {
+          "description": "Akcja do wykonania."
+        }
+      },
+      "active_reply": "Moduł VK Integration aktywny. Wywołano komendę: {cmd}"
+    },
+    "welcome": {
+      "name": "Welcome and Goodbye",
+      "description": "Konfigurowalne powitania, pożegnania, automatyczne role i wiadomości prywatne dla nowych członków.",
+      "commands": {},
+      "welcome_message": "Witaj {user} na serwerze {server}! Jesteś naszym {member_count}. członkiem.",
+      "dm_welcome_message": "Witaj na serwerze {server}! Zapoznaj się z regulaminem i miłego pobytu.",
+      "goodbye_message": "Żegnaj {username}. Będziemy tęsknić!"
+    },
+    "workflow_builder": {
+      "name": "Kreator Przepływów",
+      "description": "Wizualne automatyzacje DAG z detekcją cykli i dry-run.",
+      "commands": {
+        "workflow": {
+          "description": "Komenda modułu Workflow Builder.",
+          "options": {
+            "action": {
+              "description": "Akcja do wykonania."
+            }
+          }
+        },
+        "action": {
+          "description": "Akcja do wykonania."
+        }
+      },
+      "active_reply": "Moduł Workflow Builder aktywny. Wywołano komendę: {cmd}"
+    },
+    "youtube_extended": {
+      "name": "Integracja YouTube",
+      "description": "Powiadomienia o filmach, premierach i Shorts z kanałów YouTube.",
+      "commands": {
+        "youtube": {
+          "description": "Komenda modułu YouTube Extended.",
+          "options": {
+            "action": {
+              "description": "Akcja do wykonania."
+            }
+          }
+        },
+        "action": {
+          "description": "Akcja do wykonania."
+        }
+      },
+      "active_reply": "Moduł YouTube Extended aktywny. Wywołano komendę: {cmd}"
+    }
+  }
+}

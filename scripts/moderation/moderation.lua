@@ -1,3 +1,5 @@
+local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
+
 local function missing(message)
     return {
         {
@@ -13,13 +15,13 @@ return {
         id = "moderation",
         name = "Moderation",
         version = "0.4.0",
-        description = "Bezpieczne akcje moderacyjne, trwałe numerowane sprawy (cases), ostrzeżenia i audyt.",
+        description = "Safe moderation actions, persistent numbered cases, warnings, and audit logging.",
         category = "safety",
         default_enabled = true,
         commands = {
             {
                 name = "moderate",
-                description = "Wykonuje timeout, kick, ban, softban, unban albo czyszczenie wiadomości.",
+                description = "Execute timeout, kick, ban, softban, unban, or message purge.",
                 integration_types = { "guild" },
                 contexts = { "guild" },
                 options = {
@@ -40,13 +42,13 @@ return {
                     {
                         type = "user",
                         name = "user",
-                        description = "Użytkownik dla timeout, kick, ban, softban lub unban.",
+                        description = "Target user for timeout, kick, ban, softban, or unban.",
                         required = false,
                     },
                     {
                         type = "integer",
                         name = "seconds",
-                        description = "Czas timeoutu w sekundach.",
+                        description = "Timeout duration in seconds.",
                         required = false,
                         min_value = 1,
                         max_value = 2419200,
@@ -54,7 +56,7 @@ return {
                     {
                         type = "integer",
                         name = "delete_days",
-                        description = "Dni historii wiadomości do usunięcia (0-7, dla softban i ban).",
+                        description = "Days of message history to delete (0-7).",
                         required = false,
                         min_value = 0,
                         max_value = 7,
@@ -62,7 +64,7 @@ return {
                     {
                         type = "integer",
                         name = "amount",
-                        description = "Liczba wiadomości do usunięcia.",
+                        description = "Number of messages to purge.",
                         required = false,
                         min_value = 1,
                         max_value = 100,
@@ -70,19 +72,19 @@ return {
                     {
                         type = "string",
                         name = "reason",
-                        description = "Powód widoczny w audycie Discorda.",
+                        description = "Reason visible in Discord audit log.",
                         required = false,
                         max_length = 512,
                     },
                     {
                         type = "string",
                         name = "severity",
-                        description = "Poziom powagi sprawy.",
+                        description = "Case severity level.",
                         required = false,
                         choices = {
                             { name = "Informacyjny", value = "info" },
                             { name = "Niski", value = "low" },
-                            { name = "Średni", value = "medium" },
+                            { name = "Medium", value = "medium" },
                             { name = "Wysoki", value = "high" },
                             { name = "Krytyczny", value = "critical" },
                         },
@@ -99,31 +101,31 @@ return {
             },
             {
                 name = "warn",
-                description = "Nakłada oficjalne ostrzeżenie i rejestruje sprawę moderacyjną.",
+                description = "Issue an official warning and record a moderation case.",
                 integration_types = { "guild" },
                 contexts = { "guild" },
                 options = {
                     {
                         type = "user",
                         name = "user",
-                        description = "Ostrzegany użytkownik.",
+                        description = "User to warn.",
                         required = true,
                     },
                     {
                         type = "string",
                         name = "reason",
-                        description = "Powód ostrzeżenia.",
+                        description = "Warning reason.",
                         required = true,
                         max_length = 512,
                     },
                     {
                         type = "string",
                         name = "severity",
-                        description = "Poziom powagi sprawy.",
+                        description = "Case severity level.",
                         required = false,
                         choices = {
                             { name = "Niski", value = "low" },
-                            { name = "Średni", value = "medium" },
+                            { name = "Medium", value = "medium" },
                             { name = "Wysoki", value = "high" },
                             { name = "Krytyczny", value = "critical" },
                         },
@@ -131,7 +133,7 @@ return {
                     {
                         type = "integer",
                         name = "points",
-                        description = "Punkty karne (domyślnie 1).",
+                        description = "Penalty points (default 1).",
                         required = false,
                         min_value = 0,
                         max_value = 1000,
@@ -140,55 +142,55 @@ return {
             },
             {
                 name = "case",
-                description = "Zarządzanie sprawami moderacyjnymi: podgląd, notatki, unieważnianie, statystyki.",
+                description = "Manage moderation cases: view, note, void, and view stats.",
                 integration_types = { "guild" },
                 contexts = { "guild" },
                 options = {
                     {
                         type = "string",
                         name = "action",
-                        description = "Operacja na sprawach moderacyjnych.",
+                        description = "Moderation case action.",
                         required = true,
                         choices = {
-                            { name = "Podgląd sprawy", value = "view" },
+                            { name = "View case", value = "view" },
                             { name = "Lista spraw", value = "list" },
-                            { name = "Edytuj sprawę", value = "edit" },
-                            { name = "Dodaj notatkę", value = "note" },
-                            { name = "Unieważnij sprawę", value = "void" },
-                            { name = "Przywróć sprawę", value = "restore" },
+                            { name = "Edit case", value = "edit" },
+                            { name = "Add note", value = "note" },
+                            { name = "Void case", value = "void" },
+                            { name = "Restore case", value = "restore" },
                             { name = "Statystyki moderacji", value = "stats" },
                         },
                     },
                     {
                         type = "integer",
                         name = "case_number",
-                        description = "Numer sprawy.",
+                        description = "Case number.",
                         required = false,
                         min_value = 1,
                     },
                     {
                         type = "user",
                         name = "user",
-                        description = "Użytkownik (dla listy spraw lub statystyk).",
+                        description = "Target user.",
                         required = false,
                     },
                     {
                         type = "string",
                         name = "text",
-                        description = "Treść notatki lub powód unieważnienia.",
+                        description = "Note content or void reason.",
                         required = false,
                         max_length = 1000,
                     },
                     {
                         type = "boolean",
                         name = "visible",
-                        description = "Czy notatka ma być widoczna dla ukaranego użytkownika.",
+                        description = "Whether note is visible to sanctioned user.",
                         required = false,
                     },
                     {
                         type = "integer",
                         name = "version",
-                        description = "Wersja sprawy (dla void/restore).",
+                        description = "Case version (for void/restore).",
                         required = false,
                         min_value = 1,
                     },
@@ -212,14 +214,14 @@ return {
     on_command = function(command, ctx)
         local accepted = {
             type = "reply",
-            content = "Akcja moderacyjna została przyjęta.",
+            content = t("modules.moderation.accepted", ctx),
             ephemeral = true,
         }
 
         if command == "warn" then
             local user_id = ctx.options.user
             if not user_id then
-                return missing("Musisz wskazać użytkownika do ostrzeżenia.")
+                return missing("You must specify a user to warn.")
             end
             local reason = ctx.options.reason or "Brak powodu"
             local severity = ctx.options.severity or "medium"
@@ -247,7 +249,7 @@ return {
             if action == "view" then
                 local num = tonumber(ctx.options.case_number)
                 if not num then
-                    return missing("Musisz podać numer sprawy (case_number).")
+                    return missing("You must specify a case number (case_number).")
                 end
                 return {
                     accepted,
@@ -313,10 +315,10 @@ return {
                 }
             elseif action == "void" then
                 local num = tonumber(ctx.options.case_number)
-                local reason = ctx.options.text or "Unieważniono decyzją moderatora"
+                local reason = ctx.options.text or "Voided by moderator decision"
                 local version = tonumber(ctx.options.version) or 0
                 if not num then
-                    return missing("Unieważnienie wymaga numeru sprawy (case_number).")
+                    return missing("Voiding requires a case number (case_number).")
                 end
                 return {
                     accepted,
@@ -334,7 +336,7 @@ return {
                 local num = tonumber(ctx.options.case_number)
                 local version = tonumber(ctx.options.version) or 0
                 if not num then
-                    return missing("Przywrócenie wymaga numeru sprawy (case_number).")
+                    return missing("Restoring requires a case number (case_number).")
                 end
                 return {
                     accepted,
@@ -385,7 +387,7 @@ return {
         end
 
         if not user_id then
-            return missing("Dla tej akcji musisz wskazać użytkownika.")
+            return missing("For this action you must specify a user.")
         end
 
         if action == "timeout" then

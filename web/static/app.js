@@ -245,7 +245,7 @@ function initRealtimeStream() {
     });
 
     sse.addEventListener("case_updated", () => {
-      showToast("Zaktualizowano sprawę moderacyjną", "info", 3000);
+      showToast("Moderation case updated", "info", 3000);
       if (state.activeTab === "moderation") {
         loadCases();
       }
@@ -256,7 +256,7 @@ function initRealtimeStream() {
     });
 
     sse.addEventListener("case_created", () => {
-      showToast("Utworzono nową sprawę moderacyjną", "info", 3000);
+      showToast("New moderation case created", "info", 3000);
       if (state.activeTab === "moderation") {
         loadCases();
       }
@@ -327,8 +327,8 @@ async function showDashboard() {
     ui.guildSelect.disabled = true;
     ui.modules.replaceChildren(
       messageCard(
-        "Brak serwerów",
-        "Discord nie zwrócił żadnego serwera, którym możesz zarządzać."
+        "No servers",
+        "Discord did not return any servers you can manage."
       )
     );
     return;
@@ -364,7 +364,7 @@ async function loadLiveUptime() {
       ui.kpiBotStatus.style.color = "var(--danger)";
     }
     if (ui.kpiUptime) {
-      ui.kpiUptime.textContent = "Uptime: niedostępny";
+      ui.kpiUptime.textContent = "Uptime: unavailable";
     }
   }
 }

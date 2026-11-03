@@ -153,7 +153,7 @@ async fn lua_rejects_a_queue_outside_server_configuration() {
         Some(LuaAction::Reply {
             ephemeral: true,
             content,
-        }) if content.contains("nie jest dozwolona")
+        }) if content.contains("nie jest dozwolona") || content.contains("not allowed")
     ));
 }
 

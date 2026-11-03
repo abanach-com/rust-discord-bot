@@ -489,7 +489,10 @@ async fn test_channel_resolution_server_isolation_and_error_handling() {
     let foreign =
         resolve_and_validate_channel(&ctx, &origin, Some("201"), ChannelPurpose::SendMessage).await;
     assert!(foreign.is_err(), "foreign channel 201 should be rejected");
-    assert!(foreign.unwrap_err().to_string().contains("obcego serwera"));
+    let foreign_err = foreign.unwrap_err().to_string();
+    assert!(
+        foreign_err.contains("different server") || foreign_err.contains("obcego serwera")
+    );
     assert_eq!(
         mock.modifying_requests_count.load(Ordering::SeqCst),
         baseline_modifications,
@@ -503,7 +506,10 @@ async fn test_channel_resolution_server_isolation_and_error_handling() {
         dm.is_err(),
         "DM channel 301 in guild context should be rejected"
     );
-    assert!(dm.unwrap_err().to_string().contains("kanał prywatny"));
+    let dm_err = dm.unwrap_err().to_string();
+    assert!(
+        dm_err.contains("private channel") || dm_err.contains("kanał prywatny")
+    );
     assert_eq!(
         mock.modifying_requests_count.load(Ordering::SeqCst),
         baseline_modifications,
@@ -517,11 +523,9 @@ async fn test_channel_resolution_server_isolation_and_error_handling() {
         category.is_err(),
         "Category channel 401 should be rejected for SendMessage"
     );
+    let cat_err = category.unwrap_err().to_string();
     assert!(
-        category
-            .unwrap_err()
-            .to_string()
-            .contains("kategoria kanałów")
+        cat_err.contains("channel categories") || cat_err.contains("kategoria kanałów")
     );
     assert_eq!(
         mock.modifying_requests_count.load(Ordering::SeqCst),
@@ -563,11 +567,9 @@ async fn test_channel_resolution_server_isolation_and_error_handling() {
         denied_channel.is_err(),
         "channel 102 with denied SEND_MESSAGES should be rejected"
     );
+    let denied_err = denied_channel.unwrap_err().to_string();
     assert!(
-        denied_channel
-            .unwrap_err()
-            .to_string()
-            .contains("brak uprawnień użytkownika")
+        denied_err.contains("missing user permissions") || denied_err.contains("brak uprawnień użytkownika")
     );
     assert_eq!(
         mock.modifying_requests_count.load(Ordering::SeqCst),
@@ -677,11 +679,10 @@ async fn test_join_guard_raid_kick_timeout_and_self_punishment_contract() {
         self_check.is_err(),
         "manual command on self must be rejected"
     );
+    let self_err = self_check.unwrap_err().to_string();
     assert!(
-        self_check
-            .unwrap_err()
-            .to_string()
-            .contains("nie możesz wykonać tej akcji na sobie")
+        self_err.contains("cannot perform this action on yourself")
+            || self_err.contains("nie możesz wykonać tej akcji na sobie")
     );
 
     shard_manager.shutdown_all().await;

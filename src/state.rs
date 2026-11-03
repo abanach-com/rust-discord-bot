@@ -82,13 +82,13 @@ impl AppState {
             .user_agent(user_agent)
             .redirect(reqwest_songbird::redirect::Policy::custom(|attempt| {
                 if attempt.previous().len() >= 10 {
-                    return attempt.error("zbyt wiele przekierowań w odtwarzaczu mediów");
+                    return attempt.error("too many redirects in media player");
                 }
 
                 let next_url = attempt.url();
                 if next_url.scheme() != "https" {
                     return attempt
-                        .error("przekierowanie w odtwarzaczu mediów musi używać protokołu HTTPS");
+                        .error("media player redirect must use HTTPS protocol");
                 }
 
                 let ip = match next_url.host() {
@@ -101,7 +101,7 @@ impl AppState {
                 if let Some(ip) = ip
                     && crate::discord::music::is_blocked_ip(ip)
                 {
-                    return attempt.error("przekierowanie do zablokowanego prywatnego adresu IP");
+                    return attempt.error("redirect to blocked private IP address");
                 }
 
                 attempt.follow()

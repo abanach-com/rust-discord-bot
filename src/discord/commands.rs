@@ -61,9 +61,19 @@ fn build_command(
         .validate_options_order()
         .map_err(|message| anyhow!("{message}"))?;
 
+    let description = if definition.description.contains('.') {
+        crate::translations::t("en", &definition.description)
+    } else {
+        definition.description.clone()
+    };
+
     let mut command = CreateCommand::new(&definition.name)
-        .description(&definition.description)
+        .description(&description)
         .nsfw(definition.nsfw);
+
+    for (locale, desc) in crate::translations::get_command_localizations(&definition.name) {
+        command = command.description_localized(locale, desc);
+    }
 
     if scope == RegistrationScope::Global {
         command = command
@@ -94,7 +104,7 @@ fn build_command(
     }
 
     for option in &definition.options {
-        command = command.add_option(build_option(option)?);
+        command = command.add_option(build_option(option, &definition.name)?);
     }
 
     Ok(command)
@@ -115,12 +125,21 @@ const fn interaction_context(context: LuaInteractionContext) -> InteractionConte
     }
 }
 
-fn build_option(definition: &LuaCommandOption) -> Result<CreateCommandOption> {
+fn build_option(definition: &LuaCommandOption, cmd_name: &str) -> Result<CreateCommandOption> {
     let option_type = option_type(definition.kind);
+    let description = if definition.description.contains('.') {
+        crate::translations::t("en", &definition.description)
+    } else {
+        definition.description.clone()
+    };
     let mut option =
-        CreateCommandOption::new(option_type, &definition.name, &definition.description)
+        CreateCommandOption::new(option_type, &definition.name, &description)
             .required(definition.required)
             .set_autocomplete(definition.autocomplete);
+
+    for (locale, desc) in crate::translations::get_command_option_localizations(cmd_name, &definition.name) {
+        option = option.description_localized(locale, desc);
+    }
 
     if let Some(min_length) = definition.min_length {
         option = option.min_length(min_length);
@@ -184,7 +203,7 @@ fn build_option(definition: &LuaCommandOption) -> Result<CreateCommandOption> {
     }
 
     for child in &definition.options {
-        option = option.add_sub_option(build_option(child)?);
+        option = option.add_sub_option(build_option(child, cmd_name)?);
     }
 
     Ok(option)

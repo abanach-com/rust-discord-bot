@@ -1,3 +1,5 @@
+local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
+
 local SUSPICIOUS_DOMAINS = {
     "grabify.link", "iplogger.org", "2no.co", "yip.su", "blasze.com",
     "shorturl.at", "bit.ly", "tinyurl.com", "cutt.ly", "is.gd"
@@ -228,7 +230,7 @@ local function evaluate(ctx)
         user_mention_counts[user_id] = (user_mention_counts[user_id] or 0) + 1
         local max_single = tonumber(config.max_single_user_mentions) or 4
         if max_single > 0 and user_mention_counts[user_id] > max_single then
-            return "repeated_user_mentions", string.format("użytkownik %s oznaczony %d razy", user_id, user_mention_counts[user_id])
+            return "repeated_user_mentions", string.format("user %s mentioned %d times", user_id, user_mention_counts[user_id])
         end
     end
 
@@ -282,8 +284,8 @@ local function build_actions(ctx, rule, evidence, is_edit)
 
     if config.send_notice ~= false then
         local default_notice = config.delete_messages == false
-            and "Wiadomość narusza zasady AutoMod ({rule})."
-            or "Wiadomość została usunięta przez AutoMod."
+            and "Message violates AutoMod rules ({rule})."
+            or "Message was removed by AutoMod."
         local notice = config.notice or default_notice
         notice = string.gsub(notice, "{user}", "<@" .. tostring(ctx.actor_id) .. ">")
         notice = string.gsub(notice, "{rule}", escaped(rule))
@@ -295,12 +297,12 @@ local function build_actions(ctx, rule, evidence, is_edit)
     end
 
     if config.alert_channel_id and config.alert_channel_id ~= "" then
-        local edit_badge = is_edit and " *(wykryto podczas edycji wiadomości)*" or ""
+        local edit_badge = is_edit and " *(detected during message edit)*" or ""
         table.insert(actions, {
             type = "send_message",
             channel_id = config.alert_channel_id,
             content = string.format(
-                "🛡️ **AutoMod zadziałał**%s\nUżytkownik: <@%s> (`%s`)\nKanał: <#%s>\nReguła: `%s`\nDowód: `%s`\nWiadomość: `%s`",
+                "🛡️ **AutoMod Action**%s\nUser: <@%s> (`%s`)\nChannel: <#%s>\nRule: `%s`\nEvidence: `%s`\nMessage: `%s`",
                 edit_badge,
                 tostring(ctx.actor_id),
                 tostring(ctx.actor_id),
@@ -333,7 +335,7 @@ return {
         id = "automod",
         name = "Advanced Lua AutoMod",
         version = "1.1.0",
-        description = "Wielowarstwowy filtr treści, linków, zaproszeń, wzmianek, caps locka, załączników i edycji wiadomości.",
+        description = "Multi-layer content filtering for links, invites, mentions, caps, attachments, and message edits.",
         category = "safety",
         default_enabled = false,
         events = {
@@ -346,7 +348,7 @@ return {
             properties = {
                 blocked_words = {
                     type = "array",
-                    title = "Zablokowane słowa lub frazy",
+                    title = "Blocked words or phrases",
                     items = { type = "string", minLength = 1, maxLength = 64 },
                     maxItems = 250,
                 },
@@ -386,10 +388,10 @@ return {
                 send_notice = { type = "boolean", default = true },
                 notice = {
                     type = "string",
-                    default = "{user}, wiadomość została usunięta przez AutoMod (`{rule}`).",
+                    default = "{user}, message was removed by AutoMod (`{rule}`).",
                     maxLength = 500,
                 },
-                alert_channel_id = { type = "string", title = "Kanał alertów AutoMod" },
+                alert_channel_id = { type = "string", title = "AutoMod Alerts Channel" },
             },
         },
     },

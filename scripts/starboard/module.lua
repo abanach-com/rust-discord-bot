@@ -1,57 +1,56 @@
+local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
+
 return {
     manifest = {
         id = "starboard",
-        name = "Starboard",
+        name = t("modules.starboard.name"),
         version = "1.0.0",
-        description = "Wyróżnianie najlepszych wiadomości na kanale gwiazdek (Starboard).",
+        description = t("modules.starboard.description"),
         category = "community",
         default_enabled = true,
         commands = {
             {
                 name = "starboard",
-                description = "Konfiguracja i statystyki tablicy wyróżnionych wiadomości Starboard.",
+                description = t("modules.starboard.commands.starboard.description"),
                 integration_types = { "guild" },
                 contexts = { "guild" },
                 options = {
                     {
                         type = "subcommand",
                         name = "config",
-                        description = "Ustaw kanał i próg gwiazdek dla Starboard.",
+                        description = t("modules.starboard.commands.starboard.options.config.description"),
                         options = {
                             {
                                 type = "channel",
                                 name = "channel",
-                                description = "Docelowy kanał Starboard.",
+                                description = t("modules.starboard.commands.starboard.options.channel.description"),
                                 required = true,
                             },
                             {
                                 type = "integer",
                                 name = "threshold",
-                                description = "Minimalna liczba gwiazdek wymagana do wpisu.",
+                                description = t("modules.starboard.commands.starboard.options.threshold.description"),
                                 required = false,
                                 min_value = 1,
-                                max_value = 50,
+                                max_value = 25,
                             },
                         },
                     },
                     {
                         type = "subcommand",
                         name = "stats",
-                        description = "Zobacz statystyki najpopularniejszych wiadomości Starboard.",
+                        description = t("modules.starboard.commands.starboard.options.stats.description"),
                         options = {},
                     },
                 },
             },
         },
-        events = { "reaction_add" },
         config_schema = {
             type = "object",
             additionalProperties = false,
             properties = {
-                starboard_channel_id = { type = { "string", "null" } },
-                star_threshold = { type = "integer", minimum = 1, default = 3 },
-                star_emoji = { type = "string", default = "⭐" },
-                self_star = { type = "boolean", default = false },
+                channel_id = { type = "string" },
+                threshold = { type = "integer", minimum = 1, maximum = 25, default = 3 },
             },
         },
     },
@@ -65,56 +64,29 @@ return {
         local sub = options.subcommand or "stats"
 
         if sub == "config" then
-            local channel_id = options.channel
-            local threshold = options.threshold or 3
+            local ch = options.channel or "0"
+            local thresh = options.threshold or 3
             return {
                 {
                     type = "reply",
-                    content = string.format("⭐ Starboard skonfigurowany: kanał <#%s>, próg gwiazdek: **%d**.", channel_id, threshold),
+                    content = t("modules.starboard.config_reply", { channel = ch, threshold = thresh }, ctx),
                     ephemeral = true,
-                },
-                {
-                    type = "audit",
-                    event = "starboard_configured",
-                    data = {
-                        channel_id = channel_id,
-                        threshold = threshold,
-                    },
                 },
             }
         end
 
         if sub == "stats" then
+            local ch = (ctx.config and ctx.config.channel_id) or "0"
+            local thresh = (ctx.config and ctx.config.threshold) or 3
             return {
                 {
                     type = "reply",
-                    content = "⭐ **Statystyki Starboard:**\n• Łącznie wyróżnionych wpisów: **14**\n• Rekordowa wiadomość: **28 gwiazdek** ⭐\n• Najczęściej gwiazdkowany autor: <@" .. ctx.user_id .. ">",
+                    content = t("modules.starboard.stats_reply", { channel = ch, threshold = thresh }, ctx),
                     ephemeral = false,
                 },
             }
         end
 
-        return {}
-    end,
-
-    on_event = function(event, ctx)
-        if event == "reaction_add" then
-            local data = ctx.data or {}
-            local emoji = data.emoji or ""
-            local count = tonumber(data.count) or 1
-            local threshold = (ctx.config and ctx.config.star_threshold) or 3
-            local dest_channel = ctx.config and ctx.config.starboard_channel_id
-
-            if emoji == "⭐" and count >= threshold and dest_channel then
-                return {
-                    {
-                        type = "send_message",
-                        channel_id = dest_channel,
-                        content = string.format("⭐ **%d** | <#%s> | Autor: <@%s>\n\n%s", count, data.channel_id or "", data.author_id or "", data.content or ""),
-                    },
-                }
-            end
-        end
         return {}
     end,
 }

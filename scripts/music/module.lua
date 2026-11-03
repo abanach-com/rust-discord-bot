@@ -1,22 +1,24 @@
+local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
+
 return {
     manifest = {
         id = "music",
-        name = "Music",
+        name = t("modules.music.name"),
         version = "0.3.0",
-        description = "Odtwarzanie, kolejka, pętla i sterowanie głosem przez izolowane akcje Lua.",
+        description = t("modules.music.description"),
         category = "voice",
         default_enabled = true,
         commands = {
             {
                 name = "music",
-                description = "Steruje odtwarzaniem muzyki na kanale głosowym.",
+                description = t("modules.music.commands.music.description"),
                 integration_types = { "guild" },
                 contexts = { "guild" },
                 options = {
                     {
                         type = "string",
                         name = "action",
-                        description = "Operacja na odtwarzaczu.",
+                        description = t("modules.music.commands.music.options.action.description"),
                         required = true,
                         choices = {
                             { name = "Play", value = "play" },
@@ -24,18 +26,18 @@ return {
                             { name = "Resume", value = "resume" },
                             { name = "Skip", value = "skip" },
                             { name = "Stop", value = "stop" },
-                            { name = "Queue", value = "queue" },
-                            { name = "Leave", value = "leave" },
                             { name = "Volume", value = "volume" },
                             { name = "Loop", value = "loop" },
+                            { name = "Now Playing", value = "now_playing" },
+                            { name = "Queue", value = "queue" },
                         },
                     },
                     {
                         type = "string",
                         name = "query",
-                        description = "Tytuł albo dozwolony adres HTTPS.",
+                        description = t("modules.music.commands.music.options.query.description"),
                         required = false,
-                        max_length = 500,
+                        max_length = 512,
                     },
                 },
             },
@@ -68,7 +70,7 @@ return {
             return {
                 {
                     type = "reply",
-                    content = "Dla akcji play podaj tytuł albo dozwolony adres HTTPS.",
+                    content = t("modules.music.missing_play_query", ctx),
                     ephemeral = true,
                 },
             }
@@ -77,7 +79,7 @@ return {
             return {
                 {
                     type = "reply",
-                    content = "Dla akcji volume podaj poziom głośności w procentach (np. 50, 100, 150).",
+                    content = t("modules.music.missing_volume_level", ctx),
                     ephemeral = true,
                 },
             }
@@ -86,7 +88,7 @@ return {
         return {
             {
                 type = "reply",
-                content = "Polecenie muzyczne zostało przyjęte.",
+                content = t("modules.music.accepted", ctx),
                 ephemeral = true,
             },
             {

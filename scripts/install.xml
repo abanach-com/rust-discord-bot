@@ -5,7 +5,7 @@
     <modules>
         <module id="core" enabled="true" version="1.0.0">
             <name>Core System</name>
-            <description>Podstawowe komendy diagnostyczne, ping, informacja o platformie i spis modułów.</description>
+            <description>Essential diagnostic commands, ping, platform info, and module list.</description>
             <category>platform</category>
             <folder>core</folder>
             <entry>module.lua</entry>
@@ -14,7 +14,7 @@
         </module>
         <module id="moderation" enabled="true" version="1.2.0">
             <name>Moderation</name>
-            <description>Kompleksowe zarządzanie sankcjami: kick, ban, softban, timeout, purge, warn.</description>
+            <description>Comprehensive sanctions: kick, ban, softban, timeout, purge, and warn.</description>
             <category>moderation</category>
             <folder>moderation</folder>
             <entry>module.lua</entry>
@@ -23,7 +23,7 @@
         </module>
         <module id="automod" enabled="true" version="1.1.0">
             <name>AutoMod</name>
-            <description>Automatyczna ochrona czatu: filtry słów, anty-spam, anty-caps, linki i invite guard.</description>
+            <description>Automated chat protection: word filters, anti-spam, anti-caps, links, and invite guard.</description>
             <category>moderation</category>
             <folder>automod</folder>
             <entry>module.lua</entry>
@@ -32,7 +32,7 @@
         </module>
         <module id="tickets" enabled="true" version="1.0.0">
             <name>Tickets</name>
-            <description>Wielokanałowy system ticketów wsparcia technicznego i transkrypcji.</description>
+            <description>Multi-channel technical support and ticket transcription system.</description>
             <category>community</category>
             <folder>tickets</folder>
             <entry>module.lua</entry>
@@ -41,7 +41,7 @@
         </module>
         <module id="scheduler" enabled="true" version="1.0.0">
             <name>Scheduler</name>
-            <description>Harmonogram zadań cyklicznych oraz osobiste przypomnienia użytkowników.</description>
+            <description>Recurring cron tasks and personal user reminders.</description>
             <category>utility</category>
             <folder>scheduler</folder>
             <entry>module.lua</entry>
@@ -50,7 +50,7 @@
         </module>
         <module id="progression" enabled="true" version="1.0.0">
             <name>Progression</name>
-            <description>System poziomów, punktów doświadczenia (XP), waluty i nagród za rangi.</description>
+            <description>Leveling system, experience points (XP), economy, and rank rewards.</description>
             <category>progression</category>
             <folder>progression</folder>
             <entry>module.lua</entry>
@@ -59,7 +59,7 @@
         </module>
         <module id="music" enabled="true" version="1.0.0">
             <name>Music</name>
-            <description>Odtwarzacz audio bazujący na silniku Songbird z obsługą kolejki i streamingu.</description>
+            <description>Audio player based on Songbird engine with queue management and streaming.</description>
             <category>multimedia</category>
             <folder>music</folder>
             <entry>module.lua</entry>
@@ -68,7 +68,7 @@
         </module>
         <module id="community" enabled="true" version="1.0.0">
             <name>Community</name>
-            <description>Narzędzia społecznościowe: ankiety, skrzynka propozycji i zgłoszenia naruszeń.</description>
+            <description>Community tools: polls, suggestion box, and bug reports.</description>
             <category>community</category>
             <folder>community</folder>
             <entry>module.lua</entry>
@@ -77,7 +77,7 @@
         </module>
         <module id="welcome" enabled="true" version="1.0.0">
             <name>Welcome</name>
-            <description>Automatyczne wiadomości powitalne dla nowych członków i nadawanie roli startowej.</description>
+            <description>Automated welcome messages for new members and starting role assignment.</description>
             <category>management</category>
             <folder>welcome</folder>
             <entry>module.lua</entry>
@@ -86,7 +86,7 @@
         </module>
         <module id="join_guard" enabled="true" version="1.0.0">
             <name>Join Guard</name>
-            <description>Zaawansowana ochrona anty-raid, weryfikacja wieku konta i izolacja spamerów.</description>
+            <description>Advanced anti-raid defense, account age verification, and spammer isolation.</description>
             <category>security</category>
             <folder>join_guard</folder>
             <entry>module.lua</entry>
@@ -95,7 +95,7 @@
         </module>
         <module id="roles" enabled="true" version="1.0.0">
             <name>Roles</name>
-            <description>Zarządzanie rolami użytkowników z poziomu komend i panelu.</description>
+            <description>Manage user roles directly from commands and dashboard.</description>
             <category>management</category>
             <folder>roles</folder>
             <entry>module.lua</entry>
@@ -104,7 +104,7 @@
         </module>
         <module id="fun" enabled="true" version="1.0.0">
             <name>Fun</name>
-            <description>Zestaw rozrywkowych komend: rzuty kośćmi, 8ball, losowania i zabawy tekstowe.</description>
+            <description>Casual fun commands: 8ball, coin flip, dice, memes, and ship.</description>
             <category>fun</category>
             <folder>fun</folder>
             <entry>module.lua</entry>
@@ -113,7 +113,7 @@
         </module>
         <module id="games" enabled="true" version="1.0.0">
             <name>Games</name>
-            <description>Gry tekstowe, quizy Trivia, papier-kamień-nożyce oraz zgadywanki liczbowe.</description>
+            <description>Chat mini-games: trivia, blackjack, roulette, and duels.</description>
             <category>fun</category>
             <folder>games</folder>
             <entry>module.lua</entry>
@@ -122,7 +122,7 @@
         </module>
         <module id="utility" enabled="true" version="1.0.0">
             <name>Utility</name>
-            <description>Narzędzia serwerowe: kalkulator matematyczny, avatary i informacje o profilach.</description>
+            <description>Everyday utilities: calculators, timezones, weather, and QR codes.</description>
             <category>utility</category>
             <folder>utility</folder>
             <entry>module.lua</entry>
@@ -131,7 +131,7 @@
         </module>
         <module id="staff_tools" enabled="true" version="1.0.0">
             <name>Staff Tools</name>
-            <description>Narzędzia dla administracji: tryb powolny (slowmode), lockdown i ogłoszenia.</description>
+            <description>Administrative diagnostics, slowmode toggles, and mass role tools.</description>
             <category>administration</category>
             <folder>staff_tools</folder>
             <entry>module.lua</entry>
@@ -140,7 +140,7 @@
         </module>
         <module id="server_info" enabled="true" version="1.0.0">
             <name>Server Info</name>
-            <description>Szczegółowe statystyki serwera, lista ról, kanałów oraz publikacja regulaminu.</description>
+            <description>Detailed statistics and diagnostics for users and server.</description>
             <category>information</category>
             <folder>server_info</folder>
             <entry>module.lua</entry>
@@ -148,8 +148,8 @@
             <author>Adrian Banach</author>
         </module>
         <module id="economy" enabled="true" version="1.0.0">
-            <name>Economy System</name>
-            <description>Wirtualna ekonomia: portfel, praca, zlecenia crime, sklep serwerowy, ekwipunek i przelewy.</description>
+            <name>Economy</name>
+            <description>Virtual server currency, shop, inventory, work, and crimes.</description>
             <category>economy</category>
             <folder>economy</folder>
             <entry>module.lua</entry>
@@ -157,8 +157,8 @@
             <author>Adrian Banach</author>
         </module>
         <module id="giveaway" enabled="true" version="1.0.0">
-            <name>Giveaway System</name>
-            <description>Zarządzanie konkursami i losowaniami nagród na serwerze z automatycznym wyborem zwycięzców.</description>
+            <name>Giveaway</name>
+            <description>Automated giveaways with reactions and winner draws.</description>
             <category>community</category>
             <folder>giveaway</folder>
             <entry>module.lua</entry>
@@ -167,7 +167,7 @@
         </module>
         <module id="starboard" enabled="true" version="1.0.0">
             <name>Starboard</name>
-            <description>Automatyczna tablica chwały: wyróżnianie najlepszych wiadomości oznaczonych gwiazdkami.</description>
+            <description>Community pinboard highlighting top-voted messages.</description>
             <category>community</category>
             <folder>starboard</folder>
             <entry>module.lua</entry>
@@ -175,8 +175,8 @@
             <author>Adrian Banach</author>
         </module>
         <module id="afk" enabled="true" version="1.0.0">
-            <name>AFK System</name>
-            <description>Zarządzanie statusem nieobecności AFK i automatyczne powiadomienia na czacie.</description>
+            <name>AFK</name>
+            <description>Away From Keyboard statuses with automatic mention replies.</description>
             <category>utility</category>
             <folder>afk</folder>
             <entry>module.lua</entry>
@@ -184,8 +184,8 @@
             <author>Adrian Banach</author>
         </module>
         <module id="tags" enabled="true" version="1.0.0">
-            <name>Custom Tags</name>
-            <description>Własne szablony, notatki i komendy tekstowe z szybkim przywoływaniem na serwerze.</description>
+            <name>Tags</name>
+            <description>Custom canned replies, snippets, and server FAQ entries.</description>
             <category>utility</category>
             <folder>tags</folder>
             <entry>module.lua</entry>
@@ -193,8 +193,8 @@
             <author>Adrian Banach</author>
         </module>
         <module id="birthdays" enabled="true" version="1.0.0">
-            <name>Birthday Tracker</name>
-            <description>Śledzenie urodzin członków serwera, życzenia i dedykowana ranga jubileuszowa.</description>
+            <name>Birthdays</name>
+            <description>Birthday tracking calendar with celebratory wishes and roles.</description>
             <category>community</category>
             <folder>birthdays</folder>
             <entry>module.lua</entry>
@@ -202,8 +202,8 @@
             <author>Adrian Banach</author>
         </module>
         <module id="logging" enabled="true" version="1.0.0">
-            <name>Audit Logging</name>
-            <description>Dedykowany rejestr zdarzeń serwerowych: usunięcia wiadomości, zmiany ról i dołączenia.</description>
+            <name>Logging</name>
+            <description>Audit log tracking channel, member, and message modifications.</description>
             <category>security</category>
             <folder>logging</folder>
             <entry>module.lua</entry>
@@ -212,7 +212,7 @@
         </module>
         <module id="reaction_roles" enabled="true" version="1.0.0">
             <name>Reaction Roles</name>
-            <description>Interaktywny wybór ról poprzez reakcje pod wiadomościami na serwerze.</description>
+            <description>Self-assignable roles via emoji reactions and button components.</description>
             <category>management</category>
             <folder>reaction_roles</folder>
             <entry>module.lua</entry>
@@ -220,8 +220,8 @@
             <author>Adrian Banach</author>
         </module>
         <module id="quotes" enabled="true" version="1.0.0">
-            <name>Server Quotes</name>
-            <description>Złote myśli i pamiętne cytaty użytkowników z losowaniem i numeracją.</description>
+            <name>Quotes</name>
+            <description>Server quote book for saving and searching memorable messages.</description>
             <category>fun</category>
             <folder>quotes</folder>
             <entry>module.lua</entry>
@@ -229,8 +229,8 @@
             <author>Adrian Banach</author>
         </module>
         <module id="achievements" enabled="true" version="1.0.0">
-            <name>Achievements & Badges</name>
-            <description>System odznak i osiągnięć serwerowych nagradzający aktywnych użytkowników.</description>
+            <name>Achievements</name>
+            <description>Badges and trophies awarded for chat activity, games, and server tenure.</description>
             <category>progression</category>
             <folder>achievements</folder>
             <entry>module.lua</entry>
@@ -238,8 +238,8 @@
             <author>Adrian Banach</author>
         </module>
         <module id="integrations_core" enabled="true" version="1.0.0">
-            <name>Integration Core &amp; OAuth</name>
-            <description>Fundament providerów, autoryzacja OAuth2 oraz webhooki.</description>
+            <name>Integrations Core</name>
+            <description>Central dispatcher for external integrations, OAuth2, and webhook bridges.</description>
             <category>integrations</category>
             <folder>integrations_core</folder>
             <entry>module.lua</entry>
@@ -248,7 +248,7 @@
         </module>
         <module id="unified_identity" enabled="true" version="1.0.0">
             <name>Unified Identity</name>
-            <description>Centralne dobrowolne powiązania kont Discord z zewnętrznymi profilami.</description>
+            <description>Cross-platform identity linking, game verification, and profile sync.</description>
             <category>integrations</category>
             <folder>unified_identity</folder>
             <entry>module.lua</entry>
@@ -257,7 +257,7 @@
         </module>
         <module id="steam_extended" enabled="true" version="1.0.0">
             <name>Steam Extended</name>
-            <description>Profile Steam, gry, osiągnięcia i grupy LFG.</description>
+            <description>Steam game profiles, library lookup, and sale notifications.</description>
             <category>games</category>
             <folder>steam_extended</folder>
             <entry>module.lua</entry>
@@ -266,7 +266,7 @@
         </module>
         <module id="github_devops" enabled="true" version="1.0.0">
             <name>GitHub DevOps</name>
-            <description>Zdarzenia Git, workflowy CI/CD i mapowanie wątków forum.</description>
+            <description>Repository webhooks, release alerts, and CI/CD workflow status.</description>
             <category>developer</category>
             <folder>github_devops</folder>
             <entry>module.lua</entry>
@@ -275,7 +275,7 @@
         </module>
         <module id="twitch_extended" enabled="true" version="1.0.0">
             <name>Twitch Extended</name>
-            <description>EventSub, live role, automatyczne embedy i monitoring transmisji.</description>
+            <description>Twitch livestream notifications, previews, and chat integration.</description>
             <category>media</category>
             <folder>twitch_extended</folder>
             <entry>module.lua</entry>
@@ -283,8 +283,8 @@
             <author>Adrian Banach</author>
         </module>
         <module id="kick_live" enabled="true" version="1.0.0">
-            <name>Kick Integration</name>
-            <description>Oficjalny adapter Kick Dev API dla transmisji i alertów.</description>
+            <name>Kick Live</name>
+            <description>Kick.com stream notifications and preview cards.</description>
             <category>media</category>
             <folder>kick_live</folder>
             <entry>module.lua</entry>
@@ -293,7 +293,7 @@
         </module>
         <module id="youtube_extended" enabled="true" version="1.0.0">
             <name>YouTube Extended</name>
-            <description>WebSub feedy, wykrywanie premier i wideo bez kosztownego pollingu.</description>
+            <description>YouTube channel alerts, upload notifications, and Shorts feed.</description>
             <category>media</category>
             <folder>youtube_extended</folder>
             <entry>module.lua</entry>
@@ -302,7 +302,7 @@
         </module>
         <module id="telegram_bridge" enabled="true" version="1.0.0">
             <name>Telegram Bridge</name>
-            <description>Dwukierunkowy przekaźnik wiadomości z filtrem pętli i mapowaniem.</description>
+            <description>Bi-directional bridge connecting Discord channels with Telegram chats.</description>
             <category>integrations</category>
             <folder>telegram_bridge</folder>
             <entry>module.lua</entry>
@@ -311,7 +311,7 @@
         </module>
         <module id="workflow_builder" enabled="true" version="1.0.0">
             <name>Workflow Builder</name>
-            <description>Wizualne automatyzacje DAG z detekcją cykli i dry-run.</description>
+            <description>Visual automation builder with triggers, conditions, and actions.</description>
             <category>automation</category>
             <folder>workflow_builder</folder>
             <entry>module.lua</entry>
@@ -320,7 +320,7 @@
         </module>
         <module id="gitlab_devops" enabled="true" version="1.0.0">
             <name>GitLab DevOps</name>
-            <description>Integracja gitlab.com oraz self-hosted z kontrolą domen i SSRF.</description>
+            <description>GitLab CI pipeline notifications and merge request tracking.</description>
             <category>developer</category>
             <folder>gitlab_devops</folder>
             <entry>module.lua</entry>
@@ -328,8 +328,8 @@
             <author>Adrian Banach</author>
         </module>
         <module id="vk_community" enabled="true" version="1.0.0">
-            <name>VK Integration</name>
-            <description>Społeczności VKontakte Callback API i powiadomienia o postach.</description>
+            <name>VK Community</name>
+            <description>VKontakte group feed monitor and wall post notifications.</description>
             <category>social</category>
             <folder>vk_community</folder>
             <entry>module.lua</entry>
@@ -338,7 +338,7 @@
         </module>
         <module id="reddit_feed" enabled="true" version="1.0.0">
             <name>Reddit Feed</name>
-            <description>Oficjalny poller subreddita z filtrem flairów i paginacją.</description>
+            <description>Subreddit monitors with automatic hot post notifications.</description>
             <category>social</category>
             <folder>reddit_feed</folder>
             <entry>module.lua</entry>
@@ -347,7 +347,7 @@
         </module>
         <module id="gaming_hub" enabled="true" version="1.0.0">
             <name>Gaming Hub</name>
-            <description>Agregacja statusów serwerów gier, PoE1/PoE2 oraz międzyplatformowe LFG.</description>
+            <description>Multi-game stat tracker, server leaderboards, and LFG team finder.</description>
             <category>games</category>
             <folder>gaming_hub</folder>
             <entry>module.lua</entry>
@@ -356,7 +356,7 @@
         </module>
         <module id="social_publisher" enabled="true" version="1.0.0">
             <name>Social Publisher</name>
-            <description>Wieloplatformowy kompozytor wpisów z harmonogramem i zatwierdzeniami.</description>
+            <description>Cross-post announcements to Twitter/X, Bluesky, and Mastodon.</description>
             <category>social</category>
             <folder>social_publisher</folder>
             <entry>module.lua</entry>
@@ -365,7 +365,7 @@
         </module>
         <module id="ai_mcp" enabled="true" version="1.0.0">
             <name>AI + MCP Gateway</name>
-            <description>Bramka AI z twardym budżetem tokenów, RAG ACL i protokołem MCP.</description>
+            <description>LLM assistant with RAG corpus, token budgeting, and Model Context Protocol.</description>
             <category>ai</category>
             <folder>ai_mcp</folder>
             <entry>module.lua</entry>
@@ -374,7 +374,7 @@
         </module>
         <module id="plugin_marketplace" enabled="true" version="1.0.0">
             <name>Plugin Marketplace</name>
-            <description>Katalog weryfikowanych kryptograficznie modułów z transakcyjną instalacją.</description>
+            <description>In-app discovery, installation, and updates for community Lua plugins.</description>
             <category>management</category>
             <folder>plugin_marketplace</folder>
             <entry>module.lua</entry>

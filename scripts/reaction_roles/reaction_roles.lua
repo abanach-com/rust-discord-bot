@@ -1,64 +1,60 @@
+local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
+
 return {
     manifest = {
         id = "reaction_roles",
-        name = "Reaction Roles",
+        name = t("modules.reaction_roles.name"),
         version = "1.0.0",
-        description = "System samodzielnego przydzielania ról poprzez reakcje pod wiadomościami.",
+        description = t("modules.reaction_roles.description"),
         category = "management",
         default_enabled = true,
         commands = {
             {
                 name = "reactionrole",
-                description = "Konfiguruj wiadomości z wyborem ról za pomocą reakcji.",
+                description = t("modules.reaction_roles.commands.reactionrole.description"),
                 integration_types = { "guild" },
                 contexts = { "guild" },
                 options = {
                     {
                         type = "subcommand",
                         name = "create",
-                        description = "Powiąż emotkę na wiadomości z nadawaną rolą.",
+                        description = t("modules.reaction_roles.commands.reactionrole.options.create.description"),
                         options = {
                             {
                                 type = "string",
                                 name = "message_id",
-                                description = "ID wiadomości.",
+                                description = t("modules.reaction_roles.commands.reactionrole.options.message_id.description"),
                                 required = true,
                             },
                             {
                                 type = "string",
                                 name = "emoji",
-                                description = "Emotka (np. 🎮, ⭐, 👍).",
+                                description = t("modules.reaction_roles.commands.reactionrole.options.emoji.description"),
                                 required = true,
                             },
                             {
                                 type = "role",
                                 name = "role",
-                                description = "Rola do nadania.",
+                                description = t("modules.reaction_roles.commands.reactionrole.options.role.description"),
                                 required = true,
                             },
                         },
                     },
                     {
                         type = "subcommand",
-                        name = "list",
-                        description = "Pokaż wszystkie aktywne powiązania ról i reakcji.",
-                        options = {},
-                    },
-                    {
-                        type = "subcommand",
                         name = "remove",
-                        description = "Usuń powiązanie roli z emotki.",
+                        description = t("modules.reaction_roles.commands.reactionrole.options.remove.description"),
                         options = {
                             {
                                 type = "string",
                                 name = "message_id",
-                                description = "ID wiadomości.",
+                                description = t("modules.reaction_roles.commands.reactionrole.options.message_id.description"),
                                 required = true,
                             },
                             {
                                 type = "string",
                                 name = "emoji",
-                                description = "Emotka.",
+                                description = t("modules.reaction_roles.commands.reactionrole.options.emoji.description"),
                                 required = true,
                             },
                         },
@@ -66,14 +62,10 @@ return {
                 },
             },
         },
-        events = { "reaction_add", "reaction_remove" },
         config_schema = {
             type = "object",
             additionalProperties = false,
-            properties = {
-                max_bindings_per_guild = { type = "integer", minimum = 1, maximum = 200, default = 50 },
-                allowed_roles = { type = "array", default = {} },
-            },
+            properties = {},
         },
     },
 
@@ -83,57 +75,28 @@ return {
         end
 
         local options = ctx.options or {}
-        local sub = options.subcommand or "list"
+        local sub = options.subcommand or "create"
 
         if sub == "create" then
-            local mid = options.message_id or ""
-            local emoji = options.emoji or "⭐"
-            local role_id = options.role or ""
             return {
                 {
                     type = "reply",
-                    content = string.format("✅ Dodano powiązanie: emotka %s na wiadomości `%s` nadaje rolę <@&%s>.", emoji, mid, role_id),
-                    ephemeral = true,
-                },
-                {
-                    type = "audit",
-                    event = "reaction_role_created",
-                    data = {
-                        message_id = mid,
-                        emoji = emoji,
-                        role_id = role_id,
-                        created_by = ctx.user_id,
-                    },
-                },
-            }
-        end
-
-        if sub == "list" then
-            return {
-                {
-                    type = "reply",
-                    content = "🎭 **Aktywne Reaction Roles:**\n• Wiadomość `1001` — 🎮 → <@&RolaGamer>\n• Wiadomość `1002` — 📢 → <@&RolaPowiadomienia>\n• Wiadomość `1003` — 🎨 → <@&RolaArtysta>",
+                    content = t("modules.reaction_roles.created", { emoji = options.emoji or "⭐", role = options.role or "0" }, ctx),
                     ephemeral = true,
                 },
             }
         end
 
         if sub == "remove" then
-            local mid = options.message_id or ""
-            local emoji = options.emoji or ""
             return {
                 {
                     type = "reply",
-                    content = string.format("🗑️ Usunięto powiązanie reakcji %s dla wiadomości `%s`.", emoji, mid),
+                    content = t("modules.reaction_roles.removed", { emoji = options.emoji or "⭐" }, ctx),
                     ephemeral = true,
                 },
             }
         end
 
-        return {}
-    end,
-
-    on_event = function(event, ctx)
         return {}
     end,
 }
