@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod features;
+pub mod integrations;
 pub mod routes;
 pub mod static_files;
 
@@ -395,6 +396,119 @@ pub fn build_router(state: WebState) -> Router {
         .route(
             "/api/guilds/{guild_id}/ai/query",
             post(features::query_ai_assistant),
+        )
+        // Phase 4: Integrations & Extensibility (#92-#107)
+        .route(
+            "/api/guilds/{guild_id}/integrations",
+            get(integrations::list_guild_integrations),
+        )
+        .route(
+            "/api/guilds/{guild_id}/integrations/{provider}/connect",
+            post(integrations::initiate_provider_connect),
+        )
+        .route(
+            "/api/guilds/{guild_id}/integrations/{provider}/callback",
+            post(integrations::complete_provider_callback),
+        )
+        .route(
+            "/api/guilds/{guild_id}/integrations/{provider}",
+            delete(integrations::disconnect_provider),
+        )
+        .route(
+            "/api/guilds/{guild_id}/integrations/deliveries",
+            get(integrations::list_delivery_logs),
+        )
+        .route(
+            "/api/integrations/webhooks/{provider}",
+            post(integrations::handle_inbound_webhook),
+        )
+        .route(
+            "/api/guilds/{guild_id}/identity/link",
+            post(integrations::link_identity),
+        )
+        .route(
+            "/api/guilds/{guild_id}/identity/links",
+            get(integrations::list_identities),
+        )
+        .route(
+            "/api/guilds/{guild_id}/identity/unlink/{provider}",
+            delete(integrations::unlink_identity),
+        )
+        .route(
+            "/api/guilds/{guild_id}/steam/lfg",
+            get(integrations::list_steam_lfg).post(integrations::create_steam_lfg),
+        )
+        .route(
+            "/api/guilds/{guild_id}/steam/lfg/{post_id}/join",
+            post(integrations::join_steam_lfg),
+        )
+        .route(
+            "/api/guilds/{guild_id}/github/thread-map",
+            post(integrations::map_github_thread),
+        )
+        .route(
+            "/api/guilds/{guild_id}/telegram/bridge",
+            post(integrations::create_telegram_bridge),
+        )
+        .route(
+            "/api/guilds/{guild_id}/telegram/bridges",
+            get(integrations::list_telegram_bridges),
+        )
+        .route(
+            "/api/guilds/{guild_id}/workflows",
+            post(integrations::create_workflow),
+        )
+        .route(
+            "/api/guilds/{guild_id}/workflows/{wf_id}/dry-run",
+            post(integrations::dry_run_workflow),
+        )
+        .route(
+            "/api/gaming-hub/status",
+            get(integrations::list_game_statuses),
+        )
+        .route(
+            "/api/gaming-hub/leagues/{version}",
+            get(integrations::get_poe_leagues),
+        )
+        .route(
+            "/api/guilds/{guild_id}/social/drafts",
+            post(integrations::create_social_draft),
+        )
+        .route(
+            "/api/guilds/{guild_id}/social/drafts/{draft_id}/approve",
+            post(integrations::approve_social_draft),
+        )
+        .route(
+            "/api/guilds/{guild_id}/ai/budget",
+            get(integrations::get_ai_budget),
+        )
+        .route(
+            "/api/guilds/{guild_id}/ai/budget/record",
+            post(integrations::record_ai_usage),
+        )
+        .route(
+            "/api/guilds/{guild_id}/ai/documents",
+            post(integrations::add_ai_knowledge_doc),
+        )
+        .route(
+            "/api/guilds/{guild_id}/ai/search",
+            post(integrations::search_ai_knowledge),
+        )
+        .route(
+            "/api/marketplace/packages",
+            get(integrations::list_marketplace_packages),
+        )
+        .route(
+            "/api/marketplace/publish",
+            post(integrations::publish_marketplace_package),
+        )
+        .route(
+            "/api/guilds/{guild_id}/marketplace/install",
+            post(integrations::install_guild_plugin),
+        )
+        .route(
+            "/api/guilds/{guild_id}/marketplace/installed",
+            get(integrations::list_installed_guild_plugins),
         )
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn_with_state(

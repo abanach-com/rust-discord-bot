@@ -384,6 +384,31 @@ AI features are optional modules, not a prerequisite for core moderation.
 
 No AI model may autonomously ban users without an explicit, reviewable guild policy and an appeal path.
 
+## 13. Integrations, External Ecosystem & Extensibility (Phase 4)
+
+| Capability | Status | Notes |
+| --- | --- | --- |
+| Provider Adapter & Contract Hierarchy | Implemented | Strict traits `ProviderAdapter`, `ProviderCapability`, `ProviderEvent`, `ProviderAction` (#92) |
+| SSRF Sentinel & IP Restrictor | Implemented | RFC 1918, RFC 3927, loopback, and cloud metadata filter with allowlists (#92) |
+| OAuth2 Authorization Code + PKCE | Implemented | S256 verifier/challenge pair, state/nonce TTL, single-flight refresh (#92) |
+| Webhook Gateway & Broker | Implemented | Raw body HMAC-SHA256, persistent deduplication, exponential backoff, circuit breaker (#92) |
+| Unified Identity Service | Implemented | Multi-account links, anti-hijack checks, self-service unlink, role sync (#93) |
+| Steam Extended API & LFG | Implemented | OpenID assertion validation, privacy-respecting library/profile, cross-guild LFG (#94) |
+| GitHub DevOps Suite | Implemented | Push/PR/Check-run webhooks, Forum thread mapper, RBAC write controls (#95) |
+| Twitch Extended EventSub | Implemented | EventSub transport, stream online/offline, live embeds, live roles (#96) |
+| Kick Integration | Implemented | Kick Dev API client, livestream alerts, dynamic embed updates (#97) |
+| YouTube Extended WebSub | Implemented | WebSub push subscriptions, upload/shorts heuristics, quota monitor (#98) |
+| Telegram Bidirectional Bridge | Implemented | Webhook secret token check, bidirectional relay, anti-loop echo protection (#99) |
+| Workflow Builder Visual DAG | Implemented | Directed acyclic graph engine, Kahn's cycle detection, dry-run simulation (#100) |
+| GitLab Cloud & Self-Hosted | Implemented | Token verification, pipeline failure alerts, self-hosted SSRF allowlist (#101) |
+| VKontakte Community Gateway | Implemented | Callback API handshake challenge, post notifications, failure isolation (#102) |
+| Reddit Official API Poller | Implemented | Cursor pagination, flair/score filtering, moderator dry-run approvals (#103) |
+| Gaming Hub Aggregator | Implemented | Multi-game status registry, strict PoE1 vs PoE2 namespace isolation (#104) |
+| Social Publisher Multi-Platform | Implemented | Cross-platform composer, scheduled release, two-person approval gates (#105) |
+| AI Gateway & Hard Budget | Implemented | Hard token/USD caps per guild with instant cutoff, prompt injection sanitization (#106) |
+| MCP Protocol Client/Server | Implemented | Model Context Protocol tool allowlists, mutating action approval gates (#106) |
+| Plugin Marketplace & Verification | Implemented | Semver manifests, SHA-256 cryptographic check, transactional install/rollback (#107) |
+
 ## Delivery order
 
 ### Phase 0 — foundation
@@ -419,8 +444,13 @@ Current pull request:
 - multi-guild dashboard roles
 - scale testing and shard orchestration
 
-### Phase 4 — ecosystem
+### Phase 4 — ecosystem & integrations (Completed)
 
-- signed modules, review tooling and marketplace
-- public SDK and documentation site
-- optional privacy-reviewed AI modules
+- signed modules, review tooling and marketplace (#107)
+- integration core, OAuth2 + PKCE, webhook gateway broker (#92)
+- unified identity and account linking (#93)
+- external bridges: Steam (#94), GitHub (#95), Twitch (#96), Kick (#97), YouTube (#98), Telegram (#99), GitLab (#101), VK (#102), Reddit (#103)
+- visual DAG workflow builder (#100)
+- gaming hub and PoE1/PoE2 separation (#104)
+- social publisher with multi-target composer and approvals (#105)
+- AI gateway, hard budget caps, channel ACL RAG, and MCP tools (#106)

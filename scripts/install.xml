@@ -237,5 +237,151 @@
             <config>config.json</config>
             <author>Adrian Banach</author>
         </module>
+        <module id="integrations_core" enabled="true" version="1.0.0">
+            <name>Integration Core &amp; OAuth</name>
+            <description>Fundament providerów, autoryzacja OAuth2 oraz webhooki.</description>
+            <category>integrations</category>
+            <folder>integrations_core</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="unified_identity" enabled="true" version="1.0.0">
+            <name>Unified Identity</name>
+            <description>Centralne dobrowolne powiązania kont Discord z zewnętrznymi profilami.</description>
+            <category>integrations</category>
+            <folder>unified_identity</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="steam_extended" enabled="true" version="1.0.0">
+            <name>Steam Extended</name>
+            <description>Profile Steam, gry, osiągnięcia i grupy LFG.</description>
+            <category>games</category>
+            <folder>steam_extended</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="github_devops" enabled="true" version="1.0.0">
+            <name>GitHub DevOps</name>
+            <description>Zdarzenia Git, workflowy CI/CD i mapowanie wątków forum.</description>
+            <category>developer</category>
+            <folder>github_devops</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="twitch_extended" enabled="true" version="1.0.0">
+            <name>Twitch Extended</name>
+            <description>EventSub, live role, automatyczne embedy i monitoring transmisji.</description>
+            <category>media</category>
+            <folder>twitch_extended</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="kick_live" enabled="true" version="1.0.0">
+            <name>Kick Integration</name>
+            <description>Oficjalny adapter Kick Dev API dla transmisji i alertów.</description>
+            <category>media</category>
+            <folder>kick_live</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="youtube_extended" enabled="true" version="1.0.0">
+            <name>YouTube Extended</name>
+            <description>WebSub feedy, wykrywanie premier i wideo bez kosztownego pollingu.</description>
+            <category>media</category>
+            <folder>youtube_extended</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="telegram_bridge" enabled="true" version="1.0.0">
+            <name>Telegram Bridge</name>
+            <description>Dwukierunkowy przekaźnik wiadomości z filtrem pętli i mapowaniem.</description>
+            <category>integrations</category>
+            <folder>telegram_bridge</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="workflow_builder" enabled="true" version="1.0.0">
+            <name>Workflow Builder</name>
+            <description>Wizualne automatyzacje DAG z detekcją cykli i dry-run.</description>
+            <category>automation</category>
+            <folder>workflow_builder</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="gitlab_devops" enabled="true" version="1.0.0">
+            <name>GitLab DevOps</name>
+            <description>Integracja gitlab.com oraz self-hosted z kontrolą domen i SSRF.</description>
+            <category>developer</category>
+            <folder>gitlab_devops</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="vk_community" enabled="true" version="1.0.0">
+            <name>VK Integration</name>
+            <description>Społeczności VKontakte Callback API i powiadomienia o postach.</description>
+            <category>social</category>
+            <folder>vk_community</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="reddit_feed" enabled="true" version="1.0.0">
+            <name>Reddit Feed</name>
+            <description>Oficjalny poller subreddita z filtrem flairów i paginacją.</description>
+            <category>social</category>
+            <folder>reddit_feed</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="gaming_hub" enabled="true" version="1.0.0">
+            <name>Gaming Hub</name>
+            <description>Agregacja statusów serwerów gier, PoE1/PoE2 oraz międzyplatformowe LFG.</description>
+            <category>games</category>
+            <folder>gaming_hub</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="social_publisher" enabled="true" version="1.0.0">
+            <name>Social Publisher</name>
+            <description>Wieloplatformowy kompozytor wpisów z harmonogramem i zatwierdzeniami.</description>
+            <category>social</category>
+            <folder>social_publisher</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="ai_mcp" enabled="true" version="1.0.0">
+            <name>AI + MCP Gateway</name>
+            <description>Bramka AI z twardym budżetem tokenów, RAG ACL i protokołem MCP.</description>
+            <category>ai</category>
+            <folder>ai_mcp</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
+        <module id="plugin_marketplace" enabled="true" version="1.0.0">
+            <name>Plugin Marketplace</name>
+            <description>Katalog weryfikowanych kryptograficznie modułów z transakcyjną instalacją.</description>
+            <category>management</category>
+            <folder>plugin_marketplace</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+            <author>Adrian Banach</author>
+        </module>
     </modules>
 </installer>
+
+

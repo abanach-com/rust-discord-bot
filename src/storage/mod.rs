@@ -343,6 +343,289 @@ pub struct FaqEntry {
     pub updated_at: DateTime<Utc>,
 }
 
+// ==========================================
+// Phase 4: Integrations & Extensibility (#92-#107)
+// ==========================================
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct IntegrationConnection {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub provider: String,
+    pub provider_account_id: Option<String>,
+    pub access_token: Option<String>,
+    pub refresh_token: Option<String>,
+    pub token_expires_at: Option<DateTime<Utc>>,
+    pub scopes: Value,
+    pub metadata: Value,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct IntegrationWebhookSubscription {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub provider: String,
+    pub external_id: String,
+    pub secret_token: Option<String>,
+    pub target_channel_id: String,
+    pub config: Value,
+    pub active: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct IntegrationDeliveryLog {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub provider: String,
+    pub event_type: String,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub payload_summary: Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct LinkedAccount {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub discord_user_id: String,
+    pub provider: String,
+    pub provider_subject: String,
+    pub attributes: Value,
+    pub verified_at: DateTime<Utc>,
+    pub synced_role_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct SteamLfgPost {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub author_id: String,
+    pub game_id: String,
+    pub game_name: String,
+    pub description: String,
+    pub max_players: i32,
+    pub current_players: Value,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct GitHubDevopsMapping {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub repo_full_name: String,
+    pub thread_channel_id: String,
+    pub issue_or_pr_number: i32,
+    pub discord_thread_id: String,
+    pub last_status: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct TwitchStreamSubscription {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub streamer_login: String,
+    pub streamer_id: String,
+    pub discord_channel_id: String,
+    pub live_role_id: Option<String>,
+    pub last_message_id: Option<String>,
+    pub is_live: bool,
+    pub last_title: Option<String>,
+    pub last_game: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct KickStreamSubscription {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub slug: String,
+    pub channel_id: String,
+    pub discord_channel_id: String,
+    pub live_role_id: Option<String>,
+    pub last_message_id: Option<String>,
+    pub is_live: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct YouTubeChannelSubscription {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub channel_id: String,
+    pub channel_title: String,
+    pub discord_channel_id: String,
+    pub last_video_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct TelegramBridge {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub telegram_chat_id: String,
+    pub discord_channel_id: String,
+    pub secret_token: String,
+    pub paused: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct TelegramMessageMapping {
+    pub id: Uuid,
+    pub bridge_id: Uuid,
+    pub telegram_message_id: String,
+    pub discord_message_id: String,
+    pub direction: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct WorkflowDefinition {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub name: String,
+    pub dag_nodes: Value,
+    pub dag_edges: Value,
+    pub is_active: bool,
+    pub version: i32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct WorkflowRunExecution {
+    pub id: Uuid,
+    pub workflow_id: Uuid,
+    pub guild_id: String,
+    pub trigger_event: String,
+    pub status: String,
+    pub logs: Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct GitLabSubscription {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub host: String,
+    pub project_id: String,
+    pub project_path: String,
+    pub secret_token: String,
+    pub discord_channel_id: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct VkSubscription {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub group_id: String,
+    pub confirmation_code: String,
+    pub secret_key: String,
+    pub discord_channel_id: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct RedditSubscription {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub subreddit: String,
+    pub discord_channel_id: String,
+    pub filter_flair: Option<String>,
+    pub min_score: i32,
+    pub last_seen_fullname: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct GamingHubGameStatus {
+    pub id: Uuid,
+    pub game_id: String,
+    pub region: String,
+    pub server_name: String,
+    pub status: String,
+    pub player_count: i32,
+    pub last_checked_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct SocialPublicationDraft {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub author_id: String,
+    pub content: String,
+    pub media_urls: Value,
+    pub targets: Value,
+    pub scheduled_at: Option<DateTime<Utc>>,
+    pub approved_by: Option<String>,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct AiGuildBudget {
+    pub guild_id: String,
+    pub monthly_token_limit: i64,
+    pub used_tokens: i64,
+    pub monthly_usd_limit: f64,
+    pub used_usd: f64,
+    pub is_halted: bool,
+    pub reset_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct AiKnowledgeDocument {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub channel_acl: Value,
+    pub title: String,
+    pub content: String,
+    pub source_type: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct McpToolAuthorization {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub tool_name: String,
+    pub allowed_roles: Value,
+    pub requires_approval: bool,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PluginMarketplacePackage {
+    pub id: Uuid,
+    pub plugin_id: String,
+    pub name: String,
+    pub version: String,
+    pub author: String,
+    pub sha256_hash: String,
+    pub manifest: Value,
+    pub is_verified: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PluginGuildInstallation {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub plugin_id: String,
+    pub version: String,
+    pub enabled: bool,
+    pub config: Value,
+    pub installed_at: DateTime<Utc>,
+}
+
 impl Storage {
     pub async fn connect(database_url: Option<&str>) -> anyhow::Result<Self> {
         match database_url {
@@ -1610,6 +1893,633 @@ impl Storage {
         match self {
             Self::Memory(store) => Ok(store.delete_faq_entry(faq_id)),
             Self::Postgres(store) => store.delete_faq_entry(faq_id).await,
+        }
+    }
+
+    // ==========================================
+    // Phase 4: Integrations & Extensibility (#92-#107)
+    // ==========================================
+
+    pub async fn upsert_integration_connection(
+        &self,
+        conn: IntegrationConnection,
+    ) -> anyhow::Result<IntegrationConnection> {
+        match self {
+            Self::Memory(store) => Ok(store.upsert_integration_connection(conn)),
+            Self::Postgres(store) => store.upsert_integration_connection(conn).await,
+        }
+    }
+
+    pub async fn get_integration_connection(
+        &self,
+        guild_id: &str,
+        provider: &str,
+    ) -> anyhow::Result<Option<IntegrationConnection>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_integration_connection(guild_id, provider)),
+            Self::Postgres(store) => store.get_integration_connection(guild_id, provider).await,
+        }
+    }
+
+    pub async fn list_integration_connections(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<IntegrationConnection>> {
+        match self {
+            Self::Memory(store) => Ok(store.list_integration_connections(guild_id)),
+            Self::Postgres(store) => store.list_integration_connections(guild_id).await,
+        }
+    }
+
+    pub async fn delete_integration_connection(
+        &self,
+        guild_id: &str,
+        provider: &str,
+    ) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => Ok(store.delete_integration_connection(guild_id, provider)),
+            Self::Postgres(store) => {
+                store
+                    .delete_integration_connection(guild_id, provider)
+                    .await
+            }
+        }
+    }
+
+    pub async fn create_webhook_subscription(
+        &self,
+        sub: IntegrationWebhookSubscription,
+    ) -> anyhow::Result<IntegrationWebhookSubscription> {
+        match self {
+            Self::Memory(store) => Ok(store.create_webhook_subscription(sub)),
+            Self::Postgres(store) => store.create_webhook_subscription(sub).await,
+        }
+    }
+
+    pub async fn list_webhook_subscriptions(
+        &self,
+        guild_id: &str,
+        provider: Option<&str>,
+    ) -> anyhow::Result<Vec<IntegrationWebhookSubscription>> {
+        match self {
+            Self::Memory(store) => Ok(store.list_webhook_subscriptions(guild_id, provider)),
+            Self::Postgres(store) => store.list_webhook_subscriptions(guild_id, provider).await,
+        }
+    }
+
+    pub async fn delete_webhook_subscription(&self, id: Uuid) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => Ok(store.delete_webhook_subscription(id)),
+            Self::Postgres(store) => store.delete_webhook_subscription(id).await,
+        }
+    }
+
+    pub async fn check_and_record_event_dedupe(
+        &self,
+        provider: &str,
+        event_id: &str,
+    ) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => Ok(store.check_and_record_event_dedupe(provider, event_id)),
+            Self::Postgres(store) => {
+                store
+                    .check_and_record_event_dedupe(provider, event_id)
+                    .await
+            }
+        }
+    }
+
+    pub async fn record_delivery_log(
+        &self,
+        log: IntegrationDeliveryLog,
+    ) -> anyhow::Result<IntegrationDeliveryLog> {
+        match self {
+            Self::Memory(store) => Ok(store.record_delivery_log(log)),
+            Self::Postgres(store) => store.record_delivery_log(log).await,
+        }
+    }
+
+    pub async fn list_delivery_logs(
+        &self,
+        guild_id: &str,
+        provider: Option<&str>,
+    ) -> anyhow::Result<Vec<IntegrationDeliveryLog>> {
+        match self {
+            Self::Memory(store) => Ok(store.list_delivery_logs(guild_id, provider)),
+            Self::Postgres(store) => store.list_delivery_logs(guild_id, provider).await,
+        }
+    }
+
+    // Agent 04 (#93): Unified Identity
+    pub async fn link_account(&self, link: LinkedAccount) -> anyhow::Result<LinkedAccount> {
+        match self {
+            Self::Memory(store) => store.link_account(link),
+            Self::Postgres(store) => store.link_account(link).await,
+        }
+    }
+
+    pub async fn get_linked_account(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        provider: &str,
+    ) -> anyhow::Result<Option<LinkedAccount>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_linked_account(guild_id, user_id, provider)),
+            Self::Postgres(store) => store.get_linked_account(guild_id, user_id, provider).await,
+        }
+    }
+
+    pub async fn list_linked_accounts(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Vec<LinkedAccount>> {
+        match self {
+            Self::Memory(store) => Ok(store.list_linked_accounts(guild_id, user_id)),
+            Self::Postgres(store) => store.list_linked_accounts(guild_id, user_id).await,
+        }
+    }
+
+    pub async fn unlink_account(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        provider: &str,
+    ) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => Ok(store.unlink_account(guild_id, user_id, provider)),
+            Self::Postgres(store) => store.unlink_account(guild_id, user_id, provider).await,
+        }
+    }
+
+    // Agent 05 (#94) & Agent 15 (#104): Steam & Gaming Hub LFG
+    pub async fn create_steam_lfg_post(&self, post: SteamLfgPost) -> anyhow::Result<SteamLfgPost> {
+        match self {
+            Self::Memory(store) => Ok(store.create_steam_lfg_post(post)),
+            Self::Postgres(store) => store.create_steam_lfg_post(post).await,
+        }
+    }
+
+    pub async fn list_steam_lfg_posts(
+        &self,
+        guild_id: &str,
+        game_id: Option<&str>,
+    ) -> anyhow::Result<Vec<SteamLfgPost>> {
+        match self {
+            Self::Memory(store) => Ok(store.list_steam_lfg_posts(guild_id, game_id)),
+            Self::Postgres(store) => store.list_steam_lfg_posts(guild_id, game_id).await,
+        }
+    }
+
+    pub async fn join_steam_lfg_post(
+        &self,
+        id: Uuid,
+        user_id: &str,
+    ) -> anyhow::Result<SteamLfgPost> {
+        match self {
+            Self::Memory(store) => store.join_steam_lfg_post(id, user_id),
+            Self::Postgres(store) => store.join_steam_lfg_post(id, user_id).await,
+        }
+    }
+
+    // Agent 06 (#95): GitHub DevOps
+    pub async fn upsert_github_devops_mapping(
+        &self,
+        mapping: GitHubDevopsMapping,
+    ) -> anyhow::Result<GitHubDevopsMapping> {
+        match self {
+            Self::Memory(store) => Ok(store.upsert_github_devops_mapping(mapping)),
+            Self::Postgres(store) => store.upsert_github_devops_mapping(mapping).await,
+        }
+    }
+
+    pub async fn get_github_devops_mapping(
+        &self,
+        guild_id: &str,
+        repo: &str,
+        number: i32,
+    ) -> anyhow::Result<Option<GitHubDevopsMapping>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_github_devops_mapping(guild_id, repo, number)),
+            Self::Postgres(store) => {
+                store
+                    .get_github_devops_mapping(guild_id, repo, number)
+                    .await
+            }
+        }
+    }
+
+    // Agent 07 (#96): Twitch Extended
+    pub async fn upsert_twitch_subscription(
+        &self,
+        sub: TwitchStreamSubscription,
+    ) -> anyhow::Result<TwitchStreamSubscription> {
+        match self {
+            Self::Memory(store) => Ok(store.upsert_twitch_subscription(sub)),
+            Self::Postgres(store) => store.upsert_twitch_subscription(sub).await,
+        }
+    }
+
+    pub async fn get_twitch_subscription(
+        &self,
+        guild_id: &str,
+        streamer: &str,
+    ) -> anyhow::Result<Option<TwitchStreamSubscription>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_twitch_subscription(guild_id, streamer)),
+            Self::Postgres(store) => store.get_twitch_subscription(guild_id, streamer).await,
+        }
+    }
+
+    // Agent 08 (#97): Kick Integration
+    pub async fn upsert_kick_subscription(
+        &self,
+        sub: KickStreamSubscription,
+    ) -> anyhow::Result<KickStreamSubscription> {
+        match self {
+            Self::Memory(store) => Ok(store.upsert_kick_subscription(sub)),
+            Self::Postgres(store) => store.upsert_kick_subscription(sub).await,
+        }
+    }
+
+    pub async fn get_kick_subscription(
+        &self,
+        guild_id: &str,
+        slug: &str,
+    ) -> anyhow::Result<Option<KickStreamSubscription>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_kick_subscription(guild_id, slug)),
+            Self::Postgres(store) => store.get_kick_subscription(guild_id, slug).await,
+        }
+    }
+
+    // Agent 09 (#98): YouTube Extended
+    pub async fn upsert_youtube_subscription(
+        &self,
+        sub: YouTubeChannelSubscription,
+    ) -> anyhow::Result<YouTubeChannelSubscription> {
+        match self {
+            Self::Memory(store) => Ok(store.upsert_youtube_subscription(sub)),
+            Self::Postgres(store) => store.upsert_youtube_subscription(sub).await,
+        }
+    }
+
+    pub async fn get_youtube_subscription(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+    ) -> anyhow::Result<Option<YouTubeChannelSubscription>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_youtube_subscription(guild_id, channel_id)),
+            Self::Postgres(store) => store.get_youtube_subscription(guild_id, channel_id).await,
+        }
+    }
+
+    // Agent 10 (#99): Telegram Bridge
+    pub async fn create_telegram_bridge(
+        &self,
+        bridge: TelegramBridge,
+    ) -> anyhow::Result<TelegramBridge> {
+        match self {
+            Self::Memory(store) => Ok(store.create_telegram_bridge(bridge)),
+            Self::Postgres(store) => store.create_telegram_bridge(bridge).await,
+        }
+    }
+
+    pub async fn get_telegram_bridge(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+    ) -> anyhow::Result<Option<TelegramBridge>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_telegram_bridge(guild_id, channel_id)),
+            Self::Postgres(store) => store.get_telegram_bridge(guild_id, channel_id).await,
+        }
+    }
+
+    pub async fn list_telegram_bridges(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<TelegramBridge>> {
+        match self {
+            Self::Memory(store) => Ok(store.list_telegram_bridges(guild_id)),
+            Self::Postgres(store) => store.list_telegram_bridges(guild_id).await,
+        }
+    }
+
+    pub async fn record_telegram_message_mapping(
+        &self,
+        mapping: TelegramMessageMapping,
+    ) -> anyhow::Result<TelegramMessageMapping> {
+        match self {
+            Self::Memory(store) => Ok(store.record_telegram_message_mapping(mapping)),
+            Self::Postgres(store) => store.record_telegram_message_mapping(mapping).await,
+        }
+    }
+
+    pub async fn get_telegram_message_mapping(
+        &self,
+        bridge_id: Uuid,
+        msg_id: &str,
+        direction: &str,
+    ) -> anyhow::Result<Option<TelegramMessageMapping>> {
+        match self {
+            Self::Memory(store) => {
+                Ok(store.get_telegram_message_mapping(bridge_id, msg_id, direction))
+            }
+            Self::Postgres(store) => {
+                store
+                    .get_telegram_message_mapping(bridge_id, msg_id, direction)
+                    .await
+            }
+        }
+    }
+
+    pub async fn delete_telegram_bridge(&self, bridge_id: Uuid) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => Ok(store.delete_telegram_bridge(bridge_id)),
+            Self::Postgres(store) => store.delete_telegram_bridge(bridge_id).await,
+        }
+    }
+
+    // Agent 11 (#100): Workflow Builder
+    pub async fn create_workflow_definition(
+        &self,
+        wf: WorkflowDefinition,
+    ) -> anyhow::Result<WorkflowDefinition> {
+        match self {
+            Self::Memory(store) => Ok(store.create_workflow_definition(wf)),
+            Self::Postgres(store) => store.create_workflow_definition(wf).await,
+        }
+    }
+
+    pub async fn get_workflow_definition(
+        &self,
+        id: Uuid,
+    ) -> anyhow::Result<Option<WorkflowDefinition>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_workflow_definition(id)),
+            Self::Postgres(store) => store.get_workflow_definition(id).await,
+        }
+    }
+
+    pub async fn list_workflow_definitions(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<WorkflowDefinition>> {
+        match self {
+            Self::Memory(store) => Ok(store.list_workflow_definitions(guild_id)),
+            Self::Postgres(store) => store.list_workflow_definitions(guild_id).await,
+        }
+    }
+
+    pub async fn record_workflow_run(
+        &self,
+        run: WorkflowRunExecution,
+    ) -> anyhow::Result<WorkflowRunExecution> {
+        match self {
+            Self::Memory(store) => Ok(store.record_workflow_run(run)),
+            Self::Postgres(store) => store.record_workflow_run(run).await,
+        }
+    }
+
+    // Agent 12 (#101): GitLab
+    pub async fn upsert_gitlab_subscription(
+        &self,
+        sub: GitLabSubscription,
+    ) -> anyhow::Result<GitLabSubscription> {
+        match self {
+            Self::Memory(store) => Ok(store.upsert_gitlab_subscription(sub)),
+            Self::Postgres(store) => store.upsert_gitlab_subscription(sub).await,
+        }
+    }
+
+    pub async fn get_gitlab_subscription(
+        &self,
+        guild_id: &str,
+        host: &str,
+        project_id: &str,
+    ) -> anyhow::Result<Option<GitLabSubscription>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_gitlab_subscription(guild_id, host, project_id)),
+            Self::Postgres(store) => {
+                store
+                    .get_gitlab_subscription(guild_id, host, project_id)
+                    .await
+            }
+        }
+    }
+
+    // Agent 13 (#102): VK Integration
+    pub async fn upsert_vk_subscription(
+        &self,
+        sub: VkSubscription,
+    ) -> anyhow::Result<VkSubscription> {
+        match self {
+            Self::Memory(store) => Ok(store.upsert_vk_subscription(sub)),
+            Self::Postgres(store) => store.upsert_vk_subscription(sub).await,
+        }
+    }
+
+    pub async fn get_vk_subscription(
+        &self,
+        guild_id: &str,
+        group_id: &str,
+    ) -> anyhow::Result<Option<VkSubscription>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_vk_subscription(guild_id, group_id)),
+            Self::Postgres(store) => store.get_vk_subscription(guild_id, group_id).await,
+        }
+    }
+
+    // Agent 14 (#103): Reddit
+    pub async fn upsert_reddit_subscription(
+        &self,
+        sub: RedditSubscription,
+    ) -> anyhow::Result<RedditSubscription> {
+        match self {
+            Self::Memory(store) => Ok(store.upsert_reddit_subscription(sub)),
+            Self::Postgres(store) => store.upsert_reddit_subscription(sub).await,
+        }
+    }
+
+    pub async fn get_reddit_subscription(
+        &self,
+        guild_id: &str,
+        subreddit: &str,
+    ) -> anyhow::Result<Option<RedditSubscription>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_reddit_subscription(guild_id, subreddit)),
+            Self::Postgres(store) => store.get_reddit_subscription(guild_id, subreddit).await,
+        }
+    }
+
+    // Agent 15 (#104): Gaming Hub
+    pub async fn update_gaming_hub_game_status(
+        &self,
+        status: GamingHubGameStatus,
+    ) -> anyhow::Result<GamingHubGameStatus> {
+        match self {
+            Self::Memory(store) => Ok(store.update_gaming_hub_game_status(status)),
+            Self::Postgres(store) => store.update_gaming_hub_game_status(status).await,
+        }
+    }
+
+    pub async fn list_gaming_hub_game_statuses(
+        &self,
+        game_id: Option<&str>,
+    ) -> anyhow::Result<Vec<GamingHubGameStatus>> {
+        match self {
+            Self::Memory(store) => Ok(store.list_gaming_hub_game_statuses(game_id)),
+            Self::Postgres(store) => store.list_gaming_hub_game_statuses(game_id).await,
+        }
+    }
+
+    // Agent 16 (#105): Social Publisher
+    pub async fn create_social_draft(
+        &self,
+        draft: SocialPublicationDraft,
+    ) -> anyhow::Result<SocialPublicationDraft> {
+        match self {
+            Self::Memory(store) => Ok(store.create_social_draft(draft)),
+            Self::Postgres(store) => store.create_social_draft(draft).await,
+        }
+    }
+
+    pub async fn list_social_drafts(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<SocialPublicationDraft>> {
+        match self {
+            Self::Memory(store) => Ok(store.list_social_drafts(guild_id)),
+            Self::Postgres(store) => store.list_social_drafts(guild_id).await,
+        }
+    }
+
+    pub async fn approve_social_draft(
+        &self,
+        id: Uuid,
+        approver_id: &str,
+    ) -> anyhow::Result<Option<SocialPublicationDraft>> {
+        match self {
+            Self::Memory(store) => Ok(store.approve_social_draft(id, approver_id)),
+            Self::Postgres(store) => store.approve_social_draft(id, approver_id).await,
+        }
+    }
+
+    // Agent 17 & 18 (#106): AI + MCP
+    pub async fn get_or_create_ai_budget(&self, guild_id: &str) -> anyhow::Result<AiGuildBudget> {
+        match self {
+            Self::Memory(store) => Ok(store.get_or_create_ai_budget(guild_id)),
+            Self::Postgres(store) => store.get_or_create_ai_budget(guild_id).await,
+        }
+    }
+
+    pub async fn record_ai_usage(
+        &self,
+        guild_id: &str,
+        tokens: i64,
+        usd: f64,
+    ) -> anyhow::Result<AiGuildBudget> {
+        match self {
+            Self::Memory(store) => store.record_ai_usage(guild_id, tokens, usd),
+            Self::Postgres(store) => store.record_ai_usage(guild_id, tokens, usd).await,
+        }
+    }
+
+    pub async fn create_ai_document(
+        &self,
+        doc: AiKnowledgeDocument,
+    ) -> anyhow::Result<AiKnowledgeDocument> {
+        match self {
+            Self::Memory(store) => Ok(store.create_ai_document(doc)),
+            Self::Postgres(store) => store.create_ai_document(doc).await,
+        }
+    }
+
+    pub async fn search_ai_documents(
+        &self,
+        guild_id: &str,
+        user_channels: &[String],
+        query: &str,
+    ) -> anyhow::Result<Vec<AiKnowledgeDocument>> {
+        match self {
+            Self::Memory(store) => Ok(store.search_ai_documents(guild_id, user_channels, query)),
+            Self::Postgres(store) => {
+                store
+                    .search_ai_documents(guild_id, user_channels, query)
+                    .await
+            }
+        }
+    }
+
+    pub async fn upsert_mcp_tool_authorization(
+        &self,
+        auth: McpToolAuthorization,
+    ) -> anyhow::Result<McpToolAuthorization> {
+        match self {
+            Self::Memory(store) => Ok(store.upsert_mcp_tool_authorization(auth)),
+            Self::Postgres(store) => store.upsert_mcp_tool_authorization(auth).await,
+        }
+    }
+
+    pub async fn get_mcp_tool_authorizations(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<McpToolAuthorization>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_mcp_tool_authorizations(guild_id)),
+            Self::Postgres(store) => store.get_mcp_tool_authorizations(guild_id).await,
+        }
+    }
+
+    // Agent 19 (#107): Plugin Marketplace
+    pub async fn publish_marketplace_package(
+        &self,
+        pkg: PluginMarketplacePackage,
+    ) -> anyhow::Result<PluginMarketplacePackage> {
+        match self {
+            Self::Memory(store) => Ok(store.publish_marketplace_package(pkg)),
+            Self::Postgres(store) => store.publish_marketplace_package(pkg).await,
+        }
+    }
+
+    pub async fn list_marketplace_packages(&self) -> anyhow::Result<Vec<PluginMarketplacePackage>> {
+        match self {
+            Self::Memory(store) => Ok(store.list_marketplace_packages()),
+            Self::Postgres(store) => store.list_marketplace_packages().await,
+        }
+    }
+
+    pub async fn install_plugin_package(
+        &self,
+        install: PluginGuildInstallation,
+    ) -> anyhow::Result<PluginGuildInstallation> {
+        match self {
+            Self::Memory(store) => Ok(store.install_plugin_package(install)),
+            Self::Postgres(store) => store.install_plugin_package(install).await,
+        }
+    }
+
+    pub async fn list_installed_plugins(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<PluginGuildInstallation>> {
+        match self {
+            Self::Memory(store) => Ok(store.list_installed_plugins(guild_id)),
+            Self::Postgres(store) => store.list_installed_plugins(guild_id).await,
+        }
+    }
+
+    pub async fn uninstall_plugin_package(
+        &self,
+        guild_id: &str,
+        plugin_id: &str,
+    ) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => Ok(store.uninstall_plugin_package(guild_id, plugin_id)),
+            Self::Postgres(store) => store.uninstall_plugin_package(guild_id, plugin_id).await,
         }
     }
 }

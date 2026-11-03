@@ -4,13 +4,18 @@ use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
 use uuid::Uuid;
 
 use super::{
-    AdjustMemberProgressParams, AuditLogEntry, CardCollection, CardTrade, CoinTransfer,
-    CoinTransferOutcome, CommunityPoll, CountingGame, CustomAutomation, DailyClaimOutcome,
-    DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink, Giveaway,
-    GuildModuleSettings, InviteTracking, MemberProgress, ModerationAppeal,
-    ModerationExecutionIntent, ModuleDraftConfig, ProgressMetric, ProgressionSeason,
-    ReputationGrantOutcome, ScheduledEvent, ServerSnapshot, StarboardEntry, StickyMessage,
-    StoreItem, TimedRoleGrant, Tournament, TupperProfile, XpAward, level_for_xp,
+    AdjustMemberProgressParams, AiGuildBudget, AiKnowledgeDocument, AuditLogEntry, CardCollection,
+    CardTrade, CoinTransfer, CoinTransferOutcome, CommunityPoll, CountingGame, CustomAutomation,
+    DailyClaimOutcome, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink,
+    GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway, GuildModuleSettings,
+    IntegrationConnection, IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking,
+    KickStreamSubscription, LinkedAccount, McpToolAuthorization, MemberProgress, ModerationAppeal,
+    ModerationExecutionIntent, ModuleDraftConfig, PluginGuildInstallation,
+    PluginMarketplacePackage, ProgressMetric, ProgressionSeason, RedditSubscription,
+    ReputationGrantOutcome, ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry,
+    SteamLfgPost, StickyMessage, StoreItem, TelegramBridge, TelegramMessageMapping, TimedRoleGrant,
+    Tournament, TupperProfile, TwitchStreamSubscription, VkSubscription, WorkflowDefinition,
+    WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
 };
 
 pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
@@ -2512,6 +2517,1203 @@ impl PostgresStore {
             .bind(faq_id)
             .execute(&self.pool)
             .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    // ==========================================
+    // Phase 4: Integrations & Extensibility (#92-#107)
+    // ==========================================
+
+    pub async fn upsert_integration_connection(
+        &self,
+        conn: IntegrationConnection,
+    ) -> anyhow::Result<IntegrationConnection> {
+        let row = sqlx::query_as::<_, IntegrationConnection>(
+            r#"
+            INSERT INTO integration_connections (id, guild_id, provider, provider_account_id, access_token, refresh_token, token_expires_at, scopes, metadata, enabled, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (id) DO UPDATE SET
+                provider_account_id = EXCLUDED.provider_account_id,
+                access_token = EXCLUDED.access_token,
+                refresh_token = EXCLUDED.refresh_token,
+                token_expires_at = EXCLUDED.token_expires_at,
+                scopes = EXCLUDED.scopes,
+                metadata = EXCLUDED.metadata,
+                enabled = EXCLUDED.enabled,
+                updated_at = EXCLUDED.updated_at
+            RETURNING *
+            "#
+        )
+        .bind(conn.id)
+        .bind(&conn.guild_id)
+        .bind(&conn.provider)
+        .bind(&conn.provider_account_id)
+        .bind(&conn.access_token)
+        .bind(&conn.refresh_token)
+        .bind(conn.token_expires_at)
+        .bind(&conn.scopes)
+        .bind(&conn.metadata)
+        .bind(conn.enabled)
+        .bind(conn.created_at)
+        .bind(conn.updated_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn get_integration_connection(
+        &self,
+        guild_id: &str,
+        provider: &str,
+    ) -> anyhow::Result<Option<IntegrationConnection>> {
+        let row = sqlx::query_as::<_, IntegrationConnection>(
+            "SELECT * FROM integration_connections WHERE guild_id = $1 AND provider = $2",
+        )
+        .bind(guild_id)
+        .bind(provider)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn list_integration_connections(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<IntegrationConnection>> {
+        let rows = sqlx::query_as::<_, IntegrationConnection>(
+            "SELECT * FROM integration_connections WHERE guild_id = $1",
+        )
+        .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn delete_integration_connection(
+        &self,
+        guild_id: &str,
+        provider: &str,
+    ) -> anyhow::Result<bool> {
+        let res = sqlx::query(
+            "DELETE FROM integration_connections WHERE guild_id = $1 AND provider = $2",
+        )
+        .bind(guild_id)
+        .bind(provider)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn create_webhook_subscription(
+        &self,
+        sub: IntegrationWebhookSubscription,
+    ) -> anyhow::Result<IntegrationWebhookSubscription> {
+        let row = sqlx::query_as::<_, IntegrationWebhookSubscription>(
+            r#"
+            INSERT INTO integration_webhook_subscriptions (id, guild_id, provider, external_id, secret_token, target_channel_id, config, active, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (guild_id, provider, external_id) DO UPDATE SET
+                secret_token = EXCLUDED.secret_token,
+                target_channel_id = EXCLUDED.target_channel_id,
+                config = EXCLUDED.config,
+                active = EXCLUDED.active
+            RETURNING *
+            "#
+        )
+        .bind(sub.id)
+        .bind(&sub.guild_id)
+        .bind(&sub.provider)
+        .bind(&sub.external_id)
+        .bind(&sub.secret_token)
+        .bind(&sub.target_channel_id)
+        .bind(&sub.config)
+        .bind(sub.active)
+        .bind(sub.created_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn list_webhook_subscriptions(
+        &self,
+        guild_id: &str,
+        provider: Option<&str>,
+    ) -> anyhow::Result<Vec<IntegrationWebhookSubscription>> {
+        let rows = if let Some(p) = provider {
+            sqlx::query_as::<_, IntegrationWebhookSubscription>(
+                "SELECT * FROM integration_webhook_subscriptions WHERE guild_id = $1 AND provider = $2"
+            )
+            .bind(guild_id)
+            .bind(p)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, IntegrationWebhookSubscription>(
+                "SELECT * FROM integration_webhook_subscriptions WHERE guild_id = $1",
+            )
+            .bind(guild_id)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        Ok(rows)
+    }
+
+    pub async fn delete_webhook_subscription(&self, id: Uuid) -> anyhow::Result<bool> {
+        let res = sqlx::query("DELETE FROM integration_webhook_subscriptions WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn check_and_record_event_dedupe(
+        &self,
+        provider: &str,
+        event_id: &str,
+    ) -> anyhow::Result<bool> {
+        let res = sqlx::query(
+            "INSERT INTO integration_event_dedupes (provider, event_id, processed_at) VALUES ($1, $2, NOW()) ON CONFLICT DO NOTHING"
+        )
+        .bind(provider)
+        .bind(event_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn record_delivery_log(
+        &self,
+        log: IntegrationDeliveryLog,
+    ) -> anyhow::Result<IntegrationDeliveryLog> {
+        let row = sqlx::query_as::<_, IntegrationDeliveryLog>(
+            r#"
+            INSERT INTO integration_delivery_logs (id, guild_id, provider, event_type, status, error_message, payload_summary, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            RETURNING *
+            "#
+        )
+        .bind(log.id)
+        .bind(&log.guild_id)
+        .bind(&log.provider)
+        .bind(&log.event_type)
+        .bind(&log.status)
+        .bind(&log.error_message)
+        .bind(&log.payload_summary)
+        .bind(log.created_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn list_delivery_logs(
+        &self,
+        guild_id: &str,
+        provider: Option<&str>,
+    ) -> anyhow::Result<Vec<IntegrationDeliveryLog>> {
+        let rows = if let Some(p) = provider {
+            sqlx::query_as::<_, IntegrationDeliveryLog>(
+                "SELECT * FROM integration_delivery_logs WHERE guild_id = $1 AND provider = $2 ORDER BY created_at DESC"
+            )
+            .bind(guild_id)
+            .bind(p)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, IntegrationDeliveryLog>(
+                "SELECT * FROM integration_delivery_logs WHERE guild_id = $1 ORDER BY created_at DESC"
+            )
+            .bind(guild_id)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        Ok(rows)
+    }
+
+    // Agent 04 (#93): Unified Identity
+    pub async fn link_account(&self, link: LinkedAccount) -> anyhow::Result<LinkedAccount> {
+        let row = sqlx::query_as::<_, LinkedAccount>(
+            r#"
+            INSERT INTO linked_accounts (id, guild_id, discord_user_id, provider, provider_subject, attributes, verified_at, synced_role_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            RETURNING *
+            "#
+        )
+        .bind(link.id)
+        .bind(&link.guild_id)
+        .bind(&link.discord_user_id)
+        .bind(&link.provider)
+        .bind(&link.provider_subject)
+        .bind(&link.attributes)
+        .bind(link.verified_at)
+        .bind(&link.synced_role_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn get_linked_account(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        provider: &str,
+    ) -> anyhow::Result<Option<LinkedAccount>> {
+        let row = sqlx::query_as::<_, LinkedAccount>(
+            "SELECT * FROM linked_accounts WHERE guild_id = $1 AND discord_user_id = $2 AND provider = $3"
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .bind(provider)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn list_linked_accounts(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Vec<LinkedAccount>> {
+        let rows = sqlx::query_as::<_, LinkedAccount>(
+            "SELECT * FROM linked_accounts WHERE guild_id = $1 AND discord_user_id = $2",
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn unlink_account(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        provider: &str,
+    ) -> anyhow::Result<bool> {
+        let res = sqlx::query(
+            "DELETE FROM linked_accounts WHERE guild_id = $1 AND discord_user_id = $2 AND provider = $3"
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .bind(provider)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    // Agent 05 (#94) & Agent 15 (#104): Steam & Gaming Hub LFG
+    pub async fn create_steam_lfg_post(&self, post: SteamLfgPost) -> anyhow::Result<SteamLfgPost> {
+        let row = sqlx::query_as::<_, SteamLfgPost>(
+            r#"
+            INSERT INTO steam_lfg_posts (id, guild_id, author_id, game_id, game_name, description, max_players, current_players, expires_at, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            RETURNING *
+            "#
+        )
+        .bind(post.id)
+        .bind(&post.guild_id)
+        .bind(&post.author_id)
+        .bind(&post.game_id)
+        .bind(&post.game_name)
+        .bind(&post.description)
+        .bind(post.max_players)
+        .bind(&post.current_players)
+        .bind(post.expires_at)
+        .bind(post.created_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn list_steam_lfg_posts(
+        &self,
+        guild_id: &str,
+        game_id: Option<&str>,
+    ) -> anyhow::Result<Vec<SteamLfgPost>> {
+        let rows = if let Some(g) = game_id {
+            sqlx::query_as::<_, SteamLfgPost>(
+                "SELECT * FROM steam_lfg_posts WHERE guild_id = $1 AND game_id = $2 AND expires_at > NOW()"
+            )
+            .bind(guild_id)
+            .bind(g)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, SteamLfgPost>(
+                "SELECT * FROM steam_lfg_posts WHERE guild_id = $1 AND expires_at > NOW()",
+            )
+            .bind(guild_id)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        Ok(rows)
+    }
+
+    pub async fn join_steam_lfg_post(
+        &self,
+        id: Uuid,
+        user_id: &str,
+    ) -> anyhow::Result<SteamLfgPost> {
+        let mut tx = self.pool.begin().await?;
+        let post = sqlx::query_as::<_, SteamLfgPost>(
+            "SELECT * FROM steam_lfg_posts WHERE id = $1 FOR UPDATE",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        if post.expires_at <= Utc::now() {
+            anyhow::bail!("LFG listing has expired");
+        }
+
+        let mut players: Vec<String> =
+            serde_json::from_value(post.current_players.clone()).unwrap_or_default();
+        if !players.contains(&user_id.to_string()) {
+            if players.len() as i32 >= post.max_players {
+                anyhow::bail!("LFG post is full");
+            }
+            players.push(user_id.to_string());
+        }
+
+        let updated = sqlx::query_as::<_, SteamLfgPost>(
+            "UPDATE steam_lfg_posts SET current_players = $1 WHERE id = $2 RETURNING *",
+        )
+        .bind(serde_json::json!(players))
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    // Agent 06 (#95): GitHub DevOps
+    pub async fn upsert_github_devops_mapping(
+        &self,
+        mapping: GitHubDevopsMapping,
+    ) -> anyhow::Result<GitHubDevopsMapping> {
+        let row = sqlx::query_as::<_, GitHubDevopsMapping>(
+            r#"
+            INSERT INTO github_devops_mappings (id, guild_id, repo_full_name, thread_channel_id, issue_or_pr_number, discord_thread_id, last_status, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (guild_id, repo_full_name, issue_or_pr_number) DO UPDATE SET
+                thread_channel_id = EXCLUDED.thread_channel_id,
+                discord_thread_id = EXCLUDED.discord_thread_id,
+                last_status = EXCLUDED.last_status
+            RETURNING *
+            "#
+        )
+        .bind(mapping.id)
+        .bind(&mapping.guild_id)
+        .bind(&mapping.repo_full_name)
+        .bind(&mapping.thread_channel_id)
+        .bind(mapping.issue_or_pr_number)
+        .bind(&mapping.discord_thread_id)
+        .bind(&mapping.last_status)
+        .bind(mapping.created_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn get_github_devops_mapping(
+        &self,
+        guild_id: &str,
+        repo: &str,
+        number: i32,
+    ) -> anyhow::Result<Option<GitHubDevopsMapping>> {
+        let row = sqlx::query_as::<_, GitHubDevopsMapping>(
+            "SELECT * FROM github_devops_mappings WHERE guild_id = $1 AND repo_full_name = $2 AND issue_or_pr_number = $3"
+        )
+        .bind(guild_id)
+        .bind(repo)
+        .bind(number)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    // Agent 07 (#96): Twitch Extended
+    pub async fn upsert_twitch_subscription(
+        &self,
+        sub: TwitchStreamSubscription,
+    ) -> anyhow::Result<TwitchStreamSubscription> {
+        let row = sqlx::query_as::<_, TwitchStreamSubscription>(
+            r#"
+            INSERT INTO twitch_stream_subscriptions (id, guild_id, streamer_login, streamer_id, discord_channel_id, live_role_id, last_message_id, is_live, last_title, last_game, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            ON CONFLICT (guild_id, streamer_login) DO UPDATE SET
+                discord_channel_id = EXCLUDED.discord_channel_id,
+                live_role_id = EXCLUDED.live_role_id,
+                last_message_id = EXCLUDED.last_message_id,
+                is_live = EXCLUDED.is_live,
+                last_title = EXCLUDED.last_title,
+                last_game = EXCLUDED.last_game
+            RETURNING *
+            "#
+        )
+        .bind(sub.id)
+        .bind(&sub.guild_id)
+        .bind(&sub.streamer_login)
+        .bind(&sub.streamer_id)
+        .bind(&sub.discord_channel_id)
+        .bind(&sub.live_role_id)
+        .bind(&sub.last_message_id)
+        .bind(sub.is_live)
+        .bind(&sub.last_title)
+        .bind(&sub.last_game)
+        .bind(sub.created_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn get_twitch_subscription(
+        &self,
+        guild_id: &str,
+        streamer: &str,
+    ) -> anyhow::Result<Option<TwitchStreamSubscription>> {
+        let row = sqlx::query_as::<_, TwitchStreamSubscription>(
+            "SELECT * FROM twitch_stream_subscriptions WHERE guild_id = $1 AND streamer_login = $2",
+        )
+        .bind(guild_id)
+        .bind(streamer)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    // Agent 08 (#97): Kick Integration
+    pub async fn upsert_kick_subscription(
+        &self,
+        sub: KickStreamSubscription,
+    ) -> anyhow::Result<KickStreamSubscription> {
+        let row = sqlx::query_as::<_, KickStreamSubscription>(
+            r#"
+            INSERT INTO kick_stream_subscriptions (id, guild_id, slug, channel_id, discord_channel_id, live_role_id, last_message_id, is_live, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (guild_id, slug) DO UPDATE SET
+                discord_channel_id = EXCLUDED.discord_channel_id,
+                live_role_id = EXCLUDED.live_role_id,
+                last_message_id = EXCLUDED.last_message_id,
+                is_live = EXCLUDED.is_live
+            RETURNING *
+            "#
+        )
+        .bind(sub.id)
+        .bind(&sub.guild_id)
+        .bind(&sub.slug)
+        .bind(&sub.channel_id)
+        .bind(&sub.discord_channel_id)
+        .bind(&sub.live_role_id)
+        .bind(&sub.last_message_id)
+        .bind(sub.is_live)
+        .bind(sub.created_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn get_kick_subscription(
+        &self,
+        guild_id: &str,
+        slug: &str,
+    ) -> anyhow::Result<Option<KickStreamSubscription>> {
+        let row = sqlx::query_as::<_, KickStreamSubscription>(
+            "SELECT * FROM kick_stream_subscriptions WHERE guild_id = $1 AND slug = $2",
+        )
+        .bind(guild_id)
+        .bind(slug)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    // Agent 09 (#98): YouTube Extended
+    pub async fn upsert_youtube_subscription(
+        &self,
+        sub: YouTubeChannelSubscription,
+    ) -> anyhow::Result<YouTubeChannelSubscription> {
+        let row = sqlx::query_as::<_, YouTubeChannelSubscription>(
+            r#"
+            INSERT INTO youtube_channel_subscriptions (id, guild_id, channel_id, channel_title, discord_channel_id, last_video_id, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (guild_id, channel_id) DO UPDATE SET
+                discord_channel_id = EXCLUDED.discord_channel_id,
+                last_video_id = EXCLUDED.last_video_id
+            RETURNING *
+            "#
+        )
+        .bind(sub.id)
+        .bind(&sub.guild_id)
+        .bind(&sub.channel_id)
+        .bind(&sub.channel_title)
+        .bind(&sub.discord_channel_id)
+        .bind(&sub.last_video_id)
+        .bind(sub.created_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn get_youtube_subscription(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+    ) -> anyhow::Result<Option<YouTubeChannelSubscription>> {
+        let row = sqlx::query_as::<_, YouTubeChannelSubscription>(
+            "SELECT * FROM youtube_channel_subscriptions WHERE guild_id = $1 AND channel_id = $2",
+        )
+        .bind(guild_id)
+        .bind(channel_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    // Agent 10 (#99): Telegram Bridge
+    pub async fn create_telegram_bridge(
+        &self,
+        bridge: TelegramBridge,
+    ) -> anyhow::Result<TelegramBridge> {
+        let row = sqlx::query_as::<_, TelegramBridge>(
+            r#"
+            INSERT INTO telegram_bridges (id, guild_id, telegram_chat_id, discord_channel_id, secret_token, paused, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (guild_id, discord_channel_id) DO UPDATE SET
+                telegram_chat_id = EXCLUDED.telegram_chat_id,
+                secret_token = EXCLUDED.secret_token,
+                paused = EXCLUDED.paused
+            RETURNING *
+            "#
+        )
+        .bind(bridge.id)
+        .bind(&bridge.guild_id)
+        .bind(&bridge.telegram_chat_id)
+        .bind(&bridge.discord_channel_id)
+        .bind(&bridge.secret_token)
+        .bind(bridge.paused)
+        .bind(bridge.created_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn get_telegram_bridge(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+    ) -> anyhow::Result<Option<TelegramBridge>> {
+        let row = sqlx::query_as::<_, TelegramBridge>(
+            "SELECT * FROM telegram_bridges WHERE guild_id = $1 AND discord_channel_id = $2",
+        )
+        .bind(guild_id)
+        .bind(channel_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn list_telegram_bridges(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<TelegramBridge>> {
+        let rows = sqlx::query_as::<_, TelegramBridge>(
+            "SELECT * FROM telegram_bridges WHERE guild_id = $1",
+        )
+        .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn record_telegram_message_mapping(
+        &self,
+        mapping: TelegramMessageMapping,
+    ) -> anyhow::Result<TelegramMessageMapping> {
+        let row = sqlx::query_as::<_, TelegramMessageMapping>(
+            r#"
+            INSERT INTO telegram_message_mappings (id, bridge_id, telegram_message_id, discord_message_id, direction, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING *
+            "#
+        )
+        .bind(mapping.id)
+        .bind(mapping.bridge_id)
+        .bind(&mapping.telegram_message_id)
+        .bind(&mapping.discord_message_id)
+        .bind(&mapping.direction)
+        .bind(mapping.created_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn get_telegram_message_mapping(
+        &self,
+        bridge_id: Uuid,
+        msg_id: &str,
+        direction: &str,
+    ) -> anyhow::Result<Option<TelegramMessageMapping>> {
+        let row = sqlx::query_as::<_, TelegramMessageMapping>(
+            "SELECT * FROM telegram_message_mappings WHERE bridge_id = $1 AND direction = $2 AND (telegram_message_id = $3 OR discord_message_id = $3)"
+        )
+        .bind(bridge_id)
+        .bind(direction)
+        .bind(msg_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn delete_telegram_bridge(&self, bridge_id: Uuid) -> anyhow::Result<bool> {
+        let res = sqlx::query("DELETE FROM telegram_bridges WHERE id = $1")
+            .bind(bridge_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    // Agent 11 (#100): Workflow Builder
+    pub async fn create_workflow_definition(
+        &self,
+        wf: WorkflowDefinition,
+    ) -> anyhow::Result<WorkflowDefinition> {
+        let row = sqlx::query_as::<_, WorkflowDefinition>(
+            r#"
+            INSERT INTO workflow_definitions (id, guild_id, name, dag_nodes, dag_edges, is_active, version, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            RETURNING *
+            "#
+        )
+        .bind(wf.id)
+        .bind(&wf.guild_id)
+        .bind(&wf.name)
+        .bind(&wf.dag_nodes)
+        .bind(&wf.dag_edges)
+        .bind(wf.is_active)
+        .bind(wf.version)
+        .bind(wf.created_at)
+        .bind(wf.updated_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn get_workflow_definition(
+        &self,
+        id: Uuid,
+    ) -> anyhow::Result<Option<WorkflowDefinition>> {
+        let row = sqlx::query_as::<_, WorkflowDefinition>(
+            "SELECT * FROM workflow_definitions WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn list_workflow_definitions(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<WorkflowDefinition>> {
+        let rows = sqlx::query_as::<_, WorkflowDefinition>(
+            "SELECT * FROM workflow_definitions WHERE guild_id = $1",
+        )
+        .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn record_workflow_run(
+        &self,
+        run: WorkflowRunExecution,
+    ) -> anyhow::Result<WorkflowRunExecution> {
+        let row = sqlx::query_as::<_, WorkflowRunExecution>(
+            r#"
+            INSERT INTO workflow_run_executions (id, workflow_id, guild_id, trigger_event, status, logs, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING *
+            "#
+        )
+        .bind(run.id)
+        .bind(run.workflow_id)
+        .bind(&run.guild_id)
+        .bind(&run.trigger_event)
+        .bind(&run.status)
+        .bind(&run.logs)
+        .bind(run.created_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    // Agent 12 (#101): GitLab
+    pub async fn upsert_gitlab_subscription(
+        &self,
+        sub: GitLabSubscription,
+    ) -> anyhow::Result<GitLabSubscription> {
+        let row = sqlx::query_as::<_, GitLabSubscription>(
+            r#"
+            INSERT INTO gitlab_subscriptions (id, guild_id, host, project_id, project_path, secret_token, discord_channel_id, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (guild_id, host, project_id) DO UPDATE SET
+                project_path = EXCLUDED.project_path,
+                secret_token = EXCLUDED.secret_token,
+                discord_channel_id = EXCLUDED.discord_channel_id
+            RETURNING *
+            "#
+        )
+        .bind(sub.id)
+        .bind(&sub.guild_id)
+        .bind(&sub.host)
+        .bind(&sub.project_id)
+        .bind(&sub.project_path)
+        .bind(&sub.secret_token)
+        .bind(&sub.discord_channel_id)
+        .bind(sub.created_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn get_gitlab_subscription(
+        &self,
+        guild_id: &str,
+        host: &str,
+        project_id: &str,
+    ) -> anyhow::Result<Option<GitLabSubscription>> {
+        let row = sqlx::query_as::<_, GitLabSubscription>(
+            "SELECT * FROM gitlab_subscriptions WHERE guild_id = $1 AND host = $2 AND project_id = $3"
+        )
+        .bind(guild_id)
+        .bind(host)
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    // Agent 13 (#102): VK Integration
+    pub async fn upsert_vk_subscription(
+        &self,
+        sub: VkSubscription,
+    ) -> anyhow::Result<VkSubscription> {
+        let row = sqlx::query_as::<_, VkSubscription>(
+            r#"
+            INSERT INTO vk_subscriptions (id, guild_id, group_id, confirmation_code, secret_key, discord_channel_id, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (guild_id, group_id) DO UPDATE SET
+                confirmation_code = EXCLUDED.confirmation_code,
+                secret_key = EXCLUDED.secret_key,
+                discord_channel_id = EXCLUDED.discord_channel_id
+            RETURNING *
+            "#
+        )
+        .bind(sub.id)
+        .bind(&sub.guild_id)
+        .bind(&sub.group_id)
+        .bind(&sub.confirmation_code)
+        .bind(&sub.secret_key)
+        .bind(&sub.discord_channel_id)
+        .bind(sub.created_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn get_vk_subscription(
+        &self,
+        guild_id: &str,
+        group_id: &str,
+    ) -> anyhow::Result<Option<VkSubscription>> {
+        let row = sqlx::query_as::<_, VkSubscription>(
+            "SELECT * FROM vk_subscriptions WHERE guild_id = $1 AND group_id = $2",
+        )
+        .bind(guild_id)
+        .bind(group_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    // Agent 14 (#103): Reddit
+    pub async fn upsert_reddit_subscription(
+        &self,
+        sub: RedditSubscription,
+    ) -> anyhow::Result<RedditSubscription> {
+        let row = sqlx::query_as::<_, RedditSubscription>(
+            r#"
+            INSERT INTO reddit_subscriptions (id, guild_id, subreddit, discord_channel_id, filter_flair, min_score, last_seen_fullname, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (guild_id, subreddit) DO UPDATE SET
+                discord_channel_id = EXCLUDED.discord_channel_id,
+                filter_flair = EXCLUDED.filter_flair,
+                min_score = EXCLUDED.min_score,
+                last_seen_fullname = EXCLUDED.last_seen_fullname
+            RETURNING *
+            "#
+        )
+        .bind(sub.id)
+        .bind(&sub.guild_id)
+        .bind(&sub.subreddit)
+        .bind(&sub.discord_channel_id)
+        .bind(&sub.filter_flair)
+        .bind(sub.min_score)
+        .bind(&sub.last_seen_fullname)
+        .bind(sub.created_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn get_reddit_subscription(
+        &self,
+        guild_id: &str,
+        subreddit: &str,
+    ) -> anyhow::Result<Option<RedditSubscription>> {
+        let row = sqlx::query_as::<_, RedditSubscription>(
+            "SELECT * FROM reddit_subscriptions WHERE guild_id = $1 AND subreddit = $2",
+        )
+        .bind(guild_id)
+        .bind(subreddit)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    // Agent 15 (#104): Gaming Hub
+    pub async fn update_gaming_hub_game_status(
+        &self,
+        status: GamingHubGameStatus,
+    ) -> anyhow::Result<GamingHubGameStatus> {
+        let row = sqlx::query_as::<_, GamingHubGameStatus>(
+            r#"
+            INSERT INTO gaming_hub_game_statuses (id, game_id, region, server_name, status, player_count, last_checked_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING *
+            "#
+        )
+        .bind(status.id)
+        .bind(&status.game_id)
+        .bind(&status.region)
+        .bind(&status.server_name)
+        .bind(&status.status)
+        .bind(status.player_count)
+        .bind(status.last_checked_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn list_gaming_hub_game_statuses(
+        &self,
+        game_id: Option<&str>,
+    ) -> anyhow::Result<Vec<GamingHubGameStatus>> {
+        let rows = if let Some(g) = game_id {
+            sqlx::query_as::<_, GamingHubGameStatus>(
+                "SELECT * FROM gaming_hub_game_statuses WHERE game_id = $1",
+            )
+            .bind(g)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, GamingHubGameStatus>("SELECT * FROM gaming_hub_game_statuses")
+                .fetch_all(&self.pool)
+                .await?
+        };
+        Ok(rows)
+    }
+
+    // Agent 16 (#105): Social Publisher
+    pub async fn create_social_draft(
+        &self,
+        draft: SocialPublicationDraft,
+    ) -> anyhow::Result<SocialPublicationDraft> {
+        let row = sqlx::query_as::<_, SocialPublicationDraft>(
+            r#"
+            INSERT INTO social_publication_drafts (id, guild_id, author_id, content, media_urls, targets, scheduled_at, approved_by, status, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            RETURNING *
+            "#
+        )
+        .bind(draft.id)
+        .bind(&draft.guild_id)
+        .bind(&draft.author_id)
+        .bind(&draft.content)
+        .bind(&draft.media_urls)
+        .bind(&draft.targets)
+        .bind(draft.scheduled_at)
+        .bind(&draft.approved_by)
+        .bind(&draft.status)
+        .bind(draft.created_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn list_social_drafts(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<SocialPublicationDraft>> {
+        let rows = sqlx::query_as::<_, SocialPublicationDraft>(
+            "SELECT * FROM social_publication_drafts WHERE guild_id = $1",
+        )
+        .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn approve_social_draft(
+        &self,
+        id: Uuid,
+        approver_id: &str,
+    ) -> anyhow::Result<Option<SocialPublicationDraft>> {
+        let row = sqlx::query_as::<_, SocialPublicationDraft>(
+            "UPDATE social_publication_drafts SET approved_by = $1, status = 'approved' WHERE id = $2 RETURNING *"
+        )
+        .bind(approver_id)
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    // Agent 17 & 18 (#106): AI + MCP
+    pub async fn get_or_create_ai_budget(&self, guild_id: &str) -> anyhow::Result<AiGuildBudget> {
+        let row = sqlx::query_as::<_, AiGuildBudget>(
+            r#"
+            INSERT INTO ai_guild_budgets (guild_id, monthly_token_limit, used_tokens, monthly_usd_limit, used_usd, is_halted, reset_at)
+            VALUES ($1, 1000000, 0, 10.0, 0.0, false, NOW() + INTERVAL '30 days')
+            ON CONFLICT (guild_id) DO UPDATE SET guild_id = EXCLUDED.guild_id
+            RETURNING *
+            "#
+        )
+        .bind(guild_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn record_ai_usage(
+        &self,
+        guild_id: &str,
+        tokens: i64,
+        usd: f64,
+    ) -> anyhow::Result<AiGuildBudget> {
+        let mut tx = self.pool.begin().await?;
+        let budget = sqlx::query_as::<_, AiGuildBudget>(
+            "SELECT * FROM ai_guild_budgets WHERE guild_id = $1 FOR UPDATE",
+        )
+        .bind(guild_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        if budget.is_halted {
+            anyhow::bail!("AI budget exceeded and halted for this guild");
+        }
+
+        let new_tokens = budget.used_tokens + tokens;
+        let new_usd = budget.used_usd + usd;
+        let is_halted =
+            new_tokens >= budget.monthly_token_limit || new_usd >= budget.monthly_usd_limit;
+
+        let updated = sqlx::query_as::<_, AiGuildBudget>(
+            "UPDATE ai_guild_budgets SET used_tokens = $1, used_usd = $2, is_halted = $3 WHERE guild_id = $4 RETURNING *"
+        )
+        .bind(new_tokens)
+        .bind(new_usd)
+        .bind(is_halted)
+        .bind(guild_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    pub async fn create_ai_document(
+        &self,
+        doc: AiKnowledgeDocument,
+    ) -> anyhow::Result<AiKnowledgeDocument> {
+        let row = sqlx::query_as::<_, AiKnowledgeDocument>(
+            r#"
+            INSERT INTO ai_knowledge_documents (id, guild_id, channel_acl, title, content, source_type, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING *
+            "#
+        )
+        .bind(doc.id)
+        .bind(&doc.guild_id)
+        .bind(&doc.channel_acl)
+        .bind(&doc.title)
+        .bind(&doc.content)
+        .bind(&doc.source_type)
+        .bind(doc.created_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn search_ai_documents(
+        &self,
+        guild_id: &str,
+        user_channels: &[String],
+        query: &str,
+    ) -> anyhow::Result<Vec<AiKnowledgeDocument>> {
+        let rows = sqlx::query_as::<_, AiKnowledgeDocument>(
+            "SELECT * FROM ai_knowledge_documents WHERE guild_id = $1 AND (title ILIKE $2 OR content ILIKE $2)"
+        )
+        .bind(guild_id)
+        .bind(format!("%{query}%"))
+        .fetch_all(&self.pool)
+        .await?;
+
+        // Filter by channel ACL
+        let filtered = rows
+            .into_iter()
+            .filter(|e| {
+                let acls: Vec<String> =
+                    serde_json::from_value(e.channel_acl.clone()).unwrap_or_default();
+                acls.is_empty() || acls.iter().any(|c| user_channels.contains(c))
+            })
+            .collect();
+
+        Ok(filtered)
+    }
+
+    pub async fn upsert_mcp_tool_authorization(
+        &self,
+        auth: McpToolAuthorization,
+    ) -> anyhow::Result<McpToolAuthorization> {
+        let row = sqlx::query_as::<_, McpToolAuthorization>(
+            r#"
+            INSERT INTO mcp_tool_authorizations (id, guild_id, tool_name, allowed_roles, requires_approval, enabled)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (guild_id, tool_name) DO UPDATE SET
+                allowed_roles = EXCLUDED.allowed_roles,
+                requires_approval = EXCLUDED.requires_approval,
+                enabled = EXCLUDED.enabled
+            RETURNING *
+            "#
+        )
+        .bind(auth.id)
+        .bind(&auth.guild_id)
+        .bind(&auth.tool_name)
+        .bind(&auth.allowed_roles)
+        .bind(auth.requires_approval)
+        .bind(auth.enabled)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn get_mcp_tool_authorizations(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<McpToolAuthorization>> {
+        let rows = sqlx::query_as::<_, McpToolAuthorization>(
+            "SELECT * FROM mcp_tool_authorizations WHERE guild_id = $1",
+        )
+        .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    // Agent 19 (#107): Plugin Marketplace
+    pub async fn publish_marketplace_package(
+        &self,
+        pkg: PluginMarketplacePackage,
+    ) -> anyhow::Result<PluginMarketplacePackage> {
+        let row = sqlx::query_as::<_, PluginMarketplacePackage>(
+            r#"
+            INSERT INTO plugin_marketplace_packages (id, plugin_id, name, version, author, sha256_hash, manifest, is_verified, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (plugin_id) DO UPDATE SET
+                version = EXCLUDED.version,
+                sha256_hash = EXCLUDED.sha256_hash,
+                manifest = EXCLUDED.manifest,
+                is_verified = EXCLUDED.is_verified
+            RETURNING *
+            "#
+        )
+        .bind(pkg.id)
+        .bind(&pkg.plugin_id)
+        .bind(&pkg.name)
+        .bind(&pkg.version)
+        .bind(&pkg.author)
+        .bind(&pkg.sha256_hash)
+        .bind(&pkg.manifest)
+        .bind(pkg.is_verified)
+        .bind(pkg.created_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn list_marketplace_packages(&self) -> anyhow::Result<Vec<PluginMarketplacePackage>> {
+        let rows = sqlx::query_as::<_, PluginMarketplacePackage>(
+            "SELECT * FROM plugin_marketplace_packages",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn install_plugin_package(
+        &self,
+        install: PluginGuildInstallation,
+    ) -> anyhow::Result<PluginGuildInstallation> {
+        let row = sqlx::query_as::<_, PluginGuildInstallation>(
+            r#"
+            INSERT INTO plugin_guild_installations (id, guild_id, plugin_id, version, enabled, config, installed_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (guild_id, plugin_id) DO UPDATE SET
+                version = EXCLUDED.version,
+                enabled = EXCLUDED.enabled,
+                config = EXCLUDED.config
+            RETURNING *
+            "#
+        )
+        .bind(install.id)
+        .bind(&install.guild_id)
+        .bind(&install.plugin_id)
+        .bind(&install.version)
+        .bind(install.enabled)
+        .bind(&install.config)
+        .bind(install.installed_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn list_installed_plugins(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<PluginGuildInstallation>> {
+        let rows = sqlx::query_as::<_, PluginGuildInstallation>(
+            "SELECT * FROM plugin_guild_installations WHERE guild_id = $1",
+        )
+        .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn uninstall_plugin_package(
+        &self,
+        guild_id: &str,
+        plugin_id: &str,
+    ) -> anyhow::Result<bool> {
+        let res = sqlx::query(
+            "DELETE FROM plugin_guild_installations WHERE guild_id = $1 AND plugin_id = $2",
+        )
+        .bind(guild_id)
+        .bind(plugin_id)
+        .execute(&self.pool)
+        .await?;
         Ok(res.rows_affected() > 0)
     }
 }

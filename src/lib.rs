@@ -1,5 +1,6 @@
 pub mod config;
 pub mod discord;
+pub mod integrations;
 pub mod lua;
 pub mod metrics;
 pub mod moderation_cases;

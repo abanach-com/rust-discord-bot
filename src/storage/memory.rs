@@ -6,13 +6,18 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::{
-    AdjustMemberProgressParams, AuditLogEntry, CardCollection, CardTrade, CoinTransfer,
-    CoinTransferOutcome, CommunityPoll, CountingGame, CustomAutomation, DailyClaimOutcome,
-    DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink, Giveaway,
-    GuildModuleSettings, InviteTracking, MemberProgress, ModerationAppeal,
-    ModerationExecutionIntent, ModuleDraftConfig, ProgressMetric, ProgressionSeason,
-    ReputationGrantOutcome, ScheduledEvent, ServerSnapshot, StarboardEntry, StickyMessage,
-    StoreItem, StorePurchase, TimedRoleGrant, Tournament, TupperProfile, XpAward, level_for_xp,
+    AdjustMemberProgressParams, AiGuildBudget, AiKnowledgeDocument, AuditLogEntry, CardCollection,
+    CardTrade, CoinTransfer, CoinTransferOutcome, CommunityPoll, CountingGame, CustomAutomation,
+    DailyClaimOutcome, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink,
+    GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway, GuildModuleSettings,
+    IntegrationConnection, IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking,
+    KickStreamSubscription, LinkedAccount, McpToolAuthorization, MemberProgress, ModerationAppeal,
+    ModerationExecutionIntent, ModuleDraftConfig, PluginGuildInstallation,
+    PluginMarketplacePackage, ProgressMetric, ProgressionSeason, RedditSubscription,
+    ReputationGrantOutcome, ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry,
+    SteamLfgPost, StickyMessage, StoreItem, StorePurchase, TelegramBridge, TelegramMessageMapping,
+    TimedRoleGrant, Tournament, TupperProfile, TwitchStreamSubscription, VkSubscription,
+    WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
 };
 
 type ModuleKey = (String, String);
@@ -56,6 +61,30 @@ pub struct MemoryStore {
     card_trades: Arc<DashMap<Uuid, CardTrade>>,
     tuppers: Arc<DashMap<Uuid, TupperProfile>>,
     faqs: Arc<DashMap<Uuid, FaqEntry>>,
+    integration_connections: Arc<DashMap<Uuid, IntegrationConnection>>,
+    integration_webhook_subs: Arc<DashMap<Uuid, IntegrationWebhookSubscription>>,
+    integration_event_dedupes: Arc<DashMap<(String, String), chrono::DateTime<Utc>>>,
+    integration_delivery_logs: Arc<DashMap<Uuid, IntegrationDeliveryLog>>,
+    linked_accounts: Arc<DashMap<Uuid, LinkedAccount>>,
+    steam_lfg_posts: Arc<DashMap<Uuid, SteamLfgPost>>,
+    github_devops_mappings: Arc<DashMap<Uuid, GitHubDevopsMapping>>,
+    twitch_subs: Arc<DashMap<Uuid, TwitchStreamSubscription>>,
+    kick_subs: Arc<DashMap<Uuid, KickStreamSubscription>>,
+    youtube_subs: Arc<DashMap<Uuid, YouTubeChannelSubscription>>,
+    telegram_bridges: Arc<DashMap<Uuid, TelegramBridge>>,
+    telegram_mappings: Arc<DashMap<Uuid, TelegramMessageMapping>>,
+    workflows: Arc<DashMap<Uuid, WorkflowDefinition>>,
+    workflow_runs: Arc<DashMap<Uuid, WorkflowRunExecution>>,
+    gitlab_subs: Arc<DashMap<Uuid, GitLabSubscription>>,
+    vk_subs: Arc<DashMap<Uuid, VkSubscription>>,
+    reddit_subs: Arc<DashMap<Uuid, RedditSubscription>>,
+    gaming_hub_statuses: Arc<DashMap<(String, String), GamingHubGameStatus>>,
+    social_drafts: Arc<DashMap<Uuid, SocialPublicationDraft>>,
+    ai_budgets: Arc<DashMap<String, AiGuildBudget>>,
+    ai_documents: Arc<DashMap<Uuid, AiKnowledgeDocument>>,
+    mcp_tool_auths: Arc<DashMap<(String, String), McpToolAuthorization>>,
+    marketplace_packages: Arc<DashMap<String, PluginMarketplacePackage>>,
+    plugin_guild_installs: Arc<DashMap<(String, String), PluginGuildInstallation>>,
 }
 
 impl MemoryStore {
@@ -1530,5 +1559,609 @@ impl MemoryStore {
 
     pub fn delete_faq_entry(&self, faq_id: Uuid) -> bool {
         self.faqs.remove(&faq_id).is_some()
+    }
+
+    // ==========================================
+    // Phase 4: Integrations & Extensibility (#92-#107)
+    // ==========================================
+
+    pub fn upsert_integration_connection(
+        &self,
+        conn: IntegrationConnection,
+    ) -> IntegrationConnection {
+        self.integration_connections.insert(conn.id, conn.clone());
+        conn
+    }
+
+    pub fn get_integration_connection(
+        &self,
+        guild_id: &str,
+        provider: &str,
+    ) -> Option<IntegrationConnection> {
+        self.integration_connections
+            .iter()
+            .find(|e| e.guild_id == guild_id && e.provider.eq_ignore_ascii_case(provider))
+            .map(|e| e.value().clone())
+    }
+
+    pub fn list_integration_connections(&self, guild_id: &str) -> Vec<IntegrationConnection> {
+        self.integration_connections
+            .iter()
+            .filter(|e| e.guild_id == guild_id)
+            .map(|e| e.value().clone())
+            .collect()
+    }
+
+    pub fn delete_integration_connection(&self, guild_id: &str, provider: &str) -> bool {
+        let to_remove: Vec<Uuid> = self
+            .integration_connections
+            .iter()
+            .filter(|e| e.guild_id == guild_id && e.provider.eq_ignore_ascii_case(provider))
+            .map(|e| e.id)
+            .collect();
+        let count = to_remove.len();
+        for id in to_remove {
+            self.integration_connections.remove(&id);
+        }
+        count > 0
+    }
+
+    pub fn create_webhook_subscription(
+        &self,
+        sub: IntegrationWebhookSubscription,
+    ) -> IntegrationWebhookSubscription {
+        self.integration_webhook_subs.insert(sub.id, sub.clone());
+        sub
+    }
+
+    pub fn list_webhook_subscriptions(
+        &self,
+        guild_id: &str,
+        provider: Option<&str>,
+    ) -> Vec<IntegrationWebhookSubscription> {
+        self.integration_webhook_subs
+            .iter()
+            .filter(|e| {
+                e.guild_id == guild_id
+                    && provider
+                        .map(|p| e.provider.eq_ignore_ascii_case(p))
+                        .unwrap_or(true)
+            })
+            .map(|e| e.value().clone())
+            .collect()
+    }
+
+    pub fn delete_webhook_subscription(&self, id: Uuid) -> bool {
+        self.integration_webhook_subs.remove(&id).is_some()
+    }
+
+    pub fn check_and_record_event_dedupe(&self, provider: &str, event_id: &str) -> bool {
+        let key = (provider.to_lowercase(), event_id.to_string());
+        if self.integration_event_dedupes.contains_key(&key) {
+            false
+        } else {
+            self.integration_event_dedupes.insert(key, Utc::now());
+            true
+        }
+    }
+
+    pub fn record_delivery_log(&self, log: IntegrationDeliveryLog) -> IntegrationDeliveryLog {
+        self.integration_delivery_logs.insert(log.id, log.clone());
+        log
+    }
+
+    pub fn list_delivery_logs(
+        &self,
+        guild_id: &str,
+        provider: Option<&str>,
+    ) -> Vec<IntegrationDeliveryLog> {
+        let mut list: Vec<_> = self
+            .integration_delivery_logs
+            .iter()
+            .filter(|e| {
+                e.guild_id == guild_id
+                    && provider
+                        .map(|p| e.provider.eq_ignore_ascii_case(p))
+                        .unwrap_or(true)
+            })
+            .map(|e| e.value().clone())
+            .collect();
+        list.sort_by_key(|a| std::cmp::Reverse(a.created_at));
+        list
+    }
+
+    // Agent 04 (#93): Unified Identity
+    pub fn link_account(&self, link: LinkedAccount) -> anyhow::Result<LinkedAccount> {
+        // Enforce uniqueness
+        for item in self.linked_accounts.iter() {
+            if item.guild_id == link.guild_id && item.provider == link.provider {
+                if item.provider_subject == link.provider_subject
+                    && item.discord_user_id != link.discord_user_id
+                {
+                    anyhow::bail!("Provider account already linked to another Discord user");
+                }
+                if item.discord_user_id == link.discord_user_id
+                    && item.provider_subject != link.provider_subject
+                {
+                    anyhow::bail!("User already linked to a different account for this provider");
+                }
+            }
+        }
+        self.linked_accounts.insert(link.id, link.clone());
+        Ok(link)
+    }
+
+    pub fn get_linked_account(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        provider: &str,
+    ) -> Option<LinkedAccount> {
+        self.linked_accounts
+            .iter()
+            .find(|e| {
+                e.guild_id == guild_id
+                    && e.discord_user_id == user_id
+                    && e.provider.eq_ignore_ascii_case(provider)
+            })
+            .map(|e| e.value().clone())
+    }
+
+    pub fn list_linked_accounts(&self, guild_id: &str, user_id: &str) -> Vec<LinkedAccount> {
+        self.linked_accounts
+            .iter()
+            .filter(|e| e.guild_id == guild_id && e.discord_user_id == user_id)
+            .map(|e| e.value().clone())
+            .collect()
+    }
+
+    pub fn unlink_account(&self, guild_id: &str, user_id: &str, provider: &str) -> bool {
+        let to_remove: Vec<Uuid> = self
+            .linked_accounts
+            .iter()
+            .filter(|e| {
+                e.guild_id == guild_id
+                    && e.discord_user_id == user_id
+                    && e.provider.eq_ignore_ascii_case(provider)
+            })
+            .map(|e| e.id)
+            .collect();
+        let found = !to_remove.is_empty();
+        for id in to_remove {
+            self.linked_accounts.remove(&id);
+        }
+        found
+    }
+
+    // Agent 05 (#94) & Agent 15 (#104): Steam & Gaming Hub LFG
+    pub fn create_steam_lfg_post(&self, post: SteamLfgPost) -> SteamLfgPost {
+        self.steam_lfg_posts.insert(post.id, post.clone());
+        post
+    }
+
+    pub fn list_steam_lfg_posts(&self, guild_id: &str, game_id: Option<&str>) -> Vec<SteamLfgPost> {
+        let now = Utc::now();
+        self.steam_lfg_posts
+            .iter()
+            .filter(|e| {
+                e.guild_id == guild_id
+                    && e.expires_at > now
+                    && game_id.map(|g| e.game_id == g).unwrap_or(true)
+            })
+            .map(|e| e.value().clone())
+            .collect()
+    }
+
+    pub fn join_steam_lfg_post(&self, id: Uuid, user_id: &str) -> anyhow::Result<SteamLfgPost> {
+        let mut entry = self
+            .steam_lfg_posts
+            .get_mut(&id)
+            .ok_or_else(|| anyhow::anyhow!("LFG listing not found"))?;
+
+        if entry.expires_at <= Utc::now() {
+            anyhow::bail!("LFG listing has expired");
+        }
+
+        let mut players: Vec<String> =
+            serde_json::from_value(entry.current_players.clone()).unwrap_or_default();
+        if players.contains(&user_id.to_string()) {
+            return Ok(entry.clone());
+        }
+        if players.len() as i32 >= entry.max_players {
+            anyhow::bail!("LFG post is full");
+        }
+        players.push(user_id.to_string());
+        entry.current_players = serde_json::json!(players);
+        Ok(entry.clone())
+    }
+
+    // Agent 06 (#95): GitHub DevOps
+    pub fn upsert_github_devops_mapping(
+        &self,
+        mapping: GitHubDevopsMapping,
+    ) -> GitHubDevopsMapping {
+        self.github_devops_mappings
+            .insert(mapping.id, mapping.clone());
+        mapping
+    }
+
+    pub fn get_github_devops_mapping(
+        &self,
+        guild_id: &str,
+        repo: &str,
+        number: i32,
+    ) -> Option<GitHubDevopsMapping> {
+        self.github_devops_mappings
+            .iter()
+            .find(|e| {
+                e.guild_id == guild_id
+                    && e.repo_full_name.eq_ignore_ascii_case(repo)
+                    && e.issue_or_pr_number == number
+            })
+            .map(|e| e.value().clone())
+    }
+
+    // Agent 07 (#96): Twitch Extended
+    pub fn upsert_twitch_subscription(
+        &self,
+        sub: TwitchStreamSubscription,
+    ) -> TwitchStreamSubscription {
+        self.twitch_subs.insert(sub.id, sub.clone());
+        sub
+    }
+
+    pub fn get_twitch_subscription(
+        &self,
+        guild_id: &str,
+        streamer: &str,
+    ) -> Option<TwitchStreamSubscription> {
+        self.twitch_subs
+            .iter()
+            .find(|e| e.guild_id == guild_id && e.streamer_login.eq_ignore_ascii_case(streamer))
+            .map(|e| e.value().clone())
+    }
+
+    // Agent 08 (#97): Kick Integration
+    pub fn upsert_kick_subscription(&self, sub: KickStreamSubscription) -> KickStreamSubscription {
+        self.kick_subs.insert(sub.id, sub.clone());
+        sub
+    }
+
+    pub fn get_kick_subscription(
+        &self,
+        guild_id: &str,
+        slug: &str,
+    ) -> Option<KickStreamSubscription> {
+        self.kick_subs
+            .iter()
+            .find(|e| e.guild_id == guild_id && e.slug.eq_ignore_ascii_case(slug))
+            .map(|e| e.value().clone())
+    }
+
+    // Agent 09 (#98): YouTube Extended
+    pub fn upsert_youtube_subscription(
+        &self,
+        sub: YouTubeChannelSubscription,
+    ) -> YouTubeChannelSubscription {
+        self.youtube_subs.insert(sub.id, sub.clone());
+        sub
+    }
+
+    pub fn get_youtube_subscription(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+    ) -> Option<YouTubeChannelSubscription> {
+        self.youtube_subs
+            .iter()
+            .find(|e| e.guild_id == guild_id && e.channel_id == channel_id)
+            .map(|e| e.value().clone())
+    }
+
+    // Agent 10 (#99): Telegram Bridge
+    pub fn create_telegram_bridge(&self, bridge: TelegramBridge) -> TelegramBridge {
+        self.telegram_bridges.insert(bridge.id, bridge.clone());
+        bridge
+    }
+
+    pub fn get_telegram_bridge(&self, guild_id: &str, channel_id: &str) -> Option<TelegramBridge> {
+        self.telegram_bridges
+            .iter()
+            .find(|e| e.guild_id == guild_id && e.discord_channel_id == channel_id)
+            .map(|e| e.value().clone())
+    }
+
+    pub fn list_telegram_bridges(&self, guild_id: &str) -> Vec<TelegramBridge> {
+        self.telegram_bridges
+            .iter()
+            .filter(|e| e.guild_id == guild_id)
+            .map(|e| e.value().clone())
+            .collect()
+    }
+
+    pub fn record_telegram_message_mapping(
+        &self,
+        mapping: TelegramMessageMapping,
+    ) -> TelegramMessageMapping {
+        self.telegram_mappings.insert(mapping.id, mapping.clone());
+        mapping
+    }
+
+    pub fn get_telegram_message_mapping(
+        &self,
+        bridge_id: Uuid,
+        msg_id: &str,
+        direction: &str,
+    ) -> Option<TelegramMessageMapping> {
+        self.telegram_mappings
+            .iter()
+            .find(|e| {
+                e.bridge_id == bridge_id
+                    && e.direction == direction
+                    && (e.telegram_message_id == msg_id || e.discord_message_id == msg_id)
+            })
+            .map(|e| e.value().clone())
+    }
+
+    pub fn delete_telegram_bridge(&self, bridge_id: Uuid) -> bool {
+        self.telegram_bridges.remove(&bridge_id).is_some()
+    }
+
+    // Agent 11 (#100): Workflow Builder
+    pub fn create_workflow_definition(&self, wf: WorkflowDefinition) -> WorkflowDefinition {
+        self.workflows.insert(wf.id, wf.clone());
+        wf
+    }
+
+    pub fn get_workflow_definition(&self, id: Uuid) -> Option<WorkflowDefinition> {
+        self.workflows.get(&id).map(|e| e.value().clone())
+    }
+
+    pub fn list_workflow_definitions(&self, guild_id: &str) -> Vec<WorkflowDefinition> {
+        self.workflows
+            .iter()
+            .filter(|e| e.guild_id == guild_id)
+            .map(|e| e.value().clone())
+            .collect()
+    }
+
+    pub fn record_workflow_run(&self, run: WorkflowRunExecution) -> WorkflowRunExecution {
+        self.workflow_runs.insert(run.id, run.clone());
+        run
+    }
+
+    // Agent 12 (#101): GitLab
+    pub fn upsert_gitlab_subscription(&self, sub: GitLabSubscription) -> GitLabSubscription {
+        self.gitlab_subs.insert(sub.id, sub.clone());
+        sub
+    }
+
+    pub fn get_gitlab_subscription(
+        &self,
+        guild_id: &str,
+        host: &str,
+        project_id: &str,
+    ) -> Option<GitLabSubscription> {
+        self.gitlab_subs
+            .iter()
+            .find(|e| {
+                e.guild_id == guild_id
+                    && e.host.eq_ignore_ascii_case(host)
+                    && e.project_id == project_id
+            })
+            .map(|e| e.value().clone())
+    }
+
+    // Agent 13 (#102): VK Integration
+    pub fn upsert_vk_subscription(&self, sub: VkSubscription) -> VkSubscription {
+        self.vk_subs.insert(sub.id, sub.clone());
+        sub
+    }
+
+    pub fn get_vk_subscription(&self, guild_id: &str, group_id: &str) -> Option<VkSubscription> {
+        self.vk_subs
+            .iter()
+            .find(|e| e.guild_id == guild_id && e.group_id == group_id)
+            .map(|e| e.value().clone())
+    }
+
+    // Agent 14 (#103): Reddit
+    pub fn upsert_reddit_subscription(&self, sub: RedditSubscription) -> RedditSubscription {
+        self.reddit_subs.insert(sub.id, sub.clone());
+        sub
+    }
+
+    pub fn get_reddit_subscription(
+        &self,
+        guild_id: &str,
+        subreddit: &str,
+    ) -> Option<RedditSubscription> {
+        self.reddit_subs
+            .iter()
+            .find(|e| e.guild_id == guild_id && e.subreddit.eq_ignore_ascii_case(subreddit))
+            .map(|e| e.value().clone())
+    }
+
+    // Agent 15 (#104): Gaming Hub
+    pub fn update_gaming_hub_game_status(
+        &self,
+        status: GamingHubGameStatus,
+    ) -> GamingHubGameStatus {
+        let key = (status.game_id.clone(), status.region.clone());
+        self.gaming_hub_statuses.insert(key, status.clone());
+        status
+    }
+
+    pub fn list_gaming_hub_game_statuses(&self, game_id: Option<&str>) -> Vec<GamingHubGameStatus> {
+        self.gaming_hub_statuses
+            .iter()
+            .filter(|e| game_id.map(|g| e.game_id == g).unwrap_or(true))
+            .map(|e| e.value().clone())
+            .collect()
+    }
+
+    // Agent 16 (#105): Social Publisher
+    pub fn create_social_draft(&self, draft: SocialPublicationDraft) -> SocialPublicationDraft {
+        self.social_drafts.insert(draft.id, draft.clone());
+        draft
+    }
+
+    pub fn list_social_drafts(&self, guild_id: &str) -> Vec<SocialPublicationDraft> {
+        self.social_drafts
+            .iter()
+            .filter(|e| e.guild_id == guild_id)
+            .map(|e| e.value().clone())
+            .collect()
+    }
+
+    pub fn approve_social_draft(
+        &self,
+        id: Uuid,
+        approver_id: &str,
+    ) -> Option<SocialPublicationDraft> {
+        if let Some(mut draft) = self.social_drafts.get_mut(&id) {
+            draft.approved_by = Some(approver_id.to_string());
+            draft.status = "approved".to_string();
+            Some(draft.clone())
+        } else {
+            None
+        }
+    }
+
+    // Agent 17 & 18 (#106): AI + MCP
+    pub fn get_or_create_ai_budget(&self, guild_id: &str) -> AiGuildBudget {
+        self.ai_budgets
+            .entry(guild_id.to_string())
+            .or_insert_with(|| AiGuildBudget {
+                guild_id: guild_id.to_string(),
+                monthly_token_limit: 1_000_000,
+                used_tokens: 0,
+                monthly_usd_limit: 10.0,
+                used_usd: 0.0,
+                is_halted: false,
+                reset_at: Utc::now() + chrono::Duration::days(30),
+            })
+            .clone()
+    }
+
+    pub fn record_ai_usage(
+        &self,
+        guild_id: &str,
+        tokens: i64,
+        usd: f64,
+    ) -> anyhow::Result<AiGuildBudget> {
+        let mut budget = self
+            .ai_budgets
+            .entry(guild_id.to_string())
+            .or_insert_with(|| AiGuildBudget {
+                guild_id: guild_id.to_string(),
+                monthly_token_limit: 1_000_000,
+                used_tokens: 0,
+                monthly_usd_limit: 10.0,
+                used_usd: 0.0,
+                is_halted: false,
+                reset_at: Utc::now() + chrono::Duration::days(30),
+            });
+
+        if budget.is_halted {
+            anyhow::bail!("AI budget exceeded and halted for this guild");
+        }
+
+        budget.used_tokens += tokens;
+        budget.used_usd += usd;
+
+        if budget.used_tokens >= budget.monthly_token_limit
+            || budget.used_usd >= budget.monthly_usd_limit
+        {
+            budget.is_halted = true;
+        }
+
+        Ok(budget.clone())
+    }
+
+    pub fn create_ai_document(&self, doc: AiKnowledgeDocument) -> AiKnowledgeDocument {
+        self.ai_documents.insert(doc.id, doc.clone());
+        doc
+    }
+
+    pub fn search_ai_documents(
+        &self,
+        guild_id: &str,
+        user_channels: &[String],
+        query: &str,
+    ) -> Vec<AiKnowledgeDocument> {
+        let q = query.to_lowercase();
+        self.ai_documents
+            .iter()
+            .filter(|e| {
+                if e.guild_id != guild_id {
+                    return false;
+                }
+                let acls: Vec<String> =
+                    serde_json::from_value(e.channel_acl.clone()).unwrap_or_default();
+                let has_access = acls.is_empty() || acls.iter().any(|c| user_channels.contains(c));
+                if !has_access {
+                    return false;
+                }
+                e.title.to_lowercase().contains(&q) || e.content.to_lowercase().contains(&q)
+            })
+            .map(|e| e.value().clone())
+            .collect()
+    }
+
+    pub fn upsert_mcp_tool_authorization(
+        &self,
+        auth: McpToolAuthorization,
+    ) -> McpToolAuthorization {
+        let key = (auth.guild_id.clone(), auth.tool_name.clone());
+        self.mcp_tool_auths.insert(key, auth.clone());
+        auth
+    }
+
+    pub fn get_mcp_tool_authorizations(&self, guild_id: &str) -> Vec<McpToolAuthorization> {
+        self.mcp_tool_auths
+            .iter()
+            .filter(|e| e.guild_id == guild_id)
+            .map(|e| e.value().clone())
+            .collect()
+    }
+
+    // Agent 19 (#107): Plugin Marketplace
+    pub fn publish_marketplace_package(
+        &self,
+        pkg: PluginMarketplacePackage,
+    ) -> PluginMarketplacePackage {
+        self.marketplace_packages
+            .insert(pkg.plugin_id.clone(), pkg.clone());
+        pkg
+    }
+
+    pub fn list_marketplace_packages(&self) -> Vec<PluginMarketplacePackage> {
+        self.marketplace_packages
+            .iter()
+            .map(|e| e.value().clone())
+            .collect()
+    }
+
+    pub fn install_plugin_package(
+        &self,
+        install: PluginGuildInstallation,
+    ) -> PluginGuildInstallation {
+        let key = (install.guild_id.clone(), install.plugin_id.clone());
+        self.plugin_guild_installs.insert(key, install.clone());
+        install
+    }
+
+    pub fn list_installed_plugins(&self, guild_id: &str) -> Vec<PluginGuildInstallation> {
+        self.plugin_guild_installs
+            .iter()
+            .filter(|e| e.guild_id == guild_id)
+            .map(|e| e.value().clone())
+            .collect()
+    }
+
+    pub fn uninstall_plugin_package(&self, guild_id: &str, plugin_id: &str) -> bool {
+        let key = (guild_id.to_string(), plugin_id.to_string());
+        self.plugin_guild_installs.remove(&key).is_some()
     }
 }
