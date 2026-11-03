@@ -1,1158 +1,2364 @@
 use std::collections::HashMap;
 
+
+
 use anyhow::{Context as _, Result, anyhow};
+
 use chrono::{Duration, Utc};
+
 use serenity::{
+
     all::{
+
         ChannelId, ChannelType, CommandInteraction, GuildId, Member, MessageId, Permissions, Role,
+
         RoleId, UserId,
+
     },
+
     builder::{
+
         CreateAllowedMentions, CreateInteractionResponse, CreateInteractionResponseFollowup,
+
         CreateInteractionResponseMessage, CreateMessage, EditMember, GetMessages,
+
     },
+
     client::Context,
+
 };
+
+
 
 use crate::{AppState, lua::LuaAction};
 
+
+
 use super::{moderation_cases, music, progression, scheduler, tickets};
 
+
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+
 pub enum ChannelPurpose {
+
     SendMessage,
+
     ManageMessages,
+
 }
+
+
 
 #[derive(Clone, Debug)]
+
 pub struct ActionOrigin {
+
     pub guild_id: Option<GuildId>,
+
     pub channel_id: Option<ChannelId>,
+
     pub actor_id: Option<UserId>,
+
     pub actor_permissions: Permissions,
+
+    pub actor_roles: Vec<RoleId>,
+
     pub app_permissions: Permissions,
+
     pub enforce_actor_permissions: bool,
+
 }
+
+
 
 pub fn chunk_discord_text(text: &str, limit: usize) -> Vec<String> {
+
     if text.len() <= limit {
+
         return vec![text.to_owned()];
+
     }
+
     let mut chunks = Vec::new();
+
     let mut current_chunk = String::new();
 
+
+
     for line in text.lines() {
+
         if line.len() > limit {
+
             if !current_chunk.is_empty() {
+
                 chunks.push(std::mem::take(&mut current_chunk));
+
             }
+
             let mut sub_chunk = String::new();
+
             for ch in line.chars() {
+
                 if sub_chunk.len() + ch.len_utf8() > limit {
+
                     chunks.push(std::mem::take(&mut sub_chunk));
+
                 }
+
                 sub_chunk.push(ch);
+
             }
+
             if !sub_chunk.is_empty() {
+
                 current_chunk = sub_chunk;
+
             }
+
         } else if current_chunk.len() + line.len() + 1 > limit {
+
             chunks.push(std::mem::take(&mut current_chunk));
+
             current_chunk.push_str(line);
+
             current_chunk.push('\n');
+
         } else {
+
             current_chunk.push_str(line);
+
             current_chunk.push('\n');
+
         }
+
     }
+
+
 
     if !current_chunk.is_empty() {
+
         chunks.push(current_chunk.trim_end().to_owned());
+
     }
+
     chunks
+
 }
+
+
 
 pub async fn execute_command_actions(
+
     ctx: &Context,
+
     state: &AppState,
+
     command: &CommandInteraction,
+
     module_id: &str,
+
     actions: &[LuaAction],
+
     is_deferred: bool,
+
 ) -> Result<()> {
+
     let first_reply = actions.iter().position(|action| {
+
         matches!(
+
             action,
+
             LuaAction::Reply {
+
                 content: _,
+
                 ephemeral: _
+
             }
+
         )
+
     });
 
+
+
     if is_deferred {
+
         if let Some(index) = first_reply {
+
             if let LuaAction::Reply { content, ephemeral } = &actions[index] {
+
                 let chunks = chunk_discord_text(content, 1950);
+
                 if let Some(first) = chunks.first() {
+
                     command
+
                         .edit_response(
+
                             &ctx.http,
+
                             serenity::builder::EditInteractionResponse::new()
+
                                 .content(first)
+
                                 .allowed_mentions(CreateAllowedMentions::new()),
+
                         )
+
                         .await?;
+
                 }
+
                 for chunk in chunks.into_iter().skip(1) {
+
                     command
+
                         .create_followup(
+
                             &ctx.http,
+
                             CreateInteractionResponseFollowup::new()
+
                                 .content(chunk)
+
                                 .ephemeral(*ephemeral)
+
                                 .allowed_mentions(CreateAllowedMentions::new()),
+
                         )
+
                         .await?;
+
                 }
+
             }
+
         } else {
+
             command
+
                 .edit_response(
+
                     &ctx.http,
+
                     serenity::builder::EditInteractionResponse::new()
+
                         .content(crate::translations::t(&command.locale, "system.command_executed"))
+
                         .allowed_mentions(CreateAllowedMentions::new()),
+
                 )
+
                 .await?;
+
         }
+
     } else if let Some(index) = first_reply {
+
         if let LuaAction::Reply { content, ephemeral } = &actions[index] {
+
             let chunks = chunk_discord_text(content, 1950);
+
             let first_chunk = chunks.first().cloned().unwrap_or_default();
+
             command
+
                 .create_response(
+
                     &ctx.http,
+
                     CreateInteractionResponse::Message(
+
                         CreateInteractionResponseMessage::new()
+
                             .content(first_chunk)
+
                             .ephemeral(*ephemeral)
+
                             .allowed_mentions(CreateAllowedMentions::new()),
+
                     ),
+
                 )
+
                 .await?;
+
             for chunk in chunks.into_iter().skip(1) {
+
                 command
+
                     .create_followup(
+
                         &ctx.http,
+
                         CreateInteractionResponseFollowup::new()
+
                             .content(chunk)
+
                             .ephemeral(*ephemeral)
+
                             .allowed_mentions(CreateAllowedMentions::new()),
+
                     )
+
                     .await?;
+
             }
+
         }
+
     } else {
+
         command
+
             .create_response(
+
                 &ctx.http,
+
                 CreateInteractionResponse::Message(
+
                     CreateInteractionResponseMessage::new()
+
                         .content(crate::translations::t(&command.locale, "system.command_accepted"))
+
                         .ephemeral(true)
+
                         .allowed_mentions(CreateAllowedMentions::new()),
+
                 ),
+
             )
+
             .await?;
+
     }
 
+
+
+    let actor_roles = command
+
+        .member
+
+        .as_ref()
+
+        .map(|m| m.roles.clone())
+
+        .unwrap_or_default();
+
     let origin = ActionOrigin {
+
         guild_id: command.guild_id,
+
         channel_id: Some(command.channel_id),
+
         actor_id: Some(command.user.id),
+
         actor_permissions: command
+
             .member
+
             .as_ref()
+
             .and_then(|member| member.permissions)
+
             .unwrap_or_else(Permissions::empty),
+
+        actor_roles,
+
         app_permissions: command.app_permissions.unwrap_or_else(Permissions::empty),
+
         enforce_actor_permissions: true,
+
     };
+
+
 
     for (index, action) in actions.iter().enumerate() {
+
         if Some(index) == first_reply {
+
             continue;
+
         }
+
+
 
         if let LuaAction::Reply { content, ephemeral } = action {
+
             for chunk in chunk_discord_text(content, 1950) {
+
                 command
+
                     .create_followup(
+
                         &ctx.http,
+
                         CreateInteractionResponseFollowup::new()
+
                             .content(chunk)
+
                             .ephemeral(*ephemeral)
+
                             .allowed_mentions(CreateAllowedMentions::new()),
+
                     )
+
                     .await?;
+
             }
+
             continue;
+
         }
+
+
 
         match execute_action(ctx, state, module_id, &origin, action).await {
+
             Ok(Some(status)) => {
+
                 for chunk in chunk_discord_text(&status, 1950) {
+
                     command
+
                         .create_followup(
+
                             &ctx.http,
+
                             CreateInteractionResponseFollowup::new()
+
                                 .content(chunk)
+
                                 .ephemeral(true)
+
                                 .allowed_mentions(CreateAllowedMentions::new()),
+
                         )
+
                         .await?;
+
                 }
+
             }
+
             Ok(None) => {}
+
             Err(error) => {
+
                 tracing::warn!(
+
                     module_id,
+
                     command = %command.data.name,
+
                     user_id = %command.user.id,
+
                     ?error,
+
                     "Lua action failed"
+
                 );
+
                 for chunk in
+
                     chunk_discord_text(&format!("Nie udało się wykonać akcji: {error}"), 1950)
+
                 {
+
                     command
+
                         .create_followup(
+
                             &ctx.http,
+
                             CreateInteractionResponseFollowup::new()
+
                                 .content(chunk)
+
                                 .ephemeral(true)
+
                                 .allowed_mentions(CreateAllowedMentions::new()),
+
                         )
+
                         .await?;
+
                 }
+
                 break;
+
             }
+
         }
+
     }
 
+
+
     Ok(())
+
 }
+
+
 
 pub async fn execute_event_actions(
+
     ctx: &Context,
+
     state: &AppState,
+
     module_id: &str,
+
     guild_id: Option<GuildId>,
+
     channel_id: Option<ChannelId>,
+
     actor_id: Option<UserId>,
+
     actions: &[LuaAction],
+
 ) -> Result<()> {
+
     let origin = ActionOrigin {
+
         guild_id,
+
         channel_id,
+
         actor_id,
+
         actor_permissions: Permissions::empty(),
+
+        actor_roles: Vec::new(),
+
         app_permissions: Permissions::all(),
+
         enforce_actor_permissions: false,
+
     };
+
+
 
     let mut last_action_succeeded = true;
+
     let mut message_delete_failed = false;
 
+
+
     for action in actions {
+
         if let LuaAction::Audit { event, .. } = action
+
             && !last_action_succeeded
+
             && (event == "welcome_sent" || event == "goodbye_sent" || event.ends_with("_sent"))
+
         {
+
             tracing::info!(
+
                 event,
+
                 "Skipping confirmation audit event because previous action failed"
+
             );
+
             continue;
+
         }
+
+
 
         let action = if message_delete_failed {
+
             if let LuaAction::SendMessage {
+
                 channel_id,
+
                 content,
+
             } = action
+
             {
+
                 let adjusted_content = if content.contains("została usunięta przez AutoMod") {
+
                     content.replace(
+
                         "została usunięta przez AutoMod",
+
                         "narusza zasady AutoMod (usunięcie zablokowane)",
+
                     )
+
                 } else if content.contains("was removed by AutoMod") {
+
                     content.replace(
+
                         "was removed by AutoMod",
+
                         "violates AutoMod rules (deletion blocked)",
+
                     )
+
                 } else {
+
                     content.clone()
+
                 };
+
                 LuaAction::SendMessage {
+
                     channel_id: channel_id.clone(),
+
                     content: adjusted_content,
+
                 }
+
             } else {
+
                 action.clone()
+
             }
+
         } else {
+
             action.clone()
+
         };
 
+
+
         match &action {
+
             LuaAction::Reply { content, .. } => {
+
                 let target_channel = match resolve_and_validate_channel(
+
                     ctx,
+
                     &origin,
+
                     None,
+
                     ChannelPurpose::SendMessage,
+
                 )
+
                 .await
+
                 {
+
                     Ok(cid) => cid,
+
                     Err(err) => {
+
                         last_action_succeeded = false;
+
                         tracing::warn!(error = %err, module_id, "Brak lub błąd kanału dla event reply");
+
                         let _ = audit_action(
+
                             state,
+
                             &origin,
+
                             module_id,
+
                             "action_denied",
+
                             serde_json::json!({
+
                                 "action": "reply",
+
                                 "error": err.to_string(),
+
                             }),
+
                         )
+
                         .await;
+
                         continue;
+
                     }
+
                 };
+
                 if let Err(err) = send_message(ctx, target_channel, content).await {
+
                     last_action_succeeded = false;
+
                     tracing::warn!(error = %err, module_id, "Błąd wysyłania odpowiedzi na zdarzenie");
+
                     let _ = audit_action(
+
                         state,
+
                         &origin,
+
                         module_id,
+
                         "action_failed",
+
                         serde_json::json!({
+
                             "action": "reply",
+
                             "error": err.to_string(),
+
                         }),
+
                     )
+
                     .await;
+
                 } else {
+
                     last_action_succeeded = true;
+
                 }
+
             }
+
             LuaAction::DeleteMessage { .. } => {
+
                 if let Err(err) = execute_action(ctx, state, module_id, &origin, &action).await {
+
                     last_action_succeeded = false;
+
                     message_delete_failed = true;
+
                     tracing::warn!(
+
                         error = %err,
+
                         module_id,
+
                         ?action,
+
                         "Błąd lub odmowa wykonania akcji zdarzenia"
+
                     );
+
                     let _ = audit_action(
+
                         state,
+
                         &origin,
+
                         module_id,
+
                         "action_denied",
+
                         serde_json::json!({
+
                             "module_id": module_id,
+
                             "action": format!("{action:?}"),
+
                             "error": err.to_string(),
+
                         }),
+
                     )
+
                     .await;
+
                 } else {
+
                     last_action_succeeded = true;
+
                 }
+
             }
+
             _ => {
+
                 if let Err(err) = execute_action(ctx, state, module_id, &origin, &action).await {
+
                     last_action_succeeded = false;
+
                     tracing::warn!(
+
                         error = %err,
+
                         module_id,
+
                         ?action,
+
                         "Błąd lub odmowa wykonania akcji zdarzenia"
+
                     );
+
                     let _ = audit_action(
+
                         state,
+
                         &origin,
+
                         module_id,
+
                         "action_denied",
+
                         serde_json::json!({
+
                             "module_id": module_id,
+
                             "action": format!("{action:?}"),
+
                             "error": err.to_string(),
+
                         }),
+
                     )
+
                     .await;
+
                 } else {
+
                     last_action_succeeded = true;
+
                 }
+
             }
+
         }
+
     }
 
+
+
     Ok(())
+
 }
+
+
 
 fn action_rate_limit_scope(action: &LuaAction) -> Option<&'static str> {
+
     match action {
+
         LuaAction::Ticket {
+
             operation: crate::lua::TicketOperation::Open { .. },
+
         } => Some("ticket_create"),
+
         LuaAction::Scheduler {
+
             operation: crate::lua::SchedulerOperation::Create { .. },
+
         } => Some("scheduler_create"),
+
         LuaAction::Music {
+
             operation: crate::lua::MusicOperation::Play,
+
             ..
+
         } => Some("music_play"),
+
         LuaAction::BanMember { .. }
+
         | LuaAction::KickMember { .. }
+
         | LuaAction::TimeoutMember { .. }
+
         | LuaAction::DeleteMessage { .. }
+
         | LuaAction::Purge { .. }
+
         | LuaAction::ModerationCase { .. } => Some("destructive_admin"),
+
         _ => None,
+
     }
+
 }
+
+
 
 async fn execute_action(
+
     ctx: &Context,
+
     state: &AppState,
+
     module_id: &str,
+
     origin: &ActionOrigin,
+
     action: &LuaAction,
+
 ) -> Result<Option<String>> {
+
     // Action-level rate limits apply to interactive commands, exempting automated system/event actions
+
     if origin.enforce_actor_permissions
+
         && let Some(scope) = action_rate_limit_scope(action)
+
         && let Some(actor_id) = origin.actor_id
+
     {
+
         let guild_id_str = origin.guild_id.map(|g| g.get().to_string());
+
         let decision = state.rate_limiter.check_action(
+
             scope,
+
             &actor_id.get().to_string(),
+
             guild_id_str.as_deref(),
+
         );
+
         if !decision.allowed {
+
             state
+
                 .metrics
+
                 .rate_limit_throttled_total
+
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
             return Err(anyhow!(
+
                 "Przekroczono limit dla operacji `{scope}` (odczekaj {} s)",
+
                 decision.reset_after.as_secs().max(1)
+
             ));
+
         }
+
     }
+
+
 
     if let Some(required) = required_permission(action) {
+
         if origin.enforce_actor_permissions && !has_permission(origin.actor_permissions, required) {
+
             return Err(anyhow!(
+
                 "wywołujący nie ma wymaganych uprawnień: {required:?}"
+
             ));
+
         }
+
         if origin.enforce_actor_permissions && !has_permission(origin.app_permissions, required) {
+
             return Err(anyhow!("bot nie ma wymaganych uprawnień: {required:?}"));
+
         }
+
     }
 
+
+
     match action {
+
         LuaAction::Reply { .. } => Ok(None),
+
         LuaAction::SendMessage {
+
             channel_id,
+
             content,
+
         } => {
+
             let channel_id = resolve_and_validate_channel(
+
                 ctx,
+
                 origin,
+
                 channel_id.as_deref(),
+
                 ChannelPurpose::SendMessage,
+
             )
+
             .await?;
+
             send_message(ctx, channel_id, content).await?;
+
             Ok(None)
+
         }
+
         LuaAction::SendDirectMessage { user_id, content } => {
+
             let target_user = UserId::new(parse_snowflake(user_id)?);
+
             match target_user.create_dm_channel(&ctx.http).await {
+
                 Ok(dm_channel) => {
+
                     if let Err(err) = dm_channel
+
                         .send_message(
+
                             &ctx.http,
+
                             CreateMessage::new()
+
                                 .content(content)
+
                                 .allowed_mentions(CreateAllowedMentions::new()),
+
                         )
+
                         .await
+
                     {
+
                         tracing::warn!(
+
                             user_id = %user_id,
+
                             error = %err,
+
                             "Failed to deliver direct message"
+
                         );
+
                         anyhow::bail!(
+
                             "nie udało się dostarczyć wiadomości prywatnej do {user_id}: {err}"
+
                         );
+
                     } else {
+
                         audit_action(
+
                             state,
+
                             origin,
+
                             module_id,
+
                             "send_direct_message",
+
                             serde_json::json!({
+
                                 "target_user_id": user_id,
+
                             }),
+
                         )
+
                         .await?;
+
                     }
+
                 }
+
                 Err(err) => {
+
                     tracing::warn!(
+
                         user_id = %user_id,
+
                         error = %err,
+
                         "Failed to create DM channel"
+
                     );
+
                     anyhow::bail!("nie udało się otworzyć kanału prywatnego do {user_id}: {err}");
+
                 }
+
             }
+
             Ok(None)
+
         }
+
         LuaAction::DeleteMessage {
+
             channel_id,
+
             message_id,
+
         } => {
+
             let channel_id = resolve_and_validate_channel(
+
                 ctx,
+
                 origin,
+
                 Some(channel_id.as_str()),
+
                 ChannelPurpose::ManageMessages,
+
             )
+
             .await?;
+
             channel_id
+
                 .delete_message(&ctx.http, MessageId::new(parse_snowflake(message_id)?))
+
                 .await?;
+
             Ok(None)
+
         }
+
         LuaAction::TimeoutMember {
+
             user_id,
+
             seconds,
+
             reason,
+
         } => {
+
             let guild_id = require_guild(origin)?;
+
             let target_id = UserId::new(parse_snowflake(user_id)?);
+
             let authorizing_actor = if origin.enforce_actor_permissions {
+
                 origin.actor_id
+
             } else {
+
                 None
+
             };
+
             ensure_member_hierarchy(ctx, guild_id, authorizing_actor, target_id).await?;
+
             let until = (Utc::now() + Duration::seconds(i64::try_from(*seconds)?)).to_rfc3339();
+
             guild_id
+
                 .edit_member(
+
                     &ctx.http,
+
                     target_id,
+
                     EditMember::new().disable_communication_until(until),
+
                 )
+
                 .await?;
+
             audit_action(
+
                 state,
+
                 origin,
+
                 module_id,
+
                 "timeout_member",
+
                 serde_json::json!({
+
                     "target_user_id": user_id,
+
                     "seconds": seconds,
+
                     "reason": reason,
+
                 }),
+
             )
+
             .await?;
+
             Ok(None)
+
         }
+
         LuaAction::KickMember { user_id, reason } => {
+
             let guild_id = require_guild(origin)?;
+
             let target_id = UserId::new(parse_snowflake(user_id)?);
+
             let authorizing_actor = if origin.enforce_actor_permissions {
+
                 origin.actor_id
+
             } else {
+
                 None
+
             };
+
             ensure_member_hierarchy(ctx, guild_id, authorizing_actor, target_id).await?;
+
             guild_id
+
                 .kick_with_reason(
+
                     &ctx.http,
+
                     target_id,
+
                     reason.as_deref().unwrap_or("Rusty Discord Bot Lua module"),
+
                 )
+
                 .await?;
+
             audit_action(
+
                 state,
+
                 origin,
+
                 module_id,
+
                 "kick_member",
+
                 serde_json::json!({
+
                     "target_user_id": user_id,
+
                     "reason": reason,
+
                 }),
+
             )
+
             .await?;
+
             Ok(None)
+
         }
+
         LuaAction::BanMember {
+
             user_id,
+
             delete_message_days,
+
             reason,
+
         } => {
+
             let guild_id = require_guild(origin)?;
+
             let target_id = UserId::new(parse_snowflake(user_id)?);
+
             let authorizing_actor = if origin.enforce_actor_permissions {
+
                 origin.actor_id
+
             } else {
+
                 None
+
             };
+
             ensure_member_hierarchy(ctx, guild_id, authorizing_actor, target_id).await?;
+
             guild_id
+
                 .ban_with_reason(
+
                     &ctx.http,
+
                     target_id,
+
                     *delete_message_days,
+
                     reason.as_deref().unwrap_or("Rusty Discord Bot Lua module"),
+
                 )
+
                 .await?;
+
             audit_action(
+
                 state,
+
                 origin,
+
                 module_id,
+
                 "ban_member",
+
                 serde_json::json!({
+
                     "target_user_id": user_id,
+
                     "delete_message_days": delete_message_days,
+
                     "reason": reason,
+
                 }),
+
             )
+
             .await?;
+
             Ok(None)
+
         }
+
         LuaAction::AddRole {
+
             user_id,
+
             role_id,
+
             reason,
+
         } => {
+
             let guild_id = require_guild(origin)?;
+
             let user_id = UserId::new(parse_snowflake(user_id)?);
+
             let role_id = RoleId::new(parse_snowflake(role_id)?);
+
             if origin.enforce_actor_permissions {
+
                 ensure_member_hierarchy(ctx, guild_id, origin.actor_id, user_id).await?;
+
                 ensure_role_hierarchy(ctx, guild_id, origin.actor_id, role_id).await?;
+
             } else {
+
                 ensure_role_hierarchy(ctx, guild_id, None, role_id).await?;
+
             }
+
             let member = guild_id.member(&ctx.http, user_id).await?;
+
             member.add_role(&ctx.http, role_id).await?;
+
             audit_action(
+
                 state,
+
                 origin,
+
                 module_id,
+
                 "add_role",
+
                 serde_json::json!({
+
                     "target_user_id": user_id,
+
                     "role_id": role_id,
+
                     "reason": reason,
+
                 }),
+
             )
+
             .await?;
+
             Ok(None)
+
         }
+
         LuaAction::RemoveRole {
+
             user_id,
+
             role_id,
+
             reason,
+
         } => {
+
             let guild_id = require_guild(origin)?;
+
             let user_id = UserId::new(parse_snowflake(user_id)?);
+
             let role_id = RoleId::new(parse_snowflake(role_id)?);
+
             if origin.enforce_actor_permissions {
+
                 ensure_member_hierarchy(ctx, guild_id, origin.actor_id, user_id).await?;
+
                 ensure_role_hierarchy(ctx, guild_id, origin.actor_id, role_id).await?;
+
             } else {
+
                 ensure_role_hierarchy(ctx, guild_id, None, role_id).await?;
+
             }
+
             let member = guild_id.member(&ctx.http, user_id).await?;
+
             member.remove_role(&ctx.http, role_id).await?;
+
             audit_action(
+
                 state,
+
                 origin,
+
                 module_id,
+
                 "remove_role",
+
                 serde_json::json!({
+
                     "target_user_id": user_id,
+
                     "role_id": role_id,
+
                     "reason": reason,
+
                 }),
+
             )
+
             .await?;
+
             Ok(None)
+
         }
+
         LuaAction::Purge { channel_id, amount } => {
+
             let channel_id = resolve_and_validate_channel(
+
                 ctx,
+
                 origin,
+
                 channel_id.as_deref(),
+
                 ChannelPurpose::ManageMessages,
+
             )
+
             .await?;
+
             let messages = channel_id
+
                 .messages(&ctx.http, GetMessages::new().limit(*amount))
+
                 .await?;
+
             let message_ids = messages
+
                 .iter()
+
                 .map(|message| message.id)
+
                 .collect::<Vec<_>>();
+
             if message_ids.len() == 1 {
+
                 channel_id.delete_message(&ctx.http, message_ids[0]).await?;
+
             } else if !message_ids.is_empty() {
+
                 channel_id.delete_messages(&ctx.http, message_ids).await?;
+
             }
+
             audit_action(
+
                 state,
+
                 origin,
+
                 module_id,
+
                 "purge",
+
                 serde_json::json!({
+
                     "channel_id": channel_id,
+
                     "requested_amount": amount,
+
                     "deleted_amount": messages.len(),
+
                 }),
+
             )
+
             .await?;
+
             Ok(None)
+
         }
+
         LuaAction::Music { operation, query } => {
+
             let guild_id = require_guild(origin)?;
+
             let actor_id = origin
+
                 .actor_id
+
                 .ok_or_else(|| anyhow!("music actions require a user context"))?;
+
             let status =
+
                 music::execute(ctx, state, guild_id, actor_id, *operation, query.as_deref())
+
                     .await?;
+
             audit_action(
+
                 state,
+
                 origin,
+
                 module_id,
+
                 "music",
+
                 serde_json::json!({
+
                     "operation": operation,
+
                     "query": query,
+
                 }),
+
             )
+
             .await?;
+
             Ok(Some(status))
+
         }
+
         LuaAction::Progression { operation } => {
+
             progression::execute(
+
                 ctx,
+
                 state,
+
                 module_id,
+
                 progression::ProgressionExecutionContext::new(
+
                     origin.guild_id,
+
                     origin.channel_id,
+
                     origin.actor_id,
+
                     origin.actor_permissions,
+
                     origin.enforce_actor_permissions,
+
                 ),
+
                 operation,
+
             )
+
             .await
+
         }
+
         LuaAction::Scheduler { operation } => {
+
             scheduler::execute(
+
                 ctx,
+
                 state,
+
                 module_id,
+
                 scheduler::SchedulerExecutionContext::new(
+
                     origin.guild_id,
+
                     origin.channel_id,
+
                     origin.actor_id,
+
                     origin.actor_permissions,
+
                     origin.enforce_actor_permissions,
+
                 ),
+
                 operation,
+
             )
+
             .await
+
         }
+
         LuaAction::Ticket { operation } => {
+
             tickets::execute(
+
                 ctx,
+
                 state,
+
                 module_id,
+
                 tickets::TicketExecutionContext::new(
+
                     origin.guild_id,
+
                     origin.channel_id,
+
                     origin.actor_id,
+
                     origin.actor_permissions,
+
                     origin.app_permissions,
+
                     origin.enforce_actor_permissions,
+
                 ),
+
                 operation,
+
             )
+
             .await
+
         }
+
         LuaAction::ModerationCase { operation } => {
+
             moderation_cases::execute(
+
                 ctx,
+
                 state,
+
                 module_id,
+
                 moderation_cases::ModerationExecutionContext::new(
+
                     origin.guild_id,
+
                     origin.channel_id,
+
                     origin.actor_id,
+
                     origin.actor_permissions,
+
                     origin.app_permissions,
+
                     origin.enforce_actor_permissions,
+
                 ),
+
                 operation,
+
             )
+
             .await
+
         }
+
         LuaAction::Audit { event, data } => {
+
             state
+
                 .storage
+
                 .record_audit(
+
                     origin.guild_id.map(|id| id.get().to_string()).as_deref(),
+
                     origin.actor_id.map(|id| id.get().to_string()).as_deref(),
+
                     module_id,
+
                     event,
+
                     serde_json::to_value(data)?,
+
                 )
+
                 .await?;
+
             if let Some(gid) = origin.guild_id {
+
                 let _ = state.guild_events.send(crate::state::GuildRealtimeEvent {
+
                     guild_id: gid.get().to_string(),
+
                     event_type: "audit_entry".to_string(),
+
                     payload: serde_json::json!({
+
                         "module_id": module_id,
+
                         "event": event,
+
                     }),
+
                 });
+
             }
+
             Ok(None)
+
         }
+
     }
+
 }
+
+
 
 async fn send_message(ctx: &Context, channel_id: ChannelId, content: &str) -> Result<()> {
+
     channel_id
+
         .send_message(
+
             &ctx.http,
+
             CreateMessage::new()
+
                 .content(content)
+
                 .allowed_mentions(CreateAllowedMentions::new()),
+
         )
+
         .await?;
+
     Ok(())
+
 }
+
+
 
 fn required_permission(action: &LuaAction) -> Option<Permissions> {
+
     match action {
+
         LuaAction::DeleteMessage { .. } | LuaAction::Purge { .. } => {
+
             Some(Permissions::MANAGE_MESSAGES)
+
         }
+
         LuaAction::TimeoutMember { .. } => Some(Permissions::MODERATE_MEMBERS),
+
         LuaAction::KickMember { .. } => Some(Permissions::KICK_MEMBERS),
+
         LuaAction::BanMember { .. } => Some(Permissions::BAN_MEMBERS),
+
         LuaAction::AddRole { .. } | LuaAction::RemoveRole { .. } => Some(Permissions::MANAGE_ROLES),
+
         _ => None,
+
     }
+
 }
+
+
 
 fn has_permission(actual: Permissions, required: Permissions) -> bool {
+
     actual.contains(Permissions::ADMINISTRATOR) || actual.contains(required)
+
 }
+
+
 
 fn require_guild(origin: &ActionOrigin) -> Result<GuildId> {
+
     origin
+
         .guild_id
+
         .ok_or_else(|| anyhow!("this action can only be performed on a server"))
+
 }
+
+
 
 pub async fn resolve_and_validate_channel(
+
     ctx: &Context,
+
     origin: &ActionOrigin,
+
     channel_value: Option<&str>,
+
     purpose: ChannelPurpose,
+
 ) -> Result<ChannelId> {
+
     let channel_id = match channel_value {
+
         Some(value) => ChannelId::new(parse_snowflake(value)?),
+
         None => origin
+
             .channel_id
+
             .ok_or_else(|| anyhow!("missing channel for this action"))?,
+
     };
+
+
 
     let channel = channel_id
+
         .to_channel(ctx)
+
         .await
+
         .with_context(|| format!("cannot read data for channel {channel_id}"))?;
 
+
+
     match channel {
+
         serenity::model::channel::Channel::Guild(guild_channel) => {
+
             if let Some(expected_guild_id) = origin.guild_id
+
                 && guild_channel.guild_id != expected_guild_id
+
             {
+
                 return Err(anyhow!(
+
                     "target channel {channel_id} belongs to a different server {}",
+
                     guild_channel.guild_id
+
                 ));
+
             }
+
+
 
             match purpose {
+
                 ChannelPurpose::SendMessage => {
+
                     if guild_channel.kind == ChannelType::Category {
+
                         return Err(anyhow!("channel categories cannot be the target of messages"));
+
                     }
+
                 }
+
                 ChannelPurpose::ManageMessages => {
+
                     if guild_channel.kind == ChannelType::Category {
+
                         return Err(anyhow!(
+
                             "channel categories cannot be the target of message deletions"
+
                         ));
+
                     }
+
                 }
+
             }
+
+
 
             if origin.enforce_actor_permissions {
+
                 let mut perms = origin.actor_permissions;
-                if !perms.contains(Permissions::ADMINISTRATOR)
-                    && let Some(actor_id) = origin.actor_id
-                {
-                    for overwrite in &guild_channel.permission_overwrites {
-                        match overwrite.kind {
-                            serenity::all::PermissionOverwriteType::Role(role_id) => {
-                                if role_id.get() == guild_channel.guild_id.get() {
-                                    perms.remove(overwrite.deny);
-                                    perms.insert(overwrite.allow);
+
+                if !perms.contains(Permissions::ADMINISTRATOR) {
+
+                    if let Some(actor_id) = origin.actor_id {
+
+                        let mut role_deny = Permissions::empty();
+
+                        let mut role_allow = Permissions::empty();
+
+                        let mut member_deny = Permissions::empty();
+
+                        let mut member_allow = Permissions::empty();
+
+
+
+                        for overwrite in &guild_channel.permission_overwrites {
+
+                            match overwrite.kind {
+
+                                serenity::all::PermissionOverwriteType::Role(role_id) => {
+
+                                    if role_id.get() == guild_channel.guild_id.get() {
+
+                                        perms.remove(overwrite.deny);
+
+                                        perms.insert(overwrite.allow);
+
+                                    } else if origin.actor_roles.contains(&role_id) {
+
+                                        role_deny.insert(overwrite.deny);
+
+                                        role_allow.insert(overwrite.allow);
+
+                                    }
+
                                 }
+
+                                serenity::all::PermissionOverwriteType::Member(user_id)
+
+                                    if user_id.get() == actor_id.get() =>
+
+                                {
+
+                                    member_deny.insert(overwrite.deny);
+
+                                    member_allow.insert(overwrite.allow);
+
+                                }
+
+                                _ => {}
+
                             }
-                            serenity::all::PermissionOverwriteType::Member(user_id)
-                                if user_id.get() == actor_id.get() =>
-                            {
-                                perms.remove(overwrite.deny);
-                                perms.insert(overwrite.allow);
-                            }
-                            _ => {}
+
                         }
+
+                        perms.remove(role_deny);
+
+                        perms.insert(role_allow);
+
+                        perms.remove(member_deny);
+
+                        perms.insert(member_allow);
+
                     }
+
                 }
+
+
 
                 match purpose {
+
                     ChannelPurpose::SendMessage => {
-                        if !perms.contains(Permissions::SEND_MESSAGES) {
+
+                        if !perms.contains(Permissions::SEND_MESSAGES)
+
+                            || (origin.actor_permissions.contains(Permissions::VIEW_CHANNEL) && !perms.contains(Permissions::VIEW_CHANNEL))
+
+                        {
+
                             return Err(anyhow!(
+
                                 "missing user permissions to send messages in channel {channel_id}"
+
                             ));
+
                         }
+
                     }
+
                     ChannelPurpose::ManageMessages => {
-                        if !perms.contains(Permissions::MANAGE_MESSAGES) {
+
+                        if !perms.contains(Permissions::MANAGE_MESSAGES)
+
+                            || (origin.actor_permissions.contains(Permissions::VIEW_CHANNEL) && !perms.contains(Permissions::VIEW_CHANNEL))
+
+                        {
+
                             return Err(anyhow!(
+
                                 "missing user permissions to manage messages in channel {channel_id}"
+
                             ));
+
                         }
+
                     }
+
                 }
+
             }
+
+
 
             Ok(guild_channel.id)
+
         }
+
         serenity::model::channel::Channel::Private(private_channel) => {
+
             if origin.guild_id.is_some() {
+
                 return Err(anyhow!(
+
                     "private channel {channel_id} does not belong to this server"
+
                 ));
+
             }
+
             Ok(private_channel.id)
+
         }
+
         _ => Err(anyhow!("unsupported channel type {channel_id}")),
+
     }
+
 }
+
+
 
 pub(crate) fn parse_snowflake(value: &str) -> Result<u64> {
+
     let parsed = value
+
         .parse::<u64>()
+
         .with_context(|| format!("{value:?} is not a valid Discord identifier"))?;
+
     if parsed == 0 {
+
         return Err(anyhow!("Discord identifier cannot be zero"));
+
     }
+
     Ok(parsed)
+
 }
+
+
 
 pub async fn ensure_member_hierarchy(
+
     ctx: &Context,
+
     guild_id: GuildId,
+
     actor_id: Option<UserId>,
+
     target_id: UserId,
+
 ) -> Result<()> {
+
     let guild = guild_id.to_partial_guild(&ctx.http).await?;
+
     if target_id == guild.owner_id {
+
         return Err(anyhow!("the server owner cannot be moderated"));
+
     }
+
+
 
     let target = guild_id.member(&ctx.http, target_id).await?;
+
     let bot_id = {
+
         let id = ctx.cache.current_user().id;
+
         if id.get() == 0 {
+
             ctx.http
+
                 .get_current_user()
+
                 .await
+
                 .map(|u| u.id)
+
                 .unwrap_or(id)
+
         } else {
+
             id
+
         }
+
     };
+
     let bot = guild_id.member(&ctx.http, bot_id).await?;
+
     let target_rank = member_rank(&target, &guild.roles);
+
     let bot_rank = member_rank(&bot, &guild.roles);
 
+
+
     if !rank_is_higher(bot_rank, target_rank) {
+
         return Err(anyhow!(
+
             "the bot's highest role must be higher than the target member's role"
+
         ));
+
     }
+
+
 
     if let Some(actor_id) = actor_id {
+
         if actor_id == target_id {
+
             return Err(anyhow!("you cannot perform this action on yourself"));
+
         }
+
         if actor_id != guild.owner_id {
+
             let actor = guild_id.member(&ctx.http, actor_id).await?;
+
             if !rank_is_higher(member_rank(&actor, &guild.roles), target_rank) {
+
                 return Err(anyhow!(
+
                     "your highest role must be higher than the target member's role"
+
                 ));
+
             }
+
         }
+
     }
 
+
+
     Ok(())
+
 }
+
+
 
 async fn ensure_role_hierarchy(
+
     ctx: &Context,
+
     guild_id: GuildId,
+
     actor_id: Option<UserId>,
+
     role_id: RoleId,
+
 ) -> Result<()> {
+
     let guild = guild_id.to_partial_guild(&ctx.http).await?;
+
     let role = guild
+
         .roles
+
         .get(&role_id)
+
         .ok_or_else(|| anyhow!("role does not exist on this server"))?;
+
     if role.managed {
+
         return Err(anyhow!(
+
             "managed roles cannot be manually modified"
+
         ));
+
     }
+
     let target_rank = role_rank(role);
 
+
+
     let bot_id = {
+
         let id = ctx.cache.current_user().id;
+
         if id.get() == 0 {
+
             ctx.http
+
                 .get_current_user()
+
                 .await
+
                 .map(|u| u.id)
+
                 .unwrap_or(id)
+
         } else {
+
             id
+
         }
+
     };
+
     let bot = guild_id.member(&ctx.http, bot_id).await?;
+
     if !rank_is_higher(member_rank(&bot, &guild.roles), target_rank) {
+
         return Err(anyhow!(
+
             "the bot's highest role must be above the managed role"
+
         ));
+
     }
+
+
 
     if let Some(actor_id) = actor_id
+
         && actor_id != guild.owner_id
+
     {
+
         let actor = guild_id.member(&ctx.http, actor_id).await?;
+
         if !rank_is_higher(member_rank(&actor, &guild.roles), target_rank) {
+
             return Err(anyhow!(
+
                 "twoja najwyższa rola musi znajdować się nad zarządzaną rolą"
+
             ));
+
         }
+
     }
 
+
+
     Ok(())
+
 }
+
+
 
 fn member_rank(member: &Member, roles: &HashMap<RoleId, Role>) -> (u16, u64) {
+
     member
+
         .roles
+
         .iter()
+
         .filter_map(|role_id| roles.get(role_id))
+
         .map(role_rank)
+
         .max_by(|left, right| compare_rank(*left, *right))
+
         .unwrap_or((0, member.guild_id.get()))
+
 }
+
+
 
 fn role_rank(role: &Role) -> (u16, u64) {
+
     (role.position, role.id.get())
+
 }
+
+
 
 fn rank_is_higher(left: (u16, u64), right: (u16, u64)) -> bool {
+
     compare_rank(left, right).is_gt()
+
 }
+
+
 
 fn compare_rank(left: (u16, u64), right: (u16, u64)) -> std::cmp::Ordering {
+
     left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1))
+
 }
 
+
+
 async fn audit_action(
+
     state: &AppState,
+
     origin: &ActionOrigin,
+
     module_id: &str,
+
     event: &str,
+
     data: serde_json::Value,
+
 ) -> Result<()> {
+
     let guild_id = origin.guild_id.map(|id| id.get().to_string());
+
     let actor_id = origin.actor_id.map(|id| id.get().to_string());
+
     state
+
         .storage
+
         .record_audit(
+
             guild_id.as_deref(),
+
             actor_id.as_deref(),
+
             module_id,
+
             event,
+
             data,
+
         )
+
         .await?;
+
     if let Some(ref gid) = guild_id {
+
         let _ = state.guild_events.send(crate::state::GuildRealtimeEvent {
+
             guild_id: gid.clone(),
+
             event_type: "audit_entry".to_string(),
+
             payload: serde_json::json!({
+
                 "module_id": module_id,
+
                 "event": event,
+
             }),
+
         });
+
     }
+
     Ok(())
+
 }
+

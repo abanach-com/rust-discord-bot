@@ -128,29 +128,10 @@ pub async fn complete_provider_callback(
         return Err(ApiError::bad_request("Missing code or state"));
     }
 
-    let conn = IntegrationConnection {
-        id: Uuid::new_v4(),
-        guild_id: guild_id.clone(),
-        provider: provider.clone(),
-        provider_account_id: Some(format!("{}_acc_{}", provider, Uuid::new_v4().simple())),
-        access_token: Some(format!("token_{}", Uuid::new_v4().simple())),
-        refresh_token: Some(format!("refresh_{}", Uuid::new_v4().simple())),
-        token_expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
-        scopes: json!(["read", "events"]),
-        metadata: json!({"connected_by": session.user.id}),
-        enabled: true,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-    };
-
-    let saved = state
-        .app
-        .storage
-        .upsert_integration_connection(conn)
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-
-    Ok(Json(saved))
+    // Explicit rejection until provider adapter is fully configured (Issue #112)
+    Err(ApiError::bad_request(format!(
+        "OAuth dostawcy {provider} nie jest jeszcze skonfigurowany"
+    )))
 }
 
 pub async fn disconnect_provider(
@@ -199,6 +180,12 @@ pub async fn handle_inbound_webhook(
     headers: HeaderMap,
     body: String,
 ) -> Result<Json<Value>, ApiError> {
+    let provider = provider.to_ascii_lowercase();
+    match provider.as_str() {
+        "github" | "twitch" | "telegram" | "gitlab" | "kick" | "vk" => {}
+        _ => return Err(ApiError::not_found("Unknown webhook provider")),
+    }
+
     let raw_bytes = body.as_bytes();
 
     // Provider-specific raw signature verification
@@ -213,13 +200,26 @@ pub async fn handle_inbound_webhook(
             }
         }
         "twitch" => {
+            let message_id = headers
+                .get("Twitch-Eventsub-Message-Id")
+                .and_then(|h| h.to_str().ok())
+                .unwrap_or_default();
+            let timestamp = headers
+                .get("Twitch-Eventsub-Message-Timestamp")
+                .and_then(|h| h.to_str().ok())
+                .unwrap_or_default();
             let sig = headers
                 .get("Twitch-Eventsub-Message-Signature")
                 .and_then(|h| h.to_str().ok())
                 .ok_or_else(|| {
                     ApiError::unauthorized("Missing Twitch EventSub signature header")
                 })?;
-            if !verify_hmac_sha256("test-twitch-secret", raw_bytes, sig) {
+            let signed = if !message_id.is_empty() && !timestamp.is_empty() {
+                [message_id.as_bytes(), timestamp.as_bytes(), raw_bytes].concat()
+            } else {
+                raw_bytes.to_vec()
+            };
+            if !verify_hmac_sha256("test-twitch-secret", &signed, sig) {
                 return Err(ApiError::unauthorized("Invalid Twitch signature"));
             }
         }
@@ -264,16 +264,44 @@ pub async fn handle_inbound_webhook(
     let payload: Value =
         serde_json::from_str(&body).map_err(|_| ApiError::bad_request("Malformed JSON payload"))?;
 
-    let event_id = payload
-        .get("event_id")
-        .or_else(|| payload.get("id"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("evt_default");
+    // Extract provider delivery ID without falling back to static evt_default (Issues #114, #115)
+    let event_id: String = match provider.as_str() {
+        "github" => headers
+            .get("X-GitHub-Delivery")
+            .and_then(|h| h.to_str().ok())
+            .or_else(|| payload.get("event_id").or_else(|| payload.get("id")).and_then(|v| v.as_str()))
+            .ok_or_else(|| ApiError::bad_request("Missing GitHub delivery ID"))?
+            .to_string(),
+        "twitch" => headers
+            .get("Twitch-Eventsub-Message-Id")
+            .and_then(|h| h.to_str().ok())
+            .or_else(|| payload.get("event_id").or_else(|| payload.get("id")).and_then(|v| v.as_str()))
+            .ok_or_else(|| ApiError::bad_request("Missing Twitch EventSub message ID"))?
+            .to_string(),
+        "telegram" => payload
+            .get("update_id")
+            .map(|v| if let Some(n) = v.as_i64() { n.to_string() } else { v.as_str().unwrap_or_default().to_string() })
+            .filter(|s| !s.is_empty())
+            .or_else(|| payload.get("event_id").or_else(|| payload.get("id")).and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .ok_or_else(|| ApiError::bad_request("Missing Telegram update_id"))?,
+        "gitlab" => headers
+            .get("X-Gitlab-Event-UUID")
+            .and_then(|h| h.to_str().ok())
+            .or_else(|| payload.get("event_id").or_else(|| payload.get("id")).and_then(|v| v.as_str()))
+            .ok_or_else(|| ApiError::bad_request("Missing GitLab event UUID"))?
+            .to_string(),
+        _ => payload
+            .get("event_id")
+            .or_else(|| payload.get("id"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ApiError::bad_request(format!("Missing event_id for {provider}")))?
+            .to_string(),
+    };
 
     let is_first = state
         .app
         .storage
-        .check_and_record_event_dedupe(&provider, event_id)
+        .check_and_record_event_dedupe(&provider, &event_id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
@@ -286,7 +314,7 @@ pub async fn handle_inbound_webhook(
         })));
     }
 
-    // Record delivery log
+    // Record delivery log and check error properly (Issue #116)
     let log = IntegrationDeliveryLog {
         id: Uuid::new_v4(),
         guild_id: "global".to_string(),
@@ -301,7 +329,12 @@ pub async fn handle_inbound_webhook(
         payload_summary: json!({"event_id": event_id}),
         created_at: Utc::now(),
     };
-    let _ = state.app.storage.record_delivery_log(log).await;
+    state
+        .app
+        .storage
+        .record_delivery_log(log)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(Json(json!({
         "status": "processed",
@@ -471,7 +504,7 @@ pub async fn join_steam_lfg(
     let updated = state
         .app
         .storage
-        .join_steam_lfg_post(post_id, &session.user.id)
+        .join_steam_lfg_post(&guild_id, post_id, &session.user.id)
         .await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
@@ -651,6 +684,10 @@ pub async fn dry_run_workflow(
         .map_err(|e| ApiError::internal(e.to_string()))?
         .ok_or_else(|| ApiError::not_found("Workflow not found"))?;
 
+    if wf.guild_id != guild_id {
+        return Err(ApiError::not_found("Workflow not found"));
+    }
+
     Ok(Json(json!({
         "workflow_id": wf.id,
         "name": wf.name,
@@ -750,7 +787,7 @@ pub async fn approve_social_draft(
     let approved = state
         .app
         .storage
-        .approve_social_draft(draft_id, &session.user.id)
+        .approve_social_draft(&guild_id, draft_id, &session.user.id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
         .ok_or_else(|| ApiError::not_found("Draft not found"))?;
@@ -796,12 +833,25 @@ pub async fn record_ai_usage(
     verify_csrf(&headers, &session)?;
     ensure_guild_access(&state, &session, &guild_id).await?;
 
+    if payload.tokens < 0 || payload.usd < 0.0 {
+        return Err(ApiError::bad_request("tokens and usd must be non-negative"));
+    }
+
     let updated = state
         .app
         .storage
         .record_ai_usage(&guild_id, payload.tokens, payload.usd)
         .await
-        .map_err(|e| ApiError::too_many_requests(e.to_string()))?;
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("exceeded") || msg.contains("limit") || msg.contains("halted") {
+                ApiError::too_many_requests(msg)
+            } else if msg.contains("must be non-negative") {
+                ApiError::bad_request(msg)
+            } else {
+                ApiError::internal(msg)
+            }
+        })?;
 
     Ok(Json(updated))
 }
@@ -861,10 +911,24 @@ pub async fn search_ai_knowledge(
     let (_, session) = authenticate(&state, &headers).await?;
     ensure_guild_access(&state, &session, &guild_id).await?;
 
+    let is_admin_or_owner = session
+        .guilds
+        .iter()
+        .find(|g| g.id == guild_id)
+        .map(|g| g.owner || (g.permissions.parse::<u64>().unwrap_or(0) & 0x8) != 0)
+        .unwrap_or(false);
+
+    // Non-admin/non-owner users cannot claim arbitrary channel ACLs to bypass access controls (Issue #118)
+    let effective_channels = if is_admin_or_owner {
+        payload.user_channels
+    } else {
+        Vec::new()
+    };
+
     let results = state
         .app
         .storage
-        .search_ai_documents(&guild_id, &payload.user_channels, &payload.query)
+        .search_ai_documents(&guild_id, &effective_channels, &payload.query)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
@@ -899,6 +963,42 @@ pub struct PublishPackageRequest {
     pub raw_content_base64: Option<String>,
 }
 
+fn decode_base64_strict(input: &str) -> Result<Vec<u8>, &'static str> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut table = [0xFFu8; 256];
+    for (i, c) in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".iter().enumerate() {
+        table[*c as usize] = i as u8;
+    }
+    let bytes = input.as_bytes();
+    if bytes.len() % 4 != 0 {
+        return Err("Invalid base64 length");
+    }
+    let mut out = Vec::with_capacity((bytes.len() / 4) * 3);
+    for chunk in bytes.chunks(4) {
+        let b0 = table[chunk[0] as usize];
+        let b1 = table[chunk[1] as usize];
+        if b0 == 0xFF || b1 == 0xFF {
+            return Err("Invalid base64 character");
+        }
+        let b2 = if chunk[2] == b'=' { 0 } else { table[chunk[2] as usize] };
+        let b3 = if chunk[3] == b'=' { 0 } else { table[chunk[3] as usize] };
+        if (chunk[2] != b'=' && b2 == 0xFF) || (chunk[3] != b'=' && b3 == 0xFF) {
+            return Err("Invalid base64 character");
+        }
+        out.push((b0 << 2) | (b1 >> 4));
+        if chunk[2] != b'=' {
+            out.push((b1 << 4) | (b2 >> 2));
+            if chunk[3] != b'=' {
+                out.push((b2 << 6) | b3);
+            }
+        }
+    }
+    Ok(out)
+}
+
 pub async fn publish_marketplace_package(
     State(state): State<WebState>,
     headers: HeaderMap,
@@ -907,9 +1007,30 @@ pub async fn publish_marketplace_package(
     let (_, session) = authenticate(&state, &headers).await?;
     verify_csrf(&headers, &session)?;
 
-    // If raw content is provided, verify SHA-256
+    // Check if package already exists: must not overwrite another author's package or existing version (Issue #117)
+    let packages = state
+        .app
+        .storage
+        .list_marketplace_packages()
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    if let Some(existing) = packages.iter().find(|p| p.plugin_id == payload.plugin_id) {
+        if existing.author != session.user.id && existing.author != payload.author {
+            return Err(ApiError::forbidden(
+                "You cannot modify a package published by another author",
+            ));
+        }
+        if existing.version == payload.version {
+            return Err(ApiError::bad_request("Package version already exists"));
+        }
+    }
+
+    // Strict base64 decoding and hash verification (Issue #117)
     if let Some(ref raw_b64) = payload.raw_content_base64 {
-        let bytes = hex::decode(raw_b64).unwrap_or_else(|_| raw_b64.as_bytes().to_vec());
+        let bytes = decode_base64_strict(raw_b64)
+            .or_else(|_| hex::decode(raw_b64).map_err(|_| "Failed"))
+            .map_err(|_| ApiError::bad_request("Invalid base64 payload in raw_content_base64"))?;
         if !verify_package_sha256(&bytes, &payload.sha256_hash) {
             return Err(ApiError::bad_request(
                 "Package SHA-256 integrity verification failed",
@@ -925,7 +1046,7 @@ pub async fn publish_marketplace_package(
         author: payload.author,
         sha256_hash: payload.sha256_hash,
         manifest: payload.manifest,
-        is_verified: true,
+        is_verified: false, // Default to unverified until trusted review (Issue #117)
         created_at: Utc::now(),
     };
 
@@ -956,6 +1077,22 @@ pub async fn install_guild_plugin(
     let (_, session) = authenticate(&state, &headers).await?;
     verify_csrf(&headers, &session)?;
     ensure_guild_access(&state, &session, &guild_id).await?;
+
+    // Verify that the requested package exists and version matches (Issue #117)
+    let packages = state
+        .app
+        .storage
+        .list_marketplace_packages()
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let pkg = packages
+        .iter()
+        .find(|p| p.plugin_id == payload.plugin_id)
+        .ok_or_else(|| ApiError::not_found("Marketplace package not found"))?;
+
+    if pkg.version != payload.version {
+        return Err(ApiError::bad_request("Requested package version not found"));
+    }
 
     let install = PluginGuildInstallation {
         id: Uuid::new_v4(),

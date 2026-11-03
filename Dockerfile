@@ -18,8 +18,10 @@ COPY src ./src
 COPY migrations ./migrations
 COPY scripts ./scripts
 COPY web ./web
+COPY translations ./translations
 
-RUN cargo build --locked --release
+RUN cargo build --locked --release \
+    && test -x target/release/rusty-discord-bot
 
 FROM debian:${DEBIAN_SUITE}-slim AS runtime
 
@@ -44,13 +46,15 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/zuckerbot /usr/local/bin/zuckerbot
+COPY --from=builder /app/target/release/rusty-discord-bot /usr/local/bin/rusty-discord-bot
+RUN ln -s /usr/local/bin/rusty-discord-bot /usr/local/bin/zuckerbot
 COPY --from=builder /app/migrations ./migrations
 COPY --from=builder /app/scripts ./scripts
 COPY --from=builder /app/web ./web
+COPY --from=builder /app/translations ./translations
 
 USER zuckerbot
 
 EXPOSE 8080
 
-CMD ["zuckerbot"]
+CMD ["rusty-discord-bot"]
