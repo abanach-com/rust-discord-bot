@@ -1093,6 +1093,14 @@ pub async fn create_store_item(
 
     ensure_guild_access(&state, &session, &guild_id).await?;
 
+    if payload.price < 0 {
+        return Err(ApiError::bad_request("price must be non-negative"));
+    }
+
+    if payload.stock.is_some_and(|stock| stock < 0) {
+        return Err(ApiError::bad_request("stock must be non-negative"));
+    }
+
     let item = state
         .app
         .storage

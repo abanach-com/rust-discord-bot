@@ -2281,6 +2281,9 @@ impl PostgresStore {
 
         stock: Option<i32>,
     ) -> anyhow::Result<StoreItem> {
+        anyhow::ensure!(price >= 0, "price must be non-negative");
+        anyhow::ensure!(stock.is_none_or(|n| n >= 0), "stock must be non-negative");
+
         let id = Uuid::new_v4();
 
         let now = Utc::now();
@@ -2355,6 +2358,11 @@ impl PostgresStore {
         if item.guild_id != guild_id {
             return Err(anyhow::anyhow!("item does not belong to this guild"));
         }
+
+        anyhow::ensure!(
+            item.price >= 0,
+            "stored store item has invalid negative price"
+        );
 
         if let Some(stock) = item.stock {
             if stock <= 0 {
@@ -3514,6 +3522,11 @@ impl PostgresStore {
 
         target_card_id: Uuid,
     ) -> anyhow::Result<CardTrade> {
+        anyhow::ensure!(
+            initiator_card_id != target_card_id,
+            "cannot trade a card for itself"
+        );
+
         let mut tx = self.pool.begin().await?;
 
         let c1 = sqlx::query_as::<_, CardCollection>("SELECT id, guild_id, user_id, card_id, card_name, rarity, acquired_at FROM card_collections WHERE id = $1")
@@ -3628,33 +3641,40 @@ impl PostgresStore {
             return Err(anyhow::anyhow!("trade is not pending"));
         }
 
-        let c1 = sqlx::query_as::<_, CardCollection>(
+        anyhow::ensure!(
+            trade.initiator_card_id != trade.target_card_id,
+            "cannot trade card with itself"
+        );
 
-            "SELECT id, guild_id, user_id, card_id, card_name, rarity, acquired_at FROM card_collections WHERE id = $1 FOR UPDATE"
+        let (first_id, second_id) = if trade.initiator_card_id < trade.target_card_id {
+            (trade.initiator_card_id, trade.target_card_id)
+        } else {
+            (trade.target_card_id, trade.initiator_card_id)
+        };
 
-        )
+        const LOCK_CARD: &str = "SELECT id, guild_id, user_id, card_id, card_name, rarity, acquired_at FROM card_collections WHERE id = $1 FOR UPDATE";
 
-        .bind(trade.initiator_card_id)
+        let first = sqlx::query_as::<_, CardCollection>(LOCK_CARD)
+            .bind(first_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("card not found"))?;
 
-        .fetch_optional(&mut *tx)
+        let second = sqlx::query_as::<_, CardCollection>(LOCK_CARD)
+            .bind(second_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("card not found"))?;
 
-        .await?;
+        let (c1, c2) = if trade.initiator_card_id == first_id {
+            (first, second)
+        } else {
+            (second, first)
+        };
 
-        let c1 = c1.ok_or_else(|| anyhow::anyhow!("initiator card not found"))?;
-
-        let c2 = sqlx::query_as::<_, CardCollection>(
-
-            "SELECT id, guild_id, user_id, card_id, card_name, rarity, acquired_at FROM card_collections WHERE id = $1 FOR UPDATE"
-
-        )
-
-        .bind(trade.target_card_id)
-
-        .fetch_optional(&mut *tx)
-
-        .await?;
-
-        let c2 = c2.ok_or_else(|| anyhow::anyhow!("target card not found"))?;
+        if c1.guild_id != guild_id || c2.guild_id != guild_id {
+            return Err(anyhow::anyhow!("card belongs to different guild"));
+        }
 
         if c1.user_id != trade.initiator_user_id || c2.user_id != trade.target_user_id {
             return Err(anyhow::anyhow!("ownership changed before trade completion"));

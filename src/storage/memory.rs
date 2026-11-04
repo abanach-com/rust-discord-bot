@@ -74,7 +74,7 @@ pub struct MemoryStore {
 
     starboard_entries: Arc<DashMap<(String, String), StarboardEntry>>,
 
-    store_items: Arc<DashMap<Uuid, StoreItem>>,
+    pub(crate) store_items: Arc<DashMap<Uuid, StoreItem>>,
 
     store_purchases: Arc<DashMap<Uuid, StorePurchase>>,
 
@@ -1521,6 +1521,7 @@ impl MemoryStore {
         }
 
         let price = item.price;
+        anyhow::ensure!(price >= 0, "stored store item has invalid negative price");
 
         let now = Utc::now();
 
@@ -2279,6 +2280,10 @@ impl MemoryStore {
                 .cards
                 .get(&trade.target_card_id)
                 .ok_or_else(|| anyhow::anyhow!("target card not found"))?;
+
+            if c1.guild_id != guild_id || c2.guild_id != guild_id {
+                return Err(anyhow::anyhow!("card belongs to different guild"));
+            }
 
             if c1.user_id != trade.initiator_user_id || c2.user_id != trade.target_user_id {
                 return Err(anyhow::anyhow!("ownership changed before trade completion"));

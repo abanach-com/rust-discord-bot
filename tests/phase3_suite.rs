@@ -262,6 +262,41 @@ async fn test_phase3_games_rp_and_knowledge_suite() {
         .unwrap();
     assert!(p1_cards.iter().any(|c| c.card_id == "card_knight"));
 
+    // Issue #145: Re-accepting already accepted trade fails
+    let reaccept_res = state
+        .app
+        .storage
+        .accept_card_trade(
+            guild_id,
+            uuid::Uuid::parse_str(trade_id).unwrap(),
+            target_user_id,
+        )
+        .await;
+    assert!(reaccept_res.is_err(), "Cannot re-accept non-pending trade");
+
+    // Issue #145: Trading a card with itself is rejected at propose time
+    let self_trade_res = state
+        .app
+        .storage
+        .propose_card_trade(guild_id, user_id, card1.id, target_user_id, card1.id)
+        .await;
+    assert!(self_trade_res.is_err(), "Cannot trade a card with itself");
+
+    // Issue #145: Card belonging to a different guild is rejected
+    let other_guild_trade = state
+        .app
+        .storage
+        .accept_card_trade(
+            "different_guild_999",
+            uuid::Uuid::parse_str(trade_id).unwrap(),
+            target_user_id,
+        )
+        .await;
+    assert!(
+        other_guild_trade.is_err(),
+        "Card trade in different guild must be rejected"
+    );
+
     // Tupper RP profiles
     let tupper_resp = client
         .post(format!("{base_url}/api/guilds/{guild_id}/tuppers"))

@@ -2005,6 +2005,9 @@ impl Storage {
 
         stock: Option<i32>,
     ) -> anyhow::Result<StoreItem> {
+        anyhow::ensure!(price >= 0, "price must be non-negative");
+        anyhow::ensure!(stock.is_none_or(|n| n >= 0), "stock must be non-negative");
+
         match self {
             Self::Memory(store) => {
                 Ok(store.create_store_item(guild_id, name, description, price, role_id, stock))
@@ -2485,6 +2488,11 @@ impl Storage {
 
         target_card_id: Uuid,
     ) -> anyhow::Result<CardTrade> {
+        anyhow::ensure!(
+            initiator_card_id != target_card_id,
+            "cannot trade a card for itself"
+        );
+
         match self {
             Self::Memory(store) => store.propose_card_trade(
                 guild_id,
@@ -3529,5 +3537,139 @@ mod tests {
             fetched_fresh.is_none(),
             "unconfigured module settings must not exist after rollback"
         );
+    }
+
+    #[tokio::test]
+    async fn test_store_item_negative_price_and_stock_rejected() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_id = "guild_123";
+
+        // Negative price rejected
+        let res_neg_price = store
+            .create_store_item(guild_id, "Bad Item", "Desc", -10, None, None)
+            .await;
+        assert!(res_neg_price.is_err());
+        assert!(
+            res_neg_price
+                .unwrap_err()
+                .to_string()
+                .contains("price must be non-negative")
+        );
+
+        // Negative stock rejected
+        let res_neg_stock = store
+            .create_store_item(guild_id, "Bad Item", "Desc", 10, None, Some(-1))
+            .await;
+        assert!(res_neg_stock.is_err());
+        assert!(
+            res_neg_stock
+                .unwrap_err()
+                .to_string()
+                .contains("stock must be non-negative")
+        );
+
+        // Zero price (free) and positive price allowed
+        let free_item = store
+            .create_store_item(guild_id, "Free Item", "Desc", 0, None, Some(5))
+            .await
+            .expect("price 0 should be allowed");
+        assert_eq!(free_item.price, 0);
+
+        let paid_item = store
+            .create_store_item(guild_id, "Paid Item", "Desc", 100, None, Some(5))
+            .await
+            .expect("positive price should be allowed");
+        assert_eq!(paid_item.price, 100);
+    }
+
+    #[tokio::test]
+    async fn test_purchase_store_item_rejects_negative_price_without_side_effects() {
+        let mem = MemoryStore::default();
+        let corrupt_id = Uuid::new_v4();
+        let guild_id = "guild_123";
+        let user_id = "user_456";
+
+        // Manually insert corrupted store item with negative price
+        mem.store_items.insert(
+            corrupt_id,
+            StoreItem {
+                id: corrupt_id,
+                guild_id: guild_id.to_owned(),
+                name: "Corrupt Item".to_owned(),
+                description: "Test".to_owned(),
+                price: -100,
+                role_id: None,
+                stock: Some(5),
+                created_at: Utc::now(),
+            },
+        );
+
+        let store = Storage::Memory(mem);
+        let purchase_res = store
+            .purchase_store_item(guild_id, user_id, corrupt_id)
+            .await;
+        assert!(purchase_res.is_err());
+        assert!(
+            purchase_res
+                .unwrap_err()
+                .to_string()
+                .contains("stored store item has invalid negative price")
+        );
+
+        // Verify balance was NOT modified (user still has 0, did NOT gain coins)
+        let progress = store.get_member_progress(guild_id, user_id).await.unwrap();
+        assert_eq!(progress.coins, 0, "buyer balance must not increase");
+
+        // Verify stock was NOT decremented
+        let items = store.list_store_items(guild_id).await.unwrap();
+        let corrupt_item = items.iter().find(|i| i.id == corrupt_id).unwrap();
+        assert_eq!(corrupt_item.stock, Some(5), "stock must not decrement");
+    }
+
+    #[tokio::test]
+    async fn test_card_trade_validation_and_guild_isolation() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_1 = "guild_1";
+        let guild_2 = "guild_2";
+        let user_a = "user_a";
+        let user_b = "user_b";
+
+        let card_a = store
+            .grant_user_card(guild_1, user_a, "card_1", "Card 1", "Common")
+            .await
+            .unwrap();
+        let card_b = store
+            .grant_user_card(guild_1, user_b, "card_2", "Card 2", "Rare")
+            .await
+            .unwrap();
+
+        // 1. Cannot trade card with itself
+        let self_trade = store
+            .propose_card_trade(guild_1, user_a, card_a.id, user_b, card_a.id)
+            .await;
+        assert!(self_trade.is_err());
+
+        // 2. Cross-guild trade rejection
+        let normal_trade = store
+            .propose_card_trade(guild_1, user_a, card_a.id, user_b, card_b.id)
+            .await
+            .unwrap();
+        let wrong_guild = store
+            .accept_card_trade(guild_2, normal_trade.id, user_b)
+            .await;
+        assert!(wrong_guild.is_err());
+
+        // 3. Normal trade succeeds
+        let success = store
+            .accept_card_trade(guild_1, normal_trade.id, user_b)
+            .await
+            .unwrap();
+        assert!(success);
+
+        // 4. Cannot re-accept already completed trade
+        let reaccept = store
+            .accept_card_trade(guild_1, normal_trade.id, user_b)
+            .await;
+        assert!(reaccept.is_err());
     }
 }

@@ -407,6 +407,70 @@ async fn test_phase5_audit_fixes_comprehensive_suite() {
     );
 
     // ==========================================
+    // 8b. Issue #144: Negative Store Item Price & Stock Validation
+    // ==========================================
+    // HTTP API: negative price must be rejected with 400 Bad Request
+    let neg_price_http = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/store/items"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "name": "Negative Price Item",
+            "description": "Exploit attempt",
+            "price": -100,
+            "role_id": null,
+            "stock": null
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(neg_price_http.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // HTTP API: negative stock must be rejected with 400 Bad Request
+    let neg_stock_http = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/store/items"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "name": "Negative Stock Item",
+            "description": "Exploit attempt",
+            "price": 50,
+            "role_id": null,
+            "stock": -1
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(neg_stock_http.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Storage facade: creation with negative price or stock is rejected
+    assert!(
+        state
+            .app
+            .storage
+            .create_store_item(guild_a, "Bad Price", "Bad", -50, None, None)
+            .await
+            .is_err()
+    );
+    assert!(
+        state
+            .app
+            .storage
+            .create_store_item(guild_a, "Bad Stock", "Bad", 50, None, Some(-5))
+            .await
+            .is_err()
+    );
+
+    // Legitimate item creation with price 0 (free) or positive price succeeds
+    let free_item = state
+        .app
+        .storage
+        .create_store_item(guild_a, "Free Role", "Gift", 0, None, Some(10))
+        .await
+        .unwrap();
+    assert_eq!(free_item.price, 0);
+
+    // ==========================================
     // 9. Issue #125: AI Budget Validation & Initialization
     // ==========================================
     // Negative usage values rejected
