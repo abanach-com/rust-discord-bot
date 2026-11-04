@@ -10,6 +10,7 @@ pub struct Metrics {
     pub scheduler_jobs_claimed_total: AtomicU64,
     pub scheduler_jobs_delivered_total: AtomicU64,
     pub scheduler_jobs_failed_total: AtomicU64,
+    pub scheduler_jobs_cancelled_total: AtomicU64,
     pub dashboard_requests_total: AtomicU64,
     pub rate_limit_throttled_total: AtomicU64,
 }
@@ -24,6 +25,7 @@ impl Default for Metrics {
             scheduler_jobs_claimed_total: AtomicU64::new(0),
             scheduler_jobs_delivered_total: AtomicU64::new(0),
             scheduler_jobs_failed_total: AtomicU64::new(0),
+            scheduler_jobs_cancelled_total: AtomicU64::new(0),
             dashboard_requests_total: AtomicU64::new(0),
             rate_limit_throttled_total: AtomicU64::new(0),
         }

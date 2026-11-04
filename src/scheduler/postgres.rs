@@ -106,6 +106,7 @@ impl PostgresSchedulerStore {
                 last_error,
                 last_run_at,
                 completed_at,
+                cancellation_requested_at,
                 created_at,
                 updated_at
             "#,
@@ -160,6 +161,7 @@ impl PostgresSchedulerStore {
                     last_error,
                     last_run_at,
                     completed_at,
+                    cancellation_requested_at,
                     created_at,
                     updated_at
                 FROM scheduled_jobs
@@ -196,6 +198,7 @@ impl PostgresSchedulerStore {
                     last_error,
                     last_run_at,
                     completed_at,
+                    cancellation_requested_at,
                     created_at,
                     updated_at
                 FROM scheduled_jobs
@@ -250,22 +253,37 @@ impl PostgresSchedulerStore {
 
         match mutation {
             JobMutation::Cancel => {
-                sqlx::query(
-                    r#"
-                    UPDATE scheduled_jobs
-                    SET status = $3,
-                        completed_at = NOW(),
-                        locked_at = NULL,
-                        locked_by = NULL,
-                        updated_at = NOW()
-                    WHERE guild_id = $1 AND id = $2::uuid
-                    "#,
-                )
-                .bind(guild_id)
-                .bind(job_id)
-                .bind(STATUS_CANCELLED)
-                .execute(&mut *transaction)
-                .await?;
+                if job.status == STATUS_PROCESSING {
+                    sqlx::query(
+                        r#"
+                        UPDATE scheduled_jobs
+                        SET cancellation_requested_at = NOW(),
+                            updated_at = NOW()
+                        WHERE guild_id = $1 AND id = $2::uuid AND status = 'processing'
+                        "#,
+                    )
+                    .bind(guild_id)
+                    .bind(job_id)
+                    .execute(&mut *transaction)
+                    .await?;
+                } else {
+                    sqlx::query(
+                        r#"
+                        UPDATE scheduled_jobs
+                        SET status = $3,
+                            completed_at = NOW(),
+                            locked_at = NULL,
+                            locked_by = NULL,
+                            updated_at = NOW()
+                        WHERE guild_id = $1 AND id = $2::uuid
+                        "#,
+                    )
+                    .bind(guild_id)
+                    .bind(job_id)
+                    .bind(STATUS_CANCELLED)
+                    .execute(&mut *transaction)
+                    .await?;
+                }
             }
             JobMutation::Pause => {
                 sqlx::query(
@@ -338,6 +356,7 @@ impl PostgresSchedulerStore {
                 last_error,
                 last_run_at,
                 completed_at,
+                cancellation_requested_at,
                 created_at,
                 updated_at
             FROM scheduled_jobs
@@ -509,6 +528,57 @@ impl PostgresSchedulerStore {
         transaction.commit().await?;
         Ok(Some(job))
     }
+
+    pub async fn cancellation_requested(
+        &self,
+        job_id: &str,
+        worker_id: &str,
+    ) -> anyhow::Result<bool> {
+        if Uuid::parse_str(job_id).is_err() {
+            return Ok(false);
+        }
+        let count: (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(*)
+            FROM scheduled_jobs
+            WHERE id = $1::uuid
+              AND status = $2
+              AND locked_by = $3
+              AND cancellation_requested_at IS NOT NULL
+            "#,
+        )
+        .bind(job_id)
+        .bind(STATUS_PROCESSING)
+        .bind(worker_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count.0 > 0)
+    }
+
+    pub async fn mark_cancelled(
+        &self,
+        job_id: &str,
+        worker_id: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Option<ScheduledJob>> {
+        if Uuid::parse_str(job_id).is_err() {
+            return Ok(None);
+        }
+        let mut transaction = self.pool.begin().await?;
+        let Some(mut job) = fetch_processing_job(&mut transaction, job_id, worker_id).await? else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+
+        job.status = STATUS_CANCELLED.to_owned();
+        job.completed_at = Some(now);
+        job.locked_at = None;
+        job.locked_by = None;
+        job.updated_at = now;
+        write_runtime_state(&mut transaction, &job).await?;
+        transaction.commit().await?;
+        Ok(Some(job))
+    }
 }
 
 async fn fetch_job_for_update(
@@ -522,7 +592,7 @@ async fn fetch_job_for_update(
             id::text AS id, guild_id, module_id, channel_id, creator_user_id,
             content, mention_creator, run_at, repeat_every_seconds, remaining_runs,
             run_count, status, attempts, max_attempts, locked_at, locked_by,
-            last_error, last_run_at, completed_at, created_at, updated_at
+            last_error, last_run_at, completed_at, cancellation_requested_at, created_at, updated_at
         FROM scheduled_jobs
         WHERE guild_id = $1 AND id = $2::uuid
         FOR UPDATE
@@ -545,7 +615,7 @@ async fn fetch_processing_job(
             id::text AS id, guild_id, module_id, channel_id, creator_user_id,
             content, mention_creator, run_at, repeat_every_seconds, remaining_runs,
             run_count, status, attempts, max_attempts, locked_at, locked_by,
-            last_error, last_run_at, completed_at, created_at, updated_at
+            last_error, last_run_at, completed_at, cancellation_requested_at, created_at, updated_at
         FROM scheduled_jobs
         WHERE id = $1::uuid
           AND status = $2
@@ -577,7 +647,8 @@ async fn write_runtime_state(
             last_error = $9,
             last_run_at = $10,
             completed_at = $11,
-            updated_at = $12
+            cancellation_requested_at = $12,
+            updated_at = $13
         WHERE id = $1::uuid
         "#,
     )
@@ -592,6 +663,7 @@ async fn write_runtime_state(
     .bind(&job.last_error)
     .bind(job.last_run_at)
     .bind(job.completed_at)
+    .bind(job.cancellation_requested_at)
     .bind(job.updated_at)
     .execute(&mut **transaction)
     .await?;

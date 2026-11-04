@@ -163,6 +163,25 @@ impl SchedulerStore {
             Self::Postgres(store) => Ok(store.mark_failed(job_id, worker_id, now, error).await?),
         }
     }
+
+    pub async fn cancellation_requested(&self, job_id: &str, worker_id: &str) -> Result<bool> {
+        match self {
+            Self::Memory(store) => Ok(store.cancellation_requested(job_id, worker_id)),
+            Self::Postgres(store) => Ok(store.cancellation_requested(job_id, worker_id).await?),
+        }
+    }
+
+    pub async fn mark_cancelled(
+        &self,
+        job_id: &str,
+        worker_id: &str,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Option<ScheduledJob>> {
+        match self {
+            Self::Memory(store) => Ok(store.mark_cancelled(job_id, worker_id, now)),
+            Self::Postgres(store) => Ok(store.mark_cancelled(job_id, worker_id, now).await?),
+        }
+    }
 }
 
 pub async fn run_worker(http: Arc<Http>, state: AppState) -> Result<()> {
@@ -242,11 +261,42 @@ async fn process_single_job(
     job: ScheduledJob,
     worker_id: String,
 ) {
+    // Check if cancellation was requested before starting delivery
+    if state
+        .scheduler
+        .cancellation_requested(&job.id, &worker_id)
+        .await
+        .unwrap_or(false)
+    {
+        if let Ok(Some(cancelled)) = state
+            .scheduler
+            .mark_cancelled(&job.id, &worker_id, Utc::now())
+            .await
+        {
+            state
+                .metrics
+                .scheduler_jobs_cancelled_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            record_delivery_audit(
+                &state,
+                &cancelled,
+                &worker_id,
+                "scheduled_job_cancelled_before_delivery",
+                None,
+            )
+            .await;
+        }
+        return;
+    }
+
     let job_id = job.id.clone();
     let worker_id_heartbeat = worker_id.clone();
     let state_heartbeat = state.clone();
 
     let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut cancel_tx = Some(cancel_tx);
+
     let heartbeat_handle = tokio::spawn(async move {
         let mut interval =
             tokio::time::interval(StdDuration::from_secs(LEASE_RENEWAL_INTERVAL_SECONDS));
@@ -258,6 +308,18 @@ async fn process_single_job(
                     match state_heartbeat.scheduler.renew_lease(&job_id, &worker_id_heartbeat, now).await {
                         Ok(true) => {
                             tracing::trace!(job_id = %job_id, "scheduler lease successfully renewed");
+                            if state_heartbeat
+                                .scheduler
+                                .cancellation_requested(&job_id, &worker_id_heartbeat)
+                                .await
+                                .unwrap_or(false)
+                            {
+                                tracing::info!(job_id = %job_id, "cancellation requested while job in flight");
+                                if let Some(tx) = cancel_tx.take() {
+                                    let _ = tx.send(());
+                                }
+                                break;
+                            }
                         }
                         Ok(false) => {
                             tracing::warn!(job_id = %job_id, "failed to renew scheduler lease: job was stolen or state mutated");
@@ -275,16 +337,50 @@ async fn process_single_job(
         }
     });
 
-    let delivery_result =
-        tokio::time::timeout(StdDuration::from_secs(30), deliver_job(&http, &job))
-            .await
-            .map_err(|_| anyhow!("delivery timed out after 30 seconds"))
-            .and_then(|res| res);
+    enum DeliveryOutcome {
+        Finished(Result<()>),
+        CancelledInFlight,
+    }
+
+    let delivery_outcome = tokio::select! {
+        res = tokio::time::timeout(StdDuration::from_secs(30), deliver_job(&http, &job)) => {
+            DeliveryOutcome::Finished(res.map_err(|_| anyhow!("delivery timed out after 30 seconds")).and_then(|r| r))
+        }
+        _ = &mut cancel_rx => {
+            DeliveryOutcome::CancelledInFlight
+        }
+    };
     let _ = stop_tx.send(());
     let _ = heartbeat_handle.await;
 
-    match delivery_result {
-        Ok(()) => {
+    match delivery_outcome {
+        DeliveryOutcome::CancelledInFlight => {
+            if let Ok(Some(cancelled)) = state
+                .scheduler
+                .mark_cancelled(&job.id, &worker_id, Utc::now())
+                .await
+            {
+                state
+                    .metrics
+                    .scheduler_jobs_cancelled_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                record_delivery_audit(
+                    &state,
+                    &cancelled,
+                    &worker_id,
+                    "scheduled_job_delivery_uncertain",
+                    Some("cancelled during delivery in-flight"),
+                )
+                .await;
+            }
+        }
+        DeliveryOutcome::Finished(Ok(())) => {
+            let was_cancel_requested = state
+                .scheduler
+                .cancellation_requested(&job.id, &worker_id)
+                .await
+                .unwrap_or(false);
+
             let Some(updated) = state
                 .scheduler
                 .mark_succeeded(&job.id, &worker_id, Utc::now())
@@ -303,16 +399,51 @@ async fn process_single_job(
                 .scheduler_jobs_delivered_total
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-            record_delivery_audit(
-                &state,
-                &updated,
-                &worker_id,
-                "scheduled_job_delivered",
-                None,
-            )
-            .await;
+            let (event, note) = if was_cancel_requested {
+                (
+                    "scheduled_job_delivered",
+                    Some("delivered_after_cancel_request"),
+                )
+            } else {
+                ("scheduled_job_delivered", None)
+            };
+
+            record_delivery_audit(&state, &updated, &worker_id, event, note).await;
         }
-        Err(error) => {
+        DeliveryOutcome::Finished(Err(error)) => {
+            let cancelled = if state
+                .scheduler
+                .cancellation_requested(&job.id, &worker_id)
+                .await
+                .unwrap_or(false)
+            {
+                state
+                    .scheduler
+                    .mark_cancelled(&job.id, &worker_id, Utc::now())
+                    .await
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
+
+            if let Some(cancelled) = cancelled {
+                state
+                    .metrics
+                    .scheduler_jobs_cancelled_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let err_msg = format!("delivery failed after cancel request: {error:#}");
+                record_delivery_audit(
+                    &state,
+                    &cancelled,
+                    &worker_id,
+                    "scheduled_job_delivery_uncertain",
+                    Some(&err_msg),
+                )
+                .await;
+                return;
+            }
+
             let error_message = format!("{error:#}");
             let Some(updated) = state
                 .scheduler

@@ -30,6 +30,8 @@ pub struct ScheduledJob {
     pub last_error: Option<String>,
     pub last_run_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub cancellation_requested_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -166,6 +168,7 @@ impl NewScheduledJob {
             last_error: None,
             last_run_at: None,
             completed_at: None,
+            cancellation_requested_at: None,
             created_at: now,
             updated_at: now,
         }

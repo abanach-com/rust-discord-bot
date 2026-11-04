@@ -2622,10 +2622,16 @@ impl PostgresStore {
         event_id: Uuid,
 
         user_id: &str,
-
-        max_main: i32,
     ) -> anyhow::Result<EventRoster> {
         let mut tx = self.pool.begin().await?;
+
+        let capacity: Option<i32> = sqlx::query_scalar(
+            "SELECT max_participants FROM scheduled_events WHERE id = $1 FOR UPDATE",
+        )
+        .bind(event_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Scheduled event not found"))?;
 
         let existing = sqlx::query_as::<_, EventRoster>(
             r#"
@@ -2644,6 +2650,7 @@ impl PostgresStore {
         .await?;
 
         if let Some(r) = existing {
+            tx.commit().await?;
             return Ok(r);
         }
 
@@ -2654,10 +2661,16 @@ impl PostgresStore {
         .fetch_one(&mut *tx)
         .await?;
 
-        let role_type = if (main_count.0 as i32) < max_main {
-            "main"
-        } else {
-            "reserve"
+        let role_type = match capacity {
+            Some(limit) if limit > 0 => {
+                if (main_count.0 as i32) < limit {
+                    "main"
+                } else {
+                    "reserve"
+                }
+            }
+            Some(_) => "reserve",
+            None => "main",
         };
 
         let total_count: (i64,) =

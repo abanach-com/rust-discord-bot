@@ -1375,15 +1375,10 @@ pub async fn get_event_ics(
     Ok(resp)
 }
 
-#[derive(Debug, Deserialize)]
-
+#[derive(Debug, Deserialize, Default)]
 pub struct JoinRosterRequest {
-    #[serde(default = "default_max_main")]
-    pub max_main: i32,
-}
-
-fn default_max_main() -> i32 {
-    5
+    #[serde(default)]
+    pub max_main: Option<i32>,
 }
 
 pub async fn join_event_roster(
@@ -1393,9 +1388,11 @@ pub async fn join_event_roster(
 
     headers: HeaderMap,
 
-    Json(payload): Json<JoinRosterRequest>,
+    Json(_payload): Json<JoinRosterRequest>,
 ) -> Result<Json<EventRoster>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
+
+    verify_csrf(&headers, &session)?;
 
     ensure_guild_access(&state, &session, &guild_id).await?;
 
@@ -1415,7 +1412,7 @@ pub async fn join_event_roster(
     let entry = state
         .app
         .storage
-        .join_event_roster(event_id, &session.user.id, payload.max_main)
+        .join_event_roster(event_id, &session.user.id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
@@ -1430,6 +1427,8 @@ pub async fn leave_event_roster(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
+
+    verify_csrf(&headers, &session)?;
 
     ensure_guild_access(&state, &session, &guild_id).await?;
 

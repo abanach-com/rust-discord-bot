@@ -10,6 +10,9 @@ use uuid::Uuid;
 use rusty_discord_bot::{
     config::Config,
     moderation_cases::{CaseKind, CaseSeverity, CreateCase},
+    scheduler::{
+        JobMutation, JobMutationOutcome, NewScheduledJob, STATUS_CANCELLED, STATUS_PROCESSING,
+    },
     session::{DashboardGuild, DashboardUser},
     state::AppState,
     storage::IntegrationConnection,
@@ -585,4 +588,370 @@ async fn test_security_privacy_workflow_suite() {
         "Dry-run should report 3 simulated steps matching node count"
     );
     assert_eq!(dry_json["estimated_execution_ms"], 36);
+
+    // =========================================================================
+    // Issue #136 & #137: Event Roster Capacity & CSRF Protection
+    // =========================================================================
+
+    // Create an event with max_participants = 2
+    let roster_event = json!({
+        "title": "2-Player Tournament",
+        "description": "Strict 2-player capacity",
+        "start_time": "2026-12-01T19:00:00Z",
+        "end_time": "2026-12-01T21:00:00Z",
+        "timezone": "UTC",
+        "max_participants": 2
+    });
+    let roster_ev_res = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&roster_event)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(roster_ev_res.status(), 200);
+    let roster_ev_json: serde_json::Value = roster_ev_res.json().await.unwrap();
+    let roster_event_id = roster_ev_json["id"].as_str().unwrap();
+
+    // 137a. Join without CSRF token -> 403 Forbidden
+    let no_csrf_res = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{roster_event_id}/roster/join"
+        ))
+        .header(COOKIE, &session_cookie)
+        .json(&json!({ "max_main": 100 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        no_csrf_res.status(),
+        403,
+        "Issue #137: join_event_roster without CSRF token must return 403"
+    );
+
+    // 137b. Join with invalid CSRF token -> 403 Forbidden
+    let bad_csrf_res = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{roster_event_id}/roster/join"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", "invalid_token_999")
+        .json(&json!({ "max_main": 100 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        bad_csrf_res.status(),
+        403,
+        "Issue #137: join_event_roster with bad CSRF token must return 403"
+    );
+
+    // Setup User 2 and User 3 sessions with permissions on guild_id
+    let user_2 = "300300300300";
+    let session_2 = "test_sec_session_token_2";
+    let csrf_2 = "test_sec_csrf_token_2";
+    state
+        .app
+        .sessions
+        .save_session(
+            session_2,
+            DashboardUser {
+                id: user_2.to_string(),
+                username: "UserTwo".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Sec Guild".to_string(),
+                icon: None,
+                owner: false,
+                permissions: "8".to_string(),
+            }],
+            csrf_2.to_string(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+    perms_cache.insert(
+        (user_2.to_string(), guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+    let cookie_2 = format!("rusty_discord_bot_session={session_2}");
+
+    let user_3 = "400400400400";
+    let session_3 = "test_sec_session_token_3";
+    let csrf_3 = "test_sec_csrf_token_3";
+    state
+        .app
+        .sessions
+        .save_session(
+            session_3,
+            DashboardUser {
+                id: user_3.to_string(),
+                username: "UserThree".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Sec Guild".to_string(),
+                icon: None,
+                owner: false,
+                permissions: "8".to_string(),
+            }],
+            csrf_3.to_string(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+    perms_cache.insert(
+        (user_3.to_string(), guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+    let cookie_3 = format!("rusty_discord_bot_session={session_3}");
+
+    // 136a. User 1 joins with max_main: 100 (attempting to override capacity) -> gets "main" (1/2)
+    let join_1 = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{roster_event_id}/roster/join"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&json!({ "max_main": 100 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(join_1.status(), 200);
+    let join_1_json: serde_json::Value = join_1.json().await.unwrap();
+    assert_eq!(join_1_json["role_type"], "main");
+
+    // 136b. User 2 joins -> gets "main" (2/2)
+    let join_2 = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{roster_event_id}/roster/join"
+        ))
+        .header(COOKIE, &cookie_2)
+        .header("X-CSRF-Token", csrf_2)
+        .json(&json!({ "max_main": 100 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(join_2.status(), 200);
+    let join_2_json: serde_json::Value = join_2.json().await.unwrap();
+    assert_eq!(join_2_json["role_type"], "main");
+
+    // 136c. User 3 joins with max_main: 50 -> must be put in "reserve" because event capacity is 2!
+    let join_3 = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{roster_event_id}/roster/join"
+        ))
+        .header(COOKIE, &cookie_3)
+        .header("X-CSRF-Token", csrf_3)
+        .json(&json!({ "max_main": 50 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(join_3.status(), 200);
+    let join_3_json: serde_json::Value = join_3.json().await.unwrap();
+    assert_eq!(
+        join_3_json["role_type"], "reserve",
+        "Issue #136: User 3 must be assigned 'reserve' when event max_participants=2 is reached"
+    );
+
+    // 137c. Leave without CSRF -> 403 Forbidden
+    let leave_no_csrf = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{roster_event_id}/roster/leave"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        leave_no_csrf.status(),
+        403,
+        "Issue #137: leave_event_roster without CSRF token must return 403"
+    );
+
+    // 136d & 137d. User 1 leaves with valid CSRF -> User 3 is promoted from reserve to main!
+    let leave_res = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{roster_event_id}/roster/leave"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(leave_res.status(), 200);
+    let leave_json: serde_json::Value = leave_res.json().await.unwrap();
+    assert_eq!(leave_json["left"], true);
+    assert_eq!(leave_json["promoted_reserve_user_id"], user_3);
+
+    // =========================================================================
+    // Issue #138: Scheduler Processing Cancellation & Reliability
+    // =========================================================================
+
+    // 138a. Cancel an active job -> cancels immediately
+    let active_job = state
+        .app
+        .scheduler
+        .create_job(
+            NewScheduledJob {
+                guild_id: guild_id.to_string(),
+                module_id: "scheduler".to_string(),
+                channel_id: "123456789".to_string(),
+                creator_user_id: user_id.to_string(),
+                content: "Reminder 1".to_string(),
+                mention_creator: false,
+                run_at: Utc::now() + Duration::hours(5),
+                repeat_every_seconds: None,
+                remaining_runs: None,
+                max_attempts: 3,
+            },
+            100,
+        )
+        .await
+        .expect("create active job");
+
+    let active_job_id = match active_job {
+        rusty_discord_bot::scheduler::CreateJobOutcome::Created(j) => j.id,
+        _ => panic!("Expected job created"),
+    };
+
+    let cancel_active = state
+        .app
+        .scheduler
+        .mutate_job(
+            guild_id,
+            &active_job_id,
+            user_id,
+            false,
+            JobMutation::Cancel,
+        )
+        .await
+        .expect("mutate active job");
+    match cancel_active {
+        JobMutationOutcome::Updated(j) => {
+            assert_eq!(j.status, STATUS_CANCELLED);
+            assert!(j.completed_at.is_some());
+        }
+        _ => panic!("Expected updated outcome for active job cancel"),
+    }
+
+    // 138b. Cancel a processing job -> sets cancellation_requested_at, keeps lease and processing status
+    let processing_job = state
+        .app
+        .scheduler
+        .create_job(
+            NewScheduledJob {
+                guild_id: guild_id.to_string(),
+                module_id: "scheduler".to_string(),
+                channel_id: "123456789".to_string(),
+                creator_user_id: user_id.to_string(),
+                content: "Reminder 2".to_string(),
+                mention_creator: false,
+                run_at: Utc::now() - Duration::minutes(1), // due now
+                repeat_every_seconds: None,
+                remaining_runs: None,
+                max_attempts: 3,
+            },
+            100,
+        )
+        .await
+        .expect("create processing job");
+
+    let proc_job_id = match processing_job {
+        rusty_discord_bot::scheduler::CreateJobOutcome::Created(j) => j.id,
+        _ => panic!("Expected job created"),
+    };
+
+    let worker_id = "test_worker_xyz";
+    let claimed = state
+        .app
+        .scheduler
+        .claim_due(worker_id, Utc::now(), Utc::now() - Duration::hours(1), 10)
+        .await
+        .expect("claim due job");
+    assert!(claimed.iter().any(|j| j.id == proc_job_id));
+
+    // Cancel while processing
+    let cancel_proc = state
+        .app
+        .scheduler
+        .mutate_job(guild_id, &proc_job_id, user_id, false, JobMutation::Cancel)
+        .await
+        .expect("mutate processing job");
+
+    match cancel_proc {
+        JobMutationOutcome::Updated(j) => {
+            assert_eq!(
+                j.status, STATUS_PROCESSING,
+                "Issue #138: Processing job must not be immediately transitioned to terminal cancelled"
+            );
+            assert!(
+                j.cancellation_requested_at.is_some(),
+                "Issue #138: cancellation_requested_at must be populated"
+            );
+            assert_eq!(j.locked_by.as_deref(), Some(worker_id));
+        }
+        _ => panic!("Expected updated outcome for processing job cancel"),
+    }
+
+    // Check cancellation_requested for current worker vs another worker
+    assert!(
+        state
+            .app
+            .scheduler
+            .cancellation_requested(&proc_job_id, worker_id)
+            .await
+            .expect("check cancellation requested"),
+        "cancellation_requested must return true for locking worker"
+    );
+    assert!(
+        !state
+            .app
+            .scheduler
+            .cancellation_requested(&proc_job_id, "other_worker")
+            .await
+            .expect("check cancellation requested for other worker"),
+        "cancellation_requested must return false for other workers"
+    );
+
+    // Worker finalizes cancellation
+    let mark_res = state
+        .app
+        .scheduler
+        .mark_cancelled(&proc_job_id, worker_id, Utc::now())
+        .await
+        .expect("mark cancelled");
+    assert!(mark_res.is_some());
+    let fin_job = mark_res.unwrap();
+    assert_eq!(fin_job.status, STATUS_CANCELLED);
+    assert!(fin_job.locked_by.is_none());
+    assert!(fin_job.completed_at.is_some());
+
+    // Another worker cannot reclaim the cancelled job
+    let reclaim = state
+        .app
+        .scheduler
+        .claim_due(
+            "another_worker",
+            Utc::now() + Duration::hours(1),
+            Utc::now() - Duration::hours(1),
+            10,
+        )
+        .await
+        .expect("reclaim attempt");
+    assert!(!reclaim.iter().any(|j| j.id == proc_job_id));
 }

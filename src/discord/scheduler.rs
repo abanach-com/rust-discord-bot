@@ -290,32 +290,45 @@ async fn mutate_job(
 
     match outcome {
         JobMutationOutcome::Updated(job) => {
+            let (event, msg) = if mutation == JobMutation::Cancel
+                && job.cancellation_requested_at.is_some()
+                && job.status == crate::scheduler::STATUS_PROCESSING
+            {
+                (
+                    "scheduled_job_cancel_requested",
+                    format!(
+                        "⏳ Zadanie `{}` jest w trakcie przetwarzania — zlecono żądanie anulowania.",
+                        job.id
+                    ),
+                )
+            } else {
+                (
+                    mutation.event_name(),
+                    format!(
+                        "✅ Zadanie `{}` ma teraz status **{}**.",
+                        job.id,
+                        status_label(&job.status),
+                    ),
+                )
+            };
+
             state
                 .storage
                 .record_audit(
                     Some(guild_id),
                     Some(actor_user_id),
                     module_id,
-                    mutation.event_name(),
+                    event,
                     serde_json::json!({
-
                         "job_id": job.id,
-
                         "owner_user_id": job.creator_user_id,
-
                         "status": job.status,
-
                         "run_at": job.run_at,
-
                     }),
                 )
                 .await?;
 
-            Ok(Some(format!(
-                "✅ Zadanie `{}` ma teraz status **{}**.",
-                job.id,
-                status_label(&job.status),
-            )))
+            Ok(Some(msg))
         }
 
         JobMutationOutcome::NotFound => Ok(Some(

@@ -1675,19 +1675,31 @@ impl MemoryStore {
         self.events.get(&event_id).map(|e| e.value().clone())
     }
 
-    pub fn join_event_roster(&self, event_id: Uuid, user_id: &str, max_main: i32) -> EventRoster {
+    pub fn join_event_roster(&self, event_id: Uuid, user_id: &str) -> anyhow::Result<EventRoster> {
+        let event = self
+            .events
+            .get(&event_id)
+            .ok_or_else(|| anyhow::anyhow!("Scheduled event not found"))?;
+        let capacity = event.max_participants;
+
         let mut roster_list = self.rosters.entry(event_id).or_default();
 
         if let Some(existing) = roster_list.iter().find(|r| r.user_id == user_id) {
-            return existing.clone();
+            return Ok(existing.clone());
         }
 
         let main_count = roster_list.iter().filter(|r| r.role_type == "main").count() as i32;
 
-        let role_type = if main_count < max_main {
-            "main"
-        } else {
-            "reserve"
+        let role_type = match capacity {
+            Some(limit) if limit > 0 => {
+                if main_count < limit {
+                    "main"
+                } else {
+                    "reserve"
+                }
+            }
+            Some(_) => "reserve",
+            None => "main",
         };
 
         let position = roster_list.len() as i32 + 1;
@@ -1706,7 +1718,7 @@ impl MemoryStore {
 
         roster_list.push(entry.clone());
 
-        entry
+        Ok(entry)
     }
 
     pub fn leave_event_roster(&self, event_id: Uuid, user_id: &str) -> Option<String> {

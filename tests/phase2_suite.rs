@@ -536,6 +536,7 @@ async fn test_phase2_community_operations_and_media_suite() {
             "{base_url}/api/guilds/{guild_id}/scheduled-events/{ev_id}/roster/join"
         ))
         .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
         .json(&serde_json::json!({"max_main": 1}))
         .send()
         .await

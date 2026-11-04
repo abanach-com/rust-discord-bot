@@ -99,11 +99,22 @@ impl MemorySchedulerStore {
         let now = Utc::now();
         match mutation {
             JobMutation::Cancel => {
+                if job.status == STATUS_PROCESSING {
+                    job.cancellation_requested_at = Some(now);
+                    job.updated_at = now;
+                    return JobMutationOutcome::Updated(Box::new(job.clone()));
+                }
                 job.status = STATUS_CANCELLED.to_owned();
                 job.completed_at = Some(now);
+                job.locked_at = None;
+                job.locked_by = None;
+                job.updated_at = now;
             }
             JobMutation::Pause => {
                 job.status = STATUS_PAUSED.to_owned();
+                job.locked_at = None;
+                job.locked_by = None;
+                job.updated_at = now;
             }
             JobMutation::Resume => {
                 job.status = STATUS_ACTIVE.to_owned();
@@ -111,11 +122,11 @@ impl MemorySchedulerStore {
                     job.run_at = now + chrono::Duration::seconds(1);
                 }
                 job.completed_at = None;
+                job.locked_at = None;
+                job.locked_by = None;
+                job.updated_at = now;
             }
         }
-        job.locked_at = None;
-        job.locked_by = None;
-        job.updated_at = now;
         JobMutationOutcome::Updated(Box::new(job.clone()))
     }
 
@@ -200,6 +211,35 @@ impl MemorySchedulerStore {
         }
         job.mark_failed(now, error);
         Some(job.clone())
+    }
+
+    pub fn cancellation_requested(&self, job_id: &str, worker_id: &str) -> bool {
+        let jobs = self.lock();
+        jobs.get(job_id).is_some_and(|job| {
+            job.status == STATUS_PROCESSING
+                && job.locked_by.as_deref() == Some(worker_id)
+                && job.cancellation_requested_at.is_some()
+        })
+    }
+
+    pub fn mark_cancelled(
+        &self,
+        job_id: &str,
+        worker_id: &str,
+        now: DateTime<Utc>,
+    ) -> Option<ScheduledJob> {
+        let mut jobs = self.lock();
+        let job = jobs.get_mut(job_id)?;
+        if job.status == STATUS_PROCESSING && job.locked_by.as_deref() == Some(worker_id) {
+            job.status = STATUS_CANCELLED.to_owned();
+            job.completed_at = Some(now);
+            job.locked_at = None;
+            job.locked_by = None;
+            job.updated_at = now;
+            Some(job.clone())
+        } else {
+            None
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, HashMap<String, ScheduledJob>> {

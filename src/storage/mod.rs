@@ -2123,13 +2123,11 @@ impl Storage {
         event_id: Uuid,
 
         user_id: &str,
-
-        max_main: i32,
     ) -> anyhow::Result<EventRoster> {
         match self {
-            Self::Memory(store) => Ok(store.join_event_roster(event_id, user_id, max_main)),
+            Self::Memory(store) => store.join_event_roster(event_id, user_id),
 
-            Self::Postgres(store) => store.join_event_roster(event_id, user_id, max_main).await,
+            Self::Postgres(store) => store.join_event_roster(event_id, user_id).await,
         }
     }
 
