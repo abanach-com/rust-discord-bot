@@ -353,6 +353,7 @@ async fn test_phase2_community_operations_and_media_suite() {
             "{base_url}/api/guilds/{guild_id}/polls/{poll_id}/vote"
         ))
         .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
         .json(&serde_json::json!({"option_idx": 1}))
         .send()
         .await
@@ -386,6 +387,7 @@ async fn test_phase2_community_operations_and_media_suite() {
             "{base_url}/api/guilds/{guild_id}/giveaways/{ga_id}/join"
         ))
         .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
         .send()
         .await
         .unwrap();
@@ -407,6 +409,7 @@ async fn test_phase2_community_operations_and_media_suite() {
     let star_private_resp = client
         .post(format!("{base_url}/api/guilds/{guild_id}/starboard/track"))
         .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
         .json(&serde_json::json!({
             "source_channel_id": "staff_secret",
             "source_message_id": "msg_99",
@@ -607,6 +610,7 @@ async fn test_phase2_community_operations_and_media_suite() {
             "{base_url}/api/guilds/{guild_id}/analytics/invites"
         ))
         .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
         .json(&serde_json::json!({
             "code": "discord-gg-test",
             "inviter_id": user_id,
@@ -648,6 +652,7 @@ async fn test_phase2_community_operations_and_media_suite() {
     let dyn_resp = client
         .post(format!("{base_url}/api/guilds/{guild_id}/voice/dynamic"))
         .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
         .json(&serde_json::json!({
             "channel_id": "temp_voice_901",
             "owner_id": user_id
@@ -662,6 +667,7 @@ async fn test_phase2_community_operations_and_media_suite() {
             "{base_url}/api/guilds/{guild_id}/voice/dynamic/temp_voice_901/empty"
         ))
         .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
         .json(&serde_json::json!({"is_empty": true}))
         .send()
         .await

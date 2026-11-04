@@ -954,4 +954,397 @@ async fn test_security_privacy_workflow_suite() {
         .await
         .expect("reclaim attempt");
     assert!(!reclaim.iter().any(|j| j.id == proc_job_id));
+
+    // =========================================================================
+    // Issue #142 [P2][security]: Mutating Panel Routes CSRF Enforcement
+    // =========================================================================
+
+    // 1. vote_poll
+    let poll = state
+        .app
+        .storage
+        .create_community_poll(
+            guild_id,
+            "chan_poll",
+            "Favorite Editor?",
+            &["VSCode".to_string(), "Neovim".to_string()],
+            false,
+            Utc::now() + Duration::hours(2),
+        )
+        .await
+        .unwrap();
+
+    let vote_no_csrf = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/polls/{}/vote",
+            poll.id
+        ))
+        .header(COOKIE, &session_cookie)
+        .json(&json!({"option_idx": 0}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(vote_no_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let vote_bad_csrf = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/polls/{}/vote",
+            poll.id
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", "invalid-csrf-token")
+        .json(&json!({"option_idx": 0}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(vote_bad_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let vote_ok = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/polls/{}/vote",
+            poll.id
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&json!({"option_idx": 0}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(vote_ok.status(), reqwest::StatusCode::OK);
+
+    // 2. join_giveaway
+    let ga = state
+        .app
+        .storage
+        .create_giveaway(
+            guild_id,
+            "chan_giveaways",
+            "Discord Nitro",
+            1,
+            Utc::now() + Duration::hours(2),
+        )
+        .await
+        .unwrap();
+
+    let join_ga_no_csrf = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}/join",
+            ga.id
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(join_ga_no_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let join_ga_bad_csrf = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}/join",
+            ga.id
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", "invalid-csrf-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(join_ga_bad_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let join_ga_ok = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}/join",
+            ga.id
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(join_ga_ok.status(), reqwest::StatusCode::OK);
+
+    // 3. track_starboard
+    let sb_no_csrf = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/starboard/track"))
+        .header(COOKIE, &session_cookie)
+        .json(&json!({
+            "source_channel_id": "chan_general",
+            "source_message_id": "msg_star_1",
+            "starboard_message_id": "sb_msg_1",
+            "reaction_count": 5,
+            "is_private_channel": false
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sb_no_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let sb_bad_csrf = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/starboard/track"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", "invalid-csrf-token")
+        .json(&json!({
+            "source_channel_id": "chan_general",
+            "source_message_id": "msg_star_1",
+            "starboard_message_id": "sb_msg_1",
+            "reaction_count": 5,
+            "is_private_channel": false
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sb_bad_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let sb_ok = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/starboard/track"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&json!({
+            "source_channel_id": "chan_general",
+            "source_message_id": "msg_star_1",
+            "starboard_message_id": "sb_msg_1",
+            "reaction_count": 5,
+            "is_private_channel": false
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sb_ok.status(), reqwest::StatusCode::OK);
+
+    // 4. record_invite
+    let inv_no_csrf = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/analytics/invites"
+        ))
+        .header(COOKIE, &session_cookie)
+        .json(&json!({
+            "code": "test-invite-142",
+            "inviter_id": user_id,
+            "campaign_tag": "csrf_test"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(inv_no_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let inv_bad_csrf = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/analytics/invites"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", "invalid-csrf-token")
+        .json(&json!({
+            "code": "test-invite-142",
+            "inviter_id": user_id,
+            "campaign_tag": "csrf_test"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(inv_bad_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let inv_ok = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/analytics/invites"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&json!({
+            "code": "test-invite-142",
+            "inviter_id": user_id,
+            "campaign_tag": "csrf_test"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(inv_ok.status(), reqwest::StatusCode::OK);
+
+    // 5. register_dynamic_voice
+    let voice_no_csrf = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/voice/dynamic"))
+        .header(COOKIE, &session_cookie)
+        .json(&json!({
+            "channel_id": "dyn_chan_142",
+            "owner_id": user_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(voice_no_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let voice_bad_csrf = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/voice/dynamic"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", "invalid-csrf-token")
+        .json(&json!({
+            "channel_id": "dyn_chan_142",
+            "owner_id": user_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(voice_bad_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let voice_ok = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/voice/dynamic"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&json!({
+            "channel_id": "dyn_chan_142",
+            "owner_id": user_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(voice_ok.status(), reqwest::StatusCode::OK);
+
+    // 6. set_dynamic_voice_empty
+    let empty_no_csrf = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/voice/dynamic/dyn_chan_142/empty"
+        ))
+        .header(COOKIE, &session_cookie)
+        .json(&json!({"is_empty": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(empty_no_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let empty_bad_csrf = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/voice/dynamic/dyn_chan_142/empty"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", "invalid-csrf-token")
+        .json(&json!({"is_empty": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(empty_bad_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let empty_ok = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/voice/dynamic/dyn_chan_142/empty"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&json!({"is_empty": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(empty_ok.status(), reqwest::StatusCode::OK);
+
+    // 7. link_game_account
+    let link_no_csrf = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/games/link"))
+        .header(COOKIE, &session_cookie)
+        .json(&json!({
+            "platform": "steam",
+            "platform_account_id": "steam_142_user"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(link_no_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let link_bad_csrf = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/games/link"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", "invalid-csrf-token")
+        .json(&json!({
+            "platform": "steam",
+            "platform_account_id": "steam_142_user"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(link_bad_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let link_ok = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/games/link"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&json!({
+            "platform": "steam",
+            "platform_account_id": "steam_142_user"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(link_ok.status(), reqwest::StatusCode::OK);
+    let link_json: serde_json::Value = link_ok.json().await.unwrap();
+    let challenge_code = link_json["challenge_code"].as_str().unwrap();
+
+    // 8. verify_game_account
+    let verify_no_csrf = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/games/verify"))
+        .header(COOKIE, &session_cookie)
+        .json(&json!({
+            "platform": "steam",
+            "code": challenge_code
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(verify_no_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let verify_bad_csrf = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/games/verify"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", "invalid-csrf-token")
+        .json(&json!({
+            "platform": "steam",
+            "code": challenge_code
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(verify_bad_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let verify_ok = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/games/verify"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&json!({
+            "platform": "steam",
+            "code": challenge_code
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(verify_ok.status(), reqwest::StatusCode::OK);
+
+    // 9. submit_counting_number
+    let count_no_csrf = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/counting/chan_count_142"
+        ))
+        .header(COOKIE, &session_cookie)
+        .json(&json!({"count": 1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(count_no_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let count_bad_csrf = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/counting/chan_count_142"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", "invalid-csrf-token")
+        .json(&json!({"count": 1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(count_bad_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let count_ok = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/counting/chan_count_142"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&json!({"count": 1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(count_ok.status(), reqwest::StatusCode::OK);
 }

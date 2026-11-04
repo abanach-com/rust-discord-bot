@@ -795,6 +795,8 @@ pub async fn vote_poll(
 ) -> Result<Json<CommunityPoll>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
 
+    verify_csrf(&headers, &session)?;
+
     ensure_guild_access(&state, &session, &guild_id).await?;
 
     let poll = state
@@ -902,6 +904,8 @@ pub async fn join_giveaway(
 ) -> Result<Json<Value>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
 
+    verify_csrf(&headers, &session)?;
+
     ensure_guild_access(&state, &session, &guild_id).await?;
 
     let ga = state
@@ -994,6 +998,8 @@ pub async fn track_starboard(
     Json(payload): Json<TrackStarboardRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
+
+    verify_csrf(&headers, &session)?;
 
     ensure_guild_access(&state, &session, &guild_id).await?;
 
@@ -1631,6 +1637,8 @@ pub async fn record_invite(
 ) -> Result<Json<InviteTracking>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
 
+    verify_csrf(&headers, &session)?;
+
     ensure_guild_access(&state, &session, &guild_id).await?;
 
     let inv = state
@@ -1826,6 +1834,8 @@ pub async fn register_dynamic_voice(
 ) -> Result<Json<DynamicVoiceRoom>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
 
+    verify_csrf(&headers, &session)?;
+
     ensure_guild_access(&state, &session, &guild_id).await?;
 
     let room = state
@@ -1854,6 +1864,8 @@ pub async fn set_dynamic_voice_empty(
     Json(payload): Json<SetDynamicVoiceEmptyRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
+
+    verify_csrf(&headers, &session)?;
 
     ensure_guild_access(&state, &session, &guild_id).await?;
 
@@ -2048,6 +2060,8 @@ pub async fn link_game_account(
 ) -> Result<Json<Value>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
 
+    verify_csrf(&headers, &session)?;
+
     ensure_guild_access(&state, &session, &guild_id).await?;
 
     let code = format!("{:06X}", (Utc::now().timestamp_subsec_nanos() % 0xFFFFFF));
@@ -2098,6 +2112,8 @@ pub async fn verify_game_account(
     Json(payload): Json<VerifyGameAccountRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
+
+    verify_csrf(&headers, &session)?;
 
     ensure_guild_access(&state, &session, &guild_id).await?;
 
@@ -2219,6 +2235,8 @@ pub async fn submit_counting_number(
     Json(payload): Json<SubmitCountingRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
+
+    verify_csrf(&headers, &session)?;
 
     ensure_guild_access(&state, &session, &guild_id).await?;
 

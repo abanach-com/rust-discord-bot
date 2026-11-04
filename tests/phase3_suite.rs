@@ -117,6 +117,7 @@ async fn test_phase3_games_rp_and_knowledge_suite() {
     let link_resp = client
         .post(format!("{base_url}/api/guilds/{guild_id}/games/link"))
         .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
         .json(&link_req)
         .send()
         .await
@@ -129,6 +130,7 @@ async fn test_phase3_games_rp_and_knowledge_suite() {
     let verify_resp = client
         .post(format!("{base_url}/api/guilds/{guild_id}/games/verify"))
         .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
         .json(&serde_json::json!({
             "platform": "steam",
             "code": challenge
@@ -176,6 +178,7 @@ async fn test_phase3_games_rp_and_knowledge_suite() {
             "{base_url}/api/guilds/{guild_id}/counting/chan_count_1"
         ))
         .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
         .json(&serde_json::json!({"count": 1}))
         .send()
         .await
@@ -191,6 +194,7 @@ async fn test_phase3_games_rp_and_knowledge_suite() {
             "{base_url}/api/guilds/{guild_id}/counting/chan_count_1"
         ))
         .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
         .json(&serde_json::json!({"count": 2}))
         .send()
         .await
