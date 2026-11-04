@@ -347,6 +347,46 @@ async fn test_phase2_community_operations_and_media_suite() {
     let poll_body: serde_json::Value = create_poll_resp.json().await.unwrap();
     let poll_id = poll_body["id"].as_str().unwrap();
 
+    // Issue #147: Poll duration_minutes boundary validation
+    for invalid_duration in [0, -1, -500, i64::MIN, i64::MAX, 43_201] {
+        let invalid_poll_resp = client
+            .post(format!("{base_url}/api/guilds/{guild_id}/polls"))
+            .header(COOKIE, &session_cookie)
+            .header("x-csrf-token", csrf_token)
+            .json(&serde_json::json!({
+                "channel_id": "chan_general",
+                "question": "Invalid duration poll",
+                "options": ["A", "B"],
+                "duration_minutes": invalid_duration
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            invalid_poll_resp.status(),
+            reqwest::StatusCode::BAD_REQUEST,
+            "duration {invalid_duration} must return 400 Bad Request"
+        );
+    }
+
+    // Valid boundary durations for poll: 1 minute and 43200 minutes (30 days)
+    for valid_duration in [1, 43_200] {
+        let valid_poll_resp = client
+            .post(format!("{base_url}/api/guilds/{guild_id}/polls"))
+            .header(COOKIE, &session_cookie)
+            .header("x-csrf-token", csrf_token)
+            .json(&serde_json::json!({
+                "channel_id": "chan_general",
+                "question": "Valid duration poll",
+                "options": ["A", "B"],
+                "duration_minutes": valid_duration
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(valid_poll_resp.status(), reqwest::StatusCode::OK);
+    }
+
     // Vote on option 1 ("Rust")
     let vote_resp = client
         .post(format!(
@@ -380,6 +420,46 @@ async fn test_phase2_community_operations_and_media_suite() {
     assert_eq!(ga_resp.status(), reqwest::StatusCode::OK);
     let ga_body: serde_json::Value = ga_resp.json().await.unwrap();
     let ga_id = ga_body["id"].as_str().unwrap();
+
+    // Issue #147: Giveaway duration_minutes boundary validation
+    for invalid_duration in [0, -1, -500, i64::MIN, i64::MAX, 43_201] {
+        let invalid_ga_resp = client
+            .post(format!("{base_url}/api/guilds/{guild_id}/giveaways"))
+            .header(COOKIE, &session_cookie)
+            .header("x-csrf-token", csrf_token)
+            .json(&serde_json::json!({
+                "channel_id": "chan_events",
+                "prize": "Invalid giveaway",
+                "winners_count": 1,
+                "duration_minutes": invalid_duration
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            invalid_ga_resp.status(),
+            reqwest::StatusCode::BAD_REQUEST,
+            "duration {invalid_duration} must return 400 Bad Request"
+        );
+    }
+
+    // Valid boundary durations for giveaway: 1 minute and 43200 minutes (30 days)
+    for valid_duration in [1, 43_200] {
+        let valid_ga_resp = client
+            .post(format!("{base_url}/api/guilds/{guild_id}/giveaways"))
+            .header(COOKIE, &session_cookie)
+            .header("x-csrf-token", csrf_token)
+            .json(&serde_json::json!({
+                "channel_id": "chan_events",
+                "prize": "Valid giveaway",
+                "winners_count": 1,
+                "duration_minutes": valid_duration
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(valid_ga_resp.status(), reqwest::StatusCode::OK);
+    }
 
     // Join giveaway
     let join_ga_resp = client

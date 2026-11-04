@@ -718,6 +718,19 @@ pub struct CreatePollRequest {
     pub duration_minutes: Option<i64>,
 }
 
+fn checked_expires_at(minutes: i64) -> Result<DateTime<Utc>, ApiError> {
+    if !(1..=43_200).contains(&minutes) {
+        return Err(ApiError::bad_request(
+            "duration_minutes must be between 1 and 43200",
+        ));
+    }
+    let delta = chrono::Duration::try_minutes(minutes)
+        .ok_or_else(|| ApiError::bad_request("duration_minutes out of range"))?;
+    Utc::now()
+        .checked_add_signed(delta)
+        .ok_or_else(|| ApiError::bad_request("expiration is out of range"))
+}
+
 pub async fn create_poll(
     State(state): State<WebState>,
 
@@ -733,7 +746,7 @@ pub async fn create_poll(
 
     ensure_guild_access(&state, &session, &guild_id).await?;
 
-    let expires = Utc::now() + chrono::Duration::minutes(payload.duration_minutes.unwrap_or(1440));
+    let expires = checked_expires_at(payload.duration_minutes.unwrap_or(1440))?;
 
     let poll = state
         .app
@@ -851,7 +864,7 @@ pub async fn create_giveaway(
         return Err(ApiError::bad_request("winners_count must be positive"));
     }
 
-    let expires = Utc::now() + chrono::Duration::minutes(payload.duration_minutes);
+    let expires = checked_expires_at(payload.duration_minutes)?;
 
     let ga = state
         .app
@@ -2639,5 +2652,35 @@ pub async fn query_ai_assistant(
             "escalated_to_staff": true
 
         })))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_checked_expires_at_bounds_and_overflow_protection() {
+        // Zero and negative durations must fail
+        assert!(checked_expires_at(0).is_err());
+        assert!(checked_expires_at(-1).is_err());
+        assert!(checked_expires_at(-100).is_err());
+        assert!(checked_expires_at(i64::MIN).is_err());
+
+        // Extreme positive durations that would panic Chrono must fail safely
+        assert!(checked_expires_at(i64::MAX).is_err());
+        assert!(checked_expires_at(i64::MAX / 2).is_err());
+        assert!(checked_expires_at(43_201).is_err()); // Exceeds 30 days
+
+        // Valid boundaries: 1 minute and 43200 minutes (30 days)
+        let min_exp = checked_expires_at(1).expect("1 minute must be valid");
+        assert!(min_exp > Utc::now());
+
+        let max_exp = checked_expires_at(43_200).expect("43200 minutes (30 days) must be valid");
+        assert!(max_exp > Utc::now());
+
+        // Default durations: 1440 (1 day) and 60 (1 hour)
+        assert!(checked_expires_at(1440).is_ok());
+        assert!(checked_expires_at(60).is_ok());
     }
 }
