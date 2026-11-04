@@ -220,6 +220,7 @@ pub fn parse_xml_to_dom(source: &str) -> Result<XmlElement, InstallXmlError> {
     let mut root: Option<XmlElement> = None;
 
     while i < len {
+        let prev_main_i = i;
         // Skip whitespace
         while i < len && bytes[i].is_ascii_whitespace() {
             i += 1;
@@ -319,8 +320,11 @@ pub fn parse_xml_to_dom(source: &str) -> Result<XmlElement, InstallXmlError> {
 
             let mut attributes = HashMap::new();
             let mut is_self_closing = false;
+            let mut tag_closed = false;
 
             while i < len {
+                let prev_attr_i = i;
+
                 while i < len && bytes[i].is_ascii_whitespace() {
                     i += 1;
                 }
@@ -330,13 +334,22 @@ pub fn parse_xml_to_dom(source: &str) -> Result<XmlElement, InstallXmlError> {
 
                 if bytes[i] == b'/' && i + 1 < len && bytes[i + 1] == b'>' {
                     is_self_closing = true;
+                    tag_closed = true;
                     i += 2;
                     break;
                 }
 
                 if bytes[i] == b'>' {
+                    tag_closed = true;
                     i += 1;
                     break;
+                }
+
+                if bytes[i] == b'/' {
+                    return Err(InstallXmlError::ParseError {
+                        offset: i,
+                        message: "unexpected '/' in attribute list (expected '/>')".to_owned(),
+                    });
                 }
 
                 // Parse attribute name
@@ -350,6 +363,12 @@ pub fn parse_xml_to_dom(source: &str) -> Result<XmlElement, InstallXmlError> {
                     i += 1;
                 }
                 let attr_name = source[attr_start..i].trim().to_string();
+                if attr_name.is_empty() {
+                    return Err(InstallXmlError::ParseError {
+                        offset: attr_start,
+                        message: "expected XML attribute name".to_owned(),
+                    });
+                }
 
                 while i < len && bytes[i].is_ascii_whitespace() {
                     i += 1;
@@ -383,9 +402,21 @@ pub fn parse_xml_to_dom(source: &str) -> Result<XmlElement, InstallXmlError> {
                     String::new()
                 };
 
-                if !attr_name.is_empty() {
-                    attributes.insert(attr_name, attr_val);
+                attributes.insert(attr_name, attr_val);
+
+                if i <= prev_attr_i {
+                    return Err(InstallXmlError::ParseError {
+                        offset: i,
+                        message: "parser made no forward progress in attribute list".to_owned(),
+                    });
                 }
+            }
+
+            if !tag_closed {
+                return Err(InstallXmlError::ParseError {
+                    offset: start_tag,
+                    message: "unclosed opening tag".to_owned(),
+                });
             }
 
             let elem = XmlElement {
@@ -415,6 +446,13 @@ pub fn parse_xml_to_dom(source: &str) -> Result<XmlElement, InstallXmlError> {
             if let Some(curr) = stack.last_mut() {
                 curr.text.push_str(&unescaped);
             }
+        }
+
+        if i <= prev_main_i {
+            return Err(InstallXmlError::ParseError {
+                offset: i,
+                message: "parser made no forward progress".to_owned(),
+            });
         }
     }
 
@@ -526,5 +564,43 @@ mod tests {
     fn rejects_missing_id() {
         let xml = r#"<installer><modules><module enabled="true" /></modules></installer>"#;
         assert!(InstallManifest::parse(xml).is_err());
+    }
+
+    #[test]
+    fn malformed_attribute_slash_must_not_hang_installer() {
+        assert!(parse_xml_to_dom("<installer /broken>").is_err());
+        assert!(parse_xml_to_dom("<installer/ broken>").is_err());
+        assert!(parse_xml_to_dom("<installer/>").is_ok());
+        assert!(parse_xml_to_dom("<installer =broken>").is_err());
+        assert!(parse_xml_to_dom("<installer").is_err());
+    }
+
+    #[test]
+    fn test_malformed_xml_fuzz_fragments_never_hang() {
+        let bad_inputs = [
+            "<installer /",
+            "<installer //",
+            "<installer ///>",
+            "<installer /=",
+            "<installer /\"",
+            "<installer /'>",
+            "<installer =",
+            "<installer =/",
+            "<installer =>",
+            "<installer \"foo\">",
+            "<installer 'foo'>",
+            "<installer / >",
+            "</>",
+            "<!",
+            "<?",
+            "<![CDATA[",
+            "<!--",
+        ];
+
+        for input in bad_inputs {
+            let res = parse_xml_to_dom(input);
+            // Must either parse or return Err, but never hang
+            let _ = res;
+        }
     }
 }

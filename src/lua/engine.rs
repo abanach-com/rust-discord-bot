@@ -953,4 +953,60 @@ mod tests {
             "Ratenbegrenzung für Befehl `/help` überschritten. Bitte in 10 s erneut versuchen."
         );
     }
+
+    #[tokio::test]
+    async fn test_lua_engine_reload_with_corrupted_manifest_does_not_hang_and_preserves_registry() {
+        let temp = std::env::temp_dir().join(format!(
+            "test_engine_reload_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&temp).unwrap();
+
+        let valid_xml = r#"<installer version="1.0.0">
+            <modules>
+                <module id="test_mod" enabled="true">
+                    <folder>.</folder>
+                    <entry>test_mod.lua</entry>
+                </module>
+            </modules>
+        </installer>"#;
+        std::fs::write(temp.join("install.xml"), valid_xml).unwrap();
+        std::fs::write(
+            temp.join("test_mod.lua"),
+            r#"return {
+                manifest = {
+                    id = "test_mod",
+                    name = "Test Module",
+                    version = "1.0.0",
+                    description = "Test Module Description",
+                    category = "general",
+                    commands = {}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let limits = LuaLimits {
+            memory_bytes: 4 * 1024 * 1024,
+            instruction_limit: 100_000,
+            hook_granularity: 100,
+        };
+
+        let engine = LuaEngine::load(&temp, limits).expect("initial load should succeed");
+        assert_eq!(engine.manifests().await.len(), 1);
+
+        // Corrupt manifest with malformed attribute slash
+        std::fs::write(temp.join("install.xml"), "<installer /broken>").unwrap();
+
+        let reload_res = engine.reload().await;
+        assert!(
+            reload_res.is_err(),
+            "reload on malformed manifest must return Err"
+        );
+
+        // Existing loaded registry must remain intact and unharmed
+        assert_eq!(engine.manifests().await.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
 }
