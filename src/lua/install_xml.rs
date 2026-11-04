@@ -232,36 +232,46 @@ pub fn parse_xml_to_dom(source: &str) -> Result<XmlElement, InstallXmlError> {
         if bytes[i] == b'<' {
             // Check for XML declaration <? ... ?>
             if i + 1 < len && bytes[i + 1] == b'?' {
-                i += 2;
-                while i + 1 < len && !(bytes[i] == b'?' && bytes[i + 1] == b'>') {
-                    i += 1;
-                }
-                i = (i + 2).min(len);
+                let start_decl = i;
+                let rest = &source[i + 2..];
+                let relative_end = rest.find("?>").ok_or_else(|| InstallXmlError::ParseError {
+                    offset: start_decl,
+                    message: "unclosed XML declaration".to_owned(),
+                })?;
+                i = i + 2 + relative_end + 2;
                 continue;
             }
 
             // Check for comments <!-- ... -->
             if i + 3 < len && &bytes[i..i + 4] == b"<!--" {
-                i += 4;
-                while i + 2 < len && &bytes[i..i + 3] != b"-->" {
-                    i += 1;
-                }
-                i = (i + 3).min(len);
+                let start_comment = i;
+                let rest = &source[i + 4..];
+                let relative_end = rest
+                    .find("-->")
+                    .ok_or_else(|| InstallXmlError::ParseError {
+                        offset: start_comment,
+                        message: "unclosed comment".to_owned(),
+                    })?;
+                i = i + 4 + relative_end + 3;
                 continue;
             }
 
             // Check for CDATA <![CDATA[ ... ]]>
             if i + 8 < len && &bytes[i..i + 9] == b"<![CDATA[" {
                 let start_cdata = i + 9;
-                let mut end_cdata = start_cdata;
-                while end_cdata + 2 < len && &bytes[end_cdata..end_cdata + 3] != b"]]>" {
-                    end_cdata += 1;
-                }
+                let rest = &source[start_cdata..];
+                let relative_end = rest
+                    .find("]]>")
+                    .ok_or_else(|| InstallXmlError::ParseError {
+                        offset: start_cdata,
+                        message: "unclosed CDATA section".to_owned(),
+                    })?;
+                let end_cdata = start_cdata + relative_end;
                 let cdata_text = &source[start_cdata..end_cdata];
                 if let Some(curr) = stack.last_mut() {
                     curr.text.push_str(cdata_text);
                 }
-                i = (end_cdata + 3).min(len);
+                i = end_cdata + 3;
                 continue;
             }
 
@@ -278,6 +288,11 @@ pub fn parse_xml_to_dom(source: &str) -> Result<XmlElement, InstallXmlError> {
                 }
                 if i < len && bytes[i] == b'>' {
                     i += 1;
+                } else {
+                    return Err(InstallXmlError::ParseError {
+                        offset: start_tag,
+                        message: format!("unclosed closing tag </{tag_name}>"),
+                    });
                 }
 
                 let popped = stack.pop().ok_or_else(|| InstallXmlError::ParseError {
@@ -602,5 +617,25 @@ mod tests {
             // Must either parse or return Err, but never hang
             let _ = res;
         }
+    }
+
+    #[test]
+    fn unterminated_cdata_is_parse_error_not_panic() {
+        for xml in ["<installer><![CDATA[éa", "<installer><![CDATA[abc"] {
+            let result = std::panic::catch_unwind(|| InstallManifest::parse(xml));
+            assert!(
+                matches!(result, Ok(Err(InstallXmlError::ParseError { .. }))),
+                "must reject unclosed CDATA, never panic or silently accept: {:?}",
+                xml
+            );
+        }
+        assert!(InstallManifest::parse("<installer><![CDATA[Zażółć]]></installer>").is_ok());
+    }
+
+    #[test]
+    fn unterminated_declaration_and_comment_are_parse_errors() {
+        assert!(parse_xml_to_dom("<?xml version=\"1.0\"").is_err());
+        assert!(parse_xml_to_dom("<!-- unclosed comment").is_err());
+        assert!(parse_xml_to_dom("<installer></unclosed").is_err());
     }
 }

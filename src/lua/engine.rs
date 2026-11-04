@@ -1007,6 +1007,19 @@ mod tests {
         // Existing loaded registry must remain intact and unharmed
         assert_eq!(engine.manifests().await.len(), 1);
 
+        // Corrupt manifest with unterminated UTF-8 CDATA (#141 regression)
+        std::fs::write(temp.join("install.xml"), "<installer><![CDATA[éa").unwrap();
+
+        let reload_res2 = engine.reload().await;
+        assert!(
+            matches!(reload_res2, Err(LuaEngineError::InvalidInstallXml { .. })),
+            "reload on unclosed CDATA must return InvalidInstallXml, got {:?}",
+            reload_res2
+        );
+
+        // Registry still unharmed
+        assert_eq!(engine.manifests().await.len(), 1);
+
         let _ = std::fs::remove_dir_all(&temp);
     }
 }
