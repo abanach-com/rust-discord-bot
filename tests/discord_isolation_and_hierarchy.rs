@@ -17,17 +17,21 @@ use axum::{
 use rusty_discord_bot::{
     AppState,
     config::Config,
-    discord::executor::{
-        ActionOrigin, ChannelPurpose, ensure_member_hierarchy, execute_event_actions,
-        resolve_and_validate_channel,
+    discord::{
+        Handler,
+        executor::{
+            ActionOrigin, ChannelPurpose, ensure_member_hierarchy, execute_event_actions,
+            resolve_and_validate_channel,
+        },
     },
     lua::LuaAction,
+    storage::UpdateModuleSettingsParams,
 };
 
 use serde_json::{Value, json};
 
 use serenity::{
-    all::{ChannelId, GatewayIntents, GuildId, Ready, UserId},
+    all::{ChannelId, GatewayIntents, GuildId, Message, MessageUpdateEvent, Ready, UserId},
     client::{Context, EventHandler},
     http::HttpBuilder,
 };
@@ -1166,6 +1170,199 @@ async fn test_event_action_failures_suppress_sent_audit_and_adjust_message_delet
             .iter()
             .any(|e| e.event == "action_denied" && e.module_id == "automod"),
         "AutoMod message deletion failure must record action_denied audit entry"
+    );
+
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn test_message_update_author_verification_and_automod_guard() {
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state().await;
+    let handler = Handler::new(state.clone());
+
+    // 1. Enable AutoMod on guild 100 with invite blocking and message deletion
+    state
+        .storage
+        .update_module_settings_with_audit(UpdateModuleSettingsParams {
+            guild_id: "100",
+            module_id: "automod",
+            enabled: true,
+            config: json!({
+                "block_invites": true,
+                "delete_messages": true,
+                "send_notice": true,
+            }),
+            actor_id: Some("111111111111111111"),
+            audit_event: "module_configured",
+            audit_data: json!({"enabled": true}),
+        })
+        .await
+        .expect("enable automod settings");
+
+    let baseline_modifications = mock.modifying_requests_count.load(Ordering::SeqCst);
+    let initial_unknown_author = state
+        .metrics
+        .message_updates_unknown_author_total
+        .load(Ordering::Relaxed);
+
+    // Scenario A: Partial message_update with author=None, new=None, blocked invite content
+    // Criteria: 0 modifying actions executed (no delete, no notice), 0 automod audit entries, counter incremented
+    let event_no_author: MessageUpdateEvent = serde_json::from_value(json!({
+        "id": "900000000000000010",
+        "channel_id": "101",
+        "guild_id": "100",
+        "content": "check this out: https://discord.gg/malicious-invite",
+    }))
+    .expect("deserialize event_no_author");
+
+    handler
+        .message_update(ctx.clone(), None, None, event_no_author)
+        .await;
+
+    assert_eq!(
+        mock.modifying_requests_count.load(Ordering::SeqCst),
+        baseline_modifications,
+        "Partial message_update with unknown author must NOT trigger any modifying requests (fail-closed)"
+    );
+
+    let audits_a = state.storage.list_audit_events("100", 20).await.unwrap();
+    assert!(
+        !audits_a
+            .iter()
+            .any(|e| e.event == "automod_rule_match" || e.event == "automod_edit_rule_match"),
+        "No AutoMod rule match audit should be recorded when author is unknown"
+    );
+
+    assert_eq!(
+        state
+            .metrics
+            .message_updates_unknown_author_total
+            .load(Ordering::Relaxed),
+        initial_unknown_author + 1,
+        "Diagnostic counter message_updates_unknown_author_total must be incremented"
+    );
+
+    // Scenario B: message_update with event.author.bot=true, new=None
+    // Criteria: 0 modifying actions executed, 0 automod audit entries
+    let event_bot_author: MessageUpdateEvent = serde_json::from_value(json!({
+        "id": "900000000000000011",
+        "channel_id": "101",
+        "guild_id": "100",
+        "content": "bot message with https://discord.gg/malicious-invite",
+        "author": {
+            "id": "888888888888888888",
+            "username": "SomeBot",
+            "discriminator": "0000",
+            "avatar": null,
+            "bot": true,
+        },
+    }))
+    .expect("deserialize event_bot_author");
+
+    handler
+        .message_update(ctx.clone(), None, None, event_bot_author)
+        .await;
+
+    assert_eq!(
+        mock.modifying_requests_count.load(Ordering::SeqCst),
+        baseline_modifications,
+        "Bot message_update must NOT trigger AutoMod actions"
+    );
+
+    let audits_b = state.storage.list_audit_events("100", 20).await.unwrap();
+    assert!(
+        !audits_b
+            .iter()
+            .any(|e| e.event == "automod_rule_match" || e.event == "automod_edit_rule_match"),
+        "No AutoMod rule match audit should be recorded for bot message update"
+    );
+
+    // Scenario C: message_update with event.author=None, but new.author.bot=true (cached bot message)
+    // Criteria: 0 modifying actions executed, 0 automod audit entries
+    let event_cached_bot: MessageUpdateEvent = serde_json::from_value(json!({
+        "id": "900000000000000012",
+        "channel_id": "101",
+        "guild_id": "100",
+        "content": "cached bot message with https://discord.gg/malicious-invite",
+    }))
+    .expect("deserialize event_cached_bot");
+
+    let new_bot_msg: Message = serde_json::from_value(json!({
+        "id": "900000000000000012",
+        "channel_id": "101",
+        "guild_id": "100",
+        "author": {
+            "id": "888888888888888888",
+            "username": "CachedBot",
+            "discriminator": "0000",
+            "avatar": null,
+            "bot": true,
+        },
+        "content": "cached bot message with https://discord.gg/malicious-invite",
+        "timestamp": "2026-10-31T07:00:00Z",
+        "tts": false,
+        "mention_everyone": false,
+        "mentions": [],
+        "mention_roles": [],
+        "attachments": [],
+        "embeds": [],
+        "pinned": false,
+        "type": 0,
+    }))
+    .expect("deserialize new_bot_msg");
+
+    handler
+        .message_update(ctx.clone(), None, Some(new_bot_msg), event_cached_bot)
+        .await;
+
+    assert_eq!(
+        mock.modifying_requests_count.load(Ordering::SeqCst),
+        baseline_modifications,
+        "Cached bot message_update must NOT trigger AutoMod actions"
+    );
+
+    let audits_c = state.storage.list_audit_events("100", 20).await.unwrap();
+    assert!(
+        !audits_c
+            .iter()
+            .any(|e| e.event == "automod_rule_match" || e.event == "automod_edit_rule_match"),
+        "No AutoMod rule match audit should be recorded for cached bot message update"
+    );
+
+    // Scenario D: message_update with confirmed human author (author.bot=false)
+    // Criteria: Normal AutoMod path executes without regression (deletes violating message, sends notice, records audit)
+    let event_human_author: MessageUpdateEvent = serde_json::from_value(json!({
+        "id": "900000000000000013",
+        "channel_id": "101",
+        "guild_id": "100",
+        "content": "human edit containing https://discord.gg/malicious-invite",
+        "author": {
+            "id": "777777777777777777",
+            "username": "HumanMember",
+            "discriminator": "0000",
+            "avatar": null,
+            "bot": false,
+        },
+    }))
+    .expect("deserialize event_human_author");
+
+    handler
+        .message_update(ctx.clone(), None, None, event_human_author)
+        .await;
+
+    // Must have executed delete_message (DELETE) and notice (POST)
+    assert!(
+        mock.modifying_requests_count.load(Ordering::SeqCst) > baseline_modifications,
+        "Verified human author edit must trigger AutoMod modifying requests"
+    );
+
+    let audits_d = state.storage.list_audit_events("100", 20).await.unwrap();
+    assert!(
+        audits_d
+            .iter()
+            .any(|e| e.event == "automod_edit_rule_match" && e.module_id == "automod"),
+        "AutoMod edit rule match audit must be recorded for confirmed human author"
     );
 
     shard_manager.shutdown_all().await;

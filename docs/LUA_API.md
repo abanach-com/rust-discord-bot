@@ -92,7 +92,7 @@ Eligible guild messages provide message/author/content metadata. Bot authors and
 
 ### `message_update`
 
-Only eligible updates with usable content reach Lua. Author data may be partial, including an empty author table. See [the update payload](lua/contexts-events.md#message_update).
+Only eligible updates with usable content and a verified non-bot author (`event.author` or cached `new.author`) reach Lua. Edits with an unconfirmed/missing author are dropped by the gateway handler (fail-closed) to protect against unverified actor execution and false moderation actions; dropped edits increment `message_updates_unknown_author_total`. See [the update payload](lua/contexts-events.md#message_update).
 
 ### `message_delete`
 

@@ -284,14 +284,24 @@ impl EventHandler for Handler {
             .discord_events_total
             .fetch_add(1, Ordering::Relaxed);
 
-        let is_bot = event
+        let author = event
             .author
             .as_ref()
-            .map(|u| u.bot)
-            .or_else(|| new.as_ref().map(|m| m.author.bot))
-            .unwrap_or(false);
+            .or_else(|| new.as_ref().map(|m| &m.author));
 
-        if is_bot {
+        let Some(author) = author else {
+            self.state
+                .metrics
+                .message_updates_unknown_author_total
+                .fetch_add(1, Ordering::Relaxed);
+            tracing::debug!(
+                message_id = %event.id,
+                "skipping message_update with unknown author to prevent unverified moderation actions"
+            );
+            return;
+        };
+
+        if author.bot {
             return;
         }
 
@@ -312,23 +322,9 @@ impl EventHandler for Handler {
             return;
         };
 
-        let author_id = event
-            .author
-            .as_ref()
-            .map(|u| u.id)
-            .or_else(|| new.as_ref().map(|m| m.author.id));
-
-        let author_name = event
-            .author
-            .as_ref()
-            .map(|u| u.name.clone())
-            .or_else(|| new.as_ref().map(|m| m.author.name.clone()));
-
-        let author_global_name = event
-            .author
-            .as_ref()
-            .and_then(|u| u.global_name.clone())
-            .or_else(|| new.as_ref().and_then(|m| m.author.global_name.clone()));
+        let author_id = author.id;
+        let author_name = author.name.clone();
+        let author_global_name = author.global_name.clone();
 
         let mentions: Vec<_> = event
             .mentions
@@ -393,7 +389,7 @@ impl EventHandler for Handler {
 
             channel_id: Some(event.channel_id.get().to_string()),
 
-            actor_id: author_id.map(|id| id.get().to_string()),
+            actor_id: Some(author_id.get().to_string()),
 
             data: json!({
 
@@ -433,7 +429,7 @@ impl EventHandler for Handler {
             event_context,
             Some(guild_id),
             Some(event.channel_id),
-            author_id,
+            Some(author_id),
         )
         .await;
     }

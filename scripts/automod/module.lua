@@ -287,7 +287,8 @@ local function build_actions(ctx, rule, evidence, is_edit)
             and "Message violates AutoMod rules ({rule})."
             or "Message was removed by AutoMod."
         local notice = config.notice or default_notice
-        notice = string.gsub(notice, "{user}", "<@" .. tostring(ctx.actor_id) .. ">")
+        local user_mention = ctx.actor_id and ("<@" .. tostring(ctx.actor_id) .. ">") or "User"
+        notice = string.gsub(notice, "{user}", user_mention)
         notice = string.gsub(notice, "{rule}", escaped(rule))
         table.insert(actions, {
             type = "send_message",
@@ -298,14 +299,16 @@ local function build_actions(ctx, rule, evidence, is_edit)
 
     if config.alert_channel_id and config.alert_channel_id ~= "" then
         local edit_badge = is_edit and " *(detected during message edit)*" or ""
+        local user_mention = ctx.actor_id and ("<@" .. tostring(ctx.actor_id) .. ">") or "Unknown User"
+        local user_id_str = ctx.actor_id and tostring(ctx.actor_id) or "unknown"
         table.insert(actions, {
             type = "send_message",
             channel_id = config.alert_channel_id,
             content = string.format(
-                "🛡️ **AutoMod Action**%s\nUser: <@%s> (`%s`)\nChannel: <#%s>\nRule: `%s`\nEvidence: `%s`\nMessage: `%s`",
+                "🛡️ **AutoMod Action**%s\nUser: %s (`%s`)\nChannel: <#%s>\nRule: `%s`\nEvidence: `%s`\nMessage: `%s`",
                 edit_badge,
-                tostring(ctx.actor_id),
-                tostring(ctx.actor_id),
+                user_mention,
+                user_id_str,
                 tostring(ctx.channel_id),
                 escaped(rule),
                 escaped(evidence),

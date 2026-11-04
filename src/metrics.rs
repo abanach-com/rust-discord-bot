@@ -13,6 +13,7 @@ pub struct Metrics {
     pub scheduler_jobs_cancelled_total: AtomicU64,
     pub dashboard_requests_total: AtomicU64,
     pub rate_limit_throttled_total: AtomicU64,
+    pub message_updates_unknown_author_total: AtomicU64,
 }
 
 impl Default for Metrics {
@@ -28,6 +29,7 @@ impl Default for Metrics {
             scheduler_jobs_cancelled_total: AtomicU64::new(0),
             dashboard_requests_total: AtomicU64::new(0),
             rate_limit_throttled_total: AtomicU64::new(0),
+            message_updates_unknown_author_total: AtomicU64::new(0),
         }
     }
 }
@@ -83,7 +85,11 @@ impl Metrics {
              # HELP rusty_discord_bot_active_sessions Current number of active dashboard sessions\n\
              # TYPE rusty_discord_bot_active_sessions gauge\n\
              rusty_discord_bot_active_sessions {9}\n\
-             zuckerbot_active_sessions {9}\n",
+             zuckerbot_active_sessions {9}\n\
+             # HELP rusty_discord_bot_message_updates_unknown_author_total Total number of message_update events skipped due to missing/unknown author\n\
+             # TYPE rusty_discord_bot_message_updates_unknown_author_total counter\n\
+             rusty_discord_bot_message_updates_unknown_author_total {10}\n\
+             zuckerbot_message_updates_unknown_author_total {10}\n",
             self.uptime_seconds(),
             self.discord_events_total.load(Ordering::Relaxed),
             self.lua_commands_total.load(Ordering::Relaxed),
@@ -94,6 +100,8 @@ impl Metrics {
             self.dashboard_requests_total.load(Ordering::Relaxed),
             self.rate_limit_throttled_total.load(Ordering::Relaxed),
             active_sessions,
+            self.message_updates_unknown_author_total
+                .load(Ordering::Relaxed),
         )
     }
 }
@@ -107,10 +115,14 @@ mod tests {
         let metrics = Metrics::new();
         metrics.discord_events_total.store(15, Ordering::Relaxed);
         metrics.lua_commands_total.store(7, Ordering::Relaxed);
+        metrics
+            .message_updates_unknown_author_total
+            .store(4, Ordering::Relaxed);
 
         let rendered = metrics.render_prometheus(3);
         assert!(rendered.contains("zuckerbot_discord_events_total 15"));
         assert!(rendered.contains("zuckerbot_lua_commands_total 7"));
+        assert!(rendered.contains("zuckerbot_message_updates_unknown_author_total 4"));
         assert!(rendered.contains("zuckerbot_active_sessions 3"));
         assert!(rendered.contains("zuckerbot_uptime_seconds"));
     }

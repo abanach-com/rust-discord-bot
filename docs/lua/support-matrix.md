@@ -16,7 +16,7 @@ A usable feature needs all applicable stages: a manifest field accepted by the l
 | Command description localization | Host catalogue applied by command builder | Supported for available translations |
 | Command name localization | No implemented registration mapping | Do not declare localized names as a working feature |
 | Guild message creation | Handler dispatches `message_create` | Supported for eligible nonbot guild messages |
-| Guild message edits | Handler dispatches `message_update` with usable content | Supported with partial author data and other documented omissions |
+| Guild message edits | Handler dispatches `message_update` with usable content | Supported when confirmed non-bot author is present; unconfirmed edits safely skipped (fail-closed) |
 | Guild message deletion | Handler dispatches `message_delete` | Supported metadata-only event |
 | Member joins and leaves | Handler dispatches `guild_member_add` / `guild_member_remove` | Supported; no event channel |
 | Reaction, voice or presence callbacks | No corresponding Lua dispatch | Unsupported even if a manifest lists a syntactically valid event name |

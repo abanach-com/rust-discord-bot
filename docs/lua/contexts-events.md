@@ -136,9 +136,9 @@ Each attachment contains `id` (string), `filename` (string), `size` (number), `c
 
 ### `message_update`
 
-This path dispatches guild message edits with usable content. Known bot authors, guildless updates and updates without content are skipped. The handler combines gateway update data and the available updated message; partial events can still lack author information.
+This path dispatches guild message edits with usable content and a verified non-bot author. Known bot authors, guildless updates, updates without content, and updates lacking confirmed author information are skipped (fail-closed). The handler combines gateway update data and the available updated message; edits without confirmed author information in both `event.author` and the cached `new.author` are safely dropped and recorded in `message_updates_unknown_author_total` to prevent destructive automated moderation (such as AutoMod message deletion or penalty actions) on bot or webhook edits.
 
-The payload has the message fields above and `is_edit=true`. The handler always constructs an `author` object, but its fields can be absent: without author information Lua receives `author = {}`. In this event, `author.id`, `author.name`, `author.global_name` and `actor_id` are optional. Testing only `if author` does not establish that `author.id` exists. Collections may be empty where a partial update did not supply them. There is no guaranteed old content, before/after diff or original creation-time snapshot. Do not interpret an absent field as a confirmed deletion of that field in Discord.
+The payload has the message fields above and `is_edit=true`. When dispatched, `ctx.actor_id` and `ctx.data.author.id` reflect the verified author ID. Collections (such as mentions or attachments) may be empty where a partial update did not supply them. There is no guaranteed old content, before/after diff or original creation-time snapshot. Do not interpret an absent optional field as a confirmed deletion of that field in Discord.
 
 ```lua
 local author = ctx.data.author
