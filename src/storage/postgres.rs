@@ -2424,7 +2424,7 @@ impl PostgresStore {
 
         name: &str,
     ) -> anyhow::Result<ProgressionSeason> {
-        let standings_rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(
+        let standings_rows: Vec<(String, i32, i64, i64)> = sqlx::query_as(
             r#"
 
             SELECT user_id, level, xp, coins

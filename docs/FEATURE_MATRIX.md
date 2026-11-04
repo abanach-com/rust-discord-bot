@@ -254,7 +254,7 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 | Rank cards | Planned |
 | Leaderboards | Planned |
 | Seasonal resets | Implemented |
-| Import from other bots | Implemented |
+| Import from other bots | Foundation (preview-only) |
 | Virtual currency | Planned |
 | Daily/weekly rewards | Planned |
 | Shop and inventory | Implemented |

@@ -577,6 +577,45 @@ async fn test_phase2_community_operations_and_media_suite() {
     let import_body: serde_json::Value = import_resp.json().await.unwrap();
     assert_eq!(import_body["conflict_count"], 1);
     assert_eq!(import_body["valid_count"], 2);
+    assert_eq!(import_body["imported"], false);
+
+    // Issue #148: dry_run=false must be rejected with 400 Bad Request until full atomic apply is implemented
+    let apply_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/progression/import"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "format": "mee6",
+            "dry_run": false,
+            "rows": [
+                {"id": "user_1", "xp": 1500}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(apply_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Issue #148: Unsupported import format must be rejected with 400 Bad Request
+    let bad_format_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/progression/import"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "format": "unsupported_bot_format",
+            "dry_run": true,
+            "rows": [
+                {"id": "user_1", "xp": 1500}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_format_resp.status(), reqwest::StatusCode::BAD_REQUEST);
 
     // ==========================================
     // 7. Agent 13 (#84): Events Calendar, Rosters & Tournaments

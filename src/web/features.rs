@@ -1227,6 +1227,19 @@ pub async fn import_progression(
 
     ensure_guild_access(&_state, &session, &guild_id).await?;
 
+    let format_lower = payload.format.to_lowercase();
+    if format_lower != "mee6" && format_lower != "kiai" {
+        return Err(ApiError::bad_request(
+            "unsupported import format: expected 'mee6' or 'kiai'",
+        ));
+    }
+
+    if !payload.dry_run {
+        return Err(ApiError::bad_request(
+            "Progression import apply is not implemented; use dry_run=true",
+        ));
+    }
+
     let mut valid_count = 0;
 
     let mut conflicts = Vec::new();

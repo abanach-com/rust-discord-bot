@@ -400,4 +400,24 @@ async fn test_postgres_integration_suite() {
     assert_eq!(audit_events[0].module_id, "dashboard");
     assert_eq!(audit_events[0].event, "module_config_updated");
     assert_eq!(audit_events[0].data["reason"], "integration_test");
+
+    // 6. Issue #149: Test archive_progression_season decodes level INTEGER into i32 without SQLx error
+    store
+        .adjust_member_progress(&guild_id, "season_user_1", 2500, 150, 0)
+        .await
+        .expect("seed member_progress 1");
+    store
+        .adjust_member_progress(&guild_id, "season_user_2", 500, 25, 0)
+        .await
+        .expect("seed member_progress 2");
+
+    let season = store
+        .archive_progression_season(&guild_id, "Season 1")
+        .await
+        .expect("archive_progression_season should decode level INTEGER into i32 successfully");
+    assert_eq!(season.name, "Season 1");
+    assert_eq!(season.standings_json.as_array().unwrap().len(), 2);
+    let first = &season.standings_json[0];
+    assert_eq!(first["user_id"], "season_user_1");
+    assert_eq!(first["xp"], 2500);
 }
