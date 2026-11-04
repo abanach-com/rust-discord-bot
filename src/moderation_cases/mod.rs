@@ -81,6 +81,32 @@ impl ModerationCaseStore {
         }
     }
 
+    pub async fn list_all_subject_cases(
+        &self,
+        guild_id: u64,
+        subject_user_id: u64,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<ModerationCase>, CaseError> {
+        match self {
+            Self::Memory(store) => {
+                store
+                    .list_all_subject_cases(guild_id, subject_user_id, now)
+                    .await
+            }
+            Self::Postgres(store) => {
+                store
+                    .list_all_subject_cases(guild_id, subject_user_id, now)
+                    .await
+            }
+        }
+    }
+
+    pub fn inject_failure(&self, fail: bool) {
+        if let Self::Memory(store) = self {
+            store.inject_failure(fail);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn update_case(
         &self,

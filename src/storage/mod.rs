@@ -1129,7 +1129,12 @@ impl Storage {
         user_id: &str,
     ) -> anyhow::Result<MemberProgress> {
         match self {
-            Self::Memory(store) => Ok(store.get_member_progress(guild_id, user_id)),
+            Self::Memory(store) => {
+                if store.is_progression_failure_injected() {
+                    anyhow::bail!("simulated progression failure");
+                }
+                Ok(store.get_member_progress(guild_id, user_id))
+            }
 
             Self::Postgres(store) => store.get_member_progress(guild_id, user_id).await,
         }
@@ -1137,8 +1142,14 @@ impl Storage {
 
     pub async fn has_member_progress(&self, guild_id: &str, user_id: &str) -> anyhow::Result<bool> {
         match self {
-            Self::Memory(store) => Ok(store.has_member_progress(guild_id, user_id)),
+            Self::Memory(store) => store.has_member_progress(guild_id, user_id),
             Self::Postgres(store) => store.has_member_progress(guild_id, user_id).await,
+        }
+    }
+
+    pub fn inject_progression_failure(&self, fail: bool) {
+        if let Self::Memory(store) = self {
+            store.inject_progression_failure(fail);
         }
     }
 

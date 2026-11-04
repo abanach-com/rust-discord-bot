@@ -42,6 +42,8 @@ pub struct MemoryStore {
 
     audit_failure_injected: Arc<std::sync::atomic::AtomicBool>,
 
+    progression_failure_injected: Arc<std::sync::atomic::AtomicBool>,
+
     progression: Arc<DashMap<MemberKey, MemberProgress>>,
 
     reputation_cooldowns: Arc<DashMap<ReputationKey, chrono::DateTime<Utc>>>,
@@ -202,6 +204,16 @@ impl MemoryStore {
             .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
+    pub fn inject_progression_failure(&self, fail: bool) {
+        self.progression_failure_injected
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn is_progression_failure_injected(&self) -> bool {
+        self.progression_failure_injected
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     pub fn record_audit(
         &self,
 
@@ -334,10 +346,16 @@ impl MemoryStore {
         self.profile(guild_id, user_id, Utc::now())
     }
 
-    pub fn has_member_progress(&self, guild_id: &str, user_id: &str) -> bool {
+    pub fn has_member_progress(&self, guild_id: &str, user_id: &str) -> anyhow::Result<bool> {
+        if self
+            .progression_failure_injected
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            anyhow::bail!("simulated progression failure");
+        }
         let _guard = self.progression_guard();
         let key = (guild_id.to_owned(), user_id.to_owned());
-        self.progression.contains_key(&key)
+        Ok(self.progression.contains_key(&key))
     }
 
     pub fn erase_guild_user_data(&self, guild_id: &str, user_id: &str) -> UserErasureReport {

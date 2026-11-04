@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use rusty_discord_bot::{
     config::Config,
+    moderation_cases::{CaseKind, CaseSeverity, CreateCase},
     session::{DashboardGuild, DashboardUser},
     state::AppState,
     storage::IntegrationConnection,
@@ -76,8 +77,8 @@ async fn test_security_privacy_workflow_suite() {
 
     let client = reqwest::Client::builder().build().unwrap();
 
-    let guild_id = "guild_sec_100";
-    let user_id = "user_sec_200";
+    let guild_id = "100100100100";
+    let user_id = "200200200200";
     let session_id = "test_sec_session_token_123";
     let csrf_token = "test_sec_csrf_token_456";
 
@@ -203,7 +204,7 @@ async fn test_security_privacy_workflow_suite() {
     assert!(list_json[0].get("secret_token").is_none());
 
     // =========================================================================
-    // Issue #132 [P1][bug/privacy]: Genuinely Erase Progression & Associated Data
+    // Issue #132 & #135: Progression & Moderation Privacy Data Handling
     // =========================================================================
 
     // Setup user progress
@@ -222,6 +223,116 @@ async fn test_security_privacy_workflow_suite() {
             .await
             .expect("check progress")
     );
+
+    // Issue #135: Seed 51 moderation cases for subject user
+    let parsed_g = guild_id.parse::<u64>().unwrap();
+    let parsed_u = user_id.parse::<u64>().unwrap();
+    for i in 1..=51 {
+        state
+            .app
+            .moderation_cases
+            .create_case(
+                CreateCase {
+                    guild_id: parsed_g,
+                    subject_user_id: parsed_u,
+                    actor_user_id: 999999999,
+                    kind: CaseKind::Warning,
+                    severity: CaseSeverity::Low,
+                    points: 1,
+                    reason: format!("Warning number {i}"),
+                    source_module: "moderation".to_string(),
+                    visible_to_subject: true,
+                    expires_at: None,
+                },
+                Utc::now(),
+            )
+            .await
+            .expect("create subject case");
+    }
+
+    // Seed case for different subject user to verify isolation
+    state
+        .app
+        .moderation_cases
+        .create_case(
+            CreateCase {
+                guild_id: parsed_g,
+                subject_user_id: 888888888,
+                actor_user_id: 999999999,
+                kind: CaseKind::Warning,
+                severity: CaseSeverity::Low,
+                points: 1,
+                reason: "Other user warning".to_string(),
+                source_module: "moderation".to_string(),
+                visible_to_subject: true,
+                expires_at: None,
+            },
+            Utc::now(),
+        )
+        .await
+        .expect("create other user case");
+
+    // Verify export returns all 51 cases without truncation
+    let export_initial = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/privacy/export"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&json!({
+            "user_id": user_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(export_initial.status(), 200);
+    let initial_json: serde_json::Value = export_initial.json().await.unwrap();
+    assert!(initial_json["progression"].is_object());
+    let cases = initial_json["moderation_cases"].as_array().unwrap();
+    assert_eq!(
+        cases.len(),
+        51,
+        "Issue #135: Export must return all 51 cases without truncation to 50"
+    );
+    for c in cases {
+        assert_eq!(c["subject_user_id"], user_id);
+    }
+
+    // Issue #135: Storage failure injection must yield HTTP 500, not fake 200
+    state.app.storage.inject_progression_failure(true);
+    let prog_fail_res = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/privacy/export"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&json!({
+            "user_id": user_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        prog_fail_res.status(),
+        500,
+        "Issue #135: Storage progression failure must return HTTP 500"
+    );
+    state.app.storage.inject_progression_failure(false);
+
+    // Issue #135: Moderation case store failure injection must yield HTTP 500, not fake 200
+    state.app.moderation_cases.inject_failure(true);
+    let mod_fail_res = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/privacy/export"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&json!({
+            "user_id": user_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        mod_fail_res.status(),
+        500,
+        "Issue #135: Moderation store failure must return HTTP 500"
+    );
+    state.app.moderation_cases.inject_failure(false);
 
     // Call DELETE /api/guilds/{id}/privacy/delete
     let del_res = client
@@ -255,7 +366,7 @@ async fn test_security_privacy_workflow_suite() {
         .expect("check progress after erase");
     assert!(!has_prog, "Progress record must be deleted from storage");
 
-    // Verify export returns null for progression
+    // Verify export returns null for progression after genuine erasure
     let export_res = client
         .post(format!("{base_url}/api/guilds/{guild_id}/privacy/export"))
         .header(COOKIE, &session_cookie)
@@ -270,8 +381,90 @@ async fn test_security_privacy_workflow_suite() {
     let export_json: serde_json::Value = export_res.json().await.unwrap();
     assert!(
         export_json["progression"].is_null(),
-        "Exported progression must be null after erasure"
+        "Exported progression must be null after genuine erasure"
     );
+
+    // =========================================================================
+    // Issue #134: ICS Timezone CRLF Injection & Timezone Validation
+    // =========================================================================
+
+    // 4a. Reject invalid timezone containing CRLF
+    let invalid_event = json!({
+        "title": "Malicious Event",
+        "description": "Event with CRLF in timezone",
+        "start_time": "2026-12-01T19:00:00Z",
+        "end_time": "2026-12-01T20:00:00Z",
+        "timezone": "UTC\r\nSUMMARY:Injected Summary",
+        "max_participants": 10
+    });
+    let invalid_res = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&invalid_event)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        invalid_res.status(),
+        400,
+        "Issue #134: Timezone with CRLF must be rejected with HTTP 400"
+    );
+
+    // 4b. Create valid event with Europe/Warsaw
+    let valid_event = json!({
+        "title": "Community Workshop",
+        "description": "Learning Rust",
+        "start_time": "2026-12-01T19:00:00Z",
+        "end_time": "2026-12-01T21:00:00Z",
+        "timezone": "Europe/Warsaw",
+        "max_participants": 20
+    });
+    let valid_res = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&valid_event)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(valid_res.status(), 200);
+    let ev_created: serde_json::Value = valid_res.json().await.unwrap();
+    let event_id = ev_created["id"].as_str().unwrap();
+
+    // 4c. Fetch ICS and verify compliance with RFC 5545
+    let ics_res = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{event_id}/ics"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ics_res.status(), 200);
+    assert_eq!(
+        ics_res.headers().get("content-type").unwrap(),
+        "text/calendar; charset=utf-8"
+    );
+    let ics_text = ics_res.text().await.unwrap();
+    assert!(
+        !ics_text.contains("TZID:"),
+        "Standalone TZID property must not be emitted in UTC event"
+    );
+    assert!(ics_text.contains("DTSTART:20261201T190000Z"));
+    assert!(ics_text.contains("DTEND:20261201T210000Z"));
+    assert_eq!(ics_text.matches("SUMMARY:").count(), 1);
+    assert_eq!(ics_text.matches("BEGIN:VEVENT").count(), 1);
+    assert_eq!(ics_text.matches("END:VEVENT").count(), 1);
+
+    // 4d. Fetch ICS from another guild -> 403 Forbidden
+    let cross_res = client
+        .get(format!(
+            "{base_url}/api/guilds/other_guild_99999/scheduled-events/{event_id}/ics"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cross_res.status(), 403);
 
     // =========================================================================
     // Issue #133 [P2][bug]: Workflow DAG Validation & Dynamic Dry-Run

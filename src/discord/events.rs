@@ -30,12 +30,10 @@ pub fn generate_icalendar_event(event: &ScheduledEvent) -> String {
         DTEND:{dtend}\r\n\
         SUMMARY:{summary}\r\n\
         DESCRIPTION:{description}\r\n\
-        TZID:{tz}\r\n\
         STATUS:CONFIRMED\r\n\
         END:VEVENT\r\n\
         END:VCALENDAR\r\n",
         id = event.id,
-        tz = event.timezone,
     )
 }
 
@@ -77,7 +75,33 @@ mod tests {
         assert!(ics.contains("BEGIN:VCALENDAR"));
         assert!(ics.contains("SUMMARY:Community Game Night\\, & More!"));
         assert!(ics.contains("DESCRIPTION:Join us for fun\\nBring friends!"));
-        assert!(ics.contains("TZID:Europe/Warsaw"));
+        assert!(!ics.contains("TZID:"));
+        assert!(ics.contains("DTSTART:20261201T190000Z"));
+        assert!(ics.contains("DTEND:20261201T210000Z"));
         assert!(ics.contains("END:VCALENDAR"));
+    }
+
+    #[test]
+    fn test_generate_icalendar_event_with_malicious_crlf_timezone() {
+        let ev = ScheduledEvent {
+            id: Uuid::new_v4(),
+            guild_id: "123".to_owned(),
+            title: "Safe Meeting".to_owned(),
+            description: "Safe description".to_owned(),
+            start_time: DateTime::parse_from_rfc3339("2026-12-01T19:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            end_time: None,
+            timezone: "UTC\r\nSUMMARY:INJECTED_COLLISION\r\nBEGIN:VEVENT".to_owned(),
+            max_participants: None,
+            created_at: Utc::now(),
+        };
+
+        let ics = generate_icalendar_event(&ev);
+        assert!(!ics.contains("INJECTED_COLLISION"));
+        assert_eq!(ics.matches("SUMMARY:").count(), 1);
+        assert_eq!(ics.matches("BEGIN:VEVENT").count(), 1);
+        assert_eq!(ics.matches("END:VEVENT").count(), 1);
+        assert!(!ics.contains("TZID:"));
     }
 }

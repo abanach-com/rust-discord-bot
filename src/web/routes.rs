@@ -1172,38 +1172,27 @@ pub async fn export_user_privacy_data(
         .storage
         .has_member_progress(&guild_id, user_id)
         .await
-        .unwrap_or(false)
+        .map_err(|e| ApiError::internal(e.to_string()))?
     {
-        state
-            .app
-            .storage
-            .get_member_progress(&guild_id, user_id)
-            .await
-            .ok()
+        Some(
+            state
+                .app
+                .storage
+                .get_member_progress(&guild_id, user_id)
+                .await
+                .map_err(|e| ApiError::internal(e.to_string()))?,
+        )
     } else {
         None
     };
 
-    let parsed_guild: u64 = guild_id.parse().unwrap_or(0);
-    let parsed_uid = user_id.parse::<u64>().unwrap_or(0);
-    let cases = if parsed_guild > 0 && parsed_uid > 0 {
+    let cases = if let (Ok(g), Ok(u)) = (guild_id.parse::<u64>(), user_id.parse::<u64>()) {
         state
             .app
             .moderation_cases
-            .list_cases(
-                parsed_guild,
-                crate::moderation_cases::CaseFilter {
-                    subject_user_id: Some(parsed_uid),
-                    actor_user_id: None,
-                    kind: None,
-                    status: None,
-                    visible_to_subject_only: false,
-                    limit: 50,
-                },
-                Utc::now(),
-            )
+            .list_all_subject_cases(g, u, Utc::now())
             .await
-            .unwrap_or_default()
+            .map_err(|e| ApiError::internal(e.to_string()))?
     } else {
         Vec::new()
     };

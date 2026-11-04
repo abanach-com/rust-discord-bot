@@ -178,6 +178,55 @@ impl PostgresModerationCaseStore {
         rows.iter().map(map_case).collect()
     }
 
+    pub async fn list_all_subject_cases(
+        &self,
+        guild_id: u64,
+        subject_user_id: u64,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<ModerationCase>, CaseError> {
+        self.expire_due(guild_id, now).await?;
+        let mut all_cases = Vec::new();
+        let mut last_case_number: Option<i64> = None;
+        const BATCH_SIZE: i64 = 100;
+
+        loop {
+            let rows = sqlx::query(
+                r#"
+                SELECT *
+                FROM moderation_cases
+                WHERE guild_id = $1
+                  AND subject_user_id = $2
+                  AND ($3::bigint IS NULL OR case_number < $3)
+                ORDER BY case_number DESC
+                LIMIT $4
+                "#,
+            )
+            .bind(guild_id.to_string())
+            .bind(subject_user_id.to_string())
+            .bind(last_case_number)
+            .bind(BATCH_SIZE)
+            .fetch_all(&self.pool)
+            .await?;
+
+            if rows.is_empty() {
+                break;
+            }
+
+            let count = rows.len();
+            let batch: Vec<ModerationCase> = rows.iter().map(map_case).collect::<Result<_, _>>()?;
+            if let Some(last) = batch.last() {
+                last_case_number = Some(last.case_number);
+            }
+            all_cases.extend(batch);
+
+            if (count as i64) < BATCH_SIZE {
+                break;
+            }
+        }
+
+        Ok(all_cases)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn update_case(
         &self,

@@ -23,12 +23,18 @@ struct MemoryState {
 #[derive(Debug, Clone, Default)]
 pub struct MemoryModerationCaseStore {
     state: Arc<Mutex<MemoryState>>,
+    failure_injected: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MemoryModerationCaseStore {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn inject_failure(&self, fail: bool) {
+        self.failure_injected
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub async fn create_case(
@@ -131,6 +137,33 @@ impl MemoryModerationCaseStore {
                     && (!filter.visible_to_subject_only || value.visible_to_subject)
             })
             .take(usize::from(filter.limit))
+            .cloned()
+            .collect();
+        Ok(rows)
+    }
+
+    pub async fn list_all_subject_cases(
+        &self,
+        guild_id: u64,
+        subject_user_id: u64,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<ModerationCase>, CaseError> {
+        if self
+            .failure_injected
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(CaseError::Validation(
+                "simulated moderation case store failure".to_string(),
+            ));
+        }
+        let mut state = self.state.lock().await;
+        expire_due(&mut state, guild_id, now);
+        let rows = state
+            .cases
+            .range((guild_id, i64::MIN)..=(guild_id, i64::MAX))
+            .rev()
+            .map(|(_, value)| value)
+            .filter(|value| value.subject_user_id == subject_user_id)
             .cloned()
             .collect();
         Ok(rows)

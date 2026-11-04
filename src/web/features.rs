@@ -1309,6 +1309,16 @@ pub async fn create_event(
 
     ensure_guild_access(&state, &session, &guild_id).await?;
 
+    let tz = payload.timezone.trim();
+    if tz.is_empty()
+        || tz.len() > 64
+        || !tz
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'_' | b'-' | b'+'))
+    {
+        return Err(ApiError::bad_request("Invalid timezone"));
+    }
+
     let ev = state
         .app
         .storage
@@ -1318,7 +1328,7 @@ pub async fn create_event(
             &payload.description,
             payload.start_time,
             payload.end_time,
-            &payload.timezone,
+            tz,
             payload.max_participants,
         )
         .await
@@ -1327,6 +1337,8 @@ pub async fn create_event(
     Ok(Json(ev))
 }
 
+/// Publicly accessible via unguessable UUID for calendar subscriptions/direct downloads
+/// without requiring web dashboard authentication, while strictly bounded to the matching guild_id.
 pub async fn get_event_ics(
     State(state): State<WebState>,
 
