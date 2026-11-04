@@ -51,47 +51,39 @@ pub fn chunk_discord_text(text: &str, limit: usize) -> Vec<String> {
         return vec![text.to_owned()];
     }
 
-    let mut chunks = Vec::new();
-
-    let mut current_chunk = String::new();
-
-    for line in text.lines() {
-        if line.len() > limit {
-            if !current_chunk.is_empty() {
-                chunks.push(std::mem::take(&mut current_chunk));
-            }
-
-            let mut sub_chunk = String::new();
-
-            for ch in line.chars() {
-                if sub_chunk.len() + ch.len_utf8() > limit {
-                    chunks.push(std::mem::take(&mut sub_chunk));
-                }
-
-                sub_chunk.push(ch);
-            }
-
-            if !sub_chunk.is_empty() {
-                current_chunk = sub_chunk;
-            }
-        } else if current_chunk.len() + line.len() + 1 > limit {
-            chunks.push(std::mem::take(&mut current_chunk));
-
-            current_chunk.push_str(line);
-
-            current_chunk.push('\n');
-        } else {
-            current_chunk.push_str(line);
-
-            current_chunk.push('\n');
+    let mut result = Vec::new();
+    let mut remaining = text;
+    while !remaining.is_empty() {
+        if remaining.len() <= limit {
+            result.push(remaining.to_owned());
+            break;
         }
+
+        let max_end = remaining
+            .char_indices()
+            .take_while(|(start, ch)| start + ch.len_utf8() <= limit)
+            .map(|(start, ch)| start + ch.len_utf8())
+            .last()
+            .unwrap_or_else(|| {
+                remaining
+                    .chars()
+                    .next()
+                    .map(|c| c.len_utf8())
+                    .unwrap_or(remaining.len())
+            });
+
+        // Prefer splitting after the last newline within the limit to preserve natural line breaks
+        let split_at = if let Some(nl_pos) = remaining[..max_end].rfind('\n') {
+            nl_pos + 1
+        } else {
+            max_end
+        };
+
+        result.push(remaining[..split_at].to_owned());
+        remaining = &remaining[split_at..];
     }
 
-    if !current_chunk.is_empty() {
-        chunks.push(current_chunk.trim_end().to_owned());
-    }
-
-    chunks
+    result
 }
 
 pub async fn execute_command_actions(
@@ -1490,4 +1482,63 @@ async fn audit_action(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_chunk_discord_text_cases_from_issue_146() {
+        // Case 1: line with exact length of limit followed by newline and next line
+        // Must NOT emit an empty first chunk, and must not exceed limit
+        let res1 = chunk_discord_text("abcde\nx", 5);
+        assert_eq!(res1, vec!["abcde", "\nx"]);
+        assert_eq!(res1.concat(), "abcde\nx");
+        assert!(res1.iter().all(|c| !c.is_empty() && c.len() <= 5));
+
+        // Case 2: line exceeding limit followed by newline
+        // Must preserve the newline separator
+        let res2 = chunk_discord_text("abcdef\nz", 5);
+        assert_eq!(res2, vec!["abcde", "f\nz"]);
+        assert_eq!(res2.concat(), "abcdef\nz");
+        assert!(res2.iter().all(|c| !c.is_empty() && c.len() <= 5));
+    }
+
+    #[test]
+    fn test_chunk_discord_text_preserves_utf8_and_line_breaks_at_boundaries() {
+        for text in [
+            format!("{}\nkoniec", "a".repeat(1950)),
+            format!("{}\nkoniec", "a".repeat(1951)),
+            format!("{}\nkoniec", "ą".repeat(1000)),
+            format!("{}\n", "a".repeat(1950)),
+            format!("🦀{}", "x".repeat(1950)),
+            "line1\nline2\nline3\nline4".to_string(),
+            "".to_string(),
+        ] {
+            let chunks = chunk_discord_text(&text, 1950);
+            if text.is_empty() {
+                assert_eq!(chunks, vec![""]);
+            } else {
+                assert!(!chunks.is_empty());
+                assert!(
+                    chunks
+                        .iter()
+                        .all(|part| !part.is_empty() && part.len() <= 1950)
+                );
+            }
+            assert_eq!(chunks.concat(), text);
+        }
+    }
+
+    #[test]
+    fn test_chunk_discord_text_multi_byte_never_slices_char() {
+        let text = "🚀🦀⭐".repeat(100);
+        let chunks = chunk_discord_text(&text, 10);
+        for chunk in &chunks {
+            assert!(chunk.len() <= 10);
+            assert!(!chunk.is_empty());
+        }
+        assert_eq!(chunks.concat(), text);
+    }
 }
