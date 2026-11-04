@@ -1,399 +1,204 @@
 # Lua module API
 
-API version: `1`
+This is the entry point for ZuckerBot's Lua API **1**, checked against source snapshot [`10a2ba1`](https://github.com/abanach-com/rust-discord-bot/tree/10a2ba1780a2becd6d7ba2bfc5c4f7a2fecc9882) on 2026-11-04. The [Lua author handbook](lua/README.md) contains the complete reference, and [examples/lua](../examples/lua/README.md) contains three installable example packages. For a Polish introduction, start with [Polski szybki start](lua/quickstart-pl.md).
 
-Every file ending in `.lua` below `SCRIPTS_DIR` must return one module table.
+Lua receives a context and returns action requests. Rust owns authorization, persistent state, Discord delivery and service execution. The [support matrix](lua/support-matrix.md) separates implemented paths from helpers, registrations and future features.
+
+## Complete reference
+
+| Chapter | Scope |
+| --- | --- |
+| [1. Runtime](lua/runtime.md) | Discovery, loading, fresh VMs, configuration and execution phases |
+| [2. Quickstart](lua/quickstart.md) | Complete module, JSON defaults and XML installation |
+| [3. Manifests](lua/manifests.md) | Every manifest, command, option and installer field |
+| [4. Contexts and events](lua/contexts-events.md) | Callback signatures, nested options and all five dispatched events |
+| [5. Actions](lua/actions.md) | All 16 action types, fields, bounds, delivery and permissions |
+| [6. Host services](lua/services.md) | State ownership, reserved module identities and service results |
+| [7. Progression](lua/progression.md) | Profiles, balances, daily rewards, transfers and staff adjustments |
+| [8. Scheduler](lua/scheduler.md) | Durable jobs, policies, time syntax, ownership and retries |
+| [9. Tickets](lua/tickets.md) | Opening, policies, participants, transcripts and lifecycle |
+| [10. Moderation cases](lua/moderation-cases.md) | Cases, sanctions, notes, evidence and visibility |
+| [11. Helpers and translations](lua/helpers-i18n.md) | Complete helper table, argument rules and catalogue loading |
+| [12. Security and errors](lua/security-errors.md) | Sandbox, resource budgets, authorization and partial execution |
+| [13. Testing](lua/testing.md) | Engine fixtures, configuration validation and diagnostic workflow |
+| [14. Recipes](lua/recipes.md) | Complete packages and practical callback fragments |
+| [15. Support matrix](lua/support-matrix.md) | Current limitations, known defects and bundled module inventory |
+
+## Module contract
+
+A module file must return a table containing its `manifest` and exported callbacks. Returning only a manifest, or defining a global callback without exporting it, is not this contract.
 
 ```lua
 return {
-    manifest = { ... },
-    on_command = function(command, ctx) return { ...actions } end,
-    on_event = function(event, ctx) return { ...actions } end,
+    manifest = {
+        id = "hello", name = "Hello", version = "1.0.0",
+        description = "A minimal module", category = "examples",
+        commands = {{ name = "hello", description = "Greet the invoking user" }},
+        config_schema = { type = "object", additionalProperties = false },
+    },
+    on_command = function(command, ctx)
+        if command ~= "hello" then return {} end
+        return {{
+            type = "reply",
+            content = "Hello, " .. rustybot.escape_mentions(ctx.user_name) .. ".",
+            ephemeral = true,
+        }}
+    end,
 }
 ```
 
-A module may implement commands, events or both. Unknown commands and events should return an empty array `{}`.
+Install packages through an `install.xml` whose root is `installer` or `install`, or use the documented legacy discovery mode. See [quickstart](lua/quickstart.md) for the complete file layout. The host evaluates source in a fresh VM for each invocation; globals and closures do not persist between calls.
+
+The callbacks are `on_command(command, ctx)` and `on_event(event, ctx)`. Both return a dense, one-based array of action tables; `{}` means no actions. Always use the array wrapper and do not rely on malformed keyed tables producing a particular error.
 
 ## Manifest
 
-Required fields:
+Required fields are `id`, `name`, `version`, `description` and `category`. Optional fields include `default_enabled`, `commands`, `events`, `config_schema`, `author` and `folder`. The [manifest reference](lua/manifests.md) describes defaults and validation; the XML installer has a separate selection/metadata contract.
 
-| Field | Type | Rules |
-| --- | --- | --- |
-| `id` | string | 1–64 lowercase ASCII letters, digits, `_` or `-` |
-| `name` | string | 1–64 characters |
-| `version` | string | module version; semantic versioning is recommended |
-| `description` | string | 1–200 characters |
-| `category` | string | 1–32 characters |
-
-Optional fields:
-
-| Field | Type | Default |
-| --- | --- | --- |
-| `default_enabled` | boolean | `true` |
-| `commands` | array | empty |
-| `events` | array of strings | empty |
-| `config_schema` | table | empty object |
-
-`config_schema` is exposed to the dashboard. The foundation stores and displays JSON configuration; full JSON Schema form generation and validation are tracked in the feature roadmap.
+Declare an object configuration schema when the callback expects an object. Saved guild configuration replaces package defaults; it is not a deep merge. Loading compiles the schema but does not validate the package's actual `config.json` against it. Validate defaults explicitly; [#128](https://github.com/abanach-com/rust-discord-bot/issues/128) records failures in shipped packages at this snapshot.
 
 ## Command definition
 
-```lua
-{
-    name = "example",
-    description = "Runs an example command.",
-    integration_types = { "guild" },
-    contexts = { "guild" },
-    nsfw = false,
-    default_member_permissions = "32",
-    options = {
-        {
-            type = "string",
-            name = "mode",
-            description = "Operation mode.",
-            required = true,
-            autocomplete = false,
-            choices = {
-                { name = "Fast", value = "fast" },
-                { name = "Safe", value = "safe" },
-            },
-            min_length = 1,
-            max_length = 30,
-        },
-    },
-}
-```
+Commands declare their name, description, nested options, default member permissions and installation/interaction contexts. Required ordinary options precede optional ones. Discord IDs and permission bitsets are decimal strings; avoid converting IDs through numeric types.
 
 ### Installation and interaction contexts
 
-Current Discord commands use two separate declarations:
-
-- `integration_types` controls how the app was installed. Values: `guild`, `user`.
-- `contexts` controls where the command may run. Values: `guild`, `bot_dm`, `private_channel`.
-
-Both default to `{ "guild" }` in ZuckerBot. A `private_channel` context requires the `user` installation type. Empty arrays and duplicate values are rejected. These fields apply only to global command registration; the development-guild registration path omits them because Discord does not accept global-only context fields on guild commands.
-
-The historic `dm_permission` field is deprecated by Discord. API version 1 accepts it only as a migration input:
-
-- `dm_permission = false` maps to `{ "guild" }`;
-- `dm_permission = true` maps to `{ "guild", "bot_dm" }`;
-- it cannot be combined with `contexts`;
-- ZuckerBot never sends `dm_permission` back to Discord;
-- it is scheduled for removal in Lua API version 2.
-
-Set `nsfw = true` only for commands that are intentionally age-restricted.
-
-Supported option types:
-
-- `string`
-- `integer`
-- `number`
-- `boolean`
-- `user`
-- `channel`
-- `role`
-- `mentionable`
-- `attachment`
-- `subcommand`
-- `subcommand_group`
-
-Subcommands and subcommand groups contain nested `options`. Discord limits each level to 25 entries. The runtime rejects duplicate command names and refuses command registration if the total number of global commands exceeds 100.
-
-`default_member_permissions` is a Discord permission bitset encoded as a string. Privileged actions are checked again at execution time; command visibility is not treated as authorization.
+The default is guild installation and guild interaction. `integration_types` supports `guild` and `user`; `contexts` supports `guild`, `bot_dm` and `private_channel`. Private-channel interaction requires user installation. Deprecated `dm_permission` cannot be combined with `contexts`. See [the full context rules](lua/manifests.md) for registration differences and validation.
 
 ## Command context
 
+`ctx` contains `guild_id` (optional), `channel_id`, `user_id`, `user_name`, `member_roles`, `member_permissions`, `locale`, `options` and `config`. [The field reference](lua/contexts-events.md) describes their types and origin.
+
+Subcommands are nested in `options`; there is no host-supplied `options.subcommand` discriminator. For `/economy transfer recipient:... amount:...`, read:
+
 ```lua
-ctx = {
-    guild_id = "123" or nil,
-    channel_id = "456",
-    user_id = "789",
-    user_name = "Display name",
-    member_roles = { "111", "222" },
-    member_permissions = "1099511627776",
-    locale = "pl",
-    options = {
-        action = "timeout",
-        user = "999",
-    },
-    config = {
-        default_timeout_seconds = 600,
-    },
-}
+local transfer = (ctx.options or {}).transfer
+if transfer then
+    local recipient = transfer.recipient -- ID string from the option declaration
+    local amount = transfer.amount
+    -- Route this branch and return supported actions from the callback.
+end
 ```
 
-All Discord snowflakes are strings at Lua and JSON boundaries. Nested subcommand options are represented as nested tables.
+For a group, the shape is `options.<group>.<subcommand>.<option>`. The [complete router](../examples/lua/nested-router/module.lua) demonstrates both shapes. [#126](https://github.com/abanach-com/rust-discord-bot/issues/126) identifies shipped modules using a different, incompatible pattern.
 
 ## Event context
 
-```lua
-ctx = {
-    name = "message_create",
-    guild_id = "123" or nil,
-    channel_id = "456" or nil,
-    actor_id = "789" or nil,
-    data = { ...event-specific fields... },
-    config = { ...guild module configuration... },
-}
-```
-
-Implemented events:
+`ctx` contains `name`, optional `guild_id`, `channel_id` and `actor_id`, plus `data` and `config`. Event callbacks do not receive the command context's user name, permission bits, locale or option fields. The actual dispatched events are below; a syntactically accepted subscription name does not create a new host event.
 
 ### `message_create`
 
-`data` contains `message_id`, `content`, author data, mentions and attachment metadata.
+Eligible guild messages provide message/author/content metadata. Bot authors and messages excluded by the handler's filters are not dispatched. See the [complete payload and filters](lua/contexts-events.md#message_create).
 
 ### `message_update`
 
-Fires when an existing message is edited in a guild. `data` contains `message_id`, `content`, author data, `mentions`, `mention_roles`, `mention_everyone`, attachment metadata (`attachments`), and `is_edit = true`.
+Only eligible updates with usable content reach Lua. Author data may be partial, including an empty author table. See [the update payload](lua/contexts-events.md#message_update).
 
 ### `message_delete`
 
-Fires when a message is deleted from a channel in a guild. `data` contains `message_id` and `channel_id`.
+Deletion supplies identifiers, not the deleted message body or author. See [the deletion payload](lua/contexts-events.md#message_delete).
 
 ### `guild_member_add`
 
-Fires when a new user joins a guild. `data` contains user data, roles, `joined_at`, `recent_joins_count`, `guild_name` and `member_count`.
+Join events have a guild and actor but no event channel. See [the member-add payload](lua/contexts-events.md#guild_member_add).
 
 ### `guild_member_remove`
 
-Fires when a member leaves, is kicked, or is banned from a guild. `data` contains user data (`user`), roles (if cached), `joined_at` (if cached), `guild_name` and `member_count`.
-
-The stable event envelope lets future versions add events without exposing Serenity internals directly to Lua.
+Leave events likewise have no event channel. See [the member-remove payload](lua/contexts-events.md#guild_member_remove).
 
 ## Actions
 
-A handler returns an array of action tables. A single execution may return at most 25 actions.
+The top-level types are `reply`, `send_message`, `send_direct_message`, `delete_message`, `timeout_member`, `kick_member`, `ban_member`, `add_role`, `remove_role`, `purge`, `music`, `progression`, `scheduler`, `ticket`, `moderation_case` and `audit`. The [action reference](lua/actions.md) documents every field and bound.
+
+The engine decodes and validates the entire list before execution, with a maximum of 25 actions. Ordinary message content must contain 1–2,000 Unicode scalar values. Validation does not make the subsequent Discord/storage effects one transaction. For commands, the first `reply` is delivered before non-reply actions, even when it occurs later in the list. See [execution and partial effects](lua/security-errors.md#execution-order-and-partial-effects).
 
 ### Reply
 
-```lua
-{
-    type = "reply",
-    content = "Done.",
-    ephemeral = true,
-}
-```
-
-For commands, the first reply becomes the interaction response. Additional replies become follow-up messages. For events, a reply uses the event channel and fails if the event has no channel context.
+[`reply`](lua/actions.md#reply) responds to the interaction; additional replies become follow-ups. In event context it becomes a channel message, so `ephemeral` cannot make it private.
 
 ### Send message
 
-```lua
-{
-    type = "send_message",
-    channel_id = "123", -- optional when a channel exists in the context
-    content = "Message text",
-}
-```
-
-Generated messages use an empty allowed-mentions policy. Text such as `@everyone` cannot trigger an uncontrolled mass mention.
+[`send_message`](lua/actions.md#send-message) targets a channel, subject to scope and destination checks. Review the known permission-resolution limitation in [#110](https://github.com/abanach-com/rust-discord-bot/issues/110).
 
 ### Send direct message
 
-```lua
-{
-    type = "send_direct_message",
-    user_id = "123",
-    content = "Direct message text",
-}
-```
-
-Sends a direct message (DM) to the specified user. The bot opens a direct message channel with `user_id` and delivers the message with empty allowed mentions. Emits an audit log event (`send_direct_message`). Fails if the user has direct messages disabled or has blocked the bot.
+[`send_direct_message`](lua/actions.md#send-direct-message) asks Rust to deliver a direct message. Delivery can still fail because of the recipient's Discord settings.
 
 ### Delete message
 
-```lua
-{
-    type = "delete_message",
-    channel_id = "123",
-    message_id = "456",
-}
-```
-
-Required Discord permission: Manage Messages.
+[`delete_message`](lua/actions.md#delete-message) requires the documented channel/message identifiers and permission checks.
 
 ### Timeout member
 
-```lua
-{
-    type = "timeout_member",
-    user_id = "123",
-    seconds = 600,
-    reason = "Repeated spam",
-}
-```
-
-`seconds` must be between 1 and 2,419,200. Required permission: Moderate Members. Rust checks moderator and bot hierarchy before execution.
+[`timeout_member`](lua/actions.md#timeout-member), like other moderation actions, is subject to actor, application and hierarchy rules.
 
 ### Kick member
 
-```lua
-{
-    type = "kick_member",
-    user_id = "123",
-    reason = "Rule violation",
-}
-```
-
-Required permission: Kick Members. Rust checks moderator and bot hierarchy.
+See [`kick_member`](lua/actions.md#kick-member) for fields and authorization.
 
 ### Ban member
 
-```lua
-{
-    type = "ban_member",
-    user_id = "123",
-    delete_message_days = 0,
-    reason = "Raid account",
-}
-```
-
-`delete_message_days` must be between 0 and 7. Required permission: Ban Members. Rust checks moderator and bot hierarchy.
+See [`ban_member`](lua/actions.md#ban-member) for fields, deletion-window bounds and authorization.
 
 ### Add or remove role
 
-```lua
-{
-    type = "add_role", -- or remove_role
-    user_id = "123",
-    role_id = "456",
-    reason = "Verified member",
-}
-```
-
-Required permission: Manage Roles. The target role must be below the bot and invoking moderator in the hierarchy.
+See [`add_role` and `remove_role`](lua/actions.md) for role identifiers and hierarchy/managed-role restrictions.
 
 ### Purge
 
-```lua
-{
-    type = "purge",
-    channel_id = "123", -- optional in a command channel
-    amount = 25,
-}
-```
-
-`amount` must be between 1 and 100. Required permission: Manage Messages.
+See [`purge`](lua/actions.md#purge) for count, age and permission constraints.
 
 ### Music
 
-```lua
-{
-    type = "music",
-    operation = "play",
-    query = "artist and title",
-}
-```
-
-Operations: `play`, `pause`, `resume`, `skip`, `stop`, `queue`, `leave`.
-
-A URL must use HTTPS and match `MUSIC_ALLOWED_HOSTS`. Plain text is treated as a search query. Music actions require a guild and user voice context.
+[`music`](lua/actions.md#music) uses a string `operation`. It depends on the host voice/media configuration and context.
 
 ### Audit
 
-```lua
-{
-    type = "audit",
-    event = "custom_event",
-    data = {
-        key = "value",
-    },
-}
-```
-
-The event name must contain 1–64 bytes. Audit data is stored as JSON.
+[`audit`](lua/actions.md#audit) accepts an event name and JSON-compatible map. Keep data small and omit secrets or unnecessary private content; the action validator does not impose a separate data size/depth bound.
 
 ### Moderation case
 
-```lua
-{
-    type = "moderation_case",
-    operation = "create", -- "create", "view", "list", "add_note", "add_evidence", "void", "restore", "stats"
-    subject_id = "123",
-    action_kind = "warning", -- "warning", "staff_note", "timeout", "kick", "ban", "unban", "automod", "other"
-    severity = "medium",     -- "low", "medium", "high", "critical"
-    points = 10,
-    reason = "Spamming invites",
-    visible_to_subject = true,
-}
-```
+[`moderation_case`](lua/moderation-cases.md) uses a nested `operation` table and enforces case visibility, moderator and action-specific rules. It has no reserved module ID.
 
-Moderation cases manage persistent case history, staff notes, and points with Discord hierarchy checks, staff permission gates, and audit trails. Available operations: `create`, `view`, `list`, `add_note`, `add_evidence`, `void`, `restore`, `stats`. Non-staff members requesting case information can only see cases where they are the subject and where `visible_to_subject` is true.
+### Restricted host services
+
+| Action | Required `manifest.id` | Additional context |
+| --- | --- | --- |
+| `progression` | `progression` | Guild and actor; staff adjustment also requires interactive authorization |
+| `scheduler` | `scheduler` | Interactive command, guild and actor |
+| `ticket` | `tickets` | Interactive command, guild, channel and actor |
+
+These service actions use nested `operation` tables. Rust renders their results after Lua returns; a callback cannot synchronously query a service result. The [service guide](lua/services.md) explains these boundaries. [#129](https://github.com/abanach-com/rust-discord-bot/issues/129) documents invalid progression operations and module identities in two shipped modules.
 
 ## Built-in helper API
 
-The global `rustybot` (or `zuckerbot` for backwards compatibility) table contains safe pure helpers and translation utilities:
+`rustybot` and `zuckerbot` reference the same table:
 
-```lua
-rustybot.api_version
-rustybot.escape_mentions(text)
-rustybot.truncate(text, max_characters)
-rustybot.unix_time()
-rustybot.t(key, [args/ctx], [locale])
-```
+| Entry | Meaning |
+| --- | --- |
+| `api_version` | Integer `1` |
+| `escape_mentions(text)` | Inserts U+200B after each `@` |
+| `truncate(text, maximum)` | First N Unicode scalar values; no added ellipsis |
+| `unix_time()` | Host wall-clock Unix time in seconds |
+| `t(key, argument2, argument3)` | Translation lookup, locale selection and interpolation |
+| `translate(...)` | Alias of the table's `t` function |
 
-The global `t(key, [args/ctx], [locale])` and `translate(...)` functions are also directly exposed in the module environment:
-
-```lua
--- Simple lookup (defaults to English or ctx.locale if ctx is passed):
-local msg = t("modules.core.replies.ping_pong")
-
--- Lookup with formatted args:
-local msg = t("modules.welcome.embed_description", { user = ctx.user_name, guild = ctx.guild_name }, ctx)
-
--- Explicit locale override:
-local msg = t("modules.core.replies.ping_pong", nil, "de")
-```
-
-`escape_mentions` inserts a zero-width separator after `@`. Use it whenever untrusted display names or user-provided strings are included in output.
+The host also exposes global `t`; there is no global `translate`. See [helpers and translations](lua/helpers-i18n.md) for complete argument rules, locale fallback and catalogue loading. Catalogues load once per process; command descriptions are localized, while command names are not automatically localized by this snapshot.
 
 ## Sandbox
 
-Unavailable globals:
+The host removes `collectgarbage`, `coroutine`, `debug`, `dofile`, `io`, `load`, `loadfile`, `loadstring`, `os`, `package`, `print` and `require`, and limits VM resources. Default budgets are 8 MiB and 500,000 instructions with a hook every 1,000 instructions. These are not an elapsed-time deadline. See [security and errors](lua/security-errors.md) for exact environment settings and failure behavior.
 
-- `collectgarbage`
-- `coroutine`
-- `debug`
-- `dofile`
-- `io`
-- `load`
-- `loadfile`
-- `os`
-- `package`
-- `pcall`
-- `require`
-- `xpcall`
-
-Each execution uses:
-
-- a fresh Lua state;
-- a configurable memory limit;
-- a global instruction hook covering new Lua threads;
-- a maximum of 25 returned actions;
-- post-deserialization action validation.
-
-Configuration environment variables:
-
-```dotenv
-LUA_MEMORY_LIMIT_BYTES=8388608
-LUA_INSTRUCTION_LIMIT=500000
-LUA_HOOK_GRANULARITY=1000
-```
-
-The sandbox intentionally has no direct network, database, process, Discord-client or filesystem API. New capabilities must be modeled as narrow declarative actions and reviewed at the Rust boundary.
+There is no generic filesystem, HTTP, SQL, key-value storage, cross-module call, timer callback or persistent global state. Buttons, modals and autocomplete do not have a complete Lua callback/response path in this snapshot; an existing Rust helper or registration flag does not supply one. See [current support](lua/support-matrix.md#components-modals-and-autocomplete).
 
 ## Module development checklist
 
-1. Choose a globally unique module ID and command names.
-2. Keep the manifest free of side effects.
-3. Use `integration_types` and `contexts`, not `dm_permission`.
-4. Treat every context field as untrusted input.
-5. Escape user-controlled text before returning it.
-6. Return a user-visible reply for commands.
-7. Use the smallest privileged action possible.
-8. Add configuration schema metadata.
-9. Add runtime tests for success and failure paths.
-10. Document Discord permissions and intents.
-11. Review the module before enabling it on production guilds.
+1. Read the [quickstart](lua/quickstart.md) and choose a unique module ID and command names.
+2. Return the module wrapper, export callbacks and declare the commands/events they handle.
+3. Validate package defaults and candidate guild configuration against the manifest schema.
+4. Route actual nested options, retain IDs as strings and return dense action arrays.
+5. Check the action/service permissions and context requirements before choosing an output.
+6. Run the relevant [syntax, engine and integration checks](lua/testing.md), recording which layers actually ran.
+7. Consult [known snapshot defects](lua/support-matrix.md#known-snapshot-defects-affecting-module-authors) before copying shipped patterns.
+
+Primary implementation sources: [models](../src/lua/model.rs), [engine](../src/lua/engine.rs), [interaction/event handler](../src/discord/handler.rs) and [executor](../src/discord/executor.rs). The handbook describes their contract; it does not assert that the full Rust suite or live Discord integration passed during documentation preparation.

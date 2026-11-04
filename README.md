@@ -90,7 +90,7 @@ Modules can be toggled on/off globally by setting `enabled="true"` or `enabled="
 
 ## Centralized Translations & Internationalization (i18n)
 
-The platform defaults to **English (`en`)** with out-of-the-box multilingual support for **Polish (`pl`)** and **German (`de`)**. All localized strings across Discord slash commands, options, interactive responses, Rust host error/audit messages, and the Web UI are maintained in the centralized `translations/` directory.
+The platform defaults to **English (`en`)** and includes catalogues for **Polish (`pl`)** and **German (`de`)** in the centralized `translations/` directory. The Lua helper and command-registration behavior are documented in the [translation reference](docs/lua/helpers-i18n.md).
 
 ### Translation Catalog
 - `translations/en.json` — English (Default base reference)
@@ -98,17 +98,19 @@ The platform defaults to **English (`en`)** with out-of-the-box multilingual sup
 - `translations/de.json` — German (`Deutsch`)
 
 ### Key Architecture & Features
-1. **Compile-time Embedding with Zero Overhead**: Translations are bundled into the compiled binary via `include_str!`. At startup, the engine also inspects the runtime `translations/` folder to allow on-the-fly hot-updates without recompiling.
-2. **Native Discord Slash Command Localization**: Command names and option descriptions automatically map localized strings using Discord's official `description_localized` API. Discord displays commands in the user's client language automatically.
-3. **Lua Translation API**: In any Lua module, call `t(key, [args/ctx], [locale])` or `rustybot.t(key, ...)` to look up translated text with parameter interpolation:
+1. **Embedded catalogues and runtime overrides**: Translations are bundled into the binary via `include_str!`. The translation store also reads runtime JSON overrides when it is first initialized. Restart the process to load edited catalogues; there is no live file watcher. An override replaces that language's complete catalogue.
+2. **Discord description localization**: The registration builder adds localized command and option descriptions. Command names currently retain their manifest values. Catalogue lookup conventions are listed in the translation reference.
+3. **Lua Translation API**: Call `t(key, args, locale)` or `rustybot.t(key, args, locale)` to look up translated text with literal placeholder substitution. Pass the desired locale explicitly:
    ```lua
-   -- Context-aware locale lookup with variable interpolation:
-   local greeting = t("modules.welcome.embed_description", { user = ctx.user_name, guild = ctx.guild_name }, ctx)
+   -- A command context supplies locale; interpolation values are scalars.
+   local message = rustybot.t("system.rate_limited", {
+       command = "ping", seconds = 5,
+   }, ctx.locale)
    ```
 4. **Adding New Languages**: To add a new language (e.g., Spanish `es`, French `fr`):
    1. Create `translations/<lang_code>.json` (e.g. `translations/es.json`).
    2. Copy the structure from `translations/en.json` and translate the values.
-   3. The translation loader automatically registers any `.json` file in `translations/` matching `<lang_code>.json`. Discord slash command localizations and Lua calls will instantly support the new locale code!
+   3. Restart to load the new catalogue, check missing-key fallback and register command descriptions again in the intended scope. Lua locale normalization and Discord's registration locale names have separate requirements; see the translation reference.
 
 ## Architecture
 
@@ -220,7 +222,7 @@ return {
             return {
                 {
                     type = "reply",
-                    content = "Hello, " .. rusty-discord-bot.escape_mentions(ctx.user_name) .. ".",
+                    content = "Hello, " .. rustybot.escape_mentions(ctx.user_name) .. ".",
                     ephemeral = false,
                 },
             }
@@ -230,7 +232,7 @@ return {
 }
 ```
 
-The full manifest, context and action contract is documented in [`docs/LUA_API.md`](docs/LUA_API.md).
+The full manifest, context and action contract is documented in [`docs/LUA_API.md`](docs/LUA_API.md). The [Lua author handbook](docs/lua/README.md) provides field-level references, host-service restrictions, debugging guidance and complete [example packages](examples/lua/README.md). A [Polish quickstart](docs/lua/quickstart-pl.md) introduces module installation and the actual nested subcommand format.
 
 ## Repository layout
 
