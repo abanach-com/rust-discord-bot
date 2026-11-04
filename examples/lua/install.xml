@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<installer version="1.0.0">
+  <bot name="Lua handbook examples" />
+  <modules>
+    <module id="lua_hello" enabled="true">
+      <name>Lua Hello</name>
+      <folder>hello</folder>
+      <entry>module.lua</entry>
+      <config>config.json</config>
+    </module>
+    <module id="lua_router" enabled="true">
+      <name>Lua Nested Router</name>
+      <folder>nested-router</folder>
+      <entry>module.lua</entry>
+      <config>config.json</config>
+    </module>
+    <module id="lua_event_audit" enabled="true">
+      <name>Lua Event Audit</name>
+      <folder>event-audit</folder>
+      <entry>module.lua</entry>
+      <config>config.json</config>
+    </module>
+  </modules>
+</installer>
