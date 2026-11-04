@@ -1,6 +1,6 @@
 {
     "channel_id": null,
-    "message_template": "Welcome to the server, {user}! Enjoy your stay 🎉",
-    "autorole_id": null,
-    "dm_welcome": false
+    "message": "Welcome to the server, {user}! Enjoy your stay \ud83c\udf89",
+    "dm_welcome": false,
+    "auto_roles": []
 }

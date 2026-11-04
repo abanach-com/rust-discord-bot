@@ -1,5 +1,22 @@
 local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
 
+local function get_subcommand(options, allowed)
+    local root = options or {}
+    for _, name in ipairs(allowed) do
+        if type(root[name]) == "table" then
+            return name, root[name]
+        end
+    end
+    if type(root.subcommand) == "string" then
+        for _, name in ipairs(allowed) do
+            if root.subcommand == name then
+                return name, root
+            end
+        end
+    end
+    return nil, {}
+end
+
 return {
     manifest = {
         id = "birthdays",
@@ -64,8 +81,8 @@ return {
             type = "object",
             additionalProperties = false,
             properties = {
-                announcement_channel_id = { type = "string" },
-                birthday_role_id = { type = "string" },
+                announcement_channel_id = { type = { "string", "null" } },
+                birthday_role_id = { type = { "string", "null" } },
             },
         },
     },
@@ -75,13 +92,22 @@ return {
             return {}
         end
 
-        local options = ctx.options or {}
-        local sub = options.subcommand or "check"
+        local sub, opts = get_subcommand(ctx.options, { "set", "check", "upcoming" })
+        if not sub then
+            return {
+                {
+                    type = "reply",
+                    content = "Unsupported or missing subcommand.",
+                    ephemeral = true,
+                },
+            }
+        end
+
         local user_id = ctx.user_id
 
         if sub == "set" then
-            local day = options.day or 1
-            local month = options.month or 1
+            local day = opts.day or 1
+            local month = opts.month or 1
             return {
                 {
                     type = "reply",
@@ -92,7 +118,7 @@ return {
         end
 
         if sub == "check" then
-            local target = options.user or user_id
+            local target = opts.user or user_id
             return {
                 {
                     type = "reply",

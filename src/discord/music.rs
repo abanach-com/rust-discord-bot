@@ -83,9 +83,7 @@ pub async fn execute(
             if let Some(bot_channel) = bot_channel
                 && user_channel != bot_channel
             {
-                return Err(anyhow!(
-                    "you must be in the same voice channel as the bot"
-                ));
+                return Err(anyhow!("you must be in the same voice channel as the bot"));
             }
         }
 
@@ -133,9 +131,7 @@ pub async fn execute(
             let level = query
                 .and_then(|q| q.trim().parse::<f32>().ok())
                 .filter(|&v| (0.0..=150.0).contains(&v))
-                .ok_or_else(|| {
-                    anyhow!("volume level must be a number between 0 and 150")
-                })?;
+                .ok_or_else(|| anyhow!("volume level must be a number between 0 and 150"))?;
             let factor = level / 100.0;
             if let Some(track) = handler.queue().current() {
                 let _ = track.set_volume(factor);

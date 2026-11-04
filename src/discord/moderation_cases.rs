@@ -482,9 +482,7 @@ pub async fn execute(
             visible_to_subject,
         } => {
             if !is_mod {
-                return Err(anyhow!(
-                    "missing moderator permissions to add notes"
-                ));
+                return Err(anyhow!("missing moderator permissions to add notes"));
             }
 
             state
@@ -524,9 +522,7 @@ pub async fn execute(
             value,
         } => {
             if !is_mod {
-                return Err(anyhow!(
-                    "missing moderator permissions to add evidence"
-                ));
+                return Err(anyhow!("missing moderator permissions to add evidence"));
             }
 
             state
@@ -568,9 +564,7 @@ pub async fn execute(
             reason,
         } => {
             if !is_mod {
-                return Err(anyhow!(
-                    "missing moderator permissions to void cases"
-                ));
+                return Err(anyhow!("missing moderator permissions to void cases"));
             }
 
             let version = if *expected_version <= 0 {
@@ -701,9 +695,7 @@ pub async fn execute(
             expected_version,
         } => {
             if !is_mod {
-                return Err(anyhow!(
-                    "missing moderator permissions to restore cases"
-                ));
+                return Err(anyhow!("missing moderator permissions to restore cases"));
             }
 
             let version = if *expected_version <= 0 {
@@ -744,9 +736,7 @@ pub async fn execute(
 
         ModerationCaseOperation::Stats { moderator_user_id } => {
             if !is_mod {
-                return Err(anyhow!(
-                    "missing moderator permissions to view statistics"
-                ));
+                return Err(anyhow!("missing moderator permissions to view statistics"));
             }
 
             let mod_id = moderator_user_id

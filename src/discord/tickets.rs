@@ -68,9 +68,7 @@ pub(super) async fn execute(
         ));
     }
     if !execution.command_context {
-        return Err(anyhow!(
-            "tickets can only be managed through user commands"
-        ));
+        return Err(anyhow!("tickets can only be managed through user commands"));
     }
 
     let guild_id = execution
@@ -841,7 +839,10 @@ async fn manage_participant(
                 send_system_message(
                     ctx,
                     channel_id,
-                    &format!("➖ <@{}> has been removed from the ticket.", target_id.get()),
+                    &format!(
+                        "➖ <@{}> has been removed from the ticket.",
+                        target_id.get()
+                    ),
                     Some(target_id),
                 )
                 .await?;
@@ -1004,9 +1005,7 @@ async fn resolve_optional_log_channel(
         Channel::Guild(_) => Err(anyhow!(
             "ticket log channel must be a text channel on this server"
         )),
-        _ => Err(anyhow!(
-            "private channel cannot be a ticket log channel"
-        )),
+        _ => Err(anyhow!("private channel cannot be a ticket log channel")),
     }
 }
 
@@ -1422,7 +1421,9 @@ fn format_mutation_outcome(outcome: TicketMutationOutcome) -> String {
             status_label(&ticket.status)
         ),
         TicketMutationOutcome::NotFound => "Nie znaleziono ticketu.".to_owned(),
-        TicketMutationOutcome::Forbidden => "You do not have permission to modify this ticket.".to_owned(),
+        TicketMutationOutcome::Forbidden => {
+            "You do not have permission to modify this ticket.".to_owned()
+        }
         TicketMutationOutcome::InvalidState { current_status } => format!(
             "Ta operacja nie jest dozwolona dla ticketu w stanie **{}**.",
             status_label(&current_status)
@@ -1444,8 +1445,7 @@ fn format_participant_outcome(outcome: ParticipantMutationOutcome) -> String {
             "This user is already a ticket participant.".to_owned()
         }
         ParticipantMutationOutcome::CreatorProtected => {
-            "Ticket owner cannot be removed or added as a regular participant."
-                .to_owned()
+            "Ticket owner cannot be removed or added as a regular participant.".to_owned()
         }
         ParticipantMutationOutcome::InvalidState { current_status } => format!(
             "Cannot change participants for ticket in **{}** status.",

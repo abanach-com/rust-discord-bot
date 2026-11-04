@@ -1,5 +1,6 @@
 {
-    "min_account_age_hours": 24,
-    "action_on_flag": "kick",
-    "log_channel_id": null
+    "alert_channel_id": null,
+    "join_log_channel_id": null,
+    "minimum_account_age_hours": 24,
+    "action_on_raid": "alert"
 }

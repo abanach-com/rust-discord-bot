@@ -1164,9 +1164,7 @@ pub async fn export_user_privacy_data(
 
     let user_id = payload.user_id.trim();
     if user_id.is_empty() {
-        return Err(ApiError::bad_request(
-            "User ID was not provided.",
-        ));
+        return Err(ApiError::bad_request("User ID was not provided."));
     }
 
     let profile = state
@@ -1221,9 +1219,7 @@ pub async fn delete_user_privacy_data(
 
     let user_id = payload.user_id.trim();
     if user_id.is_empty() {
-        return Err(ApiError::bad_request(
-            "User ID was not provided.",
-        ));
+        return Err(ApiError::bad_request("User ID was not provided."));
     }
 
     let _ = state

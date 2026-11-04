@@ -1,7 +1,3 @@
 {
-    "log_channel_id": null,
-    "log_joins": true,
-    "log_leaves": true,
-    "log_moderation": true,
-    "log_message_deletes": true
+    "log_channel_id": null
 }

@@ -1,5 +1,22 @@
 local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
 
+local function get_subcommand(options, allowed)
+    local root = options or {}
+    for _, name in ipairs(allowed) do
+        if type(root[name]) == "table" then
+            return name, root[name]
+        end
+    end
+    if type(root.subcommand) == "string" then
+        for _, name in ipairs(allowed) do
+            if root.subcommand == name then
+                return name, root
+            end
+        end
+    end
+    return nil, {}
+end
+
 return {
     manifest = {
         id = "achievements",
@@ -64,8 +81,17 @@ return {
             return {}
         end
 
-        local options = ctx.options or {}
-        local sub = options.subcommand or "list"
+        local sub, opts = get_subcommand(ctx.options, { "list", "view", "claim" })
+        if not sub then
+            return {
+                {
+                    type = "reply",
+                    content = "Unsupported or missing subcommand.",
+                    ephemeral = true,
+                },
+            }
+        end
+
         local user_id = ctx.user_id
 
         if sub == "list" then
@@ -79,7 +105,7 @@ return {
         end
 
         if sub == "view" then
-            local target = options.user or user_id
+            local target = opts.user or user_id
             return {
                 {
                     type = "reply",
@@ -90,31 +116,11 @@ return {
         end
 
         if sub == "claim" then
-            local bid = options.badge_id or "first_message"
             return {
                 {
-                    type = "progression",
-                    operation = {
-                        type = "adjust_member_progress",
-                        user_id = user_id,
-                        xp_delta = 100,
-                        coins_delta = 50,
-                        reputation_delta = 1,
-                        reason = "Achievement: " .. bid,
-                    },
-                },
-                {
                     type = "reply",
-                    content = t("modules.achievements.claim_reply", { badge = bid }, ctx),
-                    ephemeral = false,
-                },
-                {
-                    type = "audit",
-                    event = "achievement_claimed",
-                    data = {
-                        user_id = user_id,
-                        badge_id = bid,
-                    },
+                    content = "Achievement claiming is not yet available.",
+                    ephemeral = true,
                 },
             }
         end

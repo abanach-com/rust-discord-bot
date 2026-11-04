@@ -7,9 +7,8 @@
     ],
     "delete_messages": true,
     "send_notice": true,
-    "timeout_seconds": 300,
-    "mention_threshold": 5,
-    "caps_threshold": 70,
+    "max_mentions": 5,
+    "max_caps_ratio": 0.8,
     "block_invites": true,
-    "block_links": false
+    "block_all_links": false
 }

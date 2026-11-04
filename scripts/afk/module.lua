@@ -1,5 +1,22 @@
 local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
 
+local function get_subcommand(options, allowed)
+    local root = options or {}
+    for _, name in ipairs(allowed) do
+        if type(root[name]) == "table" then
+            return name, root[name]
+        end
+    end
+    if type(root.subcommand) == "string" then
+        for _, name in ipairs(allowed) do
+            if root.subcommand == name then
+                return name, root
+            end
+        end
+    end
+    return nil, {}
+end
+
 return {
     manifest = {
         id = "afk",
@@ -61,12 +78,21 @@ return {
             return {}
         end
 
-        local options = ctx.options or {}
-        local sub = options.subcommand or "status"
+        local sub, opts = get_subcommand(ctx.options, { "set", "clear", "status" })
+        if not sub then
+            return {
+                {
+                    type = "reply",
+                    content = "Unsupported or missing subcommand.",
+                    ephemeral = true,
+                },
+            }
+        end
+
         local user_id = ctx.user_id
 
         if sub == "set" then
-            local reason = options.reason or t("modules.afk.default_reason", ctx)
+            local reason = opts.reason or t("modules.afk.default_reason", ctx)
             return {
                 {
                     type = "reply",

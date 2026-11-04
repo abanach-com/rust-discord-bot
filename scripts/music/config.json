@@ -1,5 +1,4 @@
 {
-    "default_volume": 100,
-    "max_queue_size": 100,
-    "allow_external_sources": true
+    "announce_tracks": true,
+    "default_volume": 0.5
 }

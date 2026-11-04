@@ -132,12 +132,13 @@ fn build_option(definition: &LuaCommandOption, cmd_name: &str) -> Result<CreateC
     } else {
         definition.description.clone()
     };
-    let mut option =
-        CreateCommandOption::new(option_type, &definition.name, &description)
-            .required(definition.required)
-            .set_autocomplete(definition.autocomplete);
+    let mut option = CreateCommandOption::new(option_type, &definition.name, &description)
+        .required(definition.required)
+        .set_autocomplete(definition.autocomplete);
 
-    for (locale, desc) in crate::translations::get_command_option_localizations(cmd_name, &definition.name) {
+    for (locale, desc) in
+        crate::translations::get_command_option_localizations(cmd_name, &definition.name)
+    {
         option = option.description_localized(locale, desc);
     }
 

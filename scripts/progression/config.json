@@ -1,7 +1,8 @@
 {
-    "xp_rate": 1.0,
-    "cooldown_seconds": 60,
-    "daily_min_coins": 50,
-    "daily_max_coins": 150,
+    "xp_min": 15,
+    "xp_max": 25,
+    "xp_cooldown_seconds": 60,
+    "daily_base_reward": 100,
+    "daily_streak_bonus": 10,
     "role_rewards": []
 }

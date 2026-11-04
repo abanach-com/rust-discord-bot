@@ -17,7 +17,7 @@ return {
             additionalProperties = false,
             properties = {
                 channel_id = {
-                    type = "string",
+                    type = { "string", "null" },
                     title = "Welcome channel ID",
                 },
                 message = {
@@ -49,7 +49,7 @@ return {
                     default = false,
                 },
                 goodbye_channel_id = {
-                    type = "string",
+                    type = { "string", "null" },
                     title = "Goodbye channel ID",
                 },
                 goodbye_message = {

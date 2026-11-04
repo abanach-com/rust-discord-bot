@@ -134,7 +134,10 @@ async fn test_phase5_audit_fixes_comprehensive_suite() {
 
     // User A attempting to delete Guild B's snapshot via Guild A endpoint MUST fail
     let del_resp = client
-        .delete(format!("{base_url}/api/guilds/{guild_a}/snapshots/{}", snap_b.id))
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_a}/snapshots/{}",
+            snap_b.id
+        ))
         .header(COOKIE, &session_cookie)
         .header("X-CSRF-Token", csrf_token)
         .send()
@@ -143,7 +146,12 @@ async fn test_phase5_audit_fixes_comprehensive_suite() {
     assert_eq!(del_resp.status(), reqwest::StatusCode::NOT_FOUND);
 
     // Guild B's snapshot must still exist intact
-    let snap_check = state.app.storage.get_server_snapshot(snap_b.id).await.unwrap();
+    let snap_check = state
+        .app
+        .storage
+        .get_server_snapshot(snap_b.id)
+        .await
+        .unwrap();
     assert!(snap_check.is_some());
 
     // Steam LFG isolation test
@@ -166,7 +174,10 @@ async fn test_phase5_audit_fixes_comprehensive_suite() {
         .unwrap();
 
     let join_lfg_resp = client
-        .post(format!("{base_url}/api/guilds/{guild_a}/steam/lfg/{}/join", lfg_b.id))
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/steam/lfg/{}/join",
+            lfg_b.id
+        ))
         .header(COOKIE, &session_cookie)
         .header("X-CSRF-Token", csrf_token)
         .send()
@@ -178,7 +189,9 @@ async fn test_phase5_audit_fixes_comprehensive_suite() {
     // 2. Issue #112: OAuth Callback Rejection for Unconfigured Provider
     // ==========================================
     let oauth_resp = client
-        .post(format!("{base_url}/api/guilds/{guild_a}/integrations/github/callback"))
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/integrations/github/callback"
+        ))
         .header(COOKIE, &session_cookie)
         .header("X-CSRF-Token", csrf_token)
         .json(&serde_json::json!({
@@ -195,7 +208,9 @@ async fn test_phase5_audit_fixes_comprehensive_suite() {
     // ==========================================
     // Unknown provider must return 404
     let unknown_wh = client
-        .post(format!("{base_url}/api/integrations/webhooks/unknown_hacker_provider"))
+        .post(format!(
+            "{base_url}/api/integrations/webhooks/unknown_hacker_provider"
+        ))
         .body(r#"{"event_id":"123"}"#)
         .send()
         .await
@@ -226,7 +241,12 @@ async fn test_phase5_audit_fixes_comprehensive_suite() {
         is_verified: false,
         created_at: Utc::now(),
     };
-    state.app.storage.publish_marketplace_package(pkg_v1).await.unwrap();
+    state
+        .app
+        .storage
+        .publish_marketplace_package(pkg_v1)
+        .await
+        .unwrap();
 
     // Attempt to publish same version by user A fails as duplicate version
     let dup_version_resp = client
@@ -249,7 +269,12 @@ async fn test_phase5_audit_fixes_comprehensive_suite() {
     // ==========================================
     // 5. Issue #120: Card Trade Deadlock & Self-Trade Rejection
     // ==========================================
-    let card1 = state.app.storage.grant_user_card(guild_a, user_a, "card_dragon", "Dragon", "legendary").await.unwrap();
+    let card1 = state
+        .app
+        .storage
+        .grant_user_card(guild_a, user_a, "card_dragon", "Dragon", "legendary")
+        .await
+        .unwrap();
 
     // Self-trade must be rejected
     let self_trade_res = state
@@ -266,20 +291,45 @@ async fn test_phase5_audit_fixes_comprehensive_suite() {
     let poll = state
         .app
         .storage
-        .create_community_poll(guild_a, "c1", "Best language?", &poll_options, false, Utc::now() + Duration::hours(1))
+        .create_community_poll(
+            guild_a,
+            "c1",
+            "Best language?",
+            &poll_options,
+            false,
+            Utc::now() + Duration::hours(1),
+        )
         .await
         .unwrap();
 
     // First vote succeeds
-    let vote1 = state.app.storage.vote_community_poll(guild_a, poll.id, user_a, 0).await.unwrap().unwrap();
+    let vote1 = state
+        .app
+        .storage
+        .vote_community_poll(guild_a, poll.id, user_a, 0)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(vote1.tallies_json[0], 1);
 
     // Second vote for the same option is a duplicate -> no tally change
-    let vote2 = state.app.storage.vote_community_poll(guild_a, poll.id, user_a, 0).await.unwrap().unwrap();
+    let vote2 = state
+        .app
+        .storage
+        .vote_community_poll(guild_a, poll.id, user_a, 0)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(vote2.tallies_json[0], 1);
 
     // Switching vote to Python -> decrements Rust and increments Python
-    let vote3 = state.app.storage.vote_community_poll(guild_a, poll.id, user_a, 1).await.unwrap().unwrap();
+    let vote3 = state
+        .app
+        .storage
+        .vote_community_poll(guild_a, poll.id, user_a, 1)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(vote3.tallies_json[0], 0);
     assert_eq!(vote3.tallies_json[1], 1);
 
@@ -287,10 +337,21 @@ async fn test_phase5_audit_fixes_comprehensive_suite() {
     let expired_poll = state
         .app
         .storage
-        .create_community_poll(guild_a, "c1", "Expired?", &poll_options, false, Utc::now() - Duration::minutes(5))
+        .create_community_poll(
+            guild_a,
+            "c1",
+            "Expired?",
+            &poll_options,
+            false,
+            Utc::now() - Duration::minutes(5),
+        )
         .await
         .unwrap();
-    let exp_vote = state.app.storage.vote_community_poll(guild_a, expired_poll.id, user_a, 0).await;
+    let exp_vote = state
+        .app
+        .storage
+        .vote_community_poll(guild_a, expired_poll.id, user_a, 0)
+        .await;
     assert!(exp_vote.is_err(), "Vote on expired poll must fail");
 
     // ==========================================
@@ -317,18 +378,33 @@ async fn test_phase5_audit_fixes_comprehensive_suite() {
     let item = state
         .app
         .storage
-        .create_store_item(guild_a, "Diamond Sword", "Legendary weapon", 1000, None, Some(5))
+        .create_store_item(
+            guild_a,
+            "Diamond Sword",
+            "Legendary weapon",
+            1000,
+            None,
+            Some(5),
+        )
         .await
         .unwrap();
 
     // User A has 0 coins, attempt purchase
-    let poor_purchase = state.app.storage.purchase_store_item(guild_a, "poor_user", item.id).await;
+    let poor_purchase = state
+        .app
+        .storage
+        .purchase_store_item(guild_a, "poor_user", item.id)
+        .await;
     assert!(poor_purchase.is_err(), "Purchase without coins must fail");
 
     // Stock must remain 5
     let items = state.app.storage.list_store_items(guild_a).await.unwrap();
     let it = items.iter().find(|i| i.id == item.id).unwrap();
-    assert_eq!(it.stock, Some(5), "Stock must NOT decrement on failed purchase");
+    assert_eq!(
+        it.stock,
+        Some(5),
+        "Stock must NOT decrement on failed purchase"
+    );
 
     // ==========================================
     // 9. Issue #125: AI Budget Validation & Initialization

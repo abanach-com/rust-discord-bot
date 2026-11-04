@@ -41,6 +41,16 @@ impl ProgressionExecutionContext {
     }
 }
 
+pub(super) fn is_operation_permitted(module_id: &str, operation: &ProgressionOperation) -> bool {
+    let is_progression = module_id == "progression";
+    let is_economy_allowed = module_id == "economy"
+        && matches!(
+            operation,
+            ProgressionOperation::Balance { .. } | ProgressionOperation::Transfer { .. }
+        );
+    is_progression || is_economy_allowed
+}
+
 pub(super) async fn execute(
     ctx: &Context,
     state: &AppState,
@@ -55,7 +65,7 @@ pub(super) async fn execute(
         actor_permissions,
         command_context,
     } = execution;
-    if module_id != "progression" {
+    if !is_operation_permitted(module_id, operation) {
         return Err(anyhow!(
             "progression operations are reserved for the trusted progression module"
         ));
@@ -182,9 +192,9 @@ pub(super) async fn execute(
                     .await?;
 
                 if *announce_level_up && let Some(channel_id) = channel_id {
-                    let template = level_up_message.as_deref().unwrap_or(
-                        "🎉 {user} has reached level **{level}**! Total XP: **{xp}**.",
-                    );
+                    let template = level_up_message
+                        .as_deref()
+                        .unwrap_or("🎉 {user} has reached level **{level}**! Total XP: **{xp}**.");
                     let mut content = template
                         .replace("{user}", &format!("<@{}>", actor_id.get()))
                         .replace("{level}", &award.profile.level.to_string())
@@ -401,9 +411,9 @@ pub(super) async fn execute(
                     "You can give reputation again <t:{}:R>.",
                     next_available_at.timestamp(),
                 ))),
-                ReputationGrantOutcome::SameAccount => Ok(Some(
-                    "You cannot give reputation to yourself.".to_owned(),
-                )),
+                ReputationGrantOutcome::SameAccount => {
+                    Ok(Some("You cannot give reputation to yourself.".to_owned()))
+                }
             }
         }
         ProgressionOperation::Adjust {
@@ -475,5 +485,43 @@ mod tests {
         assert_eq!(render_progress_bar(50, 100, 10), "[▰▰▰▰▰▱▱▱▱▱] 50.0%");
         assert_eq!(render_progress_bar(100, 100, 10), "[▰▰▰▰▰▰▰▰▰▰] 100.0%");
         assert_eq!(render_progress_bar(150, 100, 10), "[▰▰▰▰▰▰▰▰▰▰] 100.0%");
+    }
+
+    #[test]
+    fn test_progression_operation_permissions() {
+        let balance = ProgressionOperation::Balance { user_id: None };
+        let transfer = ProgressionOperation::Transfer {
+            user_id: "123".to_owned(),
+            amount: 50,
+        };
+        let adjust = ProgressionOperation::Adjust {
+            user_id: "123".to_owned(),
+            xp_delta: 10,
+            coins_delta: 0,
+            reputation_delta: 0,
+            reason: None,
+        };
+        let daily = ProgressionOperation::Daily {
+            base_reward: 100,
+            streak_bonus: 10,
+            max_streak_bonus: 30,
+        };
+
+        // progression module has full access
+        assert!(is_operation_permitted("progression", &balance));
+        assert!(is_operation_permitted("progression", &transfer));
+        assert!(is_operation_permitted("progression", &adjust));
+        assert!(is_operation_permitted("progression", &daily));
+
+        // economy module is only permitted Balance and Transfer
+        assert!(is_operation_permitted("economy", &balance));
+        assert!(is_operation_permitted("economy", &transfer));
+        assert!(!is_operation_permitted("economy", &adjust));
+        assert!(!is_operation_permitted("economy", &daily));
+
+        // untrusted / other modules are denied
+        assert!(!is_operation_permitted("achievements", &balance));
+        assert!(!is_operation_permitted("achievements", &adjust));
+        assert!(!is_operation_permitted("fun", &balance));
     }
 }

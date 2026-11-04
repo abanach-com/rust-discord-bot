@@ -1,5 +1,22 @@
 local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
 
+local function get_subcommand(options, allowed)
+    local root = options or {}
+    for _, name in ipairs(allowed) do
+        if type(root[name]) == "table" then
+            return name, root[name]
+        end
+    end
+    if type(root.subcommand) == "string" then
+        for _, name in ipairs(allowed) do
+            if root.subcommand == name then
+                return name, root
+            end
+        end
+    end
+    return nil, {}
+end
+
 return {
     manifest = {
         id = "giveaway",
@@ -90,13 +107,21 @@ return {
             return {}
         end
 
-        local options = ctx.options or {}
-        local sub = options.subcommand or "start"
+        local sub, opts = get_subcommand(ctx.options, { "start", "end", "reroll" })
+        if not sub then
+            return {
+                {
+                    type = "reply",
+                    content = "Unsupported or missing subcommand.",
+                    ephemeral = true,
+                },
+            }
+        end
 
         if sub == "start" then
-            local prize = options.prize or "Awesome Prize"
-            local duration = options.duration_minutes or 60
-            local winners = options.winners or 1
+            local prize = opts.prize or "Awesome Prize"
+            local duration = opts.duration_minutes or 60
+            local winners = opts.winners or 1
 
             local text = string.format(
                 "🎉 **NOWY KONKURS (GIVEAWAY)!** 🎉\n\n" ..
@@ -133,7 +158,7 @@ return {
         end
 
         if sub == "reroll" then
-            local gid = options.giveaway_id or "gw-1"
+            local gid = opts.giveaway_id or "gw-1"
             return {
                 {
                     type = "reply",
@@ -144,7 +169,7 @@ return {
         end
 
         if sub == "end" then
-            local gid = options.giveaway_id or "gw-1"
+            local gid = opts.giveaway_id or "gw-1"
             return {
                 {
                     type = "reply",

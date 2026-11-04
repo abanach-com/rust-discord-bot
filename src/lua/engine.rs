@@ -356,12 +356,17 @@ fn build_registry(scripts_dir: &Path, limits: LuaLimits) -> Result<Registry, Lua
                     .unwrap_or_else(|| folder_dir.join("config.json"));
 
                 let default_config = if config_file.is_file() {
-                    match fs::read_to_string(&config_file) {
-                        Ok(text) => {
-                            serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({}))
+                    let text =
+                        fs::read_to_string(&config_file).map_err(|source| LuaEngineError::Io {
+                            path: config_file.clone(),
+                            source,
+                        })?;
+                    serde_json::from_str(&text).map_err(|err| {
+                        LuaEngineError::InvalidConfigSchema {
+                            script: config_file.display().to_string(),
+                            message: format!("invalid JSON syntax: {err}"),
                         }
-                        Err(_) => serde_json::json!({}),
-                    }
+                    })?
                 } else {
                     serde_json::json!({})
                 };
@@ -373,26 +378,31 @@ fn build_registry(scripts_dir: &Path, limits: LuaLimits) -> Result<Registry, Lua
             let mut paths = Vec::new();
             collect_lua_files(scripts_dir, &mut paths)?;
             paths.sort();
-            paths
-                .into_iter()
-                .map(|p| {
-                    let config_path = p.parent().map(|dir| dir.join("config.json"));
-                    let default_config = if let Some(cfg) = config_path {
-                        if cfg.is_file() {
-                            match fs::read_to_string(&cfg) {
-                                Ok(text) => serde_json::from_str(&text)
-                                    .unwrap_or_else(|_| serde_json::json!({})),
-                                Err(_) => serde_json::json!({}),
+            let mut items = Vec::new();
+            for p in paths {
+                let config_path = p.parent().map(|dir| dir.join("config.json"));
+                let default_config = if let Some(cfg) = config_path {
+                    if cfg.is_file() {
+                        let text =
+                            fs::read_to_string(&cfg).map_err(|source| LuaEngineError::Io {
+                                path: cfg.clone(),
+                                source,
+                            })?;
+                        serde_json::from_str(&text).map_err(|err| {
+                            LuaEngineError::InvalidConfigSchema {
+                                script: cfg.display().to_string(),
+                                message: format!("invalid JSON syntax: {err}"),
                             }
-                        } else {
-                            serde_json::json!({})
-                        }
+                        })?
                     } else {
                         serde_json::json!({})
-                    };
-                    (p, None, default_config)
-                })
-                .collect()
+                    }
+                } else {
+                    serde_json::json!({})
+                };
+                items.push((p, None, default_config));
+            }
+            items
         };
 
     for (path, installer_entry, default_config) in candidate_paths {
@@ -442,6 +452,17 @@ fn build_registry(scripts_dir: &Path, limits: LuaLimits) -> Result<Registry, Lua
                     message: error.to_string(),
                 }
             })?;
+
+        let errors: Vec<String> = config_validator
+            .iter_errors(&default_config)
+            .map(|error| format!("{}: {error}", error.instance_path()))
+            .collect();
+        if !errors.is_empty() {
+            return Err(LuaEngineError::InvalidModule {
+                script: display_name.clone(),
+                message: format!("invalid bundled config: {}", errors.join("; ")),
+            });
+        }
 
         registry
             .default_configs
@@ -717,21 +738,20 @@ fn sandboxed_lua(limits: LuaLimits) -> mlua::Result<Lua> {
                                 *loc = l;
                             }
                             for pair in tbl.pairs::<Value, Value>().flatten() {
-                                if let (Value::String(k), v) = pair {
-                                    if let Ok(k_str) = k.to_str() {
-                                        if k_str != "locale" {
-                                            let val_str = match v {
-                                                Value::String(s) => {
-                                                    s.to_str().map(|s| s.to_owned()).unwrap_or_default()
-                                                }
-                                                Value::Integer(i) => i.to_string(),
-                                                Value::Number(n) => n.to_string(),
-                                                Value::Boolean(b) => b.to_string(),
-                                                _ => String::new(),
-                                            };
-                                            map.insert(k_str.to_owned(), val_str);
+                                if let (Value::String(k), v) = pair
+                                    && let Ok(k_str) = k.to_str()
+                                    && k_str != "locale"
+                                {
+                                    let val_str = match v {
+                                        Value::String(s) => {
+                                            s.to_str().map(|s| s.to_owned()).unwrap_or_default()
                                         }
-                                    }
+                                        Value::Integer(i) => i.to_string(),
+                                        Value::Number(n) => n.to_string(),
+                                        Value::Boolean(b) => b.to_string(),
+                                        _ => String::new(),
+                                    };
+                                    map.insert(k_str.to_owned(), val_str);
                                 }
                             }
                         }
@@ -910,18 +930,22 @@ mod tests {
         assert_eq!(res_en, "Command executed successfully.");
 
         let res_pl: String = lua
-            .load(r#"
+            .load(
+                r#"
                 local ctx = { locale = "pl" }
                 return rustybot.t("system.command_executed", ctx)
-            "#)
+            "#,
+            )
             .eval()
             .expect("eval");
         assert_eq!(res_pl, "Polecenie zostało wykonane.");
 
         let res_de: String = lua
-            .load(r#"
+            .load(
+                r#"
                 return t("system.rate_limited", { command = "help", seconds = "10" }, "de")
-            "#)
+            "#,
+            )
             .eval()
             .expect("eval");
         assert_eq!(

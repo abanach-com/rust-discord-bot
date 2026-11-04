@@ -1,5 +1,22 @@
 local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
 
+local function get_subcommand(options, allowed)
+    local root = options or {}
+    for _, name in ipairs(allowed) do
+        if type(root[name]) == "table" then
+            return name, root[name]
+        end
+    end
+    if type(root.subcommand) == "string" then
+        for _, name in ipairs(allowed) do
+            if root.subcommand == name then
+                return name, root
+            end
+        end
+    end
+    return nil, {}
+end
+
 return {
     manifest = {
         id = "economy",
@@ -100,8 +117,17 @@ return {
             return {}
         end
 
-        local options = ctx.options or {}
-        local sub = options.subcommand or "balance"
+        local sub, opts = get_subcommand(ctx.options, { "balance", "work", "crime", "shop", "buy", "inventory", "transfer" })
+        if not sub then
+            return {
+                {
+                    type = "reply",
+                    content = "Unsupported or missing subcommand.",
+                    ephemeral = true,
+                },
+            }
+        end
+
         local user_id = ctx.user_id
 
         if sub == "balance" then
@@ -109,14 +135,9 @@ return {
                 {
                     type = "progression",
                     operation = {
-                        type = "view_progress",
+                        type = "balance",
                         user_id = user_id,
                     },
-                },
-                {
-                    type = "reply",
-                    content = string.format("💳 **Wallet of user <@%s>**\nChecking account balance and coins...", user_id),
-                    ephemeral = true,
                 },
             }
         end
@@ -187,7 +208,7 @@ return {
         end
 
         if sub == "buy" then
-            local item_id = options.item or "mystery_box"
+            local item_id = opts.item or "mystery_box"
             return {
                 {
                     type = "reply",
@@ -216,8 +237,8 @@ return {
         end
 
         if sub == "transfer" then
-            local recipient = options.recipient
-            local amount = tonumber(options.amount) or 10
+            local recipient = opts.recipient
+            local amount = tonumber(opts.amount) or 10
             if not recipient then
                 return {
                     {
@@ -232,22 +253,8 @@ return {
                 {
                     type = "progression",
                     operation = {
-                        type = "transfer_coins",
-                        recipient_user_id = recipient,
-                        amount = amount,
-                    },
-                },
-                {
-                    type = "reply",
-                    content = t("modules.economy.pay_success", { amount = amount, recipient = recipient }, ctx),
-                    ephemeral = false,
-                },
-                {
-                    type = "audit",
-                    event = "economy_transfer",
-                    data = {
-                        sender = user_id,
-                        recipient = recipient,
+                        type = "transfer",
+                        user_id = tostring(recipient),
                         amount = amount,
                     },
                 },

@@ -269,25 +269,52 @@ pub async fn handle_inbound_webhook(
         "github" => headers
             .get("X-GitHub-Delivery")
             .and_then(|h| h.to_str().ok())
-            .or_else(|| payload.get("event_id").or_else(|| payload.get("id")).and_then(|v| v.as_str()))
+            .or_else(|| {
+                payload
+                    .get("event_id")
+                    .or_else(|| payload.get("id"))
+                    .and_then(|v| v.as_str())
+            })
             .ok_or_else(|| ApiError::bad_request("Missing GitHub delivery ID"))?
             .to_string(),
         "twitch" => headers
             .get("Twitch-Eventsub-Message-Id")
             .and_then(|h| h.to_str().ok())
-            .or_else(|| payload.get("event_id").or_else(|| payload.get("id")).and_then(|v| v.as_str()))
+            .or_else(|| {
+                payload
+                    .get("event_id")
+                    .or_else(|| payload.get("id"))
+                    .and_then(|v| v.as_str())
+            })
             .ok_or_else(|| ApiError::bad_request("Missing Twitch EventSub message ID"))?
             .to_string(),
         "telegram" => payload
             .get("update_id")
-            .map(|v| if let Some(n) = v.as_i64() { n.to_string() } else { v.as_str().unwrap_or_default().to_string() })
+            .map(|v| {
+                if let Some(n) = v.as_i64() {
+                    n.to_string()
+                } else {
+                    v.as_str().unwrap_or_default().to_string()
+                }
+            })
             .filter(|s| !s.is_empty())
-            .or_else(|| payload.get("event_id").or_else(|| payload.get("id")).and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .or_else(|| {
+                payload
+                    .get("event_id")
+                    .or_else(|| payload.get("id"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
             .ok_or_else(|| ApiError::bad_request("Missing Telegram update_id"))?,
         "gitlab" => headers
             .get("X-Gitlab-Event-UUID")
             .and_then(|h| h.to_str().ok())
-            .or_else(|| payload.get("event_id").or_else(|| payload.get("id")).and_then(|v| v.as_str()))
+            .or_else(|| {
+                payload
+                    .get("event_id")
+                    .or_else(|| payload.get("id"))
+                    .and_then(|v| v.as_str())
+            })
             .ok_or_else(|| ApiError::bad_request("Missing GitLab event UUID"))?
             .to_string(),
         _ => payload
@@ -969,11 +996,14 @@ fn decode_base64_strict(input: &str) -> Result<Vec<u8>, &'static str> {
         return Ok(Vec::new());
     }
     let mut table = [0xFFu8; 256];
-    for (i, c) in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".iter().enumerate() {
+    for (i, c) in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        .iter()
+        .enumerate()
+    {
         table[*c as usize] = i as u8;
     }
     let bytes = input.as_bytes();
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err("Invalid base64 length");
     }
     let mut out = Vec::with_capacity((bytes.len() / 4) * 3);
@@ -983,8 +1013,16 @@ fn decode_base64_strict(input: &str) -> Result<Vec<u8>, &'static str> {
         if b0 == 0xFF || b1 == 0xFF {
             return Err("Invalid base64 character");
         }
-        let b2 = if chunk[2] == b'=' { 0 } else { table[chunk[2] as usize] };
-        let b3 = if chunk[3] == b'=' { 0 } else { table[chunk[3] as usize] };
+        let b2 = if chunk[2] == b'=' {
+            0
+        } else {
+            table[chunk[2] as usize]
+        };
+        let b3 = if chunk[3] == b'=' {
+            0
+        } else {
+            table[chunk[3] as usize]
+        };
         if (chunk[2] != b'=' && b2 == 0xFF) || (chunk[3] != b'=' && b3 == 0xFF) {
             return Err("Invalid base64 character");
         }

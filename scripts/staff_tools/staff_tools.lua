@@ -134,7 +134,7 @@ return {
             type = "object",
             additionalProperties = false,
             properties = {
-                staff_channel_id = { type = "string", title = "Private staff channel" },
+                staff_channel_id = { type = { "string", "null" }, title = "Private staff channel" },
                 broadcast_channel_ids = {
                     type = "array",
                     title = "Broadcast channels",

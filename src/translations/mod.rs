@@ -1,10 +1,5 @@
-use std::{
-    collections::HashMap,
-    fs,
-    path::Path,
-    sync::LazyLock,
-};
 use serde_json::Value;
+use std::{collections::HashMap, fs, path::Path, sync::LazyLock};
 
 const EN_JSON: &str = include_str!("../../translations/en.json");
 const PL_JSON: &str = include_str!("../../translations/pl.json");
@@ -46,14 +41,14 @@ impl TranslationsStore {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        let lang = stem.to_lowercase();
-                        if let Ok(content) = fs::read_to_string(&path) {
-                            if let Ok(json_val) = serde_json::from_str::<Value>(&content) {
-                                locales.insert(lang, json_val);
-                            }
-                        }
+                if path.extension().and_then(|ext| ext.to_str()) == Some("json")
+                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                {
+                    let lang = stem.to_lowercase();
+                    if let Ok(content) = fs::read_to_string(&path)
+                        && let Ok(json_val) = serde_json::from_str::<Value>(&content)
+                    {
+                        locales.insert(lang, json_val);
                     }
                 }
             }
@@ -76,10 +71,9 @@ impl TranslationsStore {
     fn get_value<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
         let mut current = root;
         for segment in path.split('.') {
-            if let Some(next) = current.get(segment) {
+            {
+                let next = current.get(segment)?;
                 current = next;
-            } else {
-                return None;
             }
         }
         Some(current)
@@ -89,23 +83,20 @@ impl TranslationsStore {
         let norm = Self::normalize_locale(locale);
 
         // Try normalized locale
-        if let Some(locale_data) = self.locales.get(&norm) {
-            if let Some(val) = Self::get_value(locale_data, key) {
-                if let Some(s) = val.as_str() {
-                    return Some(s.to_owned());
-                }
-            }
+        if let Some(locale_data) = self.locales.get(&norm)
+            && let Some(val) = Self::get_value(locale_data, key)
+            && let Some(s) = val.as_str()
+        {
+            return Some(s.to_owned());
         }
 
         // Fallback to "en" if not found and not already en
-        if norm != "en" {
-            if let Some(en_data) = self.locales.get("en") {
-                if let Some(val) = Self::get_value(en_data, key) {
-                    if let Some(s) = val.as_str() {
-                        return Some(s.to_owned());
-                    }
-                }
-            }
+        if norm != "en"
+            && let Some(en_data) = self.locales.get("en")
+            && let Some(val) = Self::get_value(en_data, key)
+            && let Some(s) = val.as_str()
+        {
+            return Some(s.to_owned());
         }
 
         None
@@ -139,10 +130,10 @@ impl TranslationsStore {
             if lang == "en" {
                 continue;
             }
-            if let Some(val) = Self::get_value(root, key) {
-                if let Some(s) = val.as_str() {
-                    results.push((lang.clone(), s.to_owned()));
-                }
+            if let Some(val) = Self::get_value(root, key)
+                && let Some(s) = val.as_str()
+            {
+                results.push((lang.clone(), s.to_owned()));
             }
         }
         results.sort_by(|a, b| a.0.cmp(&b.0));
@@ -158,13 +149,12 @@ impl TranslationsStore {
                 }
                 if let Some(modules) = root.get("modules").and_then(|m| m.as_object()) {
                     for (_mod_id, mod_val) in modules {
-                        if let Some(commands) = mod_val.get("commands").and_then(|c| c.as_object()) {
-                            if let Some(cmd_val) = commands.get(cmd_name) {
-                                if let Some(desc) = cmd_val.get("description").and_then(|d| d.as_str()) {
-                                    results.push((lang.clone(), desc.to_owned()));
-                                    break;
-                                }
-                            }
+                        if let Some(commands) = mod_val.get("commands").and_then(|c| c.as_object())
+                            && let Some(cmd_val) = commands.get(cmd_name)
+                            && let Some(desc) = cmd_val.get("description").and_then(|d| d.as_str())
+                        {
+                            results.push((lang.clone(), desc.to_owned()));
+                            break;
                         }
                     }
                 }
@@ -174,8 +164,14 @@ impl TranslationsStore {
         results
     }
 
-    pub fn get_command_option_localizations(&self, cmd_name: &str, opt_name: &str) -> Vec<(String, String)> {
-        let mut results = self.get_localizations(&format!("commands.{cmd_name}.options.{opt_name}.description"));
+    pub fn get_command_option_localizations(
+        &self,
+        cmd_name: &str,
+        opt_name: &str,
+    ) -> Vec<(String, String)> {
+        let mut results = self.get_localizations(&format!(
+            "commands.{cmd_name}.options.{opt_name}.description"
+        ));
         if results.is_empty() {
             for (lang, root) in &self.locales {
                 if lang == "en" {
@@ -183,17 +179,15 @@ impl TranslationsStore {
                 }
                 if let Some(modules) = root.get("modules").and_then(|m| m.as_object()) {
                     for (_mod_id, mod_val) in modules {
-                        if let Some(commands) = mod_val.get("commands").and_then(|c| c.as_object()) {
-                            if let Some(cmd_val) = commands.get(cmd_name) {
-                                if let Some(options) = cmd_val.get("options").and_then(|o| o.as_object()) {
-                                    if let Some(opt_val) = options.get(opt_name) {
-                                        if let Some(desc) = opt_val.get("description").and_then(|d| d.as_str()) {
-                                            results.push((lang.clone(), desc.to_owned()));
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
+                        if let Some(commands) = mod_val.get("commands").and_then(|c| c.as_object())
+                            && let Some(cmd_val) = commands.get(cmd_name)
+                            && let Some(options) =
+                                cmd_val.get("options").and_then(|o| o.as_object())
+                            && let Some(opt_val) = options.get(opt_name)
+                            && let Some(desc) = opt_val.get("description").and_then(|d| d.as_str())
+                        {
+                            results.push((lang.clone(), desc.to_owned()));
+                            break;
                         }
                     }
                 }
@@ -265,38 +259,38 @@ mod tests {
         );
 
         // Fallback for missing key -> returns key itself
-        assert_eq!(
-            store.t("en", "non.existent.key"),
-            "non.existent.key"
-        );
+        assert_eq!(store.t("en", "non.existent.key"), "non.existent.key");
     }
 
     #[test]
     fn test_translations_with_args() {
         let store = TranslationsStore::init();
 
-        let formatted_en = store.t_args("en", "system.rate_limited", &[
-            ("command", "ping"),
-            ("seconds", "5"),
-        ]);
+        let formatted_en = store.t_args(
+            "en",
+            "system.rate_limited",
+            &[("command", "ping"), ("seconds", "5")],
+        );
         assert_eq!(
             formatted_en,
             "Rate limit exceeded for command `/ping`. Try again in 5 s."
         );
 
-        let formatted_pl = store.t_args("pl", "system.rate_limited", &[
-            ("command", "ping"),
-            ("seconds", "5"),
-        ]);
+        let formatted_pl = store.t_args(
+            "pl",
+            "system.rate_limited",
+            &[("command", "ping"), ("seconds", "5")],
+        );
         assert_eq!(
             formatted_pl,
             "Osiągnięto limit wywołań komendy `/ping`. Spróbuj ponownie za 5 s."
         );
 
-        let formatted_de = store.t_args("de", "system.rate_limited", &[
-            ("command", "ping"),
-            ("seconds", "5"),
-        ]);
+        let formatted_de = store.t_args(
+            "de",
+            "system.rate_limited",
+            &[("command", "ping"), ("seconds", "5")],
+        );
         assert_eq!(
             formatted_de,
             "Ratenbegrenzung für Befehl `/ping` überschritten. Bitte in 5 s erneut versuchen."
@@ -307,7 +301,15 @@ mod tests {
     fn test_get_localizations() {
         let store = TranslationsStore::init();
         let localizations = store.get_localizations("system.command_executed");
-        assert!(localizations.iter().any(|(lang, text)| lang == "pl" && text == "Polecenie zostało wykonane."));
-        assert!(localizations.iter().any(|(lang, text)| lang == "de" && text == "Befehl erfolgreich ausgeführt."));
+        assert!(
+            localizations
+                .iter()
+                .any(|(lang, text)| lang == "pl" && text == "Polecenie zostało wykonane.")
+        );
+        assert!(
+            localizations
+                .iter()
+                .any(|(lang, text)| lang == "de" && text == "Befehl erfolgreich ausgeführt.")
+        );
     }
 }

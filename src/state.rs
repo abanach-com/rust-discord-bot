@@ -87,8 +87,7 @@ impl AppState {
 
                 let next_url = attempt.url();
                 if next_url.scheme() != "https" {
-                    return attempt
-                        .error("media player redirect must use HTTPS protocol");
+                    return attempt.error("media player redirect must use HTTPS protocol");
                 }
 
                 let ip = match next_url.host() {

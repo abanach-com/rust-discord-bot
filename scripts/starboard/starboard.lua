@@ -1,5 +1,22 @@
 local t = (rustybot and rustybot.t) or (zuckerbot and zuckerbot.t) or function(k) return k end
 
+local function get_subcommand(options, allowed)
+    local root = options or {}
+    for _, name in ipairs(allowed) do
+        if type(root[name]) == "table" then
+            return name, root[name]
+        end
+    end
+    if type(root.subcommand) == "string" then
+        for _, name in ipairs(allowed) do
+            if root.subcommand == name then
+                return name, root
+            end
+        end
+    end
+    return nil, {}
+end
+
 return {
     manifest = {
         id = "starboard",
@@ -49,7 +66,7 @@ return {
             type = "object",
             additionalProperties = false,
             properties = {
-                channel_id = { type = "string" },
+                channel_id = { type = { "string", "null" } },
                 threshold = { type = "integer", minimum = 1, maximum = 25, default = 3 },
             },
         },
@@ -60,12 +77,20 @@ return {
             return {}
         end
 
-        local options = ctx.options or {}
-        local sub = options.subcommand or "stats"
+        local sub, opts = get_subcommand(ctx.options, { "config", "stats" })
+        if not sub then
+            return {
+                {
+                    type = "reply",
+                    content = "Unsupported or missing subcommand.",
+                    ephemeral = true,
+                },
+            }
+        end
 
         if sub == "config" then
-            local ch = options.channel or "0"
-            local thresh = options.threshold or 3
+            local ch = opts.channel or "0"
+            local thresh = opts.threshold or 3
             return {
                 {
                     type = "reply",

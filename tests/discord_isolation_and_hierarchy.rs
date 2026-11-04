@@ -1,59 +1,35 @@
 use std::{
-
     collections::BTreeMap,
-
     sync::{
-
         Arc,
-
         atomic::{AtomicUsize, Ordering},
-
     },
-
 };
 
 use axum::{
-
     Router,
-
     extract::{State, WebSocketUpgrade},
-
     http::{Method, StatusCode},
-
     response::{IntoResponse, Json, Response},
-
     routing::{any, get},
-
 };
 
 use rusty_discord_bot::{
-
     AppState,
-
     config::Config,
-
     discord::executor::{
-
         ActionOrigin, ChannelPurpose, ensure_member_hierarchy, execute_event_actions,
-
         resolve_and_validate_channel,
-
     },
-
     lua::LuaAction,
-
 };
 
 use serde_json::{Value, json};
 
 use serenity::{
-
     all::{ChannelId, GatewayIntents, GuildId, Ready, UserId},
-
     client::{Context, EventHandler},
-
     http::HttpBuilder,
-
 };
 
 use tokio::sync::{Mutex, oneshot};
@@ -61,21 +37,17 @@ use tokio::sync::{Mutex, oneshot};
 #[derive(Clone, Default)]
 
 struct MockServerState {
-
     port: u16,
 
     modifying_requests_count: Arc<AtomicUsize>,
 
     recorded_calls: Arc<Mutex<Vec<(Method, String)>>>,
-
 }
 
 async fn handle_ws(ws: WebSocketUpgrade) -> Response {
-
     println!("MOCK WS UPGRADED!");
 
     ws.on_upgrade(|mut socket| async move {
-
         println!("MOCK WS SOCKET CONNECTED!");
 
         // Send OP 10 Hello
@@ -93,47 +65,32 @@ async fn handle_ws(ws: WebSocketUpgrade) -> Response {
         });
 
         if socket
-
             .send(axum::extract::ws::Message::Text(hello.to_string().into()))
-
             .await
-
             .is_err()
-
         {
-
             return;
-
         }
 
         // Wait for OP 2 Identify
 
         while let Some(res) = socket.recv().await {
-
             println!("MOCK WS RECV: {:?}", res);
 
             if let Ok(msg) = res {
-
                 let text = match msg {
-
                     axum::extract::ws::Message::Text(t) => t.to_string(),
 
                     axum::extract::ws::Message::Binary(b) => {
-
                         String::from_utf8_lossy(&b).to_string()
-
                     }
 
                     _ => continue,
-
                 };
 
                 if let Ok(v) = serde_json::from_str::<Value>(&text)
-
                     && v.get("op").and_then(|op| op.as_i64()) == Some(2)
-
                 {
-
                     println!("MOCK WS GOT IDENTIFY: sending READY");
 
                     // Send OP 0 Ready
@@ -183,29 +140,21 @@ async fn handle_ws(ws: WebSocketUpgrade) -> Response {
                     });
 
                     let _ = socket
-
                         .send(axum::extract::ws::Message::Text(ready.to_string().into()))
-
                         .await;
 
                     break;
-
                 }
-
             }
-
         }
 
         // Keep socket alive while test runs
 
         while let Some(Ok(_)) = socket.recv().await {}
-
     })
-
 }
 
 async fn mock_discord_handler(
-
     State(mock): State<MockServerState>,
 
     method: Method,
@@ -213,9 +162,7 @@ async fn mock_discord_handler(
     uri: axum::http::Uri,
 
     bytes: axum::body::Bytes,
-
 ) -> Response {
-
     let path = uri.path().to_string();
 
     let body_str = String::from_utf8_lossy(&bytes).to_string();
@@ -223,29 +170,20 @@ async fn mock_discord_handler(
     println!("MOCK HTTP RECV: {} {} -> {}", method, path, body_str);
 
     if matches!(
-
         method,
-
         Method::POST | Method::DELETE | Method::PATCH | Method::PUT
-
     ) {
-
         mock.modifying_requests_count.fetch_add(1, Ordering::SeqCst);
-
     }
 
     mock.recorded_calls
-
         .lock()
-
         .await
-
         .push((method.clone(), format!("{}|{}", path, body_str)));
 
     // Gateway URL
 
     if path == "/api/v10/gateway" || path == "/api/v10/gateway/bot" {
-
         return Json(json!({
 
             "url": format!("ws://127.0.0.1:{}/gateway/ws", mock.port),
@@ -265,15 +203,12 @@ async fn mock_discord_handler(
             }
 
         }))
-
         .into_response();
-
     }
 
     // Bot user
 
     if path == "/api/v10/users/@me" {
-
         return Json(json!({
 
             "id": "999999999999999999",
@@ -287,19 +222,15 @@ async fn mock_discord_handler(
             "bot": true
 
         }))
-
         .into_response();
-
     }
 
     // Channel queries: GET /api/v10/channels/{channel_id}
 
     if method == Method::GET && path.starts_with("/api/v10/channels/") {
-
         let channel_id = path.trim_start_matches("/api/v10/channels/");
 
         return match channel_id {
-
             "101" => Json(json!({
 
                 "id": "101",
@@ -313,7 +244,6 @@ async fn mock_discord_handler(
                 "position": 0
 
             }))
-
             .into_response(),
 
             "102" => Json(json!({
@@ -345,7 +275,6 @@ async fn mock_discord_handler(
                 ]
 
             }))
-
             .into_response(),
 
             "201" => Json(json!({
@@ -361,7 +290,6 @@ async fn mock_discord_handler(
                 "position": 0
 
             }))
-
             .into_response(),
 
             "301" => Json(json!({
@@ -379,7 +307,6 @@ async fn mock_discord_handler(
                 }]
 
             }))
-
             .into_response(),
 
             "401" => Json(json!({
@@ -395,31 +322,21 @@ async fn mock_discord_handler(
                 "position": 0
 
             }))
-
             .into_response(),
 
             _ => (
-
                 StatusCode::NOT_FOUND,
-
                 Json(json!({"message": "Unknown Channel", "code": 10003})),
-
             )
-
                 .into_response(),
-
         };
-
     }
 
     // Send Message: POST /api/v10/channels/{channel_id}/messages
 
     if method == Method::POST && path.contains("/messages") {
-
         return (
-
             StatusCode::OK,
-
             Json(json!({
 
                 "id": "900000000000000001",
@@ -459,39 +376,27 @@ async fn mock_discord_handler(
                 "type": 0
 
             })),
-
         )
-
             .into_response();
-
     }
 
     // Delete Message: DELETE /api/v10/channels/{channel_id}/messages/{message_id}
 
     if method == Method::DELETE && path.contains("/messages/") {
-
         if path.contains("denied") || path.contains("fail") {
-
             return (
-
                 StatusCode::FORBIDDEN,
-
                 Json(json!({"message": "Missing Permissions to delete message", "code": 50013})),
-
             )
-
                 .into_response();
-
         }
 
         return StatusCode::NO_CONTENT.into_response();
-
     }
 
     // Guild query: GET /api/v10/guilds/{guild_id}
 
     if method == Method::GET && (path == "/api/v10/guilds/100" || path == "/api/v10/guilds/100/") {
-
         return Json(json!({
 
             "id": "100",
@@ -587,15 +492,12 @@ async fn mock_discord_handler(
             ]
 
         }))
-
         .into_response();
-
     }
 
     // Guild Member queries: GET /api/v10/guilds/100/members/{user_id}
 
     if method == Method::GET && path.starts_with("/api/v10/guilds/100/members/") {
-
         let user_id = path.trim_start_matches("/api/v10/guilds/100/members/");
 
         return match user_id {
@@ -663,21 +565,17 @@ async fn mock_discord_handler(
             _ => (StatusCode::NOT_FOUND, Json(json!({"message": "Unknown Member", "code": 10007}))).into_response(),
 
         };
-
     }
 
     // Kick: DELETE /api/v10/guilds/100/members/{user_id}
 
     if method == Method::DELETE && path.starts_with("/api/v10/guilds/100/members/") {
-
         return StatusCode::NO_CONTENT.into_response();
-
     }
 
     // Timeout: PATCH /api/v10/guilds/100/members/{user_id}
 
     if method == Method::PATCH && path.starts_with("/api/v10/guilds/100/members/") {
-
         return Json(json!({
 
             "user": { "id": "222222222222222222", "username": "RaidSpammer" },
@@ -689,131 +587,90 @@ async fn mock_discord_handler(
             "communication_disabled_until": "2026-10-31T08:00:00Z"
 
         }))
-
         .into_response();
-
     }
 
     // Default fallback
 
     (StatusCode::OK, Json(json!({"status": "ok"}))).into_response()
-
 }
 
 struct TestReadyHandler {
-
     tx: Arc<Mutex<Option<oneshot::Sender<Context>>>>,
-
 }
 
 #[serenity::async_trait]
 
 impl EventHandler for TestReadyHandler {
-
     async fn ready(&self, ctx: Context, ready: Ready) {
-
         println!(
-
             "Mock Discord Gateway READY received for bot: {}",
-
             ready.user.name
-
         );
 
         if let Some(tx) = self.tx.lock().await.take() {
-
             let _ = tx.send(ctx);
-
         }
-
     }
-
 }
 
 async fn start_mock_discord_environment()
-
 -> (Context, MockServerState, Arc<serenity::all::ShardManager>) {
-
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-
         .await
-
         .expect("bind ephemeral port");
 
     let port = listener.local_addr().unwrap().port();
 
     let mock_state = MockServerState {
-
         port,
 
         ..Default::default()
-
     };
 
     let app = Router::new()
-
         .route("/gateway/ws", get(handle_ws))
-
         .fallback(any(mock_discord_handler))
-
         .with_state(mock_state.clone());
 
     tokio::spawn(async move {
-
         axum::serve(listener, app).await.unwrap();
-
     });
 
     let (ready_tx, ready_rx) = oneshot::channel();
 
     let handler = TestReadyHandler {
-
         tx: Arc::new(Mutex::new(Some(ready_tx))),
-
     };
 
     let http = HttpBuilder::new("mock-token")
-
         .proxy(format!("http://127.0.0.1:{port}"))
-
         .ratelimiter_disabled(true)
-
         .build();
 
     let mut client = serenity::client::ClientBuilder::new_with_http(http, GatewayIntents::all())
-
         .event_handler(handler)
-
         .await
-
         .expect("build serenity client");
 
     let shard_manager = client.shard_manager.clone();
 
     tokio::spawn(async move {
-
         let _ = client.start().await;
-
     });
 
     let ctx = tokio::time::timeout(std::time::Duration::from_secs(5), ready_rx)
-
         .await
-
         .expect("timed out waiting for gateway ready")
-
         .expect("channel rx");
 
     (ctx, mock_state, shard_manager)
-
 }
 
 async fn create_test_state() -> AppState {
-
     let bind: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
 
     let config = Config {
-
         discord_token: "dummy_token".to_string(),
 
         discord_application_id: 123456789,
@@ -847,31 +704,23 @@ async fn create_test_state() -> AppState {
         music_allowed_hosts: std::collections::HashSet::new(),
 
         trusted_proxies: ["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()]
-
             .into_iter()
-
             .collect(),
-
     };
 
     AppState::bootstrap(config)
-
         .await
-
         .expect("bootstrap should succeed")
-
 }
 
 #[tokio::test]
 
 async fn test_channel_resolution_server_isolation_and_error_handling() {
-
     let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
 
     let origin_guild_id = GuildId::new(100);
 
     let origin = ActionOrigin {
-
         guild_id: Some(origin_guild_id),
 
         channel_id: Some(ChannelId::new(101)),
@@ -885,21 +734,16 @@ async fn test_channel_resolution_server_isolation_and_error_handling() {
         app_permissions: serenity::all::Permissions::all(),
 
         enforce_actor_permissions: true,
-
     };
 
     // 1. Correct channel on same guild -> Ok
 
     let resolved =
-
         resolve_and_validate_channel(&ctx, &origin, Some("101"), ChannelPurpose::SendMessage).await;
 
     assert!(
-
         resolved.is_ok(),
-
         "channel 101 on guild 100 should resolve successfully"
-
     );
 
     assert_eq!(resolved.unwrap().get(), 101);
@@ -909,117 +753,75 @@ async fn test_channel_resolution_server_isolation_and_error_handling() {
     // 2. Foreign server channel -> Rejected BEFORE sending modifying requests
 
     let foreign =
-
         resolve_and_validate_channel(&ctx, &origin, Some("201"), ChannelPurpose::SendMessage).await;
 
     assert!(foreign.is_err(), "foreign channel 201 should be rejected");
 
     let foreign_err = foreign.unwrap_err().to_string();
 
-    assert!(
-
-        foreign_err.contains("different server") || foreign_err.contains("obcego serwera")
-
-    );
+    assert!(foreign_err.contains("different server") || foreign_err.contains("obcego serwera"));
 
     assert_eq!(
-
         mock.modifying_requests_count.load(Ordering::SeqCst),
-
         baseline_modifications,
-
         "Zero modifying requests should be made for foreign channel"
-
     );
 
     // 3. DM channel in guild context -> Rejected
 
     let dm =
-
         resolve_and_validate_channel(&ctx, &origin, Some("301"), ChannelPurpose::SendMessage).await;
 
     assert!(
-
         dm.is_err(),
-
         "DM channel 301 in guild context should be rejected"
-
     );
 
     let dm_err = dm.unwrap_err().to_string();
 
-    assert!(
-
-        dm_err.contains("private channel") || dm_err.contains("kanał prywatny")
-
-    );
+    assert!(dm_err.contains("private channel") || dm_err.contains("kanał prywatny"));
 
     assert_eq!(
-
         mock.modifying_requests_count.load(Ordering::SeqCst),
-
         baseline_modifications,
-
         "Zero modifying requests should be made for DM channel"
-
     );
 
     // 4. Category channel -> Rejected for SendMessage
 
     let category =
-
         resolve_and_validate_channel(&ctx, &origin, Some("401"), ChannelPurpose::SendMessage).await;
 
     assert!(
-
         category.is_err(),
-
         "Category channel 401 should be rejected for SendMessage"
-
     );
 
     let cat_err = category.unwrap_err().to_string();
 
-    assert!(
-
-        cat_err.contains("channel categories") || cat_err.contains("kategoria kanałów")
-
-    );
+    assert!(cat_err.contains("channel categories") || cat_err.contains("kategoria kanałów"));
 
     assert_eq!(
-
         mock.modifying_requests_count.load(Ordering::SeqCst),
-
         baseline_modifications,
-
         "Zero modifying requests should be made for Category channel"
-
     );
 
     // 5. Non-existent channel -> Rejected on read error
 
     let not_found =
-
         resolve_and_validate_channel(&ctx, &origin, Some("999999"), ChannelPurpose::SendMessage)
-
             .await;
 
     assert!(
-
         not_found.is_err(),
-
         "Non-existent channel should fail to read"
-
     );
 
     assert_eq!(
-
         mock.modifying_requests_count.load(Ordering::SeqCst),
-
         baseline_modifications,
-
         "Zero modifying requests should be made when reading channel fails"
-
     );
 
     // 6. Channel on same guild but actor denied SEND_MESSAGES via overwrite -> Rejected BEFORE modifying requests
@@ -1035,53 +837,37 @@ async fn test_channel_resolution_server_isolation_and_error_handling() {
     };
 
     let denied_channel = resolve_and_validate_channel(
-
         &ctx,
-
         &non_admin_origin,
-
         Some("102"),
-
         ChannelPurpose::SendMessage,
-
     )
-
     .await;
 
     assert!(
-
         denied_channel.is_err(),
-
         "channel 102 with denied SEND_MESSAGES should be rejected"
-
     );
 
     let denied_err = denied_channel.unwrap_err().to_string();
 
     assert!(
-
-        denied_err.contains("missing user permissions") || denied_err.contains("brak uprawnień użytkownika")
-
+        denied_err.contains("missing user permissions")
+            || denied_err.contains("brak uprawnień użytkownika")
     );
 
     assert_eq!(
-
         mock.modifying_requests_count.load(Ordering::SeqCst),
-
         baseline_modifications,
-
         "Zero modifying requests should be made when actor lacks permission in target channel"
-
     );
 
     shard_manager.shutdown_all().await;
-
 }
 
 #[tokio::test]
 
 async fn test_join_guard_raid_kick_timeout_and_self_punishment_contract() {
-
     let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
 
     let state = create_test_state().await;
@@ -1097,51 +883,32 @@ async fn test_join_guard_raid_kick_timeout_and_self_punishment_contract() {
     // Actor is the new member (target_raid_user), but automated rules must NOT trigger self-punishment rejection!
 
     let actions = vec![
-
         LuaAction::KickMember {
-
             user_id: target_raid_user.get().to_string(),
 
             reason: Some("Join Guard: raid lockdown".to_string()),
-
         },
-
         LuaAction::SendMessage {
-
             channel_id: Some("101".to_string()),
 
             content: "🚨 Staff Alert: user kicked".to_string(),
-
         },
-
     ];
 
     let result = execute_event_actions(
-
         &ctx,
-
         &state,
-
         "join_guard",
-
         Some(guild_id),
-
         Some(ChannelId::new(101)),
-
         Some(target_raid_user),
-
         &actions,
-
     )
-
     .await;
 
     assert!(
-
         result.is_ok(),
-
         "automated event actions must succeed without self-punishment error"
-
     );
 
     // Both the Kick (DELETE) and the Alert (POST) must have been registered
@@ -1149,13 +916,9 @@ async fn test_join_guard_raid_kick_timeout_and_self_punishment_contract() {
     let modifications_after_raid = mock.modifying_requests_count.load(Ordering::SeqCst);
 
     assert_eq!(
-
         modifications_after_raid - initial_modifications,
-
         2,
-
         "Kick and staff alert message must both be dispatched"
-
     );
 
     // Case B: Protected target (Server Owner 111111111111111111)
@@ -1165,55 +928,36 @@ async fn test_join_guard_raid_kick_timeout_and_self_punishment_contract() {
     let owner_user = UserId::new(111111111111111111);
 
     let protected_actions = vec![
-
         LuaAction::TimeoutMember {
-
             user_id: owner_user.get().to_string(),
 
             seconds: 3600,
 
             reason: Some("Attempt to moderate owner".to_string()),
-
         },
-
         LuaAction::SendMessage {
-
             channel_id: Some("101".to_string()),
 
             content: "🛡️ Staff Alert: attempted action on owner".to_string(),
-
         },
-
     ];
 
     let baseline = mock.modifying_requests_count.load(Ordering::SeqCst);
 
     let protected_result = execute_event_actions(
-
         &ctx,
-
         &state,
-
         "join_guard",
-
         Some(guild_id),
-
         Some(ChannelId::new(101)),
-
         Some(owner_user),
-
         &protected_actions,
-
     )
-
     .await;
 
     assert!(
-
         protected_result.is_ok(),
-
         "execute_event_actions gracefully absorbs denied actions"
-
     );
 
     // Zero modifying requests for the timeout (owner protected!), exactly 1 for the staff alert!
@@ -1221,57 +965,39 @@ async fn test_join_guard_raid_kick_timeout_and_self_punishment_contract() {
     let after_protected = mock.modifying_requests_count.load(Ordering::SeqCst);
 
     assert_eq!(
-
         after_protected - baseline,
-
         1,
-
         "Owner timeout was rejected, but staff alert was still successfully sent"
-
     );
 
     // Case C: Manual moderator command - self punishment is strictly rejected
 
     let self_check = ensure_member_hierarchy(
-
         &ctx,
-
         guild_id,
-
         Some(target_raid_user), // moderator acting manually
-
         target_raid_user,       // target is self
-
     )
-
     .await;
 
     assert!(
-
         self_check.is_err(),
-
         "manual command on self must be rejected"
-
     );
 
     let self_err = self_check.unwrap_err().to_string();
 
     assert!(
-
         self_err.contains("cannot perform this action on yourself")
-
             || self_err.contains("nie możesz wykonać tej akcji na sobie")
-
     );
 
     shard_manager.shutdown_all().await;
-
 }
 
 #[tokio::test]
 
 async fn test_event_action_failures_suppress_sent_audit_and_adjust_message_delete() {
-
     let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
 
     let state = create_test_state().await;
@@ -1283,57 +1009,35 @@ async fn test_event_action_failures_suppress_sent_audit_and_adjust_message_delet
     // The sequence is: SendMessage (fails) -> Audit "welcome_sent"
 
     let welcome_actions = vec![
-
         LuaAction::SendMessage {
-
             channel_id: Some("999".to_string()),
 
             content: "Witaj na serwerze!".to_string(),
-
         },
-
         LuaAction::Audit {
-
             event: "welcome_sent".to_string(),
 
             data: BTreeMap::from([
-
                 ("user_id".to_string(), json!("123456")),
-
                 ("channel_id".to_string(), json!("999")),
-
             ]),
-
         },
-
     ];
 
     let res = execute_event_actions(
-
         &ctx,
-
         &state,
-
         "welcome",
-
         Some(guild_id),
-
         None,
-
         Some(UserId::new(123456)),
-
         &welcome_actions,
-
     )
-
     .await;
 
     assert!(
-
         res.is_ok(),
-
         "execute_event_actions gracefully absorbs failures"
-
     );
 
     let audit_events = state.storage.list_audit_events("100", 20).await.unwrap();
@@ -1341,69 +1045,44 @@ async fn test_event_action_failures_suppress_sent_audit_and_adjust_message_delet
     // Must NOT contain false positive welcome_sent
 
     assert!(
-
         !audit_events.iter().any(|e| e.event == "welcome_sent"),
-
         "failed welcome SendMessage must not emit false positive welcome_sent audit event"
-
     );
 
     // Must contain action_denied for failed message sending
 
     assert!(
-
         audit_events.iter().any(|e| e.event == "action_denied"),
-
         "failure should be recorded as action_denied audit entry"
-
     );
 
     // 2. Goodbye action failure: channel "999" does not exist
 
     let goodbye_actions = vec![
-
         LuaAction::SendMessage {
-
             channel_id: Some("999".to_string()),
 
             content: "Żegnaj!".to_string(),
-
         },
-
         LuaAction::Audit {
-
             event: "goodbye_sent".to_string(),
 
             data: BTreeMap::from([
-
                 ("user_id".to_string(), json!("123456")),
-
                 ("channel_id".to_string(), json!("999")),
-
             ]),
-
         },
-
     ];
 
     let res_goodbye = execute_event_actions(
-
         &ctx,
-
         &state,
-
         "welcome",
-
         Some(guild_id),
-
         None,
-
         Some(UserId::new(123456)),
-
         &goodbye_actions,
-
     )
-
     .await;
 
     assert!(res_goodbye.is_ok());
@@ -1411,11 +1090,8 @@ async fn test_event_action_failures_suppress_sent_audit_and_adjust_message_delet
     let audit_events_after = state.storage.list_audit_events("100", 20).await.unwrap();
 
     assert!(
-
         !audit_events_after.iter().any(|e| e.event == "goodbye_sent"),
-
         "failed goodbye SendMessage must not emit false positive goodbye_sent audit event"
-
     );
 
     // 3. AutoMod message deletion failure:
@@ -1427,45 +1103,28 @@ async fn test_event_action_failures_suppress_sent_audit_and_adjust_message_delet
     // "została usunięta przez AutoMod" -> "narusza zasady AutoMod (usunięcie zablokowane)"
 
     let automod_actions = vec![
-
         LuaAction::DeleteMessage {
-
             channel_id: "101".to_string(),
 
             message_id: "denied_msg_777".to_string(),
-
         },
-
         LuaAction::SendMessage {
-
             channel_id: Some("101".to_string()),
 
             content: "<@123456> Wiadomość została usunięta przez AutoMod (blocked_word)."
-
                 .to_string(),
-
         },
-
     ];
 
     let res_automod = execute_event_actions(
-
         &ctx,
-
         &state,
-
         "automod",
-
         Some(guild_id),
-
         Some(ChannelId::new(101)),
-
         Some(UserId::new(123456)),
-
         &automod_actions,
-
     )
-
     .await;
 
     assert!(res_automod.is_ok());
@@ -1475,62 +1134,39 @@ async fn test_event_action_failures_suppress_sent_audit_and_adjust_message_delet
     let calls = mock.recorded_calls.lock().await.clone();
 
     let post_calls: Vec<_> = calls
-
         .iter()
-
         .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
-
         .collect();
 
     assert!(
-
         !post_calls.is_empty(),
-
         "AutoMod notice message must still be dispatched"
-
     );
 
     let last_post = post_calls.last().unwrap();
 
     assert!(
-
         last_post
-
             .1
-
             .contains("narusza zasady AutoMod (usunięcie zablokowane)"),
-
         "dependent notice content should have been adjusted to indicate deletion was blocked, got: {}",
-
         last_post.1
-
     );
 
     assert!(
-
         !last_post.1.contains("została usunięta przez AutoMod"),
-
         "dependent notice must not falsely claim message was deleted when deletion failed, got: {}",
-
         last_post.1
-
     );
 
     let final_audits = state.storage.list_audit_events("100", 20).await.unwrap();
 
     assert!(
-
         final_audits
-
             .iter()
-
             .any(|e| e.event == "action_denied" && e.module_id == "automod"),
-
         "AutoMod message deletion failure must record action_denied audit entry"
-
     );
 
     shard_manager.shutdown_all().await;
-
 }
-

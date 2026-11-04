@@ -1,39 +1,24 @@
 use anyhow::{Context as _, Result, anyhow};
 
 use serenity::{
-
     all::{ChannelId, GuildId, Permissions, UserId},
-
     client::Context,
-
 };
-
-
 
 use super::executor::{ActionOrigin, ChannelPurpose, resolve_and_validate_channel};
 
 use crate::{
-
     AppState,
-
     lua::{SchedulerOperation, SchedulerScope},
-
     scheduler::{
-
         CreateJobOutcome, JobMutation, JobMutationOutcome, NewScheduledJob, ScheduledJob,
-
         time::{parse_repeat_interval, parse_schedule_time},
-
     },
-
 };
-
-
 
 #[derive(Clone, Copy)]
 
 pub(super) struct SchedulerExecutionContext {
-
     guild_id: Option<GuildId>,
 
     channel_id: Option<ChannelId>,
@@ -43,15 +28,10 @@ pub(super) struct SchedulerExecutionContext {
     actor_permissions: Permissions,
 
     command_context: bool,
-
 }
 
-
-
 impl SchedulerExecutionContext {
-
     pub(super) const fn new(
-
         guild_id: Option<GuildId>,
 
         channel_id: Option<ChannelId>,
@@ -61,11 +41,8 @@ impl SchedulerExecutionContext {
         actor_permissions: Permissions,
 
         command_context: bool,
-
     ) -> Self {
-
         Self {
-
             guild_id,
 
             channel_id,
@@ -75,17 +52,11 @@ impl SchedulerExecutionContext {
             actor_permissions,
 
             command_context,
-
         }
-
     }
-
 }
 
-
-
 pub(super) async fn execute(
-
     ctx: &Context,
 
     state: &AppState,
@@ -95,67 +66,41 @@ pub(super) async fn execute(
     execution: SchedulerExecutionContext,
 
     operation: &SchedulerOperation,
-
 ) -> Result<Option<String>> {
-
     if module_id != "scheduler" {
-
         return Err(anyhow!(
-
             "scheduler operations are reserved for the trusted scheduler module"
-
         ));
-
     }
 
     if !execution.command_context {
-
         return Err(anyhow!(
-
             "scheduler tasks can only be created and modified through user commands"
-
         ));
-
     }
 
-
-
     let guild_id = execution
-
         .guild_id
-
         .ok_or_else(|| anyhow!("scheduler operates exclusively on a server"))?;
 
     let actor_id = execution
-
         .actor_id
-
         .ok_or_else(|| anyhow!("scheduler operation requires a user"))?;
 
     let can_manage_guild = has_manage_guild(execution.actor_permissions);
 
     if operation.requires_manage_guild() && !can_manage_guild {
-
         return Err(anyhow!(
-
             "this scheduler operation requires Manage Server permission"
-
         ));
-
     }
-
-
 
     let guild_key = guild_id.get().to_string();
 
     let actor_key = actor_id.get().to_string();
 
-
-
     match operation {
-
         SchedulerOperation::Create {
-
             when,
 
             content,
@@ -173,65 +118,40 @@ pub(super) async fn execute(
             minimum_delay_seconds,
 
             maximum_delay_seconds,
-
         } => {
-
             let now = chrono::Utc::now();
 
             let run_at =
-
                 parse_schedule_time(when, now, *minimum_delay_seconds, *maximum_delay_seconds)
-
                     .map_err(|error| anyhow!("invalid schedule deadline: {error}"))?;
 
-
-
             let target_channel = match channel_id {
-
                 Some(channel_id) => {
-
                     let channel_id = ChannelId::new(parse_snowflake(channel_id)?);
 
                     ensure_channel_belongs_to_guild(ctx, channel_id, guild_id).await?;
 
                     channel_id
-
                 }
 
                 None => execution
-
                     .channel_id
-
                     .ok_or_else(|| anyhow!("missing destination channel"))?,
-
             };
 
-
-
             let repeat_every_seconds = repeat
-
                 .as_deref()
-
                 .map(parse_repeat_interval)
-
                 .transpose()
-
                 .map_err(|error| anyhow!("invalid repeat interval: {error}"))?;
 
             let remaining_runs = if repeat_every_seconds.is_some() {
-
                 repeat_count.map(i64::from)
-
             } else {
-
                 Some(1)
-
             };
 
-
-
             let new_job = NewScheduledJob {
-
                 guild_id: guild_key.clone(),
 
                 module_id: module_id.to_owned(),
@@ -251,29 +171,17 @@ pub(super) async fn execute(
                 remaining_runs,
 
                 max_attempts: 5,
-
             };
 
-
-
             match state.scheduler.create_job(new_job, *max_jobs).await? {
-
                 CreateJobOutcome::Created(job) => {
-
                     state
-
                         .storage
-
                         .record_audit(
-
                             Some(&guild_key),
-
                             Some(&actor_key),
-
                             module_id,
-
                             "scheduled_job_created",
-
                             serde_json::json!({
 
                                 "job_id": job.id,
@@ -289,137 +197,78 @@ pub(super) async fn execute(
                                 "mention_creator": job.mention_creator,
 
                             }),
-
                         )
-
                         .await?;
 
-
-
                     Ok(Some(format!(
-
                         "✅ Created task `{}`.\nChannel: <#{}>\nExecution: <t:{}:F> (<t:{}:R>)\nMode: {}",
-
                         job.id,
-
                         job.channel_id,
-
                         job.run_at.timestamp(),
-
                         job.run_at.timestamp(),
-
                         recurrence_description(&job),
-
                     )))
-
                 }
 
                 CreateJobOutcome::LimitReached { limit } => Ok(Some(format!(
-
                     "Reached limit of **{limit}** active tasks for this user."
-
                 ))),
-
             }
-
         }
 
         SchedulerOperation::List { scope, limit } => {
-
             let include_all = matches!(scope, SchedulerScope::All);
 
             let jobs = state
-
                 .scheduler
-
                 .list_jobs(&guild_key, &actor_key, include_all, *limit)
-
                 .await?;
 
             Ok(Some(format_job_list(&jobs, include_all)))
-
         }
 
         SchedulerOperation::Cancel { job_id } => {
-
             mutate_job(
-
                 state,
-
                 module_id,
-
                 &guild_key,
-
                 &actor_key,
-
                 can_manage_guild,
-
                 job_id,
-
                 JobMutation::Cancel,
-
             )
-
             .await
-
         }
 
         SchedulerOperation::Pause { job_id } => {
-
             mutate_job(
-
                 state,
-
                 module_id,
-
                 &guild_key,
-
                 &actor_key,
-
                 can_manage_guild,
-
                 job_id,
-
                 JobMutation::Pause,
-
             )
-
             .await
-
         }
 
         SchedulerOperation::Resume { job_id } => {
-
             mutate_job(
-
                 state,
-
                 module_id,
-
                 &guild_key,
-
                 &actor_key,
-
                 can_manage_guild,
-
                 job_id,
-
                 JobMutation::Resume,
-
             )
-
             .await
-
         }
-
     }
-
 }
 
-
-
 async fn mutate_job(
-
     state: &AppState,
 
     module_id: &str,
@@ -433,37 +282,21 @@ async fn mutate_job(
     job_id: &str,
 
     mutation: JobMutation,
-
 ) -> Result<Option<String>> {
-
     let outcome = state
-
         .scheduler
-
         .mutate_job(guild_id, job_id, actor_user_id, allow_any, mutation)
-
         .await?;
 
-
-
     match outcome {
-
         JobMutationOutcome::Updated(job) => {
-
             state
-
                 .storage
-
                 .record_audit(
-
                     Some(guild_id),
-
                     Some(actor_user_id),
-
                     module_id,
-
                     mutation.event_name(),
-
                     serde_json::json!({
 
                         "job_id": job.id,
@@ -475,63 +308,40 @@ async fn mutate_job(
                         "run_at": job.run_at,
 
                     }),
-
                 )
-
                 .await?;
 
             Ok(Some(format!(
-
                 "✅ Zadanie `{}` ma teraz status **{}**.",
-
                 job.id,
-
                 status_label(&job.status),
-
             )))
-
         }
 
         JobMutationOutcome::NotFound => Ok(Some(
-
             "Nie znaleziono zadania o podanym identyfikatorze na tym serwerze.".to_owned(),
-
         )),
 
         JobMutationOutcome::Forbidden => Ok(Some(
-
             "You can only manage your own tasks. A moderator with Manage Server can manage all."
-
                 .to_owned(),
-
         )),
 
         JobMutationOutcome::InvalidState { current_status } => Ok(Some(format!(
-
             "Ta zmiana nie jest dozwolona dla zadania w stanie **{}**.",
-
             status_label(&current_status),
-
         ))),
-
     }
-
 }
 
-
-
 async fn ensure_channel_belongs_to_guild(
-
     ctx: &Context,
 
     channel_id: ChannelId,
 
     expected_guild_id: GuildId,
-
 ) -> Result<()> {
-
     let origin = ActionOrigin {
-
         guild_id: Some(expected_guild_id),
 
         channel_id: Some(channel_id),
@@ -545,101 +355,63 @@ async fn ensure_channel_belongs_to_guild(
         app_permissions: Permissions::all(),
 
         enforce_actor_permissions: false,
-
     };
 
     resolve_and_validate_channel(ctx, &origin, None, ChannelPurpose::SendMessage).await?;
 
     Ok(())
-
 }
 
-
-
 fn format_job_list(jobs: &[ScheduledJob], include_owner: bool) -> String {
-
     if jobs.is_empty() {
-
         return "No active, paused, or running tasks.".to_owned();
-
     }
-
-
 
     let mut lines = Vec::with_capacity(jobs.len() + 1);
 
     lines.push(format!("🗓️ **Zaplanowane zadania ({})**", jobs.len()));
 
     for job in jobs {
-
         let mut preview = job.content.replace(['\n', '\r'], " ");
 
         if preview.chars().count() > 56 {
-
             preview = preview.chars().take(53).collect::<String>() + "...";
-
         }
 
         let owner = if include_owner {
-
             format!(" · <@{}>", job.creator_user_id)
-
         } else {
-
             String::new()
-
         };
 
         lines.push(format!(
-
             "• `{}` · **{}** · <t:{}:R> · <#{}>{owner}\n  `{}` · {}",
-
             job.short_id(),
-
             status_label(&job.status),
-
             job.run_at.timestamp(),
-
             job.channel_id,
-
             job.id,
-
             preview,
-
         ));
-
     }
 
     lines.join("\n")
-
 }
 
-
-
 fn recurrence_description(job: &ScheduledJob) -> String {
-
     let Some(seconds) = job.repeat_every_seconds else {
-
         return "jednorazowo".to_owned();
-
     };
 
     match job.remaining_runs {
-
         Some(runs) => format!("every {seconds}s, {runs} runs total"),
 
         None => format!("every {seconds}s, unlimited runs"),
-
     }
-
 }
 
-
-
 fn status_label(status: &str) -> &str {
-
     match status {
-
         "active" => "aktywne",
 
         "paused" => "wstrzymane",
@@ -653,38 +425,22 @@ fn status_label(status: &str) -> &str {
         "failed" => "nieudane",
 
         _ => status,
-
     }
-
 }
-
-
 
 fn has_manage_guild(permissions: Permissions) -> bool {
-
     permissions.contains(Permissions::ADMINISTRATOR)
-
         || permissions.contains(Permissions::MANAGE_GUILD)
-
 }
 
-
-
 fn parse_snowflake(value: &str) -> Result<u64> {
-
     let value = value
-
         .parse::<u64>()
-
         .with_context(|| format!("{value:?} nie jest identyfikatorem Discorda"))?;
 
     if value == 0 {
-
         return Err(anyhow!("Discord ID cannot be zero"));
-
     }
 
     Ok(value)
-
 }
-

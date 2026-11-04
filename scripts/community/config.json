@@ -1,5 +1,7 @@
 {
+    "suggestion_channel_id": null,
     "report_channel_id": null,
-    "suggestions_channel_id": null,
-    "announcements_channel_id": null
+    "feedback_channel_id": null,
+    "application_channel_id": null,
+    "bug_channel_id": null
 }

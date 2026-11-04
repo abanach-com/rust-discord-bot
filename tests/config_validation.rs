@@ -41,6 +41,24 @@ async fn all_bundled_module_schemas_compile_and_load_successfully() {
 }
 
 #[tokio::test]
+async fn bundled_default_configs_match_their_schemas() {
+    let engine = engine();
+    let mut failures = Vec::new();
+    for manifest in engine.manifests().await {
+        let config = engine.default_config(&manifest.id).await;
+        if let Err(errors) = engine.validate_module_config(&manifest.id, &config).await {
+            failures.push(format!("{}: {:?}", manifest.id, errors));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "invalid bundled defaults ({}):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+#[tokio::test]
 async fn validate_module_config_checks_types_and_limits() {
     let engine = engine();
 
@@ -155,6 +173,11 @@ return {
 }
 "#;
     std::fs::write(&script_path, lua_code).expect("write script");
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{"mode": "strict", "threshold": 50}"#,
+    )
+    .expect("write default config");
 
     let engine = LuaEngine::load(dir.path(), limits()).expect("load test engine");
 
@@ -228,5 +251,76 @@ return {
     assert!(
         result.is_err(),
         "engine load must reject invalid JSON schemas at startup"
+    );
+}
+
+#[tokio::test]
+async fn invalid_bundled_config_json_is_rejected_at_startup() {
+    let dir = tempdir().expect("tempdir");
+    let script_path = dir.path().join("module.lua");
+    let config_path = dir.path().join("config.json");
+
+    let lua_code = r#"
+return {
+    manifest = {
+        id = "syntax_err_test",
+        name = "Syntax Error Test",
+        version = "1.0.0",
+        description = "Test module",
+        category = "Utility",
+        default_enabled = true,
+        commands = {},
+        events = {},
+        config_schema = {
+            type = "object"
+        }
+    }
+}
+"#;
+    std::fs::write(&script_path, lua_code).expect("write script");
+    std::fs::write(&config_path, "{ broken_json: ").expect("write config");
+
+    let result = LuaEngine::load(dir.path(), limits());
+    assert!(
+        result.is_err(),
+        "engine load must reject invalid config JSON syntax at startup"
+    );
+}
+
+#[tokio::test]
+async fn schema_violating_bundled_config_is_rejected_at_startup() {
+    let dir = tempdir().expect("tempdir");
+    let script_path = dir.path().join("module.lua");
+    let config_path = dir.path().join("config.json");
+
+    let lua_code = r#"
+return {
+    manifest = {
+        id = "violation_test",
+        name = "Violation Test",
+        version = "1.0.0",
+        description = "Test module",
+        category = "Utility",
+        default_enabled = true,
+        commands = {},
+        events = {},
+        config_schema = {
+            type = "object",
+            required = { "strict_number" },
+            additionalProperties = false,
+            properties = {
+                strict_number = { type = "integer", minimum = 10 }
+            }
+        }
+    }
+}
+"#;
+    std::fs::write(&script_path, lua_code).expect("write script");
+    std::fs::write(&config_path, r#"{"strict_number": 2}"#).expect("write config");
+
+    let result = LuaEngine::load(dir.path(), limits());
+    assert!(
+        result.is_err(),
+        "engine load must reject default config violating schema at startup"
     );
 }
