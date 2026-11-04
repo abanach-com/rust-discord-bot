@@ -131,6 +131,97 @@ async fn test_postgres_integration_suite() {
         .expect("cancel job");
     assert!(matches!(cancel_outcome, JobMutationOutcome::Updated(_)));
 
+    // Test claim_due and cancellation tracking in PostgreSQL (#139 regression)
+    let due_job = NewScheduledJob {
+        guild_id: guild_id.clone(),
+        module_id: "scheduler".to_owned(),
+        channel_id: "channel_1001".to_owned(),
+        creator_user_id: "user_owner_1".to_owned(),
+        content: "PostgreSQL claim_due test reminder".to_owned(),
+        mention_creator: false,
+        run_at: Utc::now() - Duration::seconds(10), // due
+        repeat_every_seconds: None,
+        remaining_runs: Some(1),
+        max_attempts: 5,
+    };
+    let due_outcome = scheduler
+        .create_job(due_job, 10)
+        .await
+        .expect("create due job in postgres");
+    let due_record = match due_outcome {
+        CreateJobOutcome::Created(record) => record,
+        other => panic!("expected Created job outcome, got {:?}", other),
+    };
+    assert!(due_record.cancellation_requested_at.is_none());
+
+    // Claim due job: verifies that claim_due correctly decodes ScheduledJob with cancellation_requested_at
+    let worker_id = "worker-pg-regression-test";
+    let claimed = scheduler
+        .claim_due(
+            worker_id,
+            Utc::now(),
+            Utc::now() - Duration::seconds(60),
+            10,
+        )
+        .await
+        .expect("claim_due on PostgreSQL must decode ScheduledJob with cancellation_requested_at");
+    let claimed_job = claimed
+        .into_iter()
+        .find(|j| j.id == due_record.id)
+        .expect("claimed jobs must contain due_record");
+    assert_eq!(claimed_job.status, "processing");
+    assert_eq!(claimed_job.locked_by.as_deref(), Some(worker_id));
+    assert!(claimed_job.cancellation_requested_at.is_none());
+
+    // Cancel while in processing state -> graceful cancellation requested
+    let cancel_processing = scheduler
+        .mutate_job(
+            &guild_id,
+            &due_record.id,
+            "user_owner_1",
+            false,
+            JobMutation::Cancel,
+        )
+        .await
+        .expect("cancel processing job in postgres");
+    match cancel_processing {
+        JobMutationOutcome::Updated(updated) => {
+            assert_eq!(updated.status, "processing");
+            assert!(updated.cancellation_requested_at.is_some());
+        }
+        other => panic!(
+            "expected Updated outcome for processing cancel, got {:?}",
+            other
+        ),
+    }
+
+    // Verify cancellation_requested returns true
+    assert!(
+        scheduler
+            .cancellation_requested(&due_record.id, worker_id)
+            .await
+            .expect("check cancellation_requested")
+    );
+
+    // Finalize cancellation
+    scheduler
+        .mark_cancelled(&due_record.id, worker_id, Utc::now())
+        .await
+        .expect("mark_cancelled on postgres");
+
+    let final_job = scheduler
+        .get_job(&due_record.id)
+        .await
+        .expect("get job after cancel")
+        .expect("job should exist");
+    assert_eq!(final_job.status, "cancelled");
+    assert!(
+        !scheduler
+            .cancellation_requested(&due_record.id, worker_id)
+            .await
+            .unwrap()
+    );
+
     // 4. Test Tickets Store in PostgreSQL
     let tickets = PostgresTicketStore::connect(&database_url)
         .await

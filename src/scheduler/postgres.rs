@@ -471,6 +471,7 @@ impl PostgresSchedulerStore {
                 jobs.last_error,
                 jobs.last_run_at,
                 jobs.completed_at,
+                jobs.cancellation_requested_at,
                 jobs.created_at,
                 jobs.updated_at
             "#,

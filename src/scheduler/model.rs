@@ -31,6 +31,7 @@ pub struct ScheduledJob {
     pub last_run_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     #[serde(default)]
+    #[sqlx(default)]
     pub cancellation_requested_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
