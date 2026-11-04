@@ -1167,12 +1167,22 @@ pub async fn export_user_privacy_data(
         return Err(ApiError::bad_request("User ID was not provided."));
     }
 
-    let profile = state
+    let profile = if state
         .app
         .storage
-        .get_member_progress(&guild_id, user_id)
+        .has_member_progress(&guild_id, user_id)
         .await
-        .ok();
+        .unwrap_or(false)
+    {
+        state
+            .app
+            .storage
+            .get_member_progress(&guild_id, user_id)
+            .await
+            .ok()
+    } else {
+        None
+    };
 
     let parsed_guild: u64 = guild_id.parse().unwrap_or(0);
     let parsed_uid = user_id.parse::<u64>().unwrap_or(0);
@@ -1222,23 +1232,19 @@ pub async fn delete_user_privacy_data(
         return Err(ApiError::bad_request("User ID was not provided."));
     }
 
-    let _ = state
+    let report = state
         .app
         .storage
-        .adjust_member_progress(
-            &guild_id,
-            user_id,
-            -1_000_000_000,
-            -1_000_000_000,
-            -1_000_000_000,
-        )
-        .await;
+        .erase_guild_user_data(&guild_id, user_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(Json(json!({
         "status": "data_erased",
         "user_id": user_id,
         "guild_id": guild_id,
-        "erased_at": Utc::now()
+        "report": report,
+        "erased_at": report.erased_at
     })))
 }
 

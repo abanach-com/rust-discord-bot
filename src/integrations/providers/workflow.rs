@@ -22,6 +22,35 @@ pub struct WorkflowDag {
 }
 
 impl WorkflowDag {
+    /// Validates the DAG nodes, edges, types, limits and verifies there are no cycles.
+    pub fn validate_dag(&self) -> Result<(), String> {
+        if self.nodes.is_empty() {
+            return Err("Workflow must contain at least one node".to_string());
+        }
+        if self.nodes.len() > 100 {
+            return Err("Workflow exceeds maximum limit of 100 nodes".to_string());
+        }
+        if self.edges.len() > 200 {
+            return Err("Workflow exceeds maximum limit of 200 edges".to_string());
+        }
+
+        let mut seen_ids = std::collections::HashSet::new();
+        for node in &self.nodes {
+            if node.id.trim().is_empty() {
+                return Err("Node id cannot be empty".to_string());
+            }
+            if !seen_ids.insert(&node.id) {
+                return Err(format!("Duplicate node id: {}", node.id));
+            }
+            match node.node_type.as_str() {
+                "trigger" | "condition" | "action" | "delay" => {}
+                other => return Err(format!("Invalid node type: {other}")),
+            }
+        }
+
+        self.validate_no_cycles()
+    }
+
     /// Validates that the workflow contains no cycles using Kahn's topological sort.
     pub fn validate_no_cycles(&self) -> Result<(), String> {
         let mut in_degree: HashMap<&str, usize> = HashMap::new();

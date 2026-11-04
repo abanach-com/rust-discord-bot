@@ -63,6 +63,23 @@ pub struct AdjustMemberProgressParams<'a> {
     pub reason: Option<&'a str>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserErasureReport {
+    pub user_id: String,
+    pub guild_id: String,
+    pub progression_erased: bool,
+    pub related_records_erased: usize,
+    pub retained_records: Vec<RetainedRecordNotice>,
+    pub erased_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RetainedRecordNotice {
+    pub entity: String,
+    pub reason: String,
+    pub retention_policy: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct GuildModuleSettings {
     pub guild_id: String,
@@ -1115,6 +1132,24 @@ impl Storage {
             Self::Memory(store) => Ok(store.get_member_progress(guild_id, user_id)),
 
             Self::Postgres(store) => store.get_member_progress(guild_id, user_id).await,
+        }
+    }
+
+    pub async fn has_member_progress(&self, guild_id: &str, user_id: &str) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => Ok(store.has_member_progress(guild_id, user_id)),
+            Self::Postgres(store) => store.has_member_progress(guild_id, user_id).await,
+        }
+    }
+
+    pub async fn erase_guild_user_data(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<UserErasureReport> {
+        match self {
+            Self::Memory(store) => Ok(store.erase_guild_user_data(guild_id, user_id)),
+            Self::Postgres(store) => store.erase_guild_user_data(guild_id, user_id).await,
         }
     }
 

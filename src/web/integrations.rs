@@ -3,7 +3,7 @@ use axum::{
     extract::{Path, Query, State},
     http::HeaderMap,
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -12,7 +12,7 @@ use crate::integrations::{
     oauth::OAuthManager,
     providers::build_default_provider_registry,
     providers::marketplace::verify_package_sha256,
-    providers::workflow::WorkflowDag,
+    providers::workflow::{WorkflowDag, WorkflowEdge, WorkflowNode},
     webhook::{verify_hmac_sha256, verify_secret_token},
 };
 use crate::storage::{
@@ -33,8 +33,41 @@ use super::{
 // ==========================================
 
 #[derive(Debug, Serialize)]
+pub struct IntegrationConnectionSummary {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub provider: String,
+    pub provider_account_id: Option<String>,
+    pub token_expires_at: Option<DateTime<Utc>>,
+    pub scopes: Value,
+    pub metadata: Value,
+    pub enabled: bool,
+    pub connected: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<IntegrationConnection> for IntegrationConnectionSummary {
+    fn from(c: IntegrationConnection) -> Self {
+        Self {
+            id: c.id,
+            guild_id: c.guild_id,
+            provider: c.provider,
+            provider_account_id: c.provider_account_id,
+            token_expires_at: c.token_expires_at,
+            scopes: c.scopes,
+            metadata: c.metadata,
+            enabled: c.enabled,
+            connected: c.access_token.is_some(),
+            created_at: c.created_at,
+            updated_at: c.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
 pub struct IntegrationOverview {
-    pub connections: Vec<IntegrationConnection>,
+    pub connections: Vec<IntegrationConnectionSummary>,
     pub available_providers: Vec<ProviderInfo>,
 }
 
@@ -70,8 +103,13 @@ pub async fn list_guild_integrations(
         }
     }
 
+    let safe_connections: Vec<IntegrationConnectionSummary> = connections
+        .into_iter()
+        .map(IntegrationConnectionSummary::from)
+        .collect();
+
     Ok(Json(IntegrationOverview {
-        connections,
+        connections: safe_connections,
         available_providers,
     }))
 }
@@ -585,6 +623,31 @@ pub async fn map_github_thread(
 // Agent 10 (#99): Telegram Bridge
 // ==========================================
 
+#[derive(Debug, Serialize)]
+pub struct TelegramBridgeSummary {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub telegram_chat_id: String,
+    pub discord_channel_id: String,
+    pub secret_configured: bool,
+    pub paused: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<TelegramBridge> for TelegramBridgeSummary {
+    fn from(b: TelegramBridge) -> Self {
+        Self {
+            id: b.id,
+            guild_id: b.guild_id,
+            telegram_chat_id: b.telegram_chat_id,
+            discord_channel_id: b.discord_channel_id,
+            secret_configured: !b.secret_token.is_empty(),
+            paused: b.paused,
+            created_at: b.created_at,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateTelegramBridgeRequest {
     pub telegram_chat_id: String,
@@ -597,7 +660,7 @@ pub async fn create_telegram_bridge(
     Path(guild_id): Path<String>,
     headers: HeaderMap,
     Json(payload): Json<CreateTelegramBridgeRequest>,
-) -> Result<Json<TelegramBridge>, ApiError> {
+) -> Result<Json<TelegramBridgeSummary>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
     verify_csrf(&headers, &session)?;
     ensure_guild_access(&state, &session, &guild_id).await?;
@@ -619,14 +682,14 @@ pub async fn create_telegram_bridge(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    Ok(Json(saved))
+    Ok(Json(TelegramBridgeSummary::from(saved)))
 }
 
 pub async fn list_telegram_bridges(
     State(state): State<WebState>,
     Path(guild_id): Path<String>,
     headers: HeaderMap,
-) -> Result<Json<Vec<TelegramBridge>>, ApiError> {
+) -> Result<Json<Vec<TelegramBridgeSummary>>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
     ensure_guild_access(&state, &session, &guild_id).await?;
 
@@ -637,7 +700,9 @@ pub async fn list_telegram_bridges(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    Ok(Json(list))
+    let summaries: Vec<TelegramBridgeSummary> =
+        list.into_iter().map(TelegramBridgeSummary::from).collect();
+    Ok(Json(summaries))
 }
 
 // ==========================================
@@ -661,24 +726,30 @@ pub async fn create_workflow(
     verify_csrf(&headers, &session)?;
     ensure_guild_access(&state, &session, &guild_id).await?;
 
-    // Validate DAG cycle
-    let dag = WorkflowDag {
-        nodes: serde_json::from_value(payload.dag_nodes.clone()).unwrap_or_default(),
-        edges: serde_json::from_value(payload.dag_edges.clone()).unwrap_or_default(),
-    };
-
-    if let Err(err) = dag.validate_no_cycles() {
-        return Err(ApiError::bad_request(format!(
-            "Invalid workflow DAG: {err}"
-        )));
+    let name = payload.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::bad_request("Workflow name cannot be empty."));
     }
+
+    let nodes: Vec<WorkflowNode> = serde_json::from_value(payload.dag_nodes)
+        .map_err(|e| ApiError::bad_request(format!("Invalid dag_nodes: {e}")))?;
+    let edges: Vec<WorkflowEdge> = serde_json::from_value(payload.dag_edges)
+        .map_err(|e| ApiError::bad_request(format!("Invalid dag_edges: {e}")))?;
+
+    let dag = WorkflowDag { nodes, edges };
+    dag.validate_dag().map_err(ApiError::bad_request)?;
+
+    let validated_nodes =
+        serde_json::to_value(&dag.nodes).map_err(|e| ApiError::internal(e.to_string()))?;
+    let validated_edges =
+        serde_json::to_value(&dag.edges).map_err(|e| ApiError::internal(e.to_string()))?;
 
     let wf = WorkflowDefinition {
         id: Uuid::new_v4(),
         guild_id,
-        name: payload.name,
-        dag_nodes: payload.dag_nodes,
-        dag_edges: payload.dag_edges,
+        name: name.to_string(),
+        dag_nodes: validated_nodes,
+        dag_edges: validated_edges,
         is_active: true,
         version: 1,
         created_at: Utc::now(),
@@ -715,13 +786,26 @@ pub async fn dry_run_workflow(
         return Err(ApiError::not_found("Workflow not found"));
     }
 
+    let nodes: Vec<WorkflowNode> = serde_json::from_value(wf.dag_nodes).map_err(|e| {
+        ApiError::bad_request(format!("Stored workflow contains invalid nodes: {e}"))
+    })?;
+    let edges: Vec<WorkflowEdge> = serde_json::from_value(wf.dag_edges).map_err(|e| {
+        ApiError::bad_request(format!("Stored workflow contains invalid edges: {e}"))
+    })?;
+
+    let dag = WorkflowDag { nodes, edges };
+    dag.validate_dag().map_err(ApiError::bad_request)?;
+
+    let steps = dag.nodes.len();
+    let estimated_ms = (steps as u64) * 12;
+
     Ok(Json(json!({
         "workflow_id": wf.id,
         "name": wf.name,
         "dry_run": true,
         "valid": true,
-        "simulated_steps": 3,
-        "estimated_execution_ms": 12,
+        "simulated_steps": steps,
+        "estimated_execution_ms": estimated_ms,
     })))
 }
 

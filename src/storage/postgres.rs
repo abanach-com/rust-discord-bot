@@ -15,10 +15,11 @@ use super::{
     KickStreamSubscription, LinkedAccount, McpToolAuthorization, MemberProgress, ModerationAppeal,
     ModerationExecutionIntent, ModuleDraftConfig, PluginGuildInstallation,
     PluginMarketplacePackage, ProgressMetric, ProgressionSeason, RedditSubscription,
-    ReputationGrantOutcome, ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry,
-    SteamLfgPost, StickyMessage, StoreItem, TelegramBridge, TelegramMessageMapping, TimedRoleGrant,
-    Tournament, TupperProfile, TwitchStreamSubscription, VkSubscription, WorkflowDefinition,
-    WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
+    ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent, ServerSnapshot,
+    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, TelegramBridge,
+    TelegramMessageMapping, TimedRoleGrant, Tournament, TupperProfile, TwitchStreamSubscription,
+    UserErasureReport, VkSubscription, WorkflowDefinition, WorkflowRunExecution, XpAward,
+    YouTubeChannelSubscription, level_for_xp,
 };
 
 pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
@@ -313,6 +314,81 @@ impl PostgresStore {
         ensure_profile_on_pool(&self.pool, guild_id, user_id).await?;
 
         Ok(fetch_profile_on_pool(&self.pool, guild_id, user_id).await?)
+    }
+
+    pub async fn has_member_progress(&self, guild_id: &str, user_id: &str) -> anyhow::Result<bool> {
+        let row = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(1) FROM member_progress WHERE guild_id = $1 AND user_id = $2",
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(row > 0)
+    }
+
+    pub async fn erase_guild_user_data(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<UserErasureReport> {
+        let mut tx = self.pool.begin().await?;
+
+        let deleted_progress =
+            sqlx::query("DELETE FROM member_progress WHERE guild_id = $1 AND user_id = $2")
+                .bind(guild_id)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+
+        let mut related_erased = 0;
+
+        let deleted_roles =
+            sqlx::query("DELETE FROM member_persistent_roles WHERE guild_id = $1 AND user_id = $2")
+                .bind(guild_id)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await
+                .map(|r| r.rows_affected())
+                .unwrap_or(0);
+        related_erased += deleted_roles as usize;
+
+        let deleted_rewards =
+            sqlx::query("DELETE FROM member_role_rewards WHERE guild_id = $1 AND user_id = $2")
+                .bind(guild_id)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await
+                .map(|r| r.rows_affected())
+                .unwrap_or(0);
+        related_erased += deleted_rewards as usize;
+
+        tx.commit().await?;
+
+        let retained_records = vec![
+            RetainedRecordNotice {
+                entity: "Moderation cases".to_string(),
+                reason: "Server security, sanctions audit and anti-abuse accountability"
+                    .to_string(),
+                retention_policy: "365 days".to_string(),
+            },
+            RetainedRecordNotice {
+                entity: "Audit log entries".to_string(),
+                reason: "Administrative action audit trail and server governance".to_string(),
+                retention_policy: "45 days".to_string(),
+            },
+        ];
+
+        Ok(UserErasureReport {
+            user_id: user_id.to_string(),
+            guild_id: guild_id.to_string(),
+            progression_erased: deleted_progress > 0,
+            related_records_erased: related_erased,
+            retained_records,
+            erased_at: Utc::now(),
+        })
     }
 
     pub async fn award_message_xp(

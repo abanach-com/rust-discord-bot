@@ -17,10 +17,11 @@ use super::{
     KickStreamSubscription, LinkedAccount, McpToolAuthorization, MemberProgress, ModerationAppeal,
     ModerationExecutionIntent, ModuleDraftConfig, PluginGuildInstallation,
     PluginMarketplacePackage, ProgressMetric, ProgressionSeason, RedditSubscription,
-    ReputationGrantOutcome, ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry,
-    SteamLfgPost, StickyMessage, StoreItem, StorePurchase, TelegramBridge, TelegramMessageMapping,
-    TimedRoleGrant, Tournament, TupperProfile, TwitchStreamSubscription, VkSubscription,
-    WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
+    ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent, ServerSnapshot,
+    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
+    TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperProfile,
+    TwitchStreamSubscription, UserErasureReport, VkSubscription, WorkflowDefinition,
+    WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
 };
 
 type ModuleKey = (String, String);
@@ -331,6 +332,56 @@ impl MemoryStore {
         let _guard = self.progression_guard();
 
         self.profile(guild_id, user_id, Utc::now())
+    }
+
+    pub fn has_member_progress(&self, guild_id: &str, user_id: &str) -> bool {
+        let _guard = self.progression_guard();
+        let key = (guild_id.to_owned(), user_id.to_owned());
+        self.progression.contains_key(&key)
+    }
+
+    pub fn erase_guild_user_data(&self, guild_id: &str, user_id: &str) -> UserErasureReport {
+        let _guard = self.progression_guard();
+        let key = (guild_id.to_owned(), user_id.to_owned());
+        let progression_erased = self.progression.remove(&key).is_some();
+
+        let mut related_erased = 0;
+        if self.persistent_roles.remove(&key).is_some() {
+            related_erased += 1;
+        }
+
+        let before_roles = self.role_rewards.len();
+        self.role_rewards
+            .retain(|(g, u, _)| !(g == guild_id && u == user_id));
+        related_erased += before_roles.saturating_sub(self.role_rewards.len());
+
+        let before_rep = self.reputation_cooldowns.len();
+        self.reputation_cooldowns
+            .retain(|(g, from), _| !(g == guild_id && from == user_id));
+        related_erased += before_rep.saturating_sub(self.reputation_cooldowns.len());
+
+        let retained_records = vec![
+            RetainedRecordNotice {
+                entity: "Moderation cases".to_string(),
+                reason: "Server security, sanctions audit and anti-abuse accountability"
+                    .to_string(),
+                retention_policy: "365 days".to_string(),
+            },
+            RetainedRecordNotice {
+                entity: "Audit log entries".to_string(),
+                reason: "Administrative action audit trail and server governance".to_string(),
+                retention_policy: "45 days".to_string(),
+            },
+        ];
+
+        UserErasureReport {
+            user_id: user_id.to_string(),
+            guild_id: guild_id.to_string(),
+            progression_erased,
+            related_records_erased: related_erased,
+            retained_records,
+            erased_at: Utc::now(),
+        }
     }
 
     pub fn award_message_xp(
