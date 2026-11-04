@@ -538,3 +538,116 @@ async fn test_phase1_governance_and_defense_suite() {
         .expect("list appeals request");
     assert_eq!(appeals_list_resp.status(), reqwest::StatusCode::OK);
 }
+
+#[tokio::test]
+async fn test_http_oauth_flow_browser_binding() {
+    let (state, _) = test_web_state().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("build client");
+
+    let base_url = format!("http://{}", addr);
+
+    // 1. Initiate OAuth login -> must get 307 redirect and Set-Cookie with rusty_oauth_state
+    let login_resp = client
+        .get(format!("{base_url}/auth/discord"))
+        .send()
+        .await
+        .expect("login request");
+
+    assert_eq!(login_resp.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+    let cookie_header = login_resp
+        .headers()
+        .get(reqwest::header::SET_COOKIE)
+        .expect("set-cookie header")
+        .to_str()
+        .expect("cookie str");
+
+    assert!(cookie_header.contains("rusty_oauth_state="));
+    assert!(cookie_header.contains("Path=/auth/discord"));
+    assert!(cookie_header.contains("HttpOnly"));
+    assert!(cookie_header.contains("SameSite=Lax"));
+
+    let location = login_resp
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .expect("location header")
+        .to_str()
+        .expect("location str");
+    let parsed_url = url::Url::parse(location).expect("parsed oauth url");
+    let state_param = parsed_url
+        .query_pairs()
+        .find(|(k, _)| k == "state")
+        .map(|(_, v)| v.to_string())
+        .expect("state param");
+
+    // 2. Attack attempt: attacker initiates OAuth, sends link to victim without victim having cookie
+    let victim_resp_no_cookie = client
+        .get(format!(
+            "{base_url}/auth/discord/callback?code=mock_code&state={state_param}"
+        ))
+        .send()
+        .await
+        .expect("victim callback request");
+
+    assert_eq!(
+        victim_resp_no_cookie.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+    let error_body: serde_json::Value =
+        victim_resp_no_cookie.json().await.expect("json error body");
+    assert_eq!(
+        error_body["error"],
+        "OAuth login was not initiated in this browser."
+    );
+
+    // 3. Attack attempt: victim has another / mismatched oauth state cookie
+    let victim_resp_wrong_cookie = client
+        .get(format!(
+            "{base_url}/auth/discord/callback?code=mock_code&state={state_param}"
+        ))
+        .header(COOKIE, "rusty_oauth_state=mismatched_state_uuid")
+        .send()
+        .await
+        .expect("victim callback request with mismatched cookie");
+
+    assert_eq!(
+        victim_resp_wrong_cookie.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+    let error_body2: serde_json::Value = victim_resp_wrong_cookie
+        .json()
+        .await
+        .expect("json error body");
+    assert_eq!(
+        error_body2["error"],
+        "OAuth login was not initiated in this browser."
+    );
+
+    // State must still be preserved in server memory (not burned by malicious/mismatched requests)
+    assert!(
+        state
+            .app
+            .sessions
+            .consume_oauth_state(&state_param)
+            .await
+            .unwrap()
+    );
+}

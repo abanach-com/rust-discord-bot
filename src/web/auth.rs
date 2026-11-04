@@ -18,6 +18,7 @@ use uuid::Uuid;
 use super::{WebState, routes::ApiError};
 
 const SESSION_COOKIE: &str = "rusty_discord_bot_session";
+const OAUTH_STATE_COOKIE: &str = "rusty_oauth_state";
 const DISCORD_AUTHORIZE_URL: &str = "https://discord.com/oauth2/authorize";
 const DISCORD_TOKEN_URL: &str = "https://discord.com/api/v10/oauth2/token";
 const DISCORD_USER_URL: &str = "https://discord.com/api/v10/users/@me";
@@ -114,7 +115,7 @@ impl LoginRateLimiter {
 
 pub use crate::session::{DashboardGuild, DashboardUser, Session};
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct OAuthCallback {
     code: String,
     state: String,
@@ -129,7 +130,7 @@ pub async fn login(
     State(state): State<WebState>,
     axum::extract::ConnectInfo(peer_addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
-) -> Result<Redirect, ApiError> {
+) -> Result<Response, ApiError> {
     let client_ip = resolve_client_ip(
         Some(peer_addr.ip()),
         &headers,
@@ -176,13 +177,29 @@ pub async fn login(
         .append_pair("state", &csrf_state)
         .append_pair("prompt", "none");
 
-    Ok(Redirect::temporary(url.as_str()))
+    let mut response = Redirect::temporary(url.as_str()).into_response();
+    response.headers_mut().insert(
+        SET_COOKIE,
+        HeaderValue::from_str(&oauth_state_cookie(
+            &csrf_state,
+            state.app.config.session_cookie_secure,
+        ))
+        .map_err(|e| ApiError::internal(e.to_string()))?,
+    );
+    Ok(response)
 }
 
 pub async fn callback(
     State(state): State<WebState>,
+    headers: HeaderMap,
     Query(query): Query<OAuthCallback>,
 ) -> Result<Response, ApiError> {
+    if cookie_value(&headers, OAUTH_STATE_COOKIE).as_deref() != Some(query.state.as_str()) {
+        return Err(ApiError::bad_request(
+            "OAuth login was not initiated in this browser.",
+        ));
+    }
+
     let valid_state = state
         .app
         .sessions
@@ -270,11 +287,18 @@ pub async fn callback(
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let mut response = Redirect::to("/").into_response();
-    response.headers_mut().insert(
+    response.headers_mut().append(
         SET_COOKIE,
         HeaderValue::from_str(&session_cookie(
             &session_id,
             state.app.config.session_ttl_seconds,
+            state.app.config.session_cookie_secure,
+        ))
+        .map_err(|error| ApiError::internal(error.to_string()))?,
+    );
+    response.headers_mut().append(
+        SET_COOKIE,
+        HeaderValue::from_str(&expired_oauth_state_cookie(
             state.app.config.session_cookie_secure,
         ))
         .map_err(|error| ApiError::internal(error.to_string()))?,
@@ -641,6 +665,20 @@ fn expired_session_cookie(secure: bool) -> String {
     )
 }
 
+fn oauth_state_cookie(state: &str, secure: bool) -> String {
+    format!(
+        "{OAUTH_STATE_COOKIE}={state}; Path=/auth/discord; HttpOnly; SameSite=Lax; Max-Age=600{}",
+        if secure { "; Secure" } else { "" }
+    )
+}
+
+fn expired_oauth_state_cookie(secure: bool) -> String {
+    format!(
+        "{OAUTH_STATE_COOKIE}=; Path=/auth/discord; HttpOnly; SameSite=Lax; Max-Age=0{}",
+        if secure { "; Secure" } else { "" }
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -891,6 +929,166 @@ mod tests {
         assert_eq!(
             proxied, "203.0.113.195",
             "trusted proxy forwarded header must be extracted"
+        );
+    }
+
+    #[test]
+    fn test_oauth_state_cookie_formatting() {
+        let cookie = oauth_state_cookie("test_state_123", true);
+        assert_eq!(
+            cookie,
+            "rusty_oauth_state=test_state_123; Path=/auth/discord; HttpOnly; SameSite=Lax; Max-Age=600; Secure"
+        );
+
+        let cookie_insecure = oauth_state_cookie("test_state_123", false);
+        assert_eq!(
+            cookie_insecure,
+            "rusty_oauth_state=test_state_123; Path=/auth/discord; HttpOnly; SameSite=Lax; Max-Age=600"
+        );
+
+        let expired = expired_oauth_state_cookie(true);
+        assert_eq!(
+            expired,
+            "rusty_oauth_state=; Path=/auth/discord; HttpOnly; SameSite=Lax; Max-Age=0; Secure"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_oauth_login_sets_binding_cookie() {
+        let app = crate::state::AppState::bootstrap(test_config())
+            .await
+            .expect("bootstrap");
+        let state = WebState {
+            app,
+            login_rate_limiter: Arc::new(LoginRateLimiter::new()),
+            permissions_cache: Arc::new(DashMap::new()),
+        };
+
+        let headers = HeaderMap::new();
+        let peer_addr = "127.0.0.1:12345".parse().unwrap();
+        let response = login(
+            State(state.clone()),
+            axum::extract::ConnectInfo(peer_addr),
+            headers,
+        )
+        .await
+        .expect("login should succeed");
+
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        let loc = response
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let set_cookie = response
+            .headers()
+            .get(SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(set_cookie.starts_with("rusty_oauth_state="));
+        assert!(set_cookie.contains("Path=/auth/discord"));
+        assert!(set_cookie.contains("HttpOnly"));
+        assert!(set_cookie.contains("SameSite=Lax"));
+        assert!(set_cookie.contains("Max-Age=600"));
+
+        let url = Url::parse(loc).unwrap();
+        let state_param = url
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .map(|(_, v)| v.to_string())
+            .unwrap();
+        assert!(set_cookie.contains(&format!("rusty_oauth_state={state_param}")));
+        assert!(
+            state
+                .app
+                .sessions
+                .consume_oauth_state(&state_param)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_oauth_callback_browser_binding_verification() {
+        let app = crate::state::AppState::bootstrap(test_config())
+            .await
+            .expect("bootstrap");
+        let state = WebState {
+            app,
+            login_rate_limiter: Arc::new(LoginRateLimiter::new()),
+            permissions_cache: Arc::new(DashMap::new()),
+        };
+
+        let test_state = "valid-oauth-state-12345";
+        state
+            .app
+            .sessions
+            .save_oauth_state(test_state)
+            .await
+            .expect("save oauth state");
+
+        // 1. Missing cookie -> rejected with 400 Bad Request
+        let mut headers = HeaderMap::new();
+        let query = OAuthCallback {
+            code: "dummy_code".to_string(),
+            state: test_state.to_string(),
+        };
+        let err = callback(State(state.clone()), headers.clone(), Query(query.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            err.message,
+            "OAuth login was not initiated in this browser."
+        );
+
+        // 2. Mismatched cookie -> rejected with 400 Bad Request
+        headers.insert(
+            COOKIE,
+            HeaderValue::from_static("rusty_oauth_state=wrong-state"),
+        );
+        let err = callback(State(state.clone()), headers.clone(), Query(query.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            err.message,
+            "OAuth login was not initiated in this browser."
+        );
+
+        // State must NOT have been consumed by either failed call
+        assert!(
+            state
+                .app
+                .sessions
+                .consume_oauth_state(test_state)
+                .await
+                .unwrap()
+        );
+
+        // 3. Matching cookie but unknown/expired state in store -> rejected with 400 Bad Request
+        let mut non_existent_headers = HeaderMap::new();
+        non_existent_headers.insert(
+            COOKIE,
+            HeaderValue::from_static("rusty_oauth_state=unknown-state"),
+        );
+        let query_unknown = OAuthCallback {
+            code: "dummy_code".to_string(),
+            state: "unknown-state".to_string(),
+        };
+        let err = callback(
+            State(state.clone()),
+            non_existent_headers,
+            Query(query_unknown),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            err.message,
+            "Invalid OAuth2 login state or session expired."
         );
     }
 }
