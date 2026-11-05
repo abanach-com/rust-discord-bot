@@ -730,4 +730,135 @@ async fn test_postgres_integration_suite() {
         count, 1,
         "Exactly one tupper profile row must exist in PostgreSQL"
     );
+
+    // 9. Issue #155: Event roster monotonic position assignment and deterministic FIFO promotion in PostgreSQL
+    let event = store
+        .create_scheduled_event(
+            &guild_id,
+            "PostgreSQL Raid Event",
+            "Event roster test",
+            Utc::now(),
+            None,
+            "UTC",
+            Some(1), // capacity = 1
+        )
+        .await
+        .expect("create scheduled event in PostgreSQL");
+
+    // 9.1. A joins -> main, pos 1
+    let a = store
+        .join_event_roster(event.id, "pg_user_a")
+        .await
+        .unwrap();
+    assert_eq!(a.role_type, "main");
+    assert_eq!(a.position, 1);
+
+    // 9.2. B joins -> reserve, pos 2
+    let b = store
+        .join_event_roster(event.id, "pg_user_b")
+        .await
+        .unwrap();
+    assert_eq!(b.role_type, "reserve");
+    assert_eq!(b.position, 2);
+
+    // 9.3. C joins -> reserve, pos 3
+    let c = store
+        .join_event_roster(event.id, "pg_user_c")
+        .await
+        .unwrap();
+    assert_eq!(c.role_type, "reserve");
+    assert_eq!(c.position, 3);
+
+    // 9.4. B leaves -> pos 2 deleted, remaining: A[1], C[3]
+    let left_b = store
+        .leave_event_roster(event.id, "pg_user_b")
+        .await
+        .unwrap();
+    assert_eq!(left_b, None);
+
+    // 9.5. D joins -> receives pos 4 (MAX(position) + 1), NOT pos 3 (Issue #155)
+    let d = store
+        .join_event_roster(event.id, "pg_user_d")
+        .await
+        .unwrap();
+    assert_eq!(d.role_type, "reserve");
+    assert_eq!(
+        d.position, 4,
+        "PostgreSQL roster position must be MAX(position) + 1 = 4"
+    );
+
+    // Verify all active rows have unique positions in PostgreSQL
+    let active = store.get_event_rosters(event.id).await.unwrap();
+    let positions: Vec<i32> = active.iter().map(|r| r.position).collect();
+    assert_eq!(positions, vec![1, 3, 4]);
+
+    // 9.6. A leaves (main) -> C (reserve pos 3) MUST be promoted over D (reserve pos 4)
+    let promoted = store
+        .leave_event_roster(event.id, "pg_user_a")
+        .await
+        .unwrap();
+    assert_eq!(
+        promoted,
+        Some("pg_user_c".to_string()),
+        "Oldest reserve C must be promoted in PostgreSQL"
+    );
+
+    let after_leave = store.get_event_rosters(event.id).await.unwrap();
+    assert_eq!(after_leave.len(), 2);
+    let c_active = after_leave
+        .iter()
+        .find(|r| r.user_id == "pg_user_c")
+        .unwrap();
+    assert_eq!(c_active.role_type, "main");
+    assert_eq!(c_active.position, 3);
+
+    let d_active = after_leave
+        .iter()
+        .find(|r| r.user_id == "pg_user_d")
+        .unwrap();
+    assert_eq!(d_active.role_type, "reserve");
+    assert_eq!(d_active.position, 4);
+
+    // 9.7. Concurrent joins: 20 parallel requests for a new event must all receive unique positions
+    let concurrent_event = store
+        .create_scheduled_event(
+            &guild_id,
+            "Concurrent Event",
+            "Test parallel joins",
+            Utc::now(),
+            None,
+            "UTC",
+            Some(5),
+        )
+        .await
+        .unwrap();
+
+    let mut handles = Vec::new();
+    for i in 0..20 {
+        let store_clone = store.clone();
+        let ev_id = concurrent_event.id;
+        let u_id = format!("concurrent_roster_user_{i}");
+        handles.push(tokio::spawn(async move {
+            store_clone.join_event_roster(ev_id, &u_id).await
+        }));
+    }
+
+    for handle in handles {
+        handle
+            .await
+            .expect("join handle")
+            .expect("join event roster");
+    }
+
+    let concurrent_roster = store.get_event_rosters(concurrent_event.id).await.unwrap();
+    assert_eq!(concurrent_roster.len(), 20);
+
+    let mut seen_pos = std::collections::HashSet::new();
+    for r in &concurrent_roster {
+        assert!(
+            seen_pos.insert(r.position),
+            "Duplicate position {} in concurrent event roster in PostgreSQL",
+            r.position
+        );
+    }
 }

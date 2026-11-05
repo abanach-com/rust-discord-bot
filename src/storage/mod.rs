@@ -2158,6 +2158,14 @@ impl Storage {
         }
     }
 
+    pub async fn get_event_rosters(&self, event_id: Uuid) -> anyhow::Result<Vec<EventRoster>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_event_rosters(event_id)),
+
+            Self::Postgres(store) => store.get_event_rosters(event_id).await,
+        }
+    }
+
     pub async fn create_tournament(
         &self,
 
@@ -3813,5 +3821,115 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(list.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_event_roster_monotonic_positions_and_fifo_promotion() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_id = "event_guild_1";
+
+        let event = store
+            .create_scheduled_event(
+                guild_id,
+                "Raid Night",
+                "Description",
+                Utc::now(),
+                None,
+                "UTC",
+                Some(1), // capacity = 1
+            )
+            .await
+            .expect("create scheduled event");
+
+        // 1. A joins -> main, pos 1
+        let a = store.join_event_roster(event.id, "user_a").await.unwrap();
+        assert_eq!(a.role_type, "main");
+        assert_eq!(a.position, 1);
+
+        // 2. B joins -> reserve, pos 2
+        let b = store.join_event_roster(event.id, "user_b").await.unwrap();
+        assert_eq!(b.role_type, "reserve");
+        assert_eq!(b.position, 2);
+
+        // 3. C joins -> reserve, pos 3
+        let c = store.join_event_roster(event.id, "user_c").await.unwrap();
+        assert_eq!(c.role_type, "reserve");
+        assert_eq!(c.position, 3);
+
+        // 4. B leaves -> pos 2 deleted, remaining: A[1], C[3]
+        let left_b = store.leave_event_roster(event.id, "user_b").await.unwrap();
+        assert_eq!(left_b, None); // no promotion because B was reserve
+
+        // 5. D joins -> MUST receive pos 4, NOT pos 3 (Issue #155)
+        let d = store.join_event_roster(event.id, "user_d").await.unwrap();
+        assert_eq!(d.role_type, "reserve");
+        assert_eq!(d.position, 4, "New position must be MAX(position) + 1 = 4");
+
+        // Verify active positions: 1, 3, 4 without duplicates
+        let active = store.get_event_rosters(event.id).await.unwrap();
+        let positions: Vec<i32> = active.iter().map(|r| r.position).collect();
+        assert_eq!(positions, vec![1, 3, 4]);
+
+        // 6. A leaves (main) -> C (reserve pos 3) MUST be promoted over D (reserve pos 4)
+        let promoted = store.leave_event_roster(event.id, "user_a").await.unwrap();
+        assert_eq!(
+            promoted,
+            Some("user_c".to_string()),
+            "Oldest reserve C must be promoted"
+        );
+
+        let after_leave = store.get_event_rosters(event.id).await.unwrap();
+        assert_eq!(after_leave.len(), 2);
+        let c_active = after_leave.iter().find(|r| r.user_id == "user_c").unwrap();
+        assert_eq!(c_active.role_type, "main");
+        assert_eq!(c_active.position, 3);
+
+        let d_active = after_leave.iter().find(|r| r.user_id == "user_d").unwrap();
+        assert_eq!(d_active.role_type, "reserve");
+        assert_eq!(d_active.position, 4);
+    }
+
+    #[tokio::test]
+    async fn test_event_roster_stress_join_leave_no_duplicate_positions() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_id = "event_stress_guild";
+
+        let event = store
+            .create_scheduled_event(
+                guild_id,
+                "Stress Event",
+                "Description",
+                Utc::now(),
+                None,
+                "UTC",
+                Some(5),
+            )
+            .await
+            .unwrap();
+
+        // Perform 100 alternating join and leave operations
+        for i in 0..100 {
+            let u_id = format!("user_{i}");
+            store.join_event_roster(event.id, &u_id).await.unwrap();
+
+            // Periodically drop a previous participant to create gaps in position sequences
+            if i % 3 == 0 && i >= 3 {
+                let drop_user = format!("user_{}", i - 2);
+                let _ = store.leave_event_roster(event.id, &drop_user).await;
+            }
+        }
+
+        let roster = store.get_event_rosters(event.id).await.unwrap();
+        assert!(!roster.is_empty());
+
+        // Verify that in all remaining participants, every position is unique!
+        let mut seen_positions = std::collections::HashSet::new();
+        for r in &roster {
+            assert!(
+                seen_positions.insert(r.position),
+                "Duplicate position {} found in event roster",
+                r.position
+            );
+        }
     }
 }

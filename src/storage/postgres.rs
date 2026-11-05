@@ -2686,13 +2686,14 @@ impl PostgresStore {
             None => "main",
         };
 
-        let total_count: (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM event_rosters WHERE event_id = $1")
-                .bind(event_id)
-                .fetch_one(&mut *tx)
-                .await?;
+        let next_position: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(position)::bigint, 0) + 1 FROM event_rosters WHERE event_id = $1",
+        )
+        .bind(event_id)
+        .fetch_one(&mut *tx)
+        .await?;
 
-        let position = total_count.0 as i32 + 1;
+        let position = i32::try_from(next_position)?;
 
         let now = Utc::now();
 
@@ -2769,7 +2770,7 @@ impl PostgresStore {
 
                 WHERE event_id = $1 AND role_type = 'reserve'
 
-                ORDER BY position ASC
+                ORDER BY position ASC, joined_at ASC, user_id ASC
 
                 LIMIT 1
 
@@ -2797,6 +2798,22 @@ impl PostgresStore {
         tx.commit().await?;
 
         Ok(promoted)
+    }
+
+    pub async fn get_event_rosters(&self, event_id: Uuid) -> anyhow::Result<Vec<EventRoster>> {
+        let rows = sqlx::query_as::<_, EventRoster>(
+            r#"
+            SELECT event_id, user_id, role_type, position, joined_at
+            FROM event_rosters
+            WHERE event_id = $1
+            ORDER BY position ASC, joined_at ASC, user_id ASC
+            "#,
+        )
+        .bind(event_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
     }
 
     pub async fn create_tournament(

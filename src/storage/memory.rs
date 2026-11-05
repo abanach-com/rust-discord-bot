@@ -1705,7 +1705,13 @@ impl MemoryStore {
             None => "main",
         };
 
-        let position = roster_list.len() as i32 + 1;
+        let position = roster_list
+            .iter()
+            .map(|r| r.position)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("roster position overflow"))?;
 
         let entry = EventRoster {
             event_id,
@@ -1734,7 +1740,13 @@ impl MemoryStore {
         if removed.role_type == "main" {
             let promoted = roster_list
                 .iter_mut()
-                .find(|r| r.role_type == "reserve")
+                .filter(|r| r.role_type == "reserve")
+                .min_by(|a, b| {
+                    a.position
+                        .cmp(&b.position)
+                        .then_with(|| a.joined_at.cmp(&b.joined_at))
+                        .then_with(|| a.user_id.cmp(&b.user_id))
+                })
                 .map(|reserve| {
                     reserve.role_type = "main".to_owned();
 
@@ -1747,6 +1759,21 @@ impl MemoryStore {
         }
 
         None
+    }
+
+    pub fn get_event_rosters(&self, event_id: Uuid) -> Vec<EventRoster> {
+        let mut list = self
+            .rosters
+            .get(&event_id)
+            .map(|r| r.clone())
+            .unwrap_or_default();
+        list.sort_by(|a, b| {
+            a.position
+                .cmp(&b.position)
+                .then_with(|| a.joined_at.cmp(&b.joined_at))
+                .then_with(|| a.user_id.cmp(&b.user_id))
+        });
+        list
     }
 
     pub fn create_tournament(&self, guild_id: &str, name: &str, teams: &[String]) -> Tournament {
