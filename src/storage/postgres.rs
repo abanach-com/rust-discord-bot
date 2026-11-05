@@ -6807,6 +6807,7 @@ impl PostgresStore {
                 enabled = EXCLUDED.enabled,
                 version = command_policy_rules.version + 1,
                 updated_at = EXCLUDED.updated_at
+            WHERE command_policy_rules.guild_id = EXCLUDED.guild_id
             RETURNING id, guild_id, subject_kind, subject_id, resource_kind, module_id,
                       command_name, action_key, effect, priority, enabled, version,
                       created_by, created_at, updated_at
@@ -6827,8 +6828,9 @@ impl PostgresStore {
         .bind(&rule.created_by)
         .bind(rule.created_at)
         .bind(now)
-        .fetch_one(&mut *tx)
-        .await?;
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("policy rule ID belongs to another guild"))?;
 
         sqlx::query(
             r#"
@@ -6896,6 +6898,113 @@ impl PostgresStore {
 
         tx.commit().await?;
         Ok(count)
+    }
+
+    pub async fn replace_policy_rules(
+        &self,
+        guild_id: &str,
+        expected_revision: Option<i64>,
+        rules: Vec<CommandPolicyRule>,
+    ) -> anyhow::Result<Vec<CommandPolicyRule>> {
+        validate_snowflake("guild_id", guild_id)?;
+        for rule in &rules {
+            if rule.guild_id != guild_id {
+                anyhow::bail!("rule {} guild_id mismatch", rule.id);
+            }
+            crate::policy::validate_policy_rule_fields(rule)?;
+        }
+
+        let mut tx = self.pool.begin().await?;
+
+        // 1. Ensure revision row exists
+        sqlx::query(
+            r#"
+            INSERT INTO command_policy_revisions (guild_id, revision, updated_at)
+            VALUES ($1, 1, NOW())
+            ON CONFLICT (guild_id) DO NOTHING
+            "#,
+        )
+        .bind(guild_id)
+        .execute(&mut *tx)
+        .await?;
+
+        // 2. Lock and fetch current revision
+        let current_rev: i64 = sqlx::query_scalar(
+            "SELECT revision FROM command_policy_revisions WHERE guild_id = $1 FOR UPDATE",
+        )
+        .bind(guild_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        // 3. Verify expected revision if supplied
+        if let Some(expected) = expected_revision
+            && expected != current_rev
+        {
+            anyhow::bail!(
+                "Revision conflict: current revision is {}, expected {}",
+                current_rev,
+                expected
+            );
+        }
+
+        // 4. Delete existing rules for this guild
+        sqlx::query("DELETE FROM command_policy_rules WHERE guild_id = $1")
+            .bind(guild_id)
+            .execute(&mut *tx)
+            .await?;
+
+        // 5. Insert new rules
+        let now = Utc::now();
+        let mut inserted = Vec::with_capacity(rules.len());
+        for rule in rules {
+            let saved = sqlx::query_as::<_, CommandPolicyRule>(
+                r#"
+                INSERT INTO command_policy_rules (
+                    id, guild_id, subject_kind, subject_id, resource_kind, module_id,
+                    command_name, action_key, effect, priority, enabled, version,
+                    created_by, created_at, updated_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                RETURNING id, guild_id, subject_kind, subject_id, resource_kind, module_id,
+                          command_name, action_key, effect, priority, enabled, version,
+                          created_by, created_at, updated_at
+                "#,
+            )
+            .bind(rule.id)
+            .bind(&rule.guild_id)
+            .bind(&rule.subject_kind)
+            .bind(&rule.subject_id)
+            .bind(&rule.resource_kind)
+            .bind(&rule.module_id)
+            .bind(&rule.command_name)
+            .bind(&rule.action_key)
+            .bind(&rule.effect)
+            .bind(rule.priority)
+            .bind(rule.enabled)
+            .bind(rule.version)
+            .bind(&rule.created_by)
+            .bind(rule.created_at)
+            .bind(now)
+            .fetch_one(&mut *tx)
+            .await?;
+
+            inserted.push(saved);
+        }
+
+        // 6. Bump revision exactly once
+        sqlx::query(
+            r#"
+            UPDATE command_policy_revisions
+            SET revision = command_policy_revisions.revision + 1, updated_at = NOW()
+            WHERE guild_id = $1
+            "#,
+        )
+        .bind(guild_id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(inserted)
     }
 
     pub async fn get_policy_revision(&self, guild_id: &str) -> anyhow::Result<i64> {

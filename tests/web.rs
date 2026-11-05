@@ -1165,6 +1165,7 @@ async fn test_command_policies_api() {
 
     let admin_user_id = "555000000000000001";
     let guild_id = "777000000000000001";
+    let guild_id_2 = "777000000000000002";
     let user_id = "666000000000000001";
     let channel_id = "888000000000000001";
     let csrf_token = "valid_csrf_token_policies";
@@ -1181,13 +1182,22 @@ async fn test_command_policies_api() {
                 global_name: None,
                 avatar: None,
             },
-            vec![DashboardGuild {
-                id: guild_id.to_owned(),
-                name: "Test Guild".to_owned(),
-                icon: None,
-                owner: true,
-                permissions: "8".to_owned(),
-            }],
+            vec![
+                DashboardGuild {
+                    id: guild_id.to_owned(),
+                    name: "Test Guild".to_owned(),
+                    icon: None,
+                    owner: true,
+                    permissions: "8".to_owned(),
+                },
+                DashboardGuild {
+                    id: guild_id_2.to_owned(),
+                    name: "Test Guild 2".to_owned(),
+                    icon: None,
+                    owner: true,
+                    permissions: "8".to_owned(),
+                },
+            ],
             csrf_token.to_owned(),
             Utc::now() + Duration::hours(1),
             None,
@@ -1379,6 +1389,124 @@ async fn test_command_policies_api() {
     assert_eq!(list_resp3.status(), reqwest::StatusCode::OK);
     let list_json3: serde_json::Value = list_resp3.json().await.unwrap();
     assert_eq!(list_json3["rules"].as_array().unwrap().len(), 0);
+
+    // 12. Issue #176: Cross-guild UUID overwrite rejected with 409 Conflict
+    let create_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/policies"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "subject_kind": "channel",
+            "subject_id": channel_id,
+            "resource_kind": "module",
+            "module_id": "music",
+            "effect": "deny"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), reqwest::StatusCode::OK);
+    let created_json: serde_json::Value = create_resp.json().await.unwrap();
+    let original_id = created_json["rule"]["id"].as_str().unwrap();
+
+    let cross_upsert = client
+        .post(format!("{base_url}/api/guilds/{guild_id_2}/policies"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "id": original_id,
+            "subject_kind": "channel",
+            "subject_id": channel_id,
+            "resource_kind": "module",
+            "module_id": "music",
+            "effect": "allow"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cross_upsert.status(), reqwest::StatusCode::CONFLICT);
+
+    // 13. Issue #178: Policy import validation and atomicity
+    // A) dry_run with invalid rule fails validation
+    let dry_run_invalid = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/policies/import"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "dry_run": true,
+            "rules": [{
+                "id": uuid::Uuid::new_v4().to_string(),
+                "guild_id": guild_id,
+                "subject_kind": "channel",
+                "subject_id": channel_id,
+                "resource_kind": "module",
+                "module_id": "music",
+                "effect": "invalid_effect",
+                "priority": 0,
+                "enabled": true,
+                "version": 1,
+                "created_by": admin_user_id,
+                "created_at": Utc::now().to_rfc3339(),
+                "updated_at": Utc::now().to_rfc3339(),
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dry_run_invalid.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // B) live import with invalid rule fails validation and existing rules are not wiped
+    let live_invalid = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/policies/import"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "dry_run": false,
+            "rules": [{
+                "id": uuid::Uuid::new_v4().to_string(),
+                "guild_id": guild_id,
+                "subject_kind": "channel",
+                "subject_id": channel_id,
+                "resource_kind": "module",
+                "module_id": "music",
+                "effect": "invalid_effect",
+                "priority": 0,
+                "enabled": true,
+                "version": 1,
+                "created_by": admin_user_id,
+                "created_at": Utc::now().to_rfc3339(),
+                "updated_at": Utc::now().to_rfc3339(),
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(live_invalid.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Verify existing rule still exists in guild_id
+    let list_verify = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/policies"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    let list_v_json: serde_json::Value = list_verify.json().await.unwrap();
+    assert_eq!(list_v_json["rules"].as_array().unwrap().len(), 1);
+
+    // C) import with stale expected_revision fails with 409 Conflict
+    let cur_rev = list_v_json["revision"].as_i64().unwrap();
+    let stale_import = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/policies/import"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "expected_revision": cur_rev + 10,
+            "rules": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale_import.status(), reqwest::StatusCode::CONFLICT);
 }
 
 #[tokio::test]

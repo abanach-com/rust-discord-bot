@@ -2322,6 +2322,12 @@ impl MemoryStore {
                 validate_snowflake("channel_id", uid)?;
             }
         }
+        if let Some(existing) = self.policy_rules.get(&rule.id) {
+            if existing.guild_id != rule.guild_id {
+                anyhow::bail!("policy rule ID belongs to another guild");
+            }
+            rule.version = existing.version + 1;
+        }
         let now = Utc::now();
         rule.updated_at = now;
         self.policy_rules.insert(rule.id, rule.clone());
@@ -2349,6 +2355,43 @@ impl MemoryStore {
         let removed = before.saturating_sub(self.policy_rules.len());
         self.bump_policy_revision(guild_id)?;
         Ok(removed)
+    }
+
+    pub fn replace_policy_rules(
+        &self,
+        guild_id: &str,
+        expected_revision: Option<i64>,
+        rules: Vec<CommandPolicyRule>,
+    ) -> anyhow::Result<Vec<CommandPolicyRule>> {
+        validate_snowflake("guild_id", guild_id)?;
+        for rule in &rules {
+            if rule.guild_id != guild_id {
+                anyhow::bail!("rule {} guild_id mismatch", rule.id);
+            }
+            crate::policy::validate_policy_rule_fields(rule)?;
+        }
+
+        let current_rev = self.get_policy_revision(guild_id).unwrap_or(1);
+        if let Some(expected) = expected_revision
+            && expected != current_rev
+        {
+            anyhow::bail!(
+                "Revision conflict: current revision is {}, expected {}",
+                current_rev,
+                expected
+            );
+        }
+
+        self.policy_rules.retain(|_, r| r.guild_id != guild_id);
+        let now = Utc::now();
+        let mut inserted = Vec::with_capacity(rules.len());
+        for mut rule in rules {
+            rule.updated_at = now;
+            self.policy_rules.insert(rule.id, rule.clone());
+            inserted.push(rule);
+        }
+        self.bump_policy_revision(guild_id)?;
+        Ok(inserted)
     }
 
     pub fn get_policy_revision(&self, guild_id: &str) -> anyhow::Result<i64> {

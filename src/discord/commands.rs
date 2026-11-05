@@ -16,7 +16,7 @@ use crate::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RegistrationScope {
+pub(crate) enum RegistrationScope {
     Global,
     Guild,
 }
@@ -28,10 +28,21 @@ pub async fn register(ctx: &Context, state: &AppState) -> Result<usize> {
     } else {
         RegistrationScope::Global
     };
-    let commands = definitions
+
+    if definitions
+        .iter()
+        .any(|d| d.name == "policy" || d.name == "duty")
+    {
+        anyhow::bail!("Lua script cannot define reserved host command 'policy' or 'duty'");
+    }
+
+    let mut commands = definitions
         .iter()
         .map(|definition| build_command(definition, scope))
         .collect::<Result<Vec<_>>>()?;
+
+    commands.push(build_policy_command(scope));
+    commands.push(build_duty_command(scope));
     let count = commands.len();
 
     if let Some(guild_id) = state.config.discord_dev_guild_id {
@@ -48,6 +59,123 @@ pub async fn register(ctx: &Context, state: &AppState) -> Result<usize> {
     }
 
     Ok(count)
+}
+
+pub fn build_policy_command(scope: RegistrationScope) -> CreateCommand {
+    let mut command = CreateCommand::new("policy")
+        .description("Inspect or reset command policy rules")
+        .default_member_permissions(Permissions::ADMINISTRATOR)
+        .add_option(
+            CreateCommandOption::new(
+                CommandOptionType::SubCommand,
+                "reset",
+                "Reset all rules to default",
+            )
+            .add_sub_option(
+                CreateCommandOption::new(CommandOptionType::Boolean, "confirm", "Confirm reset")
+                    .required(true),
+            ),
+        )
+        .add_option(
+            CreateCommandOption::new(
+                CommandOptionType::SubCommand,
+                "explain",
+                "Explain policy evaluation for a command",
+            )
+            .add_sub_option(
+                CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "command",
+                    "Command name to inspect",
+                )
+                .required(true),
+            )
+            .add_sub_option(
+                CreateCommandOption::new(
+                    CommandOptionType::User,
+                    "user",
+                    "Target user to evaluate policy for",
+                )
+                .required(false),
+            ),
+        )
+        .add_option(
+            CreateCommandOption::new(
+                CommandOptionType::SubCommand,
+                "canrun",
+                "Check if a command can run",
+            )
+            .add_sub_option(
+                CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "command",
+                    "Command name to check",
+                )
+                .required(true),
+            )
+            .add_sub_option(
+                CreateCommandOption::new(
+                    CommandOptionType::User,
+                    "user",
+                    "Target user to evaluate policy for",
+                )
+                .required(false),
+            ),
+        );
+
+    if scope == RegistrationScope::Global {
+        command = command
+            .integration_types(vec![InstallationContext::Guild])
+            .contexts(vec![InteractionContext::Guild]);
+    }
+
+    command
+}
+
+pub fn build_duty_command(scope: RegistrationScope) -> CreateCommand {
+    let mut command = CreateCommand::new("duty")
+        .description("Manage moderator on-call duty availability")
+        .add_option(CreateCommandOption::new(
+            CommandOptionType::SubCommand,
+            "on",
+            "Go on duty",
+        ))
+        .add_option(
+            CreateCommandOption::new(CommandOptionType::SubCommand, "off", "Go off duty")
+                .add_sub_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::String,
+                        "duration",
+                        "Duration (e.g. 2h, 30m)",
+                    )
+                    .required(false),
+                ),
+        )
+        .add_option(CreateCommandOption::new(
+            CommandOptionType::SubCommand,
+            "status",
+            "View current duty status",
+        ))
+        .add_option(
+            CreateCommandOption::new(
+                CommandOptionType::SubCommandGroup,
+                "schedule",
+                "Manage duty schedule",
+            )
+            .add_sub_option(CreateCommandOption::new(
+                CommandOptionType::SubCommand,
+                "clear",
+                "Clear recurring schedule",
+            )),
+        );
+
+    if scope == RegistrationScope::Global {
+        command = command
+            .integration_types(vec![InstallationContext::Guild])
+            .contexts(vec![InteractionContext::Guild]);
+    }
+
+    command
 }
 
 fn build_command(
@@ -240,7 +368,7 @@ fn non_negative_integer(value: f64, name: &str) -> Result<u64> {
 mod tests {
     use serde_json::json;
 
-    use super::{RegistrationScope, build_command};
+    use super::{RegistrationScope, build_command, build_duty_command, build_policy_command};
     use crate::lua::LuaCommandDefinition;
 
     fn definition(value: serde_json::Value) -> LuaCommandDefinition {
@@ -344,5 +472,55 @@ mod tests {
                 .to_string()
                 .contains("required option 'req' cannot follow an optional option")
         );
+    }
+
+    #[test]
+    fn policy_command_builds_with_subcommands_and_options() {
+        for scope in [RegistrationScope::Global, RegistrationScope::Guild] {
+            let cmd = build_policy_command(scope);
+            let val = serde_json::to_value(&cmd).expect("serialize policy command");
+            assert_eq!(val["name"], "policy");
+            let options = val["options"].as_array().expect("options array");
+            assert_eq!(options.len(), 3);
+
+            let subnames: Vec<&str> = options.iter().filter_map(|o| o["name"].as_str()).collect();
+            assert!(subnames.contains(&"reset"));
+            assert!(subnames.contains(&"explain"));
+            assert!(subnames.contains(&"canrun"));
+
+            let reset_opt = options.iter().find(|o| o["name"] == "reset").unwrap();
+            let reset_sub = reset_opt["options"].as_array().unwrap();
+            assert_eq!(reset_sub[0]["name"], "confirm");
+            assert_eq!(reset_sub[0]["required"], true);
+
+            let explain_opt = options.iter().find(|o| o["name"] == "explain").unwrap();
+            let explain_sub = explain_opt["options"].as_array().unwrap();
+            assert_eq!(explain_sub[0]["name"], "command");
+            assert_eq!(explain_sub[0]["required"], true);
+
+            if scope == RegistrationScope::Global {
+                assert!(val["contexts"].is_array());
+                assert!(val["integration_types"].is_array());
+            } else {
+                assert!(val.get("contexts").is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn duty_command_builds_with_subcommands() {
+        for scope in [RegistrationScope::Global, RegistrationScope::Guild] {
+            let cmd = build_duty_command(scope);
+            let val = serde_json::to_value(&cmd).expect("serialize duty command");
+            assert_eq!(val["name"], "duty");
+            let options = val["options"].as_array().expect("options array");
+            assert_eq!(options.len(), 4);
+
+            let subnames: Vec<&str> = options.iter().filter_map(|o| o["name"].as_str()).collect();
+            assert!(subnames.contains(&"on"));
+            assert!(subnames.contains(&"off"));
+            assert!(subnames.contains(&"status"));
+            assert!(subnames.contains(&"schedule"));
+        }
     }
 }

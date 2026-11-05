@@ -2485,6 +2485,22 @@ impl Storage {
         }
     }
 
+    pub async fn replace_policy_rules(
+        &self,
+        guild_id: &str,
+        expected_revision: Option<i64>,
+        rules: Vec<CommandPolicyRule>,
+    ) -> anyhow::Result<Vec<CommandPolicyRule>> {
+        match self {
+            Self::Memory(store) => store.replace_policy_rules(guild_id, expected_revision, rules),
+            Self::Postgres(store) => {
+                store
+                    .replace_policy_rules(guild_id, expected_revision, rules)
+                    .await
+            }
+        }
+    }
+
     pub async fn get_policy_revision(&self, guild_id: &str) -> anyhow::Result<i64> {
         match self {
             Self::Memory(store) => store.get_policy_revision(guild_id),
@@ -5791,6 +5807,144 @@ mod tests {
         assert_eq!(reset_count, 1);
         let rules_after_reset = store.list_policy_rules(guild_1).await.unwrap();
         assert!(rules_after_reset.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_command_policy_cross_guild_upsert_isolation() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_a = "100000000000000001";
+        let guild_b = "200000000000000002";
+        let user_id = "300000000000000003";
+
+        let rule_a = CommandPolicyRule::new_user_rule(
+            guild_a.to_string(),
+            user_id.to_string(),
+            crate::policy::PolicyResource::Command {
+                module_id: "music".to_string(),
+                command_name: "play".to_string(),
+            },
+            crate::policy::PolicyEffect::Deny,
+            10,
+            "admin_a".to_string(),
+        )
+        .unwrap();
+
+        let saved_a = store.upsert_policy_rule(rule_a.clone()).await.unwrap();
+        let rev_a_before = store.get_policy_revision(guild_a).await.unwrap();
+        let rev_b_before = store.get_policy_revision(guild_b).await.unwrap();
+
+        // Admin B attempts to upsert a rule with UUID belonging to guild A
+        let mut malicious_b = rule_a.clone();
+        malicious_b.guild_id = guild_b.to_string();
+        malicious_b.created_by = "admin_b".to_string();
+        malicious_b.effect = "allow".to_string();
+
+        let res = store.upsert_policy_rule(malicious_b).await;
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("belongs to another guild")
+        );
+
+        // Guild A's rule remains intact
+        let rules_a = store.list_policy_rules(guild_a).await.unwrap();
+        assert_eq!(rules_a.len(), 1);
+        assert_eq!(rules_a[0].id, saved_a.id);
+        assert_eq!(rules_a[0].effect, "deny");
+        assert_eq!(rules_a[0].guild_id, guild_a);
+
+        // Neither revision bumped
+        assert_eq!(
+            store.get_policy_revision(guild_a).await.unwrap(),
+            rev_a_before
+        );
+        assert_eq!(
+            store.get_policy_revision(guild_b).await.unwrap(),
+            rev_b_before
+        );
+    }
+
+    #[tokio::test]
+    async fn test_command_policy_replace_atomic_and_validation() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_1 = "100000000000000001";
+        let user_id = "300000000000000003";
+
+        let initial_rule = CommandPolicyRule::new_user_rule(
+            guild_1.to_string(),
+            user_id.to_string(),
+            crate::policy::PolicyResource::Command {
+                module_id: "music".to_string(),
+                command_name: "stop".to_string(),
+            },
+            crate::policy::PolicyEffect::Deny,
+            5,
+            "admin".to_string(),
+        )
+        .unwrap();
+
+        store
+            .upsert_policy_rule(initial_rule.clone())
+            .await
+            .unwrap();
+        let rev_before = store.get_policy_revision(guild_1).await.unwrap();
+
+        // 1. Invalid rule in batch fails validation; existing rules preserved
+        let mut invalid_rule = initial_rule.clone();
+        invalid_rule.id = uuid::Uuid::new_v4();
+        invalid_rule.effect = "invalid_effect".to_string();
+
+        let res = store
+            .replace_policy_rules(guild_1, Some(rev_before), vec![invalid_rule])
+            .await;
+        assert!(res.is_err());
+        let rules = store.list_policy_rules(guild_1).await.unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].id, initial_rule.id);
+
+        // 2. Stale expected_revision fails with conflict; existing rules preserved
+        let valid_new_rule = CommandPolicyRule::new_guild_rule(
+            guild_1.to_string(),
+            crate::policy::PolicyResource::Module {
+                module_id: "moderation".to_string(),
+            },
+            crate::policy::PolicyEffect::Allow,
+            0,
+            "admin".to_string(),
+        )
+        .unwrap();
+
+        let res_stale = store
+            .replace_policy_rules(guild_1, Some(rev_before + 99), vec![valid_new_rule.clone()])
+            .await;
+        assert!(res_stale.is_err());
+        assert!(
+            res_stale
+                .unwrap_err()
+                .to_string()
+                .contains("Revision conflict")
+        );
+
+        let rules_after_conflict = store.list_policy_rules(guild_1).await.unwrap();
+        assert_eq!(rules_after_conflict.len(), 1);
+        assert_eq!(rules_after_conflict[0].id, initial_rule.id);
+
+        // 3. Successful atomic replace with correct expected_revision
+        let replaced = store
+            .replace_policy_rules(guild_1, Some(rev_before), vec![valid_new_rule.clone()])
+            .await
+            .unwrap();
+        assert_eq!(replaced.len(), 1);
+        assert_eq!(replaced[0].id, valid_new_rule.id);
+
+        let rules_final = store.list_policy_rules(guild_1).await.unwrap();
+        assert_eq!(rules_final.len(), 1);
+        assert_eq!(rules_final[0].id, valid_new_rule.id);
+        assert_eq!(
+            store.get_policy_revision(guild_1).await.unwrap(),
+            rev_before + 1
+        );
     }
 
     #[tokio::test]

@@ -1561,6 +1561,106 @@ async fn test_postgres_integration_suite() {
         .expect("list rules after reset");
     assert!(after_reset.is_empty());
 
+    // Issue #176: Cross-guild UUID overwrite rejection in PostgreSQL
+    let guild_other = "999888777666555444";
+    let rule_guild1 = rusty_discord_bot::storage::CommandPolicyRule::new_user_rule(
+        policy_guild.to_string(),
+        policy_user.to_string(),
+        rusty_discord_bot::policy::PolicyResource::Command {
+            module_id: "music".to_string(),
+            command_name: "play".to_string(),
+        },
+        rusty_discord_bot::policy::PolicyEffect::Deny,
+        10,
+        "admin".to_string(),
+    )
+    .expect("build rule_guild1");
+
+    let saved_g1 = store
+        .upsert_policy_rule(rule_guild1.clone())
+        .await
+        .expect("upsert rule_guild1");
+    let rev_g1_before = store.get_policy_revision(policy_guild).await.unwrap();
+    let rev_other_before = store.get_policy_revision(guild_other).await.unwrap();
+
+    let mut malicious_other = rule_guild1.clone();
+    malicious_other.guild_id = guild_other.to_string();
+    malicious_other.effect = "allow".to_string();
+
+    let cross_res = store.upsert_policy_rule(malicious_other).await;
+    assert!(
+        cross_res.is_err(),
+        "cross-guild upsert must fail in PostgreSQL"
+    );
+    assert!(
+        cross_res
+            .unwrap_err()
+            .to_string()
+            .contains("belongs to another guild")
+    );
+
+    assert_eq!(
+        store.get_policy_revision(policy_guild).await.unwrap(),
+        rev_g1_before
+    );
+    assert_eq!(
+        store.get_policy_revision(guild_other).await.unwrap(),
+        rev_other_before
+    );
+
+    // Issue #178: Atomic Replace Policy Rules in PostgreSQL
+    let mut invalid_rule = rule_guild1.clone();
+    invalid_rule.id = uuid::Uuid::new_v4();
+    invalid_rule.effect = "corrupt".to_string();
+
+    let rep_err = store
+        .replace_policy_rules(policy_guild, Some(rev_g1_before), vec![invalid_rule])
+        .await;
+    assert!(
+        rep_err.is_err(),
+        "replace with invalid rule must fail validation"
+    );
+
+    // Existing rules must still be intact
+    let listed_intact = store.list_policy_rules(policy_guild).await.unwrap();
+    assert_eq!(listed_intact.len(), 1);
+    assert_eq!(listed_intact[0].id, saved_g1.id);
+
+    // Stale expected_revision must fail with revision conflict
+    let rep_conflict = store
+        .replace_policy_rules(
+            policy_guild,
+            Some(rev_g1_before + 99),
+            vec![rule_channel.clone()],
+        )
+        .await;
+    assert!(rep_conflict.is_err());
+    assert!(
+        rep_conflict
+            .unwrap_err()
+            .to_string()
+            .contains("Revision conflict")
+    );
+
+    // Successful replace
+    let rep_ok = store
+        .replace_policy_rules(
+            policy_guild,
+            Some(rev_g1_before),
+            vec![rule_channel.clone()],
+        )
+        .await
+        .expect("successful replace");
+    assert_eq!(rep_ok.len(), 1);
+    assert_eq!(rep_ok[0].id, rule_channel.id);
+    assert_eq!(
+        store.get_policy_revision(policy_guild).await.unwrap(),
+        rev_g1_before + 1
+    );
+
+    // Clean up
+    let _ = store.reset_policy_rules(policy_guild).await;
+
     // Issue #168: Moderator Duty PostgreSQL Lifecycle
     let duty_guild = "888777666555444333";
     let duty_user = "222333444555666777";

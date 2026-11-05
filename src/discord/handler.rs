@@ -946,6 +946,44 @@ async fn respond_or_edit(
     Ok(())
 }
 
+const fn is_thread_channel_type(kind: serenity::all::ChannelType) -> bool {
+    matches!(
+        kind,
+        serenity::all::ChannelType::NewsThread
+            | serenity::all::ChannelType::PublicThread
+            | serenity::all::ChannelType::PrivateThread
+    )
+}
+
+async fn resolve_thread_parent_id(
+    ctx: &serenity::client::Context,
+    guild_id: serenity::all::GuildId,
+    channel_id: serenity::all::ChannelId,
+) -> Option<String> {
+    if let Some(guild) = ctx.cache.guild(guild_id) {
+        if let Some(ch) = guild.channels.get(&channel_id) {
+            if is_thread_channel_type(ch.kind) {
+                return ch.parent_id.map(|p| p.get().to_string());
+            }
+            return None;
+        }
+        if let Some(th) = guild.threads.iter().find(|t| t.id == channel_id) {
+            if is_thread_channel_type(th.kind) {
+                return th.parent_id.map(|p| p.get().to_string());
+            }
+            return None;
+        }
+    }
+    if let Ok(ch) = ctx.http.get_channel(channel_id).await
+        && let Some(gc) = ch.guild()
+        && gc.guild_id == guild_id
+        && is_thread_channel_type(gc.kind)
+    {
+        return gc.parent_id.map(|p| p.get().to_string());
+    }
+    None
+}
+
 async fn execute_command_inner(
     ctx: &Context,
 
@@ -1090,31 +1128,61 @@ async fn execute_command_inner(
             .map(|p| p.contains(serenity::all::Permissions::ADMINISTRATOR))
             .unwrap_or(false);
 
+        let thread_parent_id = resolve_thread_parent_id(ctx, guild_id, command.channel_id).await;
+
         let policy_ctx = crate::policy::PolicyContext {
             guild_id: guild_id_str.clone(),
             user_id: user_id.clone(),
             roles: roles_with_pos,
             channel_id: command.channel_id.get().to_string(),
-            thread_parent_id: None,
+            thread_parent_id,
             voice_channel_id,
             is_guild_owner,
             is_administrator,
         };
 
-        let db_revision = state
-            .storage
-            .get_policy_revision(&guild_id_str)
-            .await
-            .unwrap_or(1);
+        let db_revision = match state.storage.get_policy_revision(&guild_id_str).await {
+            Ok(rev) => rev,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    guild_id = %guild_id_str,
+                    "Failed to fetch policy revision from storage; policy fail-closed"
+                );
+                respond_or_edit(
+                    ctx,
+                    command,
+                    deferred,
+                    responded,
+                    "Access policy service is temporarily unavailable. Please try again later.",
+                )
+                .await?;
+                return Ok(());
+            }
+        };
 
         let rules = match state.policy_engine.get_cached_rules(&guild_id_str) {
             Some((rev, cached)) if rev >= db_revision => cached,
             _ => {
-                let fetched = state
-                    .storage
-                    .list_policy_rules(&guild_id_str)
-                    .await
-                    .unwrap_or_default();
+                let fetched = match state.storage.list_policy_rules(&guild_id_str).await {
+                    Ok(rules) => rules,
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            guild_id = %guild_id_str,
+                            "Failed to list policy rules from storage; policy fail-closed"
+                        );
+                        respond_or_edit(
+                            ctx,
+                            command,
+                            deferred,
+                            responded,
+                            "Access policy service is temporarily unavailable. Please try again later.",
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                };
                 state
                     .policy_engine
                     .set_cached_rules(&guild_id_str, db_revision, fetched.clone());
@@ -1322,22 +1390,27 @@ async fn handle_policy_builtin_command(
             }
         }
 
+        let thread_parent_id = resolve_thread_parent_id(ctx, guild_id, command.channel_id).await;
+
         let policy_ctx = crate::policy::PolicyContext {
             guild_id: guild_id_str.clone(),
             user_id: target_user_id,
             roles: roles_with_pos,
             channel_id: command.channel_id.get().to_string(),
-            thread_parent_id: None,
+            thread_parent_id,
             voice_channel_id: None,
             is_guild_owner: is_owner,
             is_administrator: is_admin,
         };
 
-        let rules = state
-            .storage
-            .list_policy_rules(&guild_id_str)
-            .await
-            .unwrap_or_default();
+        let rules = match state.storage.list_policy_rules(&guild_id_str).await {
+            Ok(rules) => rules,
+            Err(e) => {
+                let msg = format!("⚠️ Failed to fetch policy rules: {e}");
+                respond_or_edit(ctx, command, deferred, responded, &msg).await?;
+                return Ok(());
+            }
+        };
         let resource = crate::policy::PolicyResource::Command {
             module_id,
             command_name: target_command.to_string(),

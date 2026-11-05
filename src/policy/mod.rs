@@ -58,6 +58,43 @@ pub struct CommandPolicyRule {
     pub updated_at: DateTime<Utc>,
 }
 
+pub fn validate_policy_rule_fields(rule: &CommandPolicyRule) -> anyhow::Result<()> {
+    validate_snowflake("guild_id", &rule.guild_id)?;
+    let subject_kind = rule.subject_kind.to_lowercase();
+    if !["user", "role", "channel", "voice_channel", "guild"].contains(&subject_kind.as_str()) {
+        anyhow::bail!("Invalid subject_kind: {}", rule.subject_kind);
+    }
+    if subject_kind == "guild" && rule.subject_id.is_some() {
+        anyhow::bail!("Guild subject must not specify subject_id");
+    }
+    if subject_kind != "guild" && rule.subject_id.is_none() {
+        anyhow::bail!("{subject_kind} subject requires subject_id");
+    }
+    if let Some(ref sid) = rule.subject_id {
+        validate_snowflake("subject_id", sid)?;
+    }
+
+    let resource_kind = rule.resource_kind.to_lowercase();
+    if !["command", "module", "action"].contains(&resource_kind.as_str()) {
+        anyhow::bail!("Invalid resource_kind: {}", rule.resource_kind);
+    }
+    if resource_kind == "command" && (rule.module_id.is_none() || rule.command_name.is_none()) {
+        anyhow::bail!("Command resource requires both module_id and command_name");
+    }
+    if resource_kind == "module" && rule.module_id.is_none() {
+        anyhow::bail!("Module resource requires module_id");
+    }
+    if resource_kind == "action" && rule.action_key.is_none() {
+        anyhow::bail!("Action resource requires action_key");
+    }
+
+    let effect = rule.effect.to_lowercase();
+    if effect != "allow" && effect != "deny" {
+        anyhow::bail!("Effect must be 'allow' or 'deny', got '{}'", rule.effect);
+    }
+    Ok(())
+}
+
 impl CommandPolicyRule {
     pub fn new_user_rule(
         guild_id: String,

@@ -3565,7 +3565,14 @@ pub async fn upsert_policy_rule(
         .storage
         .upsert_policy_rule(rule)
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("belongs to another guild") {
+                ApiError::conflict("Rule ID belongs to another guild")
+            } else {
+                ApiError::internal(msg)
+            }
+        })?;
 
     state.app.policy_engine.invalidate(&guild_id);
 
@@ -3838,7 +3845,7 @@ pub async fn import_policies(
         .expected_revision
         .filter(|&expected| expected != current_revision)
     {
-        return Err(ApiError::bad_request(format!(
+        return Err(ApiError::conflict(format!(
             "Revision conflict: current revision is {current_revision}, expected {expected}"
         )));
     }
@@ -3850,6 +3857,8 @@ pub async fn import_policies(
                 rule.id, rule.guild_id
             )));
         }
+        crate::policy::validate_policy_rule_fields(rule)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
     }
 
     if payload.dry_run.unwrap_or(false) {
@@ -3861,23 +3870,19 @@ pub async fn import_policies(
         })));
     }
 
-    state
+    let imported = state
         .app
         .storage
-        .reset_policy_rules(&guild_id)
+        .replace_policy_rules(&guild_id, payload.expected_revision, payload.rules)
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-
-    let mut imported = Vec::new();
-    for rule in payload.rules {
-        let saved = state
-            .app
-            .storage
-            .upsert_policy_rule(rule)
-            .await
-            .map_err(|e| ApiError::internal(e.to_string()))?;
-        imported.push(saved);
-    }
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.to_lowercase().contains("revision conflict") {
+                ApiError::conflict(msg)
+            } else {
+                ApiError::bad_request(msg)
+            }
+        })?;
 
     state.app.policy_engine.invalidate(&guild_id);
 
