@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 
 use dashmap::{DashMap, DashSet};
 
@@ -1504,7 +1504,7 @@ impl MemoryStore {
         user_id: &str,
 
         item_id: Uuid,
-    ) -> anyhow::Result<(StoreItem, i64)> {
+    ) -> anyhow::Result<(StoreItem, StorePurchase, i64)> {
         let _guard = self.progression_guard();
 
         let mut item = self
@@ -1551,6 +1551,12 @@ impl MemoryStore {
 
         self.store_profile(profile);
 
+        let initial_status = if cloned_item.role_id.is_some() {
+            "pending".to_string()
+        } else {
+            "completed".to_string()
+        };
+
         let purchase = StorePurchase {
             id: Uuid::new_v4(),
 
@@ -1562,12 +1568,60 @@ impl MemoryStore {
 
             price_paid: price,
 
-            created_at: Utc::now(),
+            role_id: cloned_item.role_id.clone(),
+
+            fulfillment_status: initial_status,
+
+            failure_reason: None,
+
+            fulfilled_at: if cloned_item.role_id.is_none() {
+                Some(now)
+            } else {
+                None
+            },
+
+            created_at: now,
         };
 
-        self.store_purchases.insert(purchase.id, purchase);
+        self.store_purchases.insert(purchase.id, purchase.clone());
 
-        Ok((cloned_item, remaining))
+        Ok((cloned_item, purchase, remaining))
+    }
+
+    pub fn get_store_purchase(&self, purchase_id: Uuid) -> Option<StorePurchase> {
+        self.store_purchases.get(&purchase_id).map(|p| p.clone())
+    }
+
+    pub fn list_store_purchases(
+        &self,
+        guild_id: &str,
+        user_id: Option<&str>,
+    ) -> Vec<StorePurchase> {
+        let mut list: Vec<StorePurchase> = self
+            .store_purchases
+            .iter()
+            .filter(|p| p.guild_id == guild_id && user_id.is_none_or(|uid| p.user_id == uid))
+            .map(|p| p.clone())
+            .collect();
+        list.sort_by_key(|a| std::cmp::Reverse(a.created_at));
+        list
+    }
+
+    pub fn update_store_purchase_fulfillment(
+        &self,
+        purchase_id: Uuid,
+        status: &str,
+        failure_reason: Option<&str>,
+        fulfilled_at: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<()> {
+        let mut purchase = self
+            .store_purchases
+            .get_mut(&purchase_id)
+            .ok_or_else(|| anyhow::anyhow!("store purchase not found"))?;
+        purchase.fulfillment_status = status.to_string();
+        purchase.failure_reason = failure_reason.map(|s| s.to_string());
+        purchase.fulfilled_at = fulfilled_at;
+        Ok(())
     }
 
     pub fn archive_progression_season(&self, guild_id: &str, name: &str) -> ProgressionSeason {

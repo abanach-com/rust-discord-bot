@@ -325,6 +325,14 @@ pub struct StorePurchase {
 
     pub price_paid: i64,
 
+    pub role_id: Option<String>,
+
+    pub fulfillment_status: String,
+
+    pub failure_reason: Option<String>,
+
+    pub fulfilled_at: Option<DateTime<Utc>>,
+
     pub created_at: DateTime<Utc>,
 }
 
@@ -2039,11 +2047,62 @@ impl Storage {
         user_id: &str,
 
         item_id: Uuid,
-    ) -> anyhow::Result<(StoreItem, i64)> {
+    ) -> anyhow::Result<(StoreItem, StorePurchase, i64)> {
         match self {
             Self::Memory(store) => store.purchase_store_item(guild_id, user_id, item_id),
 
             Self::Postgres(store) => store.purchase_store_item(guild_id, user_id, item_id).await,
+        }
+    }
+
+    pub async fn get_store_purchase(
+        &self,
+        purchase_id: Uuid,
+    ) -> anyhow::Result<Option<StorePurchase>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_store_purchase(purchase_id)),
+
+            Self::Postgres(store) => store.get_store_purchase(purchase_id).await,
+        }
+    }
+
+    pub async fn list_store_purchases(
+        &self,
+        guild_id: &str,
+        user_id: Option<&str>,
+    ) -> anyhow::Result<Vec<StorePurchase>> {
+        match self {
+            Self::Memory(store) => Ok(store.list_store_purchases(guild_id, user_id)),
+
+            Self::Postgres(store) => store.list_store_purchases(guild_id, user_id).await,
+        }
+    }
+
+    pub async fn update_store_purchase_fulfillment(
+        &self,
+        purchase_id: Uuid,
+        status: &str,
+        failure_reason: Option<&str>,
+        fulfilled_at: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Memory(store) => store.update_store_purchase_fulfillment(
+                purchase_id,
+                status,
+                failure_reason,
+                fulfilled_at,
+            ),
+
+            Self::Postgres(store) => {
+                store
+                    .update_store_purchase_fulfillment(
+                        purchase_id,
+                        status,
+                        failure_reason,
+                        fulfilled_at,
+                    )
+                    .await
+            }
         }
     }
 
@@ -3638,6 +3697,65 @@ mod tests {
         let items = store.list_store_items(guild_id).await.unwrap();
         let corrupt_item = items.iter().find(|i| i.id == corrupt_id).unwrap();
         assert_eq!(corrupt_item.stock, Some(5), "stock must not decrement");
+    }
+
+    #[tokio::test]
+    async fn test_purchase_store_item_role_snapshot_and_fulfillment_tracking() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_id = "guild_role_test";
+        let user_id = "user_buyer";
+
+        store
+            .adjust_member_progress(guild_id, user_id, 0, 500, 0)
+            .await
+            .unwrap();
+
+        let item = store
+            .create_store_item(
+                guild_id,
+                "VIP Role",
+                "Grants VIP status",
+                200,
+                Some("role_12345"),
+                Some(10),
+            )
+            .await
+            .unwrap();
+
+        let (purchased_item, purchase, remaining) = store
+            .purchase_store_item(guild_id, user_id, item.id)
+            .await
+            .unwrap();
+
+        assert_eq!(purchased_item.id, item.id);
+        assert_eq!(remaining, 300);
+        assert_eq!(purchase.item_id, item.id);
+        assert_eq!(purchase.price_paid, 200);
+        assert_eq!(purchase.role_id, Some("role_12345".to_string()));
+        assert_eq!(purchase.fulfillment_status, "pending");
+        assert!(purchase.fulfilled_at.is_none());
+
+        let now = Utc::now();
+        store
+            .update_store_purchase_fulfillment(purchase.id, "completed", None, Some(now))
+            .await
+            .unwrap();
+
+        let updated_purchase = store
+            .get_store_purchase(purchase.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated_purchase.fulfillment_status, "completed");
+        assert_eq!(updated_purchase.fulfilled_at, Some(now));
+
+        let list = store
+            .list_store_purchases(guild_id, Some(user_id))
+            .await
+            .unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, purchase.id);
+        assert_eq!(list[0].role_id, Some("role_12345".to_string()));
     }
 
     #[tokio::test]

@@ -543,6 +543,23 @@ async fn test_phase2_community_operations_and_media_suite() {
     let purch_body: serde_json::Value = purchase_resp.json().await.unwrap();
     assert_eq!(purch_body["success"], true);
     assert_eq!(purch_body["remaining_coins"], 750); // 1000 - 250 = 750
+    assert_eq!(purch_body["fulfillment_status"], "completed");
+    assert!(purch_body["purchase_id"].is_string());
+
+    // Verify GET /api/guilds/{guild_id}/store/purchases
+    let list_purchases_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/store/purchases"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_purchases_resp.status(), reqwest::StatusCode::OK);
+    let list_purchases_body: serde_json::Value = list_purchases_resp.json().await.unwrap();
+    let purchases = list_purchases_body["purchases"].as_array().unwrap();
+    assert_eq!(purchases.len(), 1);
+    assert_eq!(purchases[0]["role_id"], "role_color_vip");
+    assert_eq!(purchases[0]["fulfillment_status"], "completed");
 
     // Archive season
     let season_resp = client

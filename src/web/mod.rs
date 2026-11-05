@@ -266,6 +266,10 @@ pub fn build_router(state: WebState) -> Router {
             post(features::purchase_store_item),
         )
         .route(
+            "/api/guilds/{guild_id}/store/purchases",
+            get(features::list_store_purchases),
+        )
+        .route(
             "/api/guilds/{guild_id}/progression/season/reset",
             post(features::reset_progression_season),
         )

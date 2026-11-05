@@ -16,8 +16,8 @@ use super::{
     ModerationExecutionIntent, ModuleDraftConfig, PluginGuildInstallation,
     PluginMarketplacePackage, ProgressMetric, ProgressionSeason, RedditSubscription,
     ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent, ServerSnapshot,
-    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, TelegramBridge,
-    TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError, TupperProfile,
+    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
+    TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError, TupperProfile,
     TwitchStreamSubscription, UserErasureReport, VkSubscription, WorkflowDefinition,
     WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
 };
@@ -2338,7 +2338,7 @@ impl PostgresStore {
         user_id: &str,
 
         item_id: Uuid,
-    ) -> anyhow::Result<(StoreItem, i64)> {
+    ) -> anyhow::Result<(StoreItem, StorePurchase, i64)> {
         let mut tx = self.pool.begin().await?;
 
         let item = sqlx::query_as::<_, StoreItem>(
@@ -2393,19 +2393,28 @@ impl PostgresStore {
 
         profile.coins -= item.price;
 
-        profile.updated_at = Utc::now();
+        let now = Utc::now();
+        profile.updated_at = now;
 
         write_profile(&mut tx, &profile).await?;
 
         let purchase_id = Uuid::new_v4();
+        let initial_status = if item.role_id.is_some() {
+            "pending"
+        } else {
+            "completed"
+        };
+        let fulfilled_at = if item.role_id.is_none() {
+            Some(now)
+        } else {
+            None
+        };
 
-        sqlx::query(
+        let purchase = sqlx::query_as::<_, StorePurchase>(
             r#"
-
-            INSERT INTO store_purchases (id, guild_id, user_id, item_id, price_paid, created_at)
-
-            VALUES ($1, $2, $3, $4, $5, $6)
-
+            INSERT INTO store_purchases (id, guild_id, user_id, item_id, price_paid, role_id, fulfillment_status, failure_reason, fulfilled_at, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            RETURNING id, guild_id, user_id, item_id, price_paid, role_id, fulfillment_status, failure_reason, fulfilled_at, created_at
             "#,
         )
         .bind(purchase_id)
@@ -2413,13 +2422,80 @@ impl PostgresStore {
         .bind(user_id)
         .bind(item_id)
         .bind(item.price)
-        .bind(Utc::now())
-        .execute(&mut *tx)
+        .bind(&item.role_id)
+        .bind(initial_status)
+        .bind(Option::<String>::None)
+        .bind(fulfilled_at)
+        .bind(now)
+        .fetch_one(&mut *tx)
         .await?;
 
         tx.commit().await?;
 
-        Ok((item, profile.coins))
+        Ok((item, purchase, profile.coins))
+    }
+
+    pub async fn get_store_purchase(
+        &self,
+        purchase_id: Uuid,
+    ) -> anyhow::Result<Option<StorePurchase>> {
+        let rec = sqlx::query_as::<_, StorePurchase>(
+            r#"
+            SELECT id, guild_id, user_id, item_id, price_paid, role_id, fulfillment_status, failure_reason, fulfilled_at, created_at
+            FROM store_purchases
+            WHERE id = $1
+            "#,
+        )
+        .bind(purchase_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(rec)
+    }
+
+    pub async fn list_store_purchases(
+        &self,
+        guild_id: &str,
+        user_id: Option<&str>,
+    ) -> anyhow::Result<Vec<StorePurchase>> {
+        let recs = sqlx::query_as::<_, StorePurchase>(
+            r#"
+            SELECT id, guild_id, user_id, item_id, price_paid, role_id, fulfillment_status, failure_reason, fulfilled_at, created_at
+            FROM store_purchases
+            WHERE guild_id = $1 AND ($2 IS NULL OR user_id = $2)
+            ORDER BY created_at DESC
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(recs)
+    }
+
+    pub async fn update_store_purchase_fulfillment(
+        &self,
+        purchase_id: Uuid,
+        status: &str,
+        failure_reason: Option<&str>,
+        fulfilled_at: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE store_purchases
+            SET fulfillment_status = $2, failure_reason = $3, fulfilled_at = $4
+            WHERE id = $1
+            "#,
+        )
+        .bind(purchase_id)
+        .bind(status)
+        .bind(failure_reason)
+        .bind(fulfilled_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
     }
 
     pub async fn archive_progression_season(

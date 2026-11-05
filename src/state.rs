@@ -133,4 +133,103 @@ impl AppState {
             is_shutting_down,
         })
     }
+
+    pub async fn deliver_store_role(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_id: &str,
+    ) -> anyhow::Result<()> {
+        for (name, id) in [
+            ("guild_id", guild_id),
+            ("user_id", user_id),
+            ("role_id", role_id),
+        ] {
+            anyhow::ensure!(!id.trim().is_empty(), "{name} cannot be empty");
+            if let Ok(num) = id.parse::<u64>() {
+                anyhow::ensure!(num != 0, "{name} snowflake cannot be 0");
+            }
+        }
+
+        let is_offline = (self.config.discord_token.starts_with("dummy")
+            || self.config.discord_token.starts_with("mock")
+            || self.config.discord_token == "offline"
+            || std::env::var("OFFLINE_MODE").is_ok())
+            && std::env::var("DISCORD_API_BASE_URL").is_err();
+
+        if is_offline {
+            tracing::debug!(
+                guild_id,
+                user_id,
+                role_id,
+                "deliver_store_role: offline/mock mode detected, simulating success"
+            );
+            return Ok(());
+        }
+
+        let base_url = std::env::var("DISCORD_API_BASE_URL")
+            .unwrap_or_else(|_| "https://discord.com/api/v10".to_string());
+        let url = format!("{base_url}/guilds/{guild_id}/members/{user_id}/roles/{role_id}");
+
+        let mut attempts = 0;
+        const MAX_ATTEMPTS: u32 = 3;
+
+        loop {
+            attempts += 1;
+            let response = self
+                .http_client
+                .put(&url)
+                .header(
+                    reqwest::header::AUTHORIZATION,
+                    format!("Bot {}", self.config.discord_token),
+                )
+                .header(
+                    reqwest::header::HeaderName::from_static("x-audit-log-reason"),
+                    "Store item role delivery",
+                )
+                .send()
+                .await;
+
+            match response {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status.is_success() {
+                        return Ok(());
+                    }
+
+                    if (status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                        || status.is_server_error())
+                        && attempts < MAX_ATTEMPTS
+                    {
+                        let backoff = if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                            let retry_after_secs = resp
+                                .headers()
+                                .get(reqwest::header::RETRY_AFTER)
+                                .and_then(|v| v.to_str().ok())
+                                .and_then(|s| s.parse::<f64>().ok())
+                                .unwrap_or(0.5);
+                            std::time::Duration::from_secs_f64(retry_after_secs.min(2.0))
+                        } else {
+                            std::time::Duration::from_millis(100 * (1 << attempts))
+                        };
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
+
+                    let error_text = resp.text().await.unwrap_or_default();
+                    anyhow::bail!(
+                        "Discord API returned status {status} when adding role {role_id} to member {user_id}: {error_text}"
+                    );
+                }
+                Err(err) => {
+                    if attempts < MAX_ATTEMPTS {
+                        tokio::time::sleep(std::time::Duration::from_millis(100 * (1 << attempts)))
+                            .await;
+                        continue;
+                    }
+                    anyhow::bail!("Network error calling Discord API: {err}");
+                }
+            }
+        }
+    }
 }

@@ -861,4 +861,66 @@ async fn test_postgres_integration_suite() {
             r.position
         );
     }
+
+    // 10. Issue #156: Store purchase role snapshot and fulfillment tracking in PostgreSQL
+    let store_user = format!("pg_store_buyer_{}", Uuid::new_v4().simple());
+    sqlx::query(
+        r#"
+        INSERT INTO member_progression (guild_id, user_id, xp, level, coins, updated_at)
+        VALUES ($1, $2, 500, 5, 1000, NOW())
+        "#,
+    )
+    .bind(&guild_id)
+    .bind(&store_user)
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    let item = store
+        .create_store_item(
+            &guild_id,
+            "Emerald VIP",
+            "Special role for VIPs",
+            400,
+            Some("role_emerald_999"),
+            Some(5),
+        )
+        .await
+        .unwrap();
+
+    let (purchased_item, purchase, remaining_coins) = store
+        .purchase_store_item(&guild_id, &store_user, item.id)
+        .await
+        .unwrap();
+
+    assert_eq!(purchased_item.id, item.id);
+    assert_eq!(remaining_coins, 600);
+    assert_eq!(purchase.price_paid, 400);
+    assert_eq!(purchase.role_id, Some("role_emerald_999".to_string()));
+    assert_eq!(purchase.fulfillment_status, "pending");
+    assert!(purchase.fulfilled_at.is_none());
+
+    let now_pg = Utc::now();
+    store
+        .update_store_purchase_fulfillment(purchase.id, "completed", None, Some(now_pg))
+        .await
+        .unwrap();
+
+    let fetched_purchase = store
+        .get_store_purchase(purchase.id)
+        .await
+        .unwrap()
+        .expect("purchase should exist");
+    assert_eq!(fetched_purchase.fulfillment_status, "completed");
+    assert_eq!(
+        fetched_purchase.role_id,
+        Some("role_emerald_999".to_string())
+    );
+
+    let purchases_list = store
+        .list_store_purchases(&guild_id, Some(&store_user))
+        .await
+        .unwrap();
+    assert_eq!(purchases_list.len(), 1);
+    assert_eq!(purchases_list[0].id, purchase.id);
 }

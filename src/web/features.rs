@@ -1152,21 +1152,89 @@ pub async fn purchase_store_item(
 
     ensure_guild_access(&state, &session, &guild_id).await?;
 
-    let (item, remaining_balance) = state
+    let (item, purchase, remaining_balance) = state
         .app
         .storage
         .purchase_store_item(&guild_id, &session.user.id, payload.item_id)
         .await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
+    let (fulfillment_status, failure_reason) = if let Some(ref role_id) = item.role_id {
+        match state
+            .app
+            .deliver_store_role(&guild_id, &session.user.id, role_id)
+            .await
+        {
+            Ok(()) => {
+                let now = Utc::now();
+                let _ = state
+                    .app
+                    .storage
+                    .update_store_purchase_fulfillment(purchase.id, "completed", None, Some(now))
+                    .await;
+                ("completed".to_string(), None)
+            }
+            Err(err) => {
+                let err_msg = err.to_string();
+                tracing::error!(
+                    guild_id = %guild_id,
+                    user_id = %session.user.id,
+                    role_id = %role_id,
+                    purchase_id = %purchase.id,
+                    error = %err_msg,
+                    "Failed to deliver Discord role for store purchase"
+                );
+                let _ = state
+                    .app
+                    .storage
+                    .update_store_purchase_fulfillment(purchase.id, "failed", Some(&err_msg), None)
+                    .await;
+                ("failed".to_string(), Some(err_msg))
+            }
+        }
+    } else {
+        ("completed".to_string(), None)
+    };
+
     Ok(Json(json!({
-
         "success": true,
-
         "purchased_item": item,
-
+        "purchase_id": purchase.id,
+        "fulfillment_status": fulfillment_status,
+        "failure_reason": failure_reason,
         "remaining_coins": remaining_balance
+    })))
+}
 
+#[derive(Debug, Deserialize)]
+pub struct ListStorePurchasesQuery {
+    pub user_id: Option<String>,
+}
+
+pub async fn list_store_purchases(
+    State(state): State<WebState>,
+
+    Path(guild_id): Path<String>,
+
+    headers: HeaderMap,
+
+    Query(query): Query<ListStorePurchasesQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+
+    verify_csrf(&headers, &session)?;
+
+    ensure_guild_access(&state, &session, &guild_id).await?;
+
+    let purchases = state
+        .app
+        .storage
+        .list_store_purchases(&guild_id, query.user_id.as_deref())
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(json!({
+        "purchases": purchases
     })))
 }
 
