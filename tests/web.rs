@@ -1145,3 +1145,238 @@ async fn test_voice_companion_channels_api() {
     let list_json3: serde_json::Value = list_resp3.json().await.unwrap();
     assert_eq!(list_json3["mappings"].as_array().unwrap().len(), 0);
 }
+
+#[tokio::test]
+async fn test_command_policies_api() {
+    let (state, _perms) = test_web_state().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let app = build_router(state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve axum");
+    });
+
+    let admin_user_id = "555000000000000001";
+    let guild_id = "777000000000000001";
+    let user_id = "666000000000000001";
+    let channel_id = "888000000000000001";
+    let csrf_token = "valid_csrf_token_policies";
+    let admin_session_id = "test_policies_admin_session";
+
+    state
+        .app
+        .sessions
+        .save_session(
+            admin_session_id,
+            DashboardUser {
+                id: admin_user_id.to_owned(),
+                username: "Admin".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_owned(),
+                name: "Test Guild".to_owned(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_owned(),
+            }],
+            csrf_token.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let session_cookie = format!("rusty_discord_bot_session={admin_session_id}");
+
+    // 1. Unauthenticated request rejected
+    let unauth = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/policies"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // 2. Initial list of policies is empty
+    let list_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/policies"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_resp.status(), reqwest::StatusCode::OK);
+    let list_json: serde_json::Value = list_resp.json().await.unwrap();
+    assert_eq!(list_json["rules"].as_array().unwrap().len(), 0);
+
+    // 3. Upsert without CSRF rejected
+    let no_csrf = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/policies"))
+        .header(COOKIE, &session_cookie)
+        .json(&serde_json::json!({
+            "subject_kind": "user",
+            "subject_id": user_id,
+            "resource_kind": "command",
+            "module_id": "fun",
+            "command_name": "meme",
+            "effect": "deny"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 4. Upsert with invalid snowflake rejected
+    let invalid_id = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/policies"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "subject_kind": "user",
+            "subject_id": "not_a_snowflake",
+            "resource_kind": "command",
+            "module_id": "fun",
+            "command_name": "meme",
+            "effect": "deny"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid_id.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 5. Valid upsert
+    let upsert_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/policies"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "subject_kind": "user",
+            "subject_id": user_id,
+            "resource_kind": "command",
+            "module_id": "fun",
+            "command_name": "meme",
+            "effect": "deny",
+            "priority": 5
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upsert_resp.status(), reqwest::StatusCode::OK);
+    let upsert_json: serde_json::Value = upsert_resp.json().await.unwrap();
+    let rule_id = upsert_json["rule"]["id"].as_str().unwrap().to_string();
+    assert!(upsert_json["revision"].as_i64().unwrap() >= 2);
+
+    // 6. List now contains the rule
+    let list_resp2 = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/policies"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_resp2.status(), reqwest::StatusCode::OK);
+    let list_json2: serde_json::Value = list_resp2.json().await.unwrap();
+    assert_eq!(list_json2["rules"].as_array().unwrap().len(), 1);
+
+    // 7. Explain policy shows denied
+    let explain_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/policies/explain"))
+        .header(COOKIE, &session_cookie)
+        .json(&serde_json::json!({
+            "user_id": user_id,
+            "channel_id": channel_id,
+            "resource_kind": "command",
+            "module_id": "fun",
+            "command_name": "meme"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(explain_resp.status(), reqwest::StatusCode::OK);
+    let explain_json: serde_json::Value = explain_resp.json().await.unwrap();
+    assert_eq!(explain_json["outcome"]["allowed"], false);
+
+    // 8. Export policies
+    let export_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/policies/export"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(export_resp.status(), reqwest::StatusCode::OK);
+    let export_json: serde_json::Value = export_resp.json().await.unwrap();
+    assert_eq!(export_json["version"], 1);
+    assert_eq!(export_json["rules"].as_array().unwrap().len(), 1);
+
+    // 9. Delete specific policy rule
+    let del_resp = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/policies/{rule_id}"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del_resp.status(), reqwest::StatusCode::OK);
+
+    // Re-create a rule for reset test
+    let _ = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/policies"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "subject_kind": "channel",
+            "subject_id": channel_id,
+            "resource_kind": "module",
+            "module_id": "fun",
+            "effect": "allow"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // 10. Reset policies requires confirm
+    let reset_fail = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/policies/reset"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({ "confirm": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reset_fail.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 10. Reset policies succeeds with confirm
+    let reset_ok = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/policies/reset"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({ "confirm": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reset_ok.status(), reqwest::StatusCode::OK);
+    let reset_json: serde_json::Value = reset_ok.json().await.unwrap();
+    assert_eq!(reset_json["reset"], true);
+    assert_eq!(reset_json["removed_count"], 1);
+
+    // 11. List is empty again
+    let list_resp3 = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/policies"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_resp3.status(), reqwest::StatusCode::OK);
+    let list_json3: serde_json::Value = list_resp3.json().await.unwrap();
+    assert_eq!(list_json3["rules"].as_array().unwrap().len(), 0);
+}

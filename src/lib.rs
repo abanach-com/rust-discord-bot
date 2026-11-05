@@ -4,6 +4,7 @@ pub mod integrations;
 pub mod lua;
 pub mod metrics;
 pub mod moderation_cases;
+pub mod policy;
 pub mod rate_limit;
 pub mod scheduler;
 pub mod session;

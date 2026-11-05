@@ -374,6 +374,30 @@ pub fn build_router(state: WebState) -> Router {
             post(features::reconcile_companion_channels),
         )
         .route(
+            "/api/guilds/{guild_id}/policies",
+            get(features::list_policy_rules).post(features::upsert_policy_rule),
+        )
+        .route(
+            "/api/guilds/{guild_id}/policies/{rule_id}",
+            delete(features::delete_policy_rule),
+        )
+        .route(
+            "/api/guilds/{guild_id}/policies/reset",
+            post(features::reset_policy_rules),
+        )
+        .route(
+            "/api/guilds/{guild_id}/policies/explain",
+            post(features::explain_policy),
+        )
+        .route(
+            "/api/guilds/{guild_id}/policies/export",
+            get(features::export_policies),
+        )
+        .route(
+            "/api/guilds/{guild_id}/policies/import",
+            post(features::import_policies),
+        )
+        .route(
             "/api/guilds/{guild_id}/feeds",
             get(features::list_feeds).post(features::create_feed),
         )

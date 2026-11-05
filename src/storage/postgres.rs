@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use super::{
     AdjustMemberProgressParams, AiGuildBudget, AiKnowledgeDocument, AuditLogEntry, CardCollection,
-    CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome, CommunityPoll,
+    CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome, CommandPolicyRule, CommunityPoll,
     CompanionChannelLease, CompanionChannelMapping, CountingGame, CustomAutomation,
     DailyClaimOutcome, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink,
     GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway, GuildModuleSettings,
@@ -413,6 +413,17 @@ impl PostgresStore {
         .map(|r| r.rows_affected())
         .unwrap_or(0);
         related_erased += deleted_leases as usize;
+
+        let deleted_policy = sqlx::query(
+            "DELETE FROM command_policy_rules WHERE guild_id = $1 AND subject_kind = 'user' AND subject_id = $2",
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map(|r| r.rows_affected())
+        .unwrap_or(0);
+        related_erased += deleted_policy as usize;
 
         tx.commit().await?;
 
@@ -6717,6 +6728,185 @@ impl PostgresStore {
         .await?;
 
         Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn list_policy_rules(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<CommandPolicyRule>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let rows = sqlx::query_as::<_, CommandPolicyRule>(
+            r#"
+            SELECT id, guild_id, subject_kind, subject_id, resource_kind, module_id,
+                   command_name, action_key, effect, priority, enabled, version,
+                   created_by, created_at, updated_at
+            FROM command_policy_rules
+            WHERE guild_id = $1
+            ORDER BY priority DESC, created_at ASC
+            "#,
+        )
+        .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn upsert_policy_rule(
+        &self,
+        rule: CommandPolicyRule,
+    ) -> anyhow::Result<CommandPolicyRule> {
+        validate_snowflake("guild_id", &rule.guild_id)?;
+        if let Some(ref uid) = rule.subject_id {
+            if rule.subject_kind == "user" {
+                validate_snowflake("user_id", uid)?;
+            } else if rule.subject_kind == "role" {
+                validate_snowflake("role_id", uid)?;
+            } else if rule.subject_kind == "channel" || rule.subject_kind == "voice_channel" {
+                validate_snowflake("channel_id", uid)?;
+            }
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let now = Utc::now();
+        let saved = sqlx::query_as::<_, CommandPolicyRule>(
+            r#"
+            INSERT INTO command_policy_rules (
+                id, guild_id, subject_kind, subject_id, resource_kind, module_id,
+                command_name, action_key, effect, priority, enabled, version,
+                created_by, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            ON CONFLICT (id)
+            DO UPDATE SET
+                subject_kind = EXCLUDED.subject_kind,
+                subject_id = EXCLUDED.subject_id,
+                resource_kind = EXCLUDED.resource_kind,
+                module_id = EXCLUDED.module_id,
+                command_name = EXCLUDED.command_name,
+                action_key = EXCLUDED.action_key,
+                effect = EXCLUDED.effect,
+                priority = EXCLUDED.priority,
+                enabled = EXCLUDED.enabled,
+                version = command_policy_rules.version + 1,
+                updated_at = EXCLUDED.updated_at
+            RETURNING id, guild_id, subject_kind, subject_id, resource_kind, module_id,
+                      command_name, action_key, effect, priority, enabled, version,
+                      created_by, created_at, updated_at
+            "#,
+        )
+        .bind(rule.id)
+        .bind(&rule.guild_id)
+        .bind(&rule.subject_kind)
+        .bind(&rule.subject_id)
+        .bind(&rule.resource_kind)
+        .bind(&rule.module_id)
+        .bind(&rule.command_name)
+        .bind(&rule.action_key)
+        .bind(&rule.effect)
+        .bind(rule.priority)
+        .bind(rule.enabled)
+        .bind(rule.version)
+        .bind(&rule.created_by)
+        .bind(rule.created_at)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO command_policy_revisions (guild_id, revision, updated_at)
+            VALUES ($1, 1, NOW())
+            ON CONFLICT (guild_id)
+            DO UPDATE SET revision = command_policy_revisions.revision + 1, updated_at = NOW()
+            "#,
+        )
+        .bind(&rule.guild_id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(saved)
+    }
+
+    pub async fn delete_policy_rule(&self, guild_id: &str, rule_id: Uuid) -> anyhow::Result<bool> {
+        validate_snowflake("guild_id", guild_id)?;
+        let mut tx = self.pool.begin().await?;
+        let res = sqlx::query("DELETE FROM command_policy_rules WHERE guild_id = $1 AND id = $2")
+            .bind(guild_id)
+            .bind(rule_id)
+            .execute(&mut *tx)
+            .await?;
+
+        let deleted = res.rows_affected() > 0;
+        if deleted {
+            sqlx::query(
+                r#"
+                INSERT INTO command_policy_revisions (guild_id, revision, updated_at)
+                VALUES ($1, 1, NOW())
+                ON CONFLICT (guild_id)
+                DO UPDATE SET revision = command_policy_revisions.revision + 1, updated_at = NOW()
+                "#,
+            )
+            .bind(guild_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(deleted)
+    }
+
+    pub async fn reset_policy_rules(&self, guild_id: &str) -> anyhow::Result<usize> {
+        validate_snowflake("guild_id", guild_id)?;
+        let mut tx = self.pool.begin().await?;
+        let res = sqlx::query("DELETE FROM command_policy_rules WHERE guild_id = $1")
+            .bind(guild_id)
+            .execute(&mut *tx)
+            .await?;
+
+        let count = res.rows_affected() as usize;
+        sqlx::query(
+            r#"
+            INSERT INTO command_policy_revisions (guild_id, revision, updated_at)
+            VALUES ($1, 1, NOW())
+            ON CONFLICT (guild_id)
+            DO UPDATE SET revision = command_policy_revisions.revision + 1, updated_at = NOW()
+            "#,
+        )
+        .bind(guild_id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(count)
+    }
+
+    pub async fn get_policy_revision(&self, guild_id: &str) -> anyhow::Result<i64> {
+        validate_snowflake("guild_id", guild_id)?;
+        let row: Option<(i64,)> =
+            sqlx::query_as("SELECT revision FROM command_policy_revisions WHERE guild_id = $1")
+                .bind(guild_id)
+                .fetch_optional(&self.pool)
+                .await?;
+
+        Ok(row.map(|(r,)| r).unwrap_or(1))
+    }
+
+    pub async fn bump_policy_revision(&self, guild_id: &str) -> anyhow::Result<i64> {
+        validate_snowflake("guild_id", guild_id)?;
+        let row: (i64,) = sqlx::query_as(
+            r#"
+            INSERT INTO command_policy_revisions (guild_id, revision, updated_at)
+            VALUES ($1, 2, NOW())
+            ON CONFLICT (guild_id)
+            DO UPDATE SET revision = command_policy_revisions.revision + 1, updated_at = NOW()
+            RETURNING revision
+            "#,
+        )
+        .bind(guild_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(row.0)
     }
 }
 

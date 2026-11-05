@@ -1480,4 +1480,84 @@ async fn test_postgres_integration_suite() {
         .await
         .expect("search after departure");
     assert!(after_removal.is_empty());
+
+    // Issue #171: Command Policy Engine PostgreSQL Lifecycle
+    let policy_guild = "999888777000111222";
+    let policy_user = "111222333444555666";
+    let policy_channel = "333444555666777888";
+
+    let init_rev = store
+        .get_policy_revision(policy_guild)
+        .await
+        .expect("get initial policy revision");
+    assert_eq!(init_rev, 1);
+
+    let rule_user = rusty_discord_bot::storage::CommandPolicyRule::new_user_rule(
+        policy_guild.to_string(),
+        policy_user.to_string(),
+        rusty_discord_bot::policy::PolicyResource::Command {
+            module_id: "fun".to_string(),
+            command_name: "meme".to_string(),
+        },
+        rusty_discord_bot::policy::PolicyEffect::Deny,
+        5,
+        "admin".to_string(),
+    )
+    .expect("construct user rule");
+
+    let rule_channel = rusty_discord_bot::storage::CommandPolicyRule::new_channel_rule(
+        policy_guild.to_string(),
+        policy_channel.to_string(),
+        rusty_discord_bot::policy::PolicyResource::Command {
+            module_id: "fun".to_string(),
+            command_name: "meme".to_string(),
+        },
+        rusty_discord_bot::policy::PolicyEffect::Allow,
+        0,
+        "admin".to_string(),
+    )
+    .expect("construct channel rule");
+
+    let saved_u = store
+        .upsert_policy_rule(rule_user.clone())
+        .await
+        .expect("upsert user rule");
+    assert_eq!(saved_u.id, rule_user.id);
+
+    let saved_c = store
+        .upsert_policy_rule(rule_channel.clone())
+        .await
+        .expect("upsert channel rule");
+    assert_eq!(saved_c.id, rule_channel.id);
+
+    let rev_after_upsert = store
+        .get_policy_revision(policy_guild)
+        .await
+        .expect("get revision after upsert");
+    assert!(rev_after_upsert >= 2);
+
+    let listed = store
+        .list_policy_rules(policy_guild)
+        .await
+        .expect("list policy rules");
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0].id, rule_user.id);
+
+    let deleted = store
+        .delete_policy_rule(policy_guild, rule_user.id)
+        .await
+        .expect("delete policy rule");
+    assert!(deleted);
+
+    let reset_count = store
+        .reset_policy_rules(policy_guild)
+        .await
+        .expect("reset policy rules");
+    assert_eq!(reset_count, 1);
+
+    let after_reset = store
+        .list_policy_rules(policy_guild)
+        .await
+        .expect("list rules after reset");
+    assert!(after_reset.is_empty());
 }

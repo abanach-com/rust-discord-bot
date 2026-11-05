@@ -64,10 +64,11 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 | Module configuration audit | Implemented |
 | Server setup wizard | Implemented |
 | Permission diagnostic wizard | Implemented |
-| Command enable/disable by channel | Planned |
-| Command enable/disable by role | Planned |
-| Command cooldowns | Planned |
-| Per-user and per-role rate limits | Planned |
+| Command enable/disable by channel | Implemented |
+| Command enable/disable by role | Implemented |
+| Command cooldowns | Implemented |
+| Per-user and per-role rate limits | Implemented |
+| Unified Command Policy Engine (ACL per user/role/channel + canrun/explain) | Implemented |
 | Channel templates | Planned |
 | Server backup/export | Implemented |
 | Server configuration import | Implemented |

@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use super::{
     AdjustMemberProgressParams, AiGuildBudget, AiKnowledgeDocument, AuditLogEntry, CardCollection,
-    CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome, CommunityPoll,
+    CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome, CommandPolicyRule, CommunityPoll,
     CompanionChannelLease, CompanionChannelMapping, CountingGame, CustomAutomation,
     DailyClaimOutcome, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink,
     GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway, GuildModuleSettings,
@@ -124,6 +124,10 @@ pub struct MemoryStore {
     companion_mappings: Arc<DashMap<Uuid, CompanionChannelMapping>>,
 
     companion_leases: Arc<DashMap<(String, String, String), CompanionChannelLease>>,
+
+    policy_rules: Arc<DashMap<Uuid, CommandPolicyRule>>,
+
+    policy_revisions: Arc<DashMap<String, i64>>,
 
     faqs: Arc<DashMap<Uuid, FaqEntry>>,
 
@@ -419,6 +423,14 @@ impl MemoryStore {
         self.companion_leases
             .retain(|(g, _, u), _| !(g == guild_id && u == user_id));
         related_erased += before_leases.saturating_sub(self.companion_leases.len());
+
+        let before_policy = self.policy_rules.len();
+        self.policy_rules.retain(|_, r| {
+            !(r.guild_id == guild_id
+                && r.subject_kind == "user"
+                && r.subject_id.as_deref() == Some(user_id))
+        });
+        related_erased += before_policy.saturating_sub(self.policy_rules.len());
 
         let retained_records = vec![
             RetainedRecordNotice {
@@ -2264,6 +2276,84 @@ impl MemoryStore {
             .map(|l| l.clone())
             .collect();
         Ok(list)
+    }
+
+    pub fn list_policy_rules(&self, guild_id: &str) -> anyhow::Result<Vec<CommandPolicyRule>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let mut list: Vec<_> = self
+            .policy_rules
+            .iter()
+            .filter(|r| r.guild_id == guild_id)
+            .map(|r| r.value().clone())
+            .collect();
+        list.sort_by(|a, b| {
+            b.priority
+                .cmp(&a.priority)
+                .then_with(|| a.created_at.cmp(&b.created_at))
+        });
+        Ok(list)
+    }
+
+    pub fn upsert_policy_rule(
+        &self,
+        mut rule: CommandPolicyRule,
+    ) -> anyhow::Result<CommandPolicyRule> {
+        validate_snowflake("guild_id", &rule.guild_id)?;
+        if let Some(ref uid) = rule.subject_id {
+            if rule.subject_kind == "user" {
+                validate_snowflake("user_id", uid)?;
+            } else if rule.subject_kind == "role" {
+                validate_snowflake("role_id", uid)?;
+            } else if rule.subject_kind == "channel" || rule.subject_kind == "voice_channel" {
+                validate_snowflake("channel_id", uid)?;
+            }
+        }
+        let now = Utc::now();
+        rule.updated_at = now;
+        self.policy_rules.insert(rule.id, rule.clone());
+        self.bump_policy_revision(&rule.guild_id)?;
+        Ok(rule)
+    }
+
+    pub fn delete_policy_rule(&self, guild_id: &str, rule_id: Uuid) -> anyhow::Result<bool> {
+        validate_snowflake("guild_id", guild_id)?;
+        if let Some((_, r)) = self.policy_rules.remove(&rule_id) {
+            if r.guild_id == guild_id {
+                self.bump_policy_revision(guild_id)?;
+                return Ok(true);
+            } else {
+                self.policy_rules.insert(r.id, r);
+            }
+        }
+        Ok(false)
+    }
+
+    pub fn reset_policy_rules(&self, guild_id: &str) -> anyhow::Result<usize> {
+        validate_snowflake("guild_id", guild_id)?;
+        let before = self.policy_rules.len();
+        self.policy_rules.retain(|_, r| r.guild_id != guild_id);
+        let removed = before.saturating_sub(self.policy_rules.len());
+        self.bump_policy_revision(guild_id)?;
+        Ok(removed)
+    }
+
+    pub fn get_policy_revision(&self, guild_id: &str) -> anyhow::Result<i64> {
+        validate_snowflake("guild_id", guild_id)?;
+        Ok(self
+            .policy_revisions
+            .get(guild_id)
+            .map(|r| *r.value())
+            .unwrap_or(1))
+    }
+
+    pub fn bump_policy_revision(&self, guild_id: &str) -> anyhow::Result<i64> {
+        validate_snowflake("guild_id", guild_id)?;
+        let mut entry = self
+            .policy_revisions
+            .entry(guild_id.to_string())
+            .or_insert(1);
+        *entry += 1;
+        Ok(*entry)
     }
 
     pub fn archive_progression_season(&self, guild_id: &str, name: &str) -> ProgressionSeason {

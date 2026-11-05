@@ -16,10 +16,10 @@ use uuid::Uuid;
 use crate::discord::events::generate_icalendar_event;
 
 use crate::storage::{
-    CardCollection, CardTrade, CleanupPlan, CommunityPoll, CustomAutomation, DynamicVoiceRoom,
-    EventRoster, FaqEntry, FeedSubscription, GameAccountLink, Giveaway, InviteTracking,
-    ProgressionSeason, ScheduledEvent, ServerSnapshot, StickyMessage, StoreItem, TupperProfile,
-    validate_snowflake,
+    CardCollection, CardTrade, CleanupPlan, CommandPolicyRule, CommunityPoll, CustomAutomation,
+    DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink, Giveaway,
+    InviteTracking, ProgressionSeason, ScheduledEvent, ServerSnapshot, StickyMessage, StoreItem,
+    TupperProfile, validate_snowflake,
 };
 
 use super::{
@@ -3403,6 +3403,506 @@ pub async fn reconcile_companion_channels(
         "reconciled": true,
         "revoked": revoked_count,
         "active_leases": remaining_leases,
+    })))
+}
+
+// ==========================================
+// Issue #171: Command Policy Engine
+// ==========================================
+
+#[derive(Debug, Deserialize)]
+pub struct UpsertPolicyRuleRequest {
+    pub id: Option<Uuid>,
+    pub subject_kind: String,
+    pub subject_id: Option<String>,
+    pub resource_kind: String,
+    pub module_id: Option<String>,
+    pub command_name: Option<String>,
+    pub action_key: Option<String>,
+    pub effect: String,
+    pub priority: Option<i32>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResetPolicyRulesRequest {
+    pub confirm: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExplainPolicyRequest {
+    pub user_id: String,
+    pub channel_id: String,
+    pub thread_parent_id: Option<String>,
+    pub voice_channel_id: Option<String>,
+    pub roles: Option<Vec<(String, i64)>>,
+    pub resource_kind: String,
+    pub module_id: Option<String>,
+    pub command_name: Option<String>,
+    pub action_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct PolicyExportData {
+    pub version: u32,
+    pub guild_id: String,
+    pub revision: i64,
+    pub exported_at: DateTime<Utc>,
+    pub rules: Vec<CommandPolicyRule>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PolicyImportRequest {
+    pub dry_run: Option<bool>,
+    pub expected_revision: Option<i64>,
+    pub rules: Vec<CommandPolicyRule>,
+}
+
+pub async fn list_policy_rules(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let revision = state
+        .app
+        .storage
+        .get_policy_revision(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let rules = state
+        .app
+        .storage
+        .list_policy_rules(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(json!({
+        "guild_id": guild_id,
+        "revision": revision,
+        "rules": rules
+    })))
+}
+
+pub async fn upsert_policy_rule(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<UpsertPolicyRuleRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let subject_kind = payload.subject_kind.to_lowercase();
+    if !["user", "role", "channel", "voice_channel", "guild"].contains(&subject_kind.as_str()) {
+        return Err(ApiError::bad_request("Invalid subject_kind"));
+    }
+    if subject_kind == "guild" && payload.subject_id.is_some() {
+        return Err(ApiError::bad_request(
+            "Guild subject must not specify subject_id",
+        ));
+    }
+    if subject_kind != "guild" && payload.subject_id.is_none() {
+        return Err(ApiError::bad_request(format!(
+            "{subject_kind} subject requires subject_id"
+        )));
+    }
+    if let Some(ref sid) = payload.subject_id {
+        validate_snowflake("subject_id", sid).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    }
+
+    let resource_kind = payload.resource_kind.to_lowercase();
+    if !["command", "module", "action"].contains(&resource_kind.as_str()) {
+        return Err(ApiError::bad_request("Invalid resource_kind"));
+    }
+    if resource_kind == "command" && (payload.module_id.is_none() || payload.command_name.is_none())
+    {
+        return Err(ApiError::bad_request(
+            "Command resource requires both module_id and command_name",
+        ));
+    }
+    if resource_kind == "module" && payload.module_id.is_none() {
+        return Err(ApiError::bad_request("Module resource requires module_id"));
+    }
+    if resource_kind == "action" && payload.action_key.is_none() {
+        return Err(ApiError::bad_request("Action resource requires action_key"));
+    }
+
+    let effect = payload.effect.to_lowercase();
+    if effect != "allow" && effect != "deny" {
+        return Err(ApiError::bad_request("Effect must be 'allow' or 'deny'"));
+    }
+
+    let now = Utc::now();
+    let rule_id = payload.id.unwrap_or_else(Uuid::new_v4);
+    let rule = CommandPolicyRule {
+        id: rule_id,
+        guild_id: guild_id.clone(),
+        subject_kind,
+        subject_id: payload.subject_id,
+        resource_kind,
+        module_id: payload.module_id,
+        command_name: payload.command_name,
+        action_key: payload.action_key,
+        effect,
+        priority: payload.priority.unwrap_or(0),
+        enabled: payload.enabled.unwrap_or(true),
+        version: 1,
+        created_by: session.user.id.clone(),
+        created_at: now,
+        updated_at: now,
+    };
+
+    let saved = state
+        .app
+        .storage
+        .upsert_policy_rule(rule)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    state.app.policy_engine.invalidate(&guild_id);
+
+    let _ = state
+        .app
+        .storage
+        .record_audit(
+            Some(&guild_id),
+            Some(&session.user.id),
+            "command_policies",
+            "rule_upserted",
+            json!({
+                "rule_id": saved.id,
+                "subject_kind": saved.subject_kind,
+                "subject_id": saved.subject_id,
+                "resource_kind": saved.resource_kind,
+                "effect": saved.effect,
+                "priority": saved.priority,
+            }),
+        )
+        .await;
+
+    let new_revision = state
+        .app
+        .storage
+        .get_policy_revision(&guild_id)
+        .await
+        .unwrap_or(1);
+
+    Ok(Json(json!({
+        "rule": saved,
+        "revision": new_revision
+    })))
+}
+
+pub async fn delete_policy_rule(
+    State(state): State<WebState>,
+    Path((guild_id, rule_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let deleted = state
+        .app
+        .storage
+        .delete_policy_rule(&guild_id, rule_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    if deleted {
+        state.app.policy_engine.invalidate(&guild_id);
+        let _ = state
+            .app
+            .storage
+            .record_audit(
+                Some(&guild_id),
+                Some(&session.user.id),
+                "command_policies",
+                "rule_deleted",
+                json!({ "rule_id": rule_id }),
+            )
+            .await;
+    }
+
+    let revision = state
+        .app
+        .storage
+        .get_policy_revision(&guild_id)
+        .await
+        .unwrap_or(1);
+
+    Ok(Json(json!({
+        "deleted": deleted,
+        "rule_id": rule_id,
+        "revision": revision
+    })))
+}
+
+pub async fn reset_policy_rules(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<ResetPolicyRulesRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    if !payload.confirm {
+        return Err(ApiError::bad_request(
+            "Confirmation required to reset policy rules",
+        ));
+    }
+
+    let removed = state
+        .app
+        .storage
+        .reset_policy_rules(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    state.app.policy_engine.invalidate(&guild_id);
+
+    let _ = state
+        .app
+        .storage
+        .record_audit(
+            Some(&guild_id),
+            Some(&session.user.id),
+            "command_policies",
+            "rules_reset",
+            json!({ "removed_count": removed }),
+        )
+        .await;
+
+    let revision = state
+        .app
+        .storage
+        .get_policy_revision(&guild_id)
+        .await
+        .unwrap_or(1);
+
+    Ok(Json(json!({
+        "reset": true,
+        "removed_count": removed,
+        "revision": revision
+    })))
+}
+
+pub async fn explain_policy(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<ExplainPolicyRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    validate_snowflake("user_id", &payload.user_id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    validate_snowflake("channel_id", &payload.channel_id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let resource = match payload.resource_kind.as_str() {
+        "command" => {
+            let m_id = payload
+                .module_id
+                .ok_or_else(|| ApiError::bad_request("module_id required"))?;
+            let c_name = payload
+                .command_name
+                .ok_or_else(|| ApiError::bad_request("command_name required"))?;
+            crate::policy::PolicyResource::Command {
+                module_id: m_id,
+                command_name: c_name,
+            }
+        }
+        "module" => {
+            let m_id = payload
+                .module_id
+                .ok_or_else(|| ApiError::bad_request("module_id required"))?;
+            crate::policy::PolicyResource::Module { module_id: m_id }
+        }
+        "action" => {
+            let a_key = payload
+                .action_key
+                .ok_or_else(|| ApiError::bad_request("action_key required"))?;
+            crate::policy::PolicyResource::Action { action_key: a_key }
+        }
+        _ => return Err(ApiError::bad_request("Invalid resource_kind")),
+    };
+
+    let rules = state
+        .app
+        .storage
+        .list_policy_rules(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let module_id_to_check = match &resource {
+        crate::policy::PolicyResource::Command { module_id, .. } => Some(module_id.as_str()),
+        crate::policy::PolicyResource::Module { module_id } => Some(module_id.as_str()),
+        _ => None,
+    };
+    let module_enabled = if let Some(m_id) = module_id_to_check {
+        match state.app.storage.get_module_settings(&guild_id, m_id).await {
+            Ok(Some(s)) => s.enabled,
+            _ => true,
+        }
+    } else {
+        true
+    };
+
+    let ctx = crate::policy::PolicyContext {
+        guild_id: guild_id.clone(),
+        user_id: payload.user_id,
+        roles: payload.roles.unwrap_or_default(),
+        channel_id: payload.channel_id,
+        thread_parent_id: payload.thread_parent_id,
+        voice_channel_id: payload.voice_channel_id,
+        is_guild_owner: false,
+        is_administrator: false,
+    };
+
+    let outcome = state
+        .app
+        .policy_engine
+        .evaluate(&ctx, &resource, &rules, module_enabled);
+
+    Ok(Json(json!({
+        "outcome": outcome,
+        "rules_evaluated_count": rules.len(),
+    })))
+}
+
+pub async fn export_policies(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<PolicyExportData>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let revision = state
+        .app
+        .storage
+        .get_policy_revision(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let rules = state
+        .app
+        .storage
+        .list_policy_rules(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(PolicyExportData {
+        version: 1,
+        guild_id,
+        revision,
+        exported_at: Utc::now(),
+        rules,
+    }))
+}
+
+pub async fn import_policies(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<PolicyImportRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let current_revision = state
+        .app
+        .storage
+        .get_policy_revision(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    if let Some(expected) = payload
+        .expected_revision
+        .filter(|&expected| expected != current_revision)
+    {
+        return Err(ApiError::bad_request(format!(
+            "Revision conflict: current revision is {current_revision}, expected {expected}"
+        )));
+    }
+
+    for rule in &payload.rules {
+        if rule.guild_id != guild_id {
+            return Err(ApiError::bad_request(format!(
+                "Rule {} has mismatched guild_id {}",
+                rule.id, rule.guild_id
+            )));
+        }
+    }
+
+    if payload.dry_run.unwrap_or(false) {
+        return Ok(Json(json!({
+            "dry_run": true,
+            "rules_count": payload.rules.len(),
+            "current_revision": current_revision,
+            "valid": true,
+        })));
+    }
+
+    state
+        .app
+        .storage
+        .reset_policy_rules(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let mut imported = Vec::new();
+    for rule in payload.rules {
+        let saved = state
+            .app
+            .storage
+            .upsert_policy_rule(rule)
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        imported.push(saved);
+    }
+
+    state.app.policy_engine.invalidate(&guild_id);
+
+    let _ = state
+        .app
+        .storage
+        .record_audit(
+            Some(&guild_id),
+            Some(&session.user.id),
+            "command_policies",
+            "rules_imported",
+            json!({ "imported_count": imported.len() }),
+        )
+        .await;
+
+    let new_revision = state
+        .app
+        .storage
+        .get_policy_revision(&guild_id)
+        .await
+        .unwrap_or(1);
+
+    Ok(Json(json!({
+        "imported": true,
+        "count": imported.len(),
+        "revision": new_revision,
     })))
 }
 

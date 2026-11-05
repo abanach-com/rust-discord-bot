@@ -957,6 +957,10 @@ async fn execute_command_inner(
 
     responded: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<()> {
+    if command.data.name == "policy" {
+        return handle_policy_builtin_command(ctx, state, command, deferred, responded).await;
+    }
+
     let Some(module_id) = state.scripts.module_for_command(&command.data.name).await else {
         respond_or_edit(
             ctx,
@@ -1047,6 +1051,88 @@ async fn execute_command_inner(
         return Ok(());
     }
 
+    if let Some(guild_id) = command.guild_id {
+        let guild_id_str = guild_id.get().to_string();
+
+        let mut roles_with_pos: Vec<(String, i64)> = Vec::new();
+        let mut is_guild_owner = false;
+        let mut voice_channel_id = None;
+
+        if let Some(guild) = ctx.cache.guild(guild_id) {
+            is_guild_owner = command.user.id == guild.owner_id;
+            if let Some(member) = command.member.as_ref() {
+                for role_id in &member.roles {
+                    let pos = guild
+                        .roles
+                        .get(role_id)
+                        .map(|r| r.position as i64)
+                        .unwrap_or(0);
+                    roles_with_pos.push((role_id.get().to_string(), pos));
+                }
+            }
+            if let Some(voice_state) = guild.voice_states.get(&command.user.id) {
+                voice_channel_id = voice_state.channel_id.map(|c| c.get().to_string());
+            }
+        } else if let Some(member) = command.member.as_ref() {
+            for role_id in &member.roles {
+                roles_with_pos.push((role_id.get().to_string(), 0));
+            }
+        }
+
+        let is_administrator = command
+            .member
+            .as_ref()
+            .and_then(|m| m.permissions)
+            .map(|p| p.contains(serenity::all::Permissions::ADMINISTRATOR))
+            .unwrap_or(false);
+
+        let policy_ctx = crate::policy::PolicyContext {
+            guild_id: guild_id_str.clone(),
+            user_id: user_id.clone(),
+            roles: roles_with_pos,
+            channel_id: command.channel_id.get().to_string(),
+            thread_parent_id: None,
+            voice_channel_id,
+            is_guild_owner,
+            is_administrator,
+        };
+
+        let db_revision = state
+            .storage
+            .get_policy_revision(&guild_id_str)
+            .await
+            .unwrap_or(1);
+
+        let rules = match state.policy_engine.get_cached_rules(&guild_id_str) {
+            Some((rev, cached)) if rev >= db_revision => cached,
+            _ => {
+                let fetched = state
+                    .storage
+                    .list_policy_rules(&guild_id_str)
+                    .await
+                    .unwrap_or_default();
+                state
+                    .policy_engine
+                    .set_cached_rules(&guild_id_str, db_revision, fetched.clone());
+                fetched
+            }
+        };
+
+        let resource = crate::policy::PolicyResource::Command {
+            module_id: module_id.clone(),
+            command_name: command.data.name.clone(),
+        };
+
+        let outcome = state
+            .policy_engine
+            .evaluate(&policy_ctx, &resource, &rules, enabled);
+
+        if !outcome.allowed {
+            respond_or_edit(ctx, command, deferred, responded, &outcome.reason).await?;
+            return Ok(());
+        }
+    }
+
     let member_roles = command
         .member
         .as_ref()
@@ -1120,6 +1206,165 @@ async fn execute_command_inner(
     responded.store(true, Ordering::SeqCst);
 
     executor::execute_command_actions(ctx, state, command, &module_id, &actions, is_deferred).await
+}
+
+async fn handle_policy_builtin_command(
+    ctx: &Context,
+    state: &AppState,
+    command: &CommandInteraction,
+    deferred: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    responded: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> anyhow::Result<()> {
+    let Some(guild_id) = command.guild_id else {
+        respond_or_edit(
+            ctx,
+            command,
+            deferred,
+            responded,
+            "Policy commands can only be used in a server.",
+        )
+        .await?;
+        return Ok(());
+    };
+
+    let guild_id_str = guild_id.get().to_string();
+    let is_owner = ctx
+        .cache
+        .guild(guild_id)
+        .map(|g| g.owner_id == command.user.id)
+        .unwrap_or(false);
+
+    let is_admin = command
+        .member
+        .as_ref()
+        .and_then(|m| m.permissions)
+        .map(|p| p.contains(serenity::all::Permissions::ADMINISTRATOR))
+        .unwrap_or(false);
+
+    if !is_owner && !is_admin {
+        respond_or_edit(
+            ctx,
+            command,
+            deferred,
+            responded,
+            "🔒 Only server administrators and the server owner can use policy diagnostic/recovery tools.",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let options = options_to_json(&command.data.options);
+    if let Some(reset_opts) = options.get("reset") {
+        let confirmed = reset_opts
+            .get("confirm")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !confirmed {
+            respond_or_edit(
+                ctx,
+                command,
+                deferred,
+                responded,
+                "⚠️ Resetting all command policies will remove custom rules. Pass `confirm: true` to confirm.",
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let count = state.storage.reset_policy_rules(&guild_id_str).await?;
+        state.policy_engine.invalidate(&guild_id_str);
+        let msg = format!("✅ Command policies reset to default ({count} custom rules removed).");
+        respond_or_edit(ctx, command, deferred, responded, &msg).await?;
+        return Ok(());
+    }
+
+    let explain_opts = options.get("explain").or_else(|| options.get("canrun"));
+    if let Some(opts) = explain_opts {
+        let target_command = opts.get("command").and_then(|v| v.as_str()).unwrap_or("");
+
+        if target_command.is_empty() {
+            respond_or_edit(
+                ctx,
+                command,
+                deferred,
+                responded,
+                "Please specify the command name to inspect.",
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let module_id = state
+            .scripts
+            .module_for_command(target_command)
+            .await
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let target_user_id = opts
+            .get("user")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| command.user.id.get().to_string());
+
+        let mut roles_with_pos = Vec::new();
+        if let (Some(guild), Some(member)) = (ctx.cache.guild(guild_id), command.member.as_ref()) {
+            for role_id in &member.roles {
+                let pos = guild
+                    .roles
+                    .get(role_id)
+                    .map(|r| r.position as i64)
+                    .unwrap_or(0);
+                roles_with_pos.push((role_id.get().to_string(), pos));
+            }
+        }
+
+        let policy_ctx = crate::policy::PolicyContext {
+            guild_id: guild_id_str.clone(),
+            user_id: target_user_id,
+            roles: roles_with_pos,
+            channel_id: command.channel_id.get().to_string(),
+            thread_parent_id: None,
+            voice_channel_id: None,
+            is_guild_owner: is_owner,
+            is_administrator: is_admin,
+        };
+
+        let rules = state
+            .storage
+            .list_policy_rules(&guild_id_str)
+            .await
+            .unwrap_or_default();
+        let resource = crate::policy::PolicyResource::Command {
+            module_id,
+            command_name: target_command.to_string(),
+        };
+
+        let outcome = state
+            .policy_engine
+            .evaluate(&policy_ctx, &resource, &rules, true);
+        let mut text = format!(
+            "📋 **Policy Evaluation for `/{}`**:\nResult: **{}**\nReason: {}\n\n**Trace:**\n",
+            target_command,
+            if outcome.allowed { "ALLOWED" } else { "DENIED" },
+            outcome.reason
+        );
+        for step in outcome.trace {
+            text.push_str(&format!("- [{}] {}\n", step.step, step.description));
+        }
+
+        respond_or_edit(ctx, command, deferred, responded, &text).await?;
+        return Ok(());
+    }
+
+    respond_or_edit(
+        ctx,
+        command,
+        deferred,
+        responded,
+        "Usage: `/policy explain command:<name>` or `/policy reset confirm:true`",
+    )
+    .await?;
+    Ok(())
 }
 
 async fn run_event(

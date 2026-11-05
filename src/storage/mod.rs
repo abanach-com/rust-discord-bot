@@ -16,6 +16,8 @@ pub use memory::MemoryStore;
 
 pub use postgres::{PostgresStore, run_safe_migrations};
 
+pub use crate::policy::CommandPolicyRule;
+
 pub use progression::{
     CoinTransfer, CoinTransferOutcome, DailyClaimOutcome, MemberProgress, ProgressMetric,
     ReputationGrantOutcome, XpAward, level_for_xp, total_xp_for_level,
@@ -2441,6 +2443,54 @@ impl Storage {
         match self {
             Self::Memory(store) => Some(store.raw_identity_history_count()),
             Self::Postgres(_) => None,
+        }
+    }
+
+    pub async fn list_policy_rules(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<CommandPolicyRule>> {
+        match self {
+            Self::Memory(store) => store.list_policy_rules(guild_id),
+            Self::Postgres(store) => store.list_policy_rules(guild_id).await,
+        }
+    }
+
+    pub async fn upsert_policy_rule(
+        &self,
+        rule: CommandPolicyRule,
+    ) -> anyhow::Result<CommandPolicyRule> {
+        match self {
+            Self::Memory(store) => store.upsert_policy_rule(rule),
+            Self::Postgres(store) => store.upsert_policy_rule(rule).await,
+        }
+    }
+
+    pub async fn delete_policy_rule(&self, guild_id: &str, rule_id: Uuid) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => store.delete_policy_rule(guild_id, rule_id),
+            Self::Postgres(store) => store.delete_policy_rule(guild_id, rule_id).await,
+        }
+    }
+
+    pub async fn reset_policy_rules(&self, guild_id: &str) -> anyhow::Result<usize> {
+        match self {
+            Self::Memory(store) => store.reset_policy_rules(guild_id),
+            Self::Postgres(store) => store.reset_policy_rules(guild_id).await,
+        }
+    }
+
+    pub async fn get_policy_revision(&self, guild_id: &str) -> anyhow::Result<i64> {
+        match self {
+            Self::Memory(store) => store.get_policy_revision(guild_id),
+            Self::Postgres(store) => store.get_policy_revision(guild_id).await,
+        }
+    }
+
+    pub async fn bump_policy_revision(&self, guild_id: &str) -> anyhow::Result<i64> {
+        match self {
+            Self::Memory(store) => store.bump_policy_revision(guild_id),
+            Self::Postgres(store) => store.bump_policy_revision(guild_id).await,
         }
     }
 
@@ -5579,5 +5629,73 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(results_g2.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_command_policy_storage_and_revision_lifecycle() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_1 = "100000000000000001";
+        let guild_2 = "200000000000000002";
+        let user_id = "300000000000000003";
+
+        // Initial revision is 1
+        assert_eq!(store.get_policy_revision(guild_1).await.unwrap(), 1);
+        assert_eq!(store.get_policy_revision(guild_2).await.unwrap(), 1);
+
+        let rule1 = CommandPolicyRule::new_user_rule(
+            guild_1.to_string(),
+            user_id.to_string(),
+            crate::policy::PolicyResource::Command {
+                module_id: "music".to_string(),
+                command_name: "play".to_string(),
+            },
+            crate::policy::PolicyEffect::Deny,
+            10,
+            "admin".to_string(),
+        )
+        .unwrap();
+
+        let rule2 = CommandPolicyRule::new_guild_rule(
+            guild_1.to_string(),
+            crate::policy::PolicyResource::Module {
+                module_id: "music".to_string(),
+            },
+            crate::policy::PolicyEffect::Allow,
+            0,
+            "admin".to_string(),
+        )
+        .unwrap();
+
+        // Upsert rule 1
+        let saved1 = store.upsert_policy_rule(rule1.clone()).await.unwrap();
+        assert_eq!(saved1.id, rule1.id);
+        let rev = store.get_policy_revision(guild_1).await.unwrap();
+        assert!(rev >= 2);
+
+        // Upsert rule 2
+        store.upsert_policy_rule(rule2.clone()).await.unwrap();
+
+        // List rules: ordered by priority DESC (rule1 with priority 10 before rule2 with priority 0)
+        let rules_g1 = store.list_policy_rules(guild_1).await.unwrap();
+        assert_eq!(rules_g1.len(), 2);
+        assert_eq!(rules_g1[0].id, rule1.id);
+        assert_eq!(rules_g1[1].id, rule2.id);
+
+        // Guild 2 has 0 rules (isolation)
+        let rules_g2 = store.list_policy_rules(guild_2).await.unwrap();
+        assert!(rules_g2.is_empty());
+
+        // Delete rule 1
+        let deleted = store.delete_policy_rule(guild_1, rule1.id).await.unwrap();
+        assert!(deleted);
+        let rules_after_del = store.list_policy_rules(guild_1).await.unwrap();
+        assert_eq!(rules_after_del.len(), 1);
+        assert_eq!(rules_after_del[0].id, rule2.id);
+
+        // Reset policies
+        let reset_count = store.reset_policy_rules(guild_1).await.unwrap();
+        assert_eq!(reset_count, 1);
+        let rules_after_reset = store.list_policy_rules(guild_1).await.unwrap();
+        assert!(rules_after_reset.is_empty());
     }
 }
