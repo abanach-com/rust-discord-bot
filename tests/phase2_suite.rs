@@ -537,6 +537,24 @@ async fn test_phase2_community_operations_and_media_suite() {
         .unwrap();
     assert_eq!(traversal_resp.status(), reqwest::StatusCode::BAD_REQUEST);
 
+    // Verify whitespace in role_id is rejected with 400 Bad Request (#165)
+    let whitespace_req = serde_json::json!({
+        "name": "Whitespace Item",
+        "description": "Whitespace attempt",
+        "price": 100,
+        "role_id": " 100000000000000002 ",
+        "stock": 5
+    });
+    let whitespace_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/store/items"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&whitespace_req)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(whitespace_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
     let item_resp = client
         .post(format!("{base_url}/api/guilds/{guild_id}/store/items"))
         .header(COOKIE, &session_cookie)

@@ -337,13 +337,12 @@ pub struct StorePurchase {
 }
 
 pub fn validate_snowflake(label: &str, id: &str) -> anyhow::Result<u64> {
-    let trimmed = id.trim();
-    anyhow::ensure!(!trimmed.is_empty(), "{label} cannot be empty");
+    anyhow::ensure!(!id.is_empty(), "{label} cannot be empty");
     anyhow::ensure!(
-        trimmed.chars().all(|c| c.is_ascii_digit()),
+        id.chars().all(|c| c.is_ascii_digit()),
         "{label} must contain only decimal digits"
     );
-    let parsed = trimmed
+    let parsed = id
         .parse::<u64>()
         .map_err(|_| anyhow::anyhow!("{label} must be a valid decimal Discord snowflake"))?;
     anyhow::ensure!(parsed != 0, "{label} must be nonzero");
@@ -3932,11 +3931,16 @@ mod tests {
             validate_snowflake("role_id", "100000000000000001").unwrap(),
             100000000000000001
         );
-        assert_eq!(validate_snowflake("role_id", " 42 ").unwrap(), 42);
+        assert_eq!(validate_snowflake("role_id", "42").unwrap(), 42);
 
         // Empty and whitespace
         assert!(validate_snowflake("role_id", "").is_err());
         assert!(validate_snowflake("role_id", "   ").is_err());
+        assert!(validate_snowflake("role_id", " 42 ").is_err());
+        assert!(validate_snowflake("role_id", "42 ").is_err());
+        assert!(validate_snowflake("role_id", " 42").is_err());
+        assert!(validate_snowflake("role_id", "\t42").is_err());
+        assert!(validate_snowflake("role_id", "42\n").is_err());
 
         // Zero
         assert!(validate_snowflake("role_id", "0").is_err());
@@ -3976,6 +3980,24 @@ mod tests {
         assert!(bad_role.is_err());
         assert!(
             bad_role
+                .unwrap_err()
+                .to_string()
+                .contains("must contain only decimal digits")
+        );
+
+        let whitespace_role = store
+            .create_store_item(
+                guild_id,
+                "Whitespace Item",
+                "desc",
+                100,
+                Some(" 42 "),
+                Some(5),
+            )
+            .await;
+        assert!(whitespace_role.is_err());
+        assert!(
+            whitespace_role
                 .unwrap_err()
                 .to_string()
                 .contains("must contain only decimal digits")
