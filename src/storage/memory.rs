@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use chrono::{DateTime, Duration, Utc};
@@ -12,12 +12,13 @@ use uuid::Uuid;
 use super::{
     AdjustMemberProgressParams, AiGuildBudget, AiKnowledgeDocument, AuditLogEntry, CardCollection,
     CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome, CommandPolicyRule, CommunityPoll,
-    CompanionChannelLease, CompanionChannelMapping, CountingGame, CustomAutomation,
-    DailyClaimOutcome, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink,
-    GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway, GuildModuleSettings,
-    IntegrationConnection, IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking,
-    KickStreamSubscription, LinkedAccount, McpToolAuthorization, MemberIdentityRecord,
-    MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
+    CompanionChannelLease, CompanionChannelMapping, CompanionMappingItem, CountingGame,
+    CustomAutomation, DailyClaimOutcome, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription,
+    GameAccountLink, GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway,
+    GuildModuleSettings, IntegrationConnection, IntegrationDeliveryLog,
+    IntegrationWebhookSubscription, InviteTracking, KickStreamSubscription, LinkedAccount,
+    MAX_COMPANION_MAPPINGS_PER_GUILD, McpToolAuthorization, MemberIdentityRecord, MemberProgress,
+    MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
     ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
     ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
     ProgressionSeason, RecordCompanionLeaseParams, RedditSubscription, ReputationGrantOutcome,
@@ -124,6 +125,8 @@ pub struct MemoryStore {
     companion_mappings: Arc<DashMap<Uuid, CompanionChannelMapping>>,
 
     companion_leases: Arc<DashMap<(String, String, String), CompanionChannelLease>>,
+
+    companion_lock: Arc<Mutex<()>>,
 
     policy_rules: Arc<DashMap<Uuid, CommandPolicyRule>>,
 
@@ -2123,51 +2126,110 @@ impl MemoryStore {
         allow_send_messages: bool,
         allow_read_history: bool,
     ) -> anyhow::Result<CompanionChannelMapping> {
-        validate_snowflake("guild_id", guild_id)?;
-        validate_snowflake("voice_channel_id", voice_channel_id)?;
-        validate_snowflake("text_channel_id", text_channel_id)?;
-
-        // Preserve mapping ID and creation timestamp when updating an existing mapping
-        let existing = self
-            .companion_mappings
-            .iter()
-            .find(|m| m.guild_id == guild_id && m.voice_channel_id == voice_channel_id)
-            .map(|m| (m.id, m.created_at));
-
-        let now = Utc::now();
-        let (id, created_at) = if let Some((old_id, old_created)) = existing {
-            self.companion_mappings.remove(&old_id);
-            (old_id, old_created)
-        } else {
-            (Uuid::new_v4(), now)
-        };
-
-        let mapping = CompanionChannelMapping {
-            id,
-            guild_id: guild_id.to_string(),
+        let item = CompanionMappingItem {
             voice_channel_id: voice_channel_id.to_string(),
             text_channel_id: text_channel_id.to_string(),
             allow_send_messages,
             allow_read_history,
-            created_at,
-            enabled: true,
         };
-        self.companion_mappings.insert(mapping.id, mapping.clone());
+        let mut results = self.batch_upsert_companion_mappings(guild_id, &[item])?;
+        results
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("Failed to upsert companion mapping"))
+    }
 
-        // Issue #175: Invalidate any active/pending leases for this voice channel that target an old text channel
-        for mut lease_entry in self.companion_leases.iter_mut() {
-            let lease = lease_entry.value_mut();
-            if lease.guild_id == guild_id
-                && lease.voice_channel_id == voice_channel_id
-                && lease.text_channel_id != text_channel_id
-                && (lease.status == "active" || lease.status == "revoke_pending")
-            {
-                lease.status = "revoke_pending".to_string();
-                lease.next_attempt_at = Some(now);
+    pub fn batch_upsert_companion_mappings(
+        &self,
+        guild_id: &str,
+        items: &[CompanionMappingItem],
+    ) -> anyhow::Result<Vec<CompanionChannelMapping>> {
+        validate_snowflake("guild_id", guild_id)?;
+        for item in items {
+            validate_snowflake("voice_channel_id", &item.voice_channel_id)?;
+            validate_snowflake("text_channel_id", &item.text_channel_id)?;
+            if item.voice_channel_id == item.text_channel_id {
+                anyhow::bail!("Voice channel and text companion channel cannot be the same");
             }
         }
 
-        Ok(mapping)
+        let _guard = self
+            .companion_lock
+            .lock()
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        let mut existing_for_guild: HashMap<String, (Uuid, DateTime<Utc>, String)> = self
+            .companion_mappings
+            .iter()
+            .filter(|m| m.guild_id == guild_id)
+            .map(|m| {
+                (
+                    m.voice_channel_id.clone(),
+                    (m.id, m.created_at, m.text_channel_id.clone()),
+                )
+            })
+            .collect();
+
+        let mut final_voice_ids: HashSet<String> = existing_for_guild.keys().cloned().collect();
+        for item in items {
+            final_voice_ids.insert(item.voice_channel_id.clone());
+        }
+
+        if final_voice_ids.len() > MAX_COMPANION_MAPPINGS_PER_GUILD {
+            anyhow::bail!(
+                "Companion mapping limit reached (max {MAX_COMPANION_MAPPINGS_PER_GUILD} per guild)"
+            );
+        }
+
+        let now = Utc::now();
+        let mut saved = Vec::new();
+
+        for item in items {
+            let (id, created_at, old_text_opt) = if let Some(&(old_id, old_created, ref old_text)) =
+                existing_for_guild.get(&item.voice_channel_id)
+            {
+                (old_id, old_created, Some(old_text.clone()))
+            } else {
+                (Uuid::new_v4(), now, None)
+            };
+
+            let mapping = CompanionChannelMapping {
+                id,
+                guild_id: guild_id.to_string(),
+                voice_channel_id: item.voice_channel_id.clone(),
+                text_channel_id: item.text_channel_id.clone(),
+                allow_send_messages: item.allow_send_messages,
+                allow_read_history: item.allow_read_history,
+                created_at,
+                enabled: true,
+            };
+
+            self.companion_mappings.insert(mapping.id, mapping.clone());
+            existing_for_guild.insert(
+                item.voice_channel_id.clone(),
+                (id, created_at, item.text_channel_id.clone()),
+            );
+
+            // Issue #175: Invalidate any active/pending leases for this voice channel that target an old text channel
+            if let Some(old_text) = old_text_opt
+                && old_text != item.text_channel_id
+            {
+                for mut lease_entry in self.companion_leases.iter_mut() {
+                    let lease = lease_entry.value_mut();
+                    if lease.guild_id == guild_id
+                        && lease.voice_channel_id == item.voice_channel_id
+                        && lease.text_channel_id != item.text_channel_id
+                        && (lease.status == "active" || lease.status == "revoke_pending")
+                    {
+                        lease.status = "revoke_pending".to_string();
+                        lease.next_attempt_at = Some(now);
+                    }
+                }
+            }
+
+            saved.push(mapping);
+        }
+
+        Ok(saved)
     }
 
     pub fn delete_companion_mapping(

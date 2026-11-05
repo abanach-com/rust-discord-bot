@@ -465,6 +465,16 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - `ensure_confined_path` in `LuaEngine` canonicalizes paths on disk and enforces that resolved files and directories remain strictly within their parent package boundary (`starts_with(&canonical_base)`).
   - Symlinks attempting to escape package directories to read arbitrary system or secret JSON configuration files are rejected at load time, safeguarding runtime configuration and preventing sandbox escapes.
 
+## 16. Duty Policy & Companion Mapping Batch Atomicity (Issues #210, #211)
+
+- **Duty Override Time Limit & Overflow Protection (#210)**:
+  - `POST /duty/override` authoritatively fetches guild duty configuration (`get_duty_settings`) and validates `duration_mins` against `1..=max_override_duration_mins` (defaulting to 1440m / 24h if unset). Rejects requests with non-positive duration or durations exceeding the configured guild policy with HTTP 400 Bad Request.
+  - Replaced unsafe duration constructors with `chrono::Duration::try_minutes(minutes)` and `checked_add_signed(delta)` across web handlers and Discord command dispatchers, preventing service crashes / panics on extreme numeric values (`i64::MAX`).
+- **Voice Companion Batch Quota & Transactional Atomicity (#211)**:
+  - Enforced global limit of 50 companion mappings per guild (`MAX_COMPANION_MAPPINGS_PER_GUILD = 50`) at both the REST API preflight layer and persistent storage layer.
+  - Implemented transactional batch persistence (`batch_upsert_companion_mappings`) for PostgreSQL using `pg_advisory_xact_lock` and single-transaction rollbacks on constraint violations, and thread-safe atomic batch persistence for `MemoryStore` under synchronization locks.
+  - Segmented `POST /companion-channels/batch` into a three-phase pipeline: (1) upfront preflight validation of all mappings, channel snowflakes, voice!=text invariants, tenant isolation, and live Discord channel types; (2) atomic storage batch upsert guaranteeing all-or-nothing execution without partial persistence; (3) post-commit Discord permission revocation and audit logging.
+
 ## Delivery order
 
 ### Phase 0 — foundation

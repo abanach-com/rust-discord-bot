@@ -1931,7 +1931,11 @@ async fn handle_duty_builtin_command(
             .min(settings.max_override_duration_mins as u64)
             .max(1);
 
-        let expires_at = chrono::Utc::now() + chrono::Duration::minutes(duration_mins as i64);
+        let delta = chrono::Duration::try_minutes(duration_mins as i64)
+            .unwrap_or_else(|| chrono::Duration::minutes(120));
+        let expires_at = chrono::Utc::now()
+            .checked_add_signed(delta)
+            .unwrap_or_else(chrono::Utc::now);
         profile.manual_override = Some("force_off".to_string());
         profile.override_expires_at = Some(expires_at);
         let saved = state.storage.upsert_duty_profile(profile).await?;

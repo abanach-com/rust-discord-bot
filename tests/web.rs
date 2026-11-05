@@ -1060,6 +1060,74 @@ async fn test_voice_companion_channels_api() {
         .unwrap();
     assert_eq!(bad_snow.status(), reqwest::StatusCode::BAD_REQUEST);
 
+    // 4b. Reject batch exceeding 50 mappings without inserting any records (Issue #211)
+    let mut over_limit_payload = Vec::new();
+    for i in 1..=51 {
+        over_limit_payload.push(serde_json::json!({
+            "voice_channel_id": format!("8880000000000000{:02}", i),
+            "text_channel_id": format!("9990000000000000{:02}", i),
+        }));
+    }
+    let over_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/voice/companion/mappings"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({ "mappings": over_limit_payload }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(over_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Verify 0 records inserted after over_limit failure
+    let empty_check = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/voice/companion/mappings"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    let empty_json: serde_json::Value = empty_check.json().await.unwrap();
+    assert_eq!(empty_json["mappings"].as_array().unwrap().len(), 0);
+
+    // 4c. Reject mixed batch (1 valid, 1 invalid) without partial inserts (Issue #211)
+    let mixed_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/voice/companion/mappings"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "mappings": [
+                {
+                    "voice_channel_id": "888000000000000050",
+                    "text_channel_id": "999000000000000050"
+                },
+                {
+                    "voice_channel_id": "888000000000000051",
+                    "text_channel_id": "888000000000000051" // same: invalid
+                }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mixed_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Verify 0 records inserted after mixed failure
+    let empty_check2 = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/voice/companion/mappings"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    let empty_json2: serde_json::Value = empty_check2.json().await.unwrap();
+    assert_eq!(empty_json2["mappings"].as_array().unwrap().len(), 0);
+
     // 5. Valid create mapping
     let create_resp = client
         .post(format!(
@@ -1666,6 +1734,60 @@ async fn test_moderator_duty_api() {
     assert_eq!(off_resp.status(), reqwest::StatusCode::OK);
     let off_json: serde_json::Value = off_resp.json().await.unwrap();
     assert_eq!(off_json["profile"]["manual_override"], "force_off");
+
+    // 8b. Override off with duration exceeding guild limit (max is 720, requesting 1440) -> 400 Bad Request (Issue #210)
+    let over_duration_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/duty/override"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "user_id": user_id,
+            "action": "off",
+            "duration_mins": 1440
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        over_duration_resp.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+
+    // 8c. Override off with extreme duration (i64::MAX) -> 400 Bad Request without panic (Issue #210)
+    let overflow_duration_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/duty/override"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "user_id": user_id,
+            "action": "off",
+            "duration_mins": i64::MAX
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        overflow_duration_resp.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+
+    // 8d. Override off with invalid non-positive duration -> 400 Bad Request (Issue #210)
+    let zero_duration_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/duty/override"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "user_id": user_id,
+            "action": "off",
+            "duration_mins": 0
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        zero_duration_resp.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
 
     // 9a. Reconcile guild duty with dry_run=true (Issue #187: pure preview, no DB mutation)
     let state_before = state

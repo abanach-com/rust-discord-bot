@@ -581,6 +581,18 @@ pub struct CompanionChannelMapping {
     pub enabled: bool,
 }
 
+pub const MAX_COMPANION_MAPPINGS_PER_GUILD: usize = 50;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompanionMappingItem {
+    pub voice_channel_id: String,
+    pub text_channel_id: String,
+    #[serde(default = "default_true_field")]
+    pub allow_send_messages: bool,
+    #[serde(default = "default_true_field")]
+    pub allow_read_history: bool,
+}
+
 fn default_true_field() -> bool {
     true
 }
@@ -3210,6 +3222,17 @@ impl Storage {
                     )
                     .await
             }
+        }
+    }
+
+    pub async fn batch_upsert_companion_mappings(
+        &self,
+        guild_id: &str,
+        items: &[CompanionMappingItem],
+    ) -> anyhow::Result<Vec<CompanionChannelMapping>> {
+        match self {
+            Self::Memory(store) => store.batch_upsert_companion_mappings(guild_id, items),
+            Self::Postgres(store) => store.batch_upsert_companion_mappings(guild_id, items).await,
         }
     }
 
@@ -6760,5 +6783,100 @@ mod tests {
             .expect("should find youtube sub");
         assert_eq!(fetched_yt.id, yt_id1);
         assert_eq!(fetched_yt.channel_title, "Tech Channel Updated");
+    }
+
+    #[tokio::test]
+    async fn test_batch_upsert_companion_mappings_quota_and_atomicity() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_id = "100000000000000001";
+
+        // 1. Batch of 51 mappings must fail and insert NOTHING (atomicity + quota)
+        let mut over_limit_items = Vec::new();
+        for i in 1..=51 {
+            over_limit_items.push(CompanionMappingItem {
+                voice_channel_id: format!("1000000000000000{:02}", i),
+                text_channel_id: format!("2000000000000000{:02}", i),
+                allow_send_messages: true,
+                allow_read_history: true,
+            });
+        }
+        let res_over = store
+            .batch_upsert_companion_mappings(guild_id, &over_limit_items)
+            .await;
+        assert!(res_over.is_err());
+        assert!(res_over.unwrap_err().to_string().contains("limit reached"));
+        assert_eq!(
+            store.list_companion_mappings(guild_id).await.unwrap().len(),
+            0
+        );
+
+        // 2. Batch with 1 valid and 1 invalid item (voice == text) must fail with 0 inserts
+        let mixed_items = vec![
+            CompanionMappingItem {
+                voice_channel_id: "100000000000000099".to_string(),
+                text_channel_id: "200000000000000099".to_string(),
+                allow_send_messages: true,
+                allow_read_history: true,
+            },
+            CompanionMappingItem {
+                voice_channel_id: "100000000000000088".to_string(),
+                text_channel_id: "100000000000000088".to_string(), // invalid: same
+                allow_send_messages: true,
+                allow_read_history: true,
+            },
+        ];
+        let res_mixed = store
+            .batch_upsert_companion_mappings(guild_id, &mixed_items)
+            .await;
+        assert!(res_mixed.is_err());
+        assert_eq!(
+            store.list_companion_mappings(guild_id).await.unwrap().len(),
+            0
+        );
+
+        // 3. Batch of exactly 50 mappings must succeed
+        let exact_50_items: Vec<CompanionMappingItem> = over_limit_items[..50].to_vec();
+        let res_50 = store
+            .batch_upsert_companion_mappings(guild_id, &exact_50_items)
+            .await
+            .expect("50 mappings should succeed");
+        assert_eq!(res_50.len(), 50);
+        assert_eq!(
+            store.list_companion_mappings(guild_id).await.unwrap().len(),
+            50
+        );
+
+        // 4. Updating an existing voice channel within 50 mappings succeeds
+        let update_item = vec![CompanionMappingItem {
+            voice_channel_id: "100000000000000001".to_string(),
+            text_channel_id: "200000000000000099".to_string(),
+            allow_send_messages: false,
+            allow_read_history: true,
+        }];
+        let res_update = store
+            .batch_upsert_companion_mappings(guild_id, &update_item)
+            .await
+            .expect("updating existing mapping should succeed");
+        assert_eq!(res_update.len(), 1);
+        assert_eq!(
+            store.list_companion_mappings(guild_id).await.unwrap().len(),
+            50
+        );
+
+        // 5. Adding 1 new mapping when 50 exist must fail
+        let new_item = vec![CompanionMappingItem {
+            voice_channel_id: "100000000000000051".to_string(),
+            text_channel_id: "200000000000000051".to_string(),
+            allow_send_messages: true,
+            allow_read_history: true,
+        }];
+        let res_51st = store
+            .batch_upsert_companion_mappings(guild_id, &new_item)
+            .await;
+        assert!(res_51st.is_err());
+        assert_eq!(
+            store.list_companion_mappings(guild_id).await.unwrap().len(),
+            50
+        );
     }
 }

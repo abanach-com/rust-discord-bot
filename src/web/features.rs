@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -16,12 +18,13 @@ use uuid::Uuid;
 use crate::discord::events::generate_icalendar_event;
 
 use crate::storage::{
-    CardCollection, CardTrade, CleanupPlan, CommandPolicyRule, CommunityPoll, CustomAutomation,
-    DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink, Giveaway,
-    HelpForumConfig, InviteTracking, ModeratorDutyProfile, ModeratorDutySettings,
-    ModeratorDutyState, ProgressionSeason, RecruitmentApplication, RecruitmentReview,
-    RecruitmentTrack, RecruitmentTrackConfig, RecurringSchedule, ScheduledEvent, ServerSnapshot,
-    StickyMessage, StoreItem, SubmittedAnswer, TupperProfile, validate_snowflake,
+    CardCollection, CardTrade, CleanupPlan, CommandPolicyRule, CommunityPoll, CompanionMappingItem,
+    CustomAutomation, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink,
+    Giveaway, HelpForumConfig, InviteTracking, MAX_COMPANION_MAPPINGS_PER_GUILD,
+    ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState, ProgressionSeason,
+    RecruitmentApplication, RecruitmentReview, RecruitmentTrack, RecruitmentTrackConfig,
+    RecurringSchedule, ScheduledEvent, ServerSnapshot, StickyMessage, StoreItem, SubmittedAnswer,
+    TupperProfile, validate_snowflake,
 };
 
 use super::{
@@ -3073,21 +3076,9 @@ pub struct UpsertCompanionMappingPayload {
     pub mappings: Option<Vec<CompanionMappingItem>>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct CompanionMappingItem {
-    pub voice_channel_id: String,
-    pub text_channel_id: String,
-    #[serde(default = "default_true")]
-    pub allow_send_messages: bool,
-    #[serde(default = "default_true")]
-    pub allow_read_history: bool,
-}
-
 fn default_true() -> bool {
     true
 }
-
-const MAX_COMPANION_MAPPINGS_PER_GUILD: usize = 50;
 
 pub async fn list_companion_mappings(
     State(state): State<WebState>,
@@ -3126,6 +3117,11 @@ pub async fn upsert_companion_mapping(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
+    let old_mappings_map: HashMap<String, String> = existing
+        .into_iter()
+        .map(|m| (m.voice_channel_id, m.text_channel_id))
+        .collect();
+
     let items_to_save: Vec<CompanionMappingItem> = if let Some(mappings) = payload.mappings {
         mappings
     } else if let (Some(v), Some(t)) = (payload.voice_channel_id, payload.text_channel_id) {
@@ -3145,8 +3141,10 @@ pub async fn upsert_companion_mapping(
         return Err(ApiError::bad_request("No mappings provided"));
     }
 
-    let mut saved_mappings = Vec::new();
-    for item in items_to_save {
+    // Step 1: Preflight validation across the ENTIRE batch before ANY database mutations
+    let mut final_voice_ids: HashSet<String> = old_mappings_map.keys().cloned().collect();
+
+    for item in &items_to_save {
         validate_snowflake("voice_channel_id", &item.voice_channel_id)
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
         validate_snowflake("text_channel_id", &item.text_channel_id)
@@ -3166,12 +3164,27 @@ pub async fn upsert_companion_mapping(
             ));
         }
 
-        // Live Discord resolution and tenant scope verification (#172)
-        if !state.app.config.discord_token.starts_with("dummy")
-            && state.app.config.discord_token != "mock"
-            && state.app.config.discord_token != "offline"
-        {
-            let http = serenity::all::Http::new(&state.app.config.discord_token);
+        final_voice_ids.insert(item.voice_channel_id.clone());
+    }
+
+    if final_voice_ids.len() > MAX_COMPANION_MAPPINGS_PER_GUILD {
+        return Err(ApiError::bad_request(format!(
+            "Companion mapping limit reached (max {MAX_COMPANION_MAPPINGS_PER_GUILD} per guild)"
+        )));
+    }
+
+    // Live Discord resolution and tenant scope verification (#172)
+    if !state.app.config.discord_token.starts_with("dummy")
+        && state.app.config.discord_token != "mock"
+        && state.app.config.discord_token != "offline"
+    {
+        let http = serenity::all::Http::new(&state.app.config.discord_token);
+        let g_num = guild_id
+            .parse::<u64>()
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        let expected_gid = serenity::all::GuildId::new(g_num);
+
+        for item in &items_to_save {
             let v_num = item
                 .voice_channel_id
                 .parse::<u64>()
@@ -3180,10 +3193,6 @@ pub async fn upsert_companion_mapping(
                 .text_channel_id
                 .parse::<u64>()
                 .map_err(|e| ApiError::bad_request(e.to_string()))?;
-            let g_num = guild_id
-                .parse::<u64>()
-                .map_err(|e| ApiError::bad_request(e.to_string()))?;
-            let expected_gid = serenity::all::GuildId::new(g_num);
 
             let v_chan = match http.get_channel(serenity::all::ChannelId::new(v_num)).await {
                 Ok(serenity::all::Channel::Guild(c)) => c,
@@ -3235,35 +3244,20 @@ pub async fn upsert_companion_mapping(
                 ));
             }
         }
+    }
 
-        let old_text_channel = existing
-            .iter()
-            .find(|m| m.voice_channel_id == item.voice_channel_id)
-            .map(|m| m.text_channel_id.clone());
+    // Step 2: Atomic batch upsert in storage
+    let saved_mappings = state
+        .app
+        .storage
+        .batch_upsert_companion_mappings(&guild_id, &items_to_save)
+        .await
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
-        let is_existing = old_text_channel.is_some();
-        if !is_existing && existing.len() >= MAX_COMPANION_MAPPINGS_PER_GUILD {
-            return Err(ApiError::bad_request(format!(
-                "Companion mapping limit reached (max {MAX_COMPANION_MAPPINGS_PER_GUILD} per guild)"
-            )));
-        }
-
-        let mapping = state
-            .app
-            .storage
-            .upsert_companion_mapping(
-                &guild_id,
-                &item.voice_channel_id,
-                &item.text_channel_id,
-                item.allow_send_messages,
-                item.allow_read_history,
-            )
-            .await
-            .map_err(|e| ApiError::internal(e.to_string()))?;
-
-        // Issue #175: If text_channel_id changed, trigger immediate Discord revoke for pending leases on old text channel
-        if let Some(ref old_text) = old_text_channel
-            && old_text != &item.text_channel_id
+    // Step 3: Post-commit Discord revoking & audit logging
+    for mapping in &saved_mappings {
+        if let Some(old_text) = old_mappings_map.get(&mapping.voice_channel_id)
+            && old_text != &mapping.text_channel_id
         {
             let pending = state
                 .app
@@ -3272,7 +3266,7 @@ pub async fn upsert_companion_mapping(
                 .await
                 .unwrap_or_default();
             for lease in pending {
-                if lease.voice_channel_id == item.voice_channel_id
+                if lease.voice_channel_id == mapping.voice_channel_id
                     && &lease.text_channel_id == old_text
                 {
                     if !state.app.config.discord_token.starts_with("dummy")
@@ -3320,8 +3314,6 @@ pub async fn upsert_companion_mapping(
                 }),
             )
             .await;
-
-        saved_mappings.push(mapping);
     }
 
     Ok(Json(json!({ "mappings": saved_mappings })))
@@ -4415,8 +4407,25 @@ pub async fn set_duty_override(
             profile.override_expires_at = None;
         }
         "off" => {
-            let duration_mins = payload.duration_mins.unwrap_or(120).max(1);
-            let expires_at = Utc::now() + chrono::Duration::minutes(duration_mins);
+            let settings = state
+                .app
+                .storage
+                .get_duty_settings(&guild_id)
+                .await
+                .map_err(|e| ApiError::internal(e.to_string()))?;
+            let max_minutes =
+                settings.map_or(1440_i64, |s| i64::from(s.max_override_duration_mins.max(1)));
+            let minutes = payload.duration_mins.unwrap_or(120);
+            if !(1..=max_minutes).contains(&minutes) {
+                return Err(ApiError::bad_request(
+                    "Override duration exceeds guild policy",
+                ));
+            }
+            let delta = chrono::Duration::try_minutes(minutes)
+                .ok_or_else(|| ApiError::bad_request("Invalid override duration"))?;
+            let expires_at = Utc::now()
+                .checked_add_signed(delta)
+                .ok_or_else(|| ApiError::bad_request("Override expiry out of range"))?;
             profile.manual_override = Some("force_off".to_string());
             profile.override_expires_at = Some(expires_at);
         }

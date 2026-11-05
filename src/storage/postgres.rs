@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use chrono::{DateTime, Duration, Utc};
 
 use serde_json::Value;
@@ -9,16 +11,16 @@ use uuid::Uuid;
 use super::{
     AdjustMemberProgressParams, AiGuildBudget, AiKnowledgeDocument, AuditLogEntry, CardCollection,
     CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome, CommandPolicyRule, CommunityPoll,
-    CompanionChannelLease, CompanionChannelMapping, CountingGame, CustomAutomation,
-    DailyClaimOutcome, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink,
-    GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway, GuildModuleSettings,
-    HelpForumConfig, HelpForumSession, HelpForumStats, IntegrationConnection,
+    CompanionChannelLease, CompanionChannelMapping, CompanionMappingItem, CountingGame,
+    CustomAutomation, DailyClaimOutcome, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription,
+    GameAccountLink, GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway,
+    GuildModuleSettings, HelpForumConfig, HelpForumSession, HelpForumStats, IntegrationConnection,
     IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking, KickStreamSubscription,
-    LinkedAccount, McpToolAuthorization, MemberIdentityRecord, MemberProgress, MemberSearchFilter,
-    MemberSearchRow, MemberSnapshot, ModerationAppeal, ModerationExecutionIntent,
-    ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState, ModuleDraftConfig,
-    PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric, ProgressionSeason,
-    RecordCompanionLeaseParams, RecruitmentApplication, RecruitmentReview,
+    LinkedAccount, MAX_COMPANION_MAPPINGS_PER_GUILD, McpToolAuthorization, MemberIdentityRecord,
+    MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
+    ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
+    ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
+    ProgressionSeason, RecordCompanionLeaseParams, RecruitmentApplication, RecruitmentReview,
     RecruitmentRoleFulfillment, RecruitmentTrack, RedditSubscription, ReputationGrantOutcome,
     RetainedRecordNotice, ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry,
     SteamLfgPost, StickyMessage, StoreItem, StorePurchase, TelegramBridge, TelegramMessageMapping,
@@ -3042,61 +3044,112 @@ impl PostgresStore {
         allow_send_messages: bool,
         allow_read_history: bool,
     ) -> anyhow::Result<CompanionChannelMapping> {
-        validate_snowflake("guild_id", guild_id)?;
-        validate_snowflake("voice_channel_id", voice_channel_id)?;
-        validate_snowflake("text_channel_id", text_channel_id)?;
+        let item = CompanionMappingItem {
+            voice_channel_id: voice_channel_id.to_string(),
+            text_channel_id: text_channel_id.to_string(),
+            allow_send_messages,
+            allow_read_history,
+        };
+        let mut results = self
+            .batch_upsert_companion_mappings(guild_id, &[item])
+            .await?;
+        results
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("Failed to upsert companion mapping"))
+    }
 
-        let id = Uuid::new_v4();
-        let now = Utc::now();
+    pub async fn batch_upsert_companion_mappings(
+        &self,
+        guild_id: &str,
+        items: &[CompanionMappingItem],
+    ) -> anyhow::Result<Vec<CompanionChannelMapping>> {
+        validate_snowflake("guild_id", guild_id)?;
+        for item in items {
+            validate_snowflake("voice_channel_id", &item.voice_channel_id)?;
+            validate_snowflake("text_channel_id", &item.text_channel_id)?;
+            if item.voice_channel_id == item.text_channel_id {
+                anyhow::bail!("Voice channel and text companion channel cannot be the same");
+            }
+        }
 
         let mut tx = self.pool.begin().await?;
 
-        let mapping = sqlx::query_as::<_, CompanionChannelMapping>(
-            r#"
-            INSERT INTO companion_channel_mappings (
-                id, guild_id, voice_channel_id, text_channel_id,
-                allow_send_messages, allow_read_history, enabled, created_at
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, true, $7)
-            ON CONFLICT (guild_id, voice_channel_id)
-            DO UPDATE SET
-                text_channel_id = EXCLUDED.text_channel_id,
-                allow_send_messages = EXCLUDED.allow_send_messages,
-                allow_read_history = EXCLUDED.allow_read_history,
-                enabled = true
-            RETURNING id, guild_id, voice_channel_id, text_channel_id, allow_send_messages, allow_read_history, enabled, created_at
-            "#,
+        // Advisory xact lock per guild to serialize concurrent batch updates
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(format!("companion_mapping:{}", guild_id))
+            .execute(&mut *tx)
+            .await?;
+
+        let existing_voice_ids: Vec<String> = sqlx::query_scalar(
+            "SELECT voice_channel_id FROM companion_channel_mappings WHERE guild_id = $1",
         )
-        .bind(id)
         .bind(guild_id)
-        .bind(voice_channel_id)
-        .bind(text_channel_id)
-        .bind(allow_send_messages)
-        .bind(allow_read_history)
-        .bind(now)
-        .fetch_one(&mut *tx)
+        .fetch_all(&mut *tx)
         .await?;
 
-        // Issue #175: Invalidate any active leases for this voice channel that target an old text channel
-        sqlx::query(
-            r#"
-            UPDATE companion_channel_leases
-            SET status = 'revoke_pending', next_attempt_at = NOW()
-            WHERE guild_id = $1
-              AND voice_channel_id = $2
-              AND text_channel_id <> $3
-              AND status IN ('active', 'revoke_pending')
-            "#,
-        )
-        .bind(guild_id)
-        .bind(voice_channel_id)
-        .bind(text_channel_id)
-        .execute(&mut *tx)
-        .await?;
+        let mut final_voice_ids: HashSet<String> = existing_voice_ids.into_iter().collect();
+        for item in items {
+            final_voice_ids.insert(item.voice_channel_id.clone());
+        }
+
+        if final_voice_ids.len() > MAX_COMPANION_MAPPINGS_PER_GUILD {
+            anyhow::bail!(
+                "Companion mapping limit reached (max {MAX_COMPANION_MAPPINGS_PER_GUILD} per guild)"
+            );
+        }
+
+        let now = Utc::now();
+        let mut saved = Vec::new();
+
+        for item in items {
+            let id = Uuid::new_v4();
+            let mapping = sqlx::query_as::<_, CompanionChannelMapping>(
+                r#"
+                INSERT INTO companion_channel_mappings (
+                    id, guild_id, voice_channel_id, text_channel_id,
+                    allow_send_messages, allow_read_history, enabled, created_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, true, $7)
+                ON CONFLICT (guild_id, voice_channel_id)
+                DO UPDATE SET
+                    text_channel_id = EXCLUDED.text_channel_id,
+                    allow_send_messages = EXCLUDED.allow_send_messages,
+                    allow_read_history = EXCLUDED.allow_read_history,
+                    enabled = true
+                RETURNING id, guild_id, voice_channel_id, text_channel_id, allow_send_messages, allow_read_history, enabled, created_at
+                "#,
+            )
+            .bind(id)
+            .bind(guild_id)
+            .bind(&item.voice_channel_id)
+            .bind(&item.text_channel_id)
+            .bind(item.allow_send_messages)
+            .bind(item.allow_read_history)
+            .bind(now)
+            .fetch_one(&mut *tx)
+            .await?;
+
+            sqlx::query(
+                r#"
+                UPDATE companion_channel_leases
+                SET status = 'revoke_pending', next_attempt_at = NOW()
+                WHERE guild_id = $1
+                  AND voice_channel_id = $2
+                  AND text_channel_id <> $3
+                  AND status IN ('active', 'revoke_pending')
+                "#,
+            )
+            .bind(guild_id)
+            .bind(&item.voice_channel_id)
+            .bind(&item.text_channel_id)
+            .execute(&mut *tx)
+            .await?;
+
+            saved.push(mapping);
+        }
 
         tx.commit().await?;
-
-        Ok(mapping)
+        Ok(saved)
     }
 
     pub async fn delete_companion_mapping(
