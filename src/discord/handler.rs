@@ -504,6 +504,59 @@ impl EventHandler for Handler {
             config: Value::Null,
         };
 
+        let roles: Vec<String> = new_member
+            .roles
+            .iter()
+            .map(|r| r.get().to_string())
+            .collect();
+        let joined_at = new_member
+            .joined_at
+            .and_then(|ts| chrono::DateTime::from_timestamp(ts.unix_timestamp(), 0));
+        let g_id_str = guild_id.get().to_string();
+        let u_id_str = new_member.user.id.get().to_string();
+
+        let _ = self
+            .state
+            .storage
+            .upsert_member_snapshot(crate::storage::UpsertMemberSnapshotParams {
+                guild_id: &g_id_str,
+                user_id: &u_id_str,
+                username: &new_member.user.name,
+                global_name: new_member.user.global_name.as_deref(),
+                nickname: new_member.nick.as_deref(),
+                role_ids: &roles,
+                joined_at,
+            })
+            .await;
+
+        let _ = self
+            .state
+            .storage
+            .record_member_identity_change(
+                &g_id_str,
+                &u_id_str,
+                "username",
+                None,
+                Some(&new_member.user.name),
+                90,
+            )
+            .await;
+
+        if let Some(ref nick) = new_member.nick {
+            let _ = self
+                .state
+                .storage
+                .record_member_identity_change(
+                    &g_id_str,
+                    &u_id_str,
+                    "nickname",
+                    None,
+                    Some(nick),
+                    90,
+                )
+                .await;
+        }
+
         run_event(
             &ctx,
             &self.state,
@@ -514,6 +567,85 @@ impl EventHandler for Handler {
             Some(new_member.user.id),
         )
         .await;
+    }
+
+    async fn guild_member_update(
+        &self,
+        _ctx: Context,
+        old_if_available: Option<Member>,
+        _new: Option<Member>,
+        event: serenity::all::GuildMemberUpdateEvent,
+    ) {
+        self.state
+            .metrics
+            .discord_events_total
+            .fetch_add(1, Ordering::Relaxed);
+
+        let g_id_str = event.guild_id.get().to_string();
+        let u_id_str = event.user.id.get().to_string();
+        let roles: Vec<String> = event.roles.iter().map(|r| r.get().to_string()).collect();
+        let joined_at = chrono::DateTime::from_timestamp(event.joined_at.unix_timestamp(), 0);
+
+        let old_nick = old_if_available.as_ref().and_then(|m| m.nick.as_deref());
+        let new_nick = event.nick.as_deref();
+        if old_nick != new_nick {
+            let _ = self
+                .state
+                .storage
+                .record_member_identity_change(
+                    &g_id_str, &u_id_str, "nickname", old_nick, new_nick, 90,
+                )
+                .await;
+        }
+
+        let old_user = old_if_available.as_ref().map(|m| &m.user);
+        let old_name = old_user.map(|u| u.name.as_str());
+        let new_name = event.user.name.as_str();
+        if old_name.is_some_and(|old| old != new_name) {
+            let _ = self
+                .state
+                .storage
+                .record_member_identity_change(
+                    &g_id_str,
+                    &u_id_str,
+                    "username",
+                    old_name,
+                    Some(new_name),
+                    90,
+                )
+                .await;
+        }
+
+        let old_global = old_user.and_then(|u| u.global_name.as_deref());
+        let new_global = event.user.global_name.as_deref();
+        if old_global != new_global {
+            let _ = self
+                .state
+                .storage
+                .record_member_identity_change(
+                    &g_id_str,
+                    &u_id_str,
+                    "global_name",
+                    old_global,
+                    new_global,
+                    90,
+                )
+                .await;
+        }
+
+        let _ = self
+            .state
+            .storage
+            .upsert_member_snapshot(crate::storage::UpsertMemberSnapshotParams {
+                guild_id: &g_id_str,
+                user_id: &u_id_str,
+                username: &event.user.name,
+                global_name: event.user.global_name.as_deref(),
+                nickname: event.nick.as_deref(),
+                role_ids: &roles,
+                joined_at,
+            })
+            .await;
     }
 
     async fn guild_member_removal(

@@ -1244,6 +1244,107 @@ pub async fn list_store_purchases(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SearchMembersQuery {
+    pub roles: Option<String>,
+    pub exclude_roles: Option<String>,
+    pub joined_after: Option<DateTime<Utc>>,
+    pub joined_before: Option<DateTime<Utc>>,
+    pub account_created_after: Option<DateTime<Utc>>,
+    pub account_created_before: Option<DateTime<Utc>>,
+    pub min_case_count: Option<i64>,
+    pub identity_changed_after: Option<DateTime<Utc>>,
+    pub limit: Option<u16>,
+    pub cursor: Option<String>,
+}
+
+pub async fn search_members(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+    Query(query): Query<SearchMembersQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+
+    let role_ids = query
+        .roles
+        .map(|r| {
+            r.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let exclude_role_ids = query
+        .exclude_roles
+        .map(|r| {
+            r.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let filter = crate::storage::MemberSearchFilter {
+        role_ids,
+        exclude_role_ids,
+        joined_after: query.joined_after,
+        joined_before: query.joined_before,
+        account_created_after: query.account_created_after,
+        account_created_before: query.account_created_before,
+        min_case_count: query.min_case_count,
+        identity_changed_after: query.identity_changed_after,
+        limit: query.limit,
+        cursor: query.cursor,
+    };
+
+    let members = state
+        .app
+        .storage
+        .search_members(&guild_id, &filter)
+        .await
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let next_cursor = members.last().map(|m| m.user_id.clone());
+
+    Ok(Json(json!({
+        "members": members,
+        "count": members.len(),
+        "next_cursor": next_cursor
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IdentityHistoryQuery {
+    pub limit: Option<usize>,
+}
+
+pub async fn get_member_identity_history(
+    State(state): State<WebState>,
+    Path((guild_id, user_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Query(query): Query<IdentityHistoryQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+
+    let history = state
+        .app
+        .storage
+        .get_member_identity_history(&guild_id, &user_id, query.limit.unwrap_or(50))
+        .await
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    Ok(Json(json!({
+        "history": history,
+        "count": history.len()
+    })))
+}
+
+#[derive(Debug, Deserialize)]
 
 pub struct ResetSeasonRequest {
     pub season_name: String,

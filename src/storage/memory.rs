@@ -14,14 +14,16 @@ use super::{
     DailyClaimOutcome, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink,
     GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway, GuildModuleSettings,
     IntegrationConnection, IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking,
-    KickStreamSubscription, LinkedAccount, McpToolAuthorization, MemberProgress, ModerationAppeal,
+    KickStreamSubscription, LinkedAccount, McpToolAuthorization, MemberIdentityRecord,
+    MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
     ModerationExecutionIntent, ModuleDraftConfig, PluginGuildInstallation,
     PluginMarketplacePackage, ProgressMetric, ProgressionSeason, RedditSubscription,
     ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent, ServerSnapshot,
     SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
     TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError, TupperProfile,
-    TwitchStreamSubscription, UserErasureReport, VkSubscription, WorkflowDefinition,
-    WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp, validate_snowflake,
+    TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport, VkSubscription,
+    WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
+    snowflake_created_at, validate_snowflake,
 };
 
 type ModuleKey = (String, String);
@@ -107,6 +109,12 @@ pub struct MemoryStore {
     tuppers: Arc<DashMap<Uuid, TupperProfile>>,
 
     tupper_prefix_index: Arc<DashMap<(String, String, String), Uuid>>,
+
+    identity_history: Arc<DashMap<Uuid, MemberIdentityRecord>>,
+
+    member_snapshots: Arc<DashMap<(String, String), MemberSnapshot>>,
+
+    member_case_counts: Arc<DashMap<(String, String), i64>>,
 
     faqs: Arc<DashMap<Uuid, FaqEntry>>,
 
@@ -379,6 +387,19 @@ impl MemoryStore {
         self.reputation_cooldowns
             .retain(|(g, from), _| !(g == guild_id && from == user_id));
         related_erased += before_rep.saturating_sub(self.reputation_cooldowns.len());
+
+        let before_identities = self.identity_history.len();
+        self.identity_history
+            .retain(|_, r| !(r.guild_id == guild_id && r.user_id == user_id));
+        related_erased += before_identities.saturating_sub(self.identity_history.len());
+
+        if self
+            .member_snapshots
+            .remove(&(guild_id.to_string(), user_id.to_string()))
+            .is_some()
+        {
+            related_erased += 1;
+        }
 
         let retained_records = vec![
             RetainedRecordNotice {
@@ -1625,6 +1646,250 @@ impl MemoryStore {
         purchase.failure_reason = failure_reason.map(|s| s.to_string());
         purchase.fulfilled_at = fulfilled_at;
         Ok(())
+    }
+
+    pub fn record_member_identity_change(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        kind: &str,
+        old_value: Option<&str>,
+        new_value: Option<&str>,
+        retention_days: i64,
+    ) -> anyhow::Result<Option<MemberIdentityRecord>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+        anyhow::ensure!(
+            kind == "username" || kind == "global_name" || kind == "nickname",
+            "invalid identity kind: {kind}"
+        );
+
+        let old_clean = old_value.map(|s| s.trim()).filter(|s| !s.is_empty());
+        let new_clean = new_value.map(|s| s.trim()).filter(|s| !s.is_empty());
+
+        if old_clean == new_clean {
+            return Ok(None);
+        }
+
+        let retention = if retention_days > 0 {
+            retention_days
+        } else {
+            90
+        };
+        let now = Utc::now();
+        let expires_at = now + Duration::days(retention);
+
+        let record = MemberIdentityRecord {
+            id: Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            user_id: user_id.to_string(),
+            kind: kind.to_string(),
+            old_value: old_clean.map(|s| s.to_string()),
+            new_value: new_clean.map(|s| s.to_string()),
+            observed_at: now,
+            expires_at,
+        };
+
+        self.identity_history.insert(record.id, record.clone());
+        Ok(Some(record))
+    }
+
+    pub fn get_member_identity_history(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<MemberIdentityRecord>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+
+        let now = Utc::now();
+        let max_limit = limit.clamp(1, 100);
+
+        let mut list: Vec<MemberIdentityRecord> = self
+            .identity_history
+            .iter()
+            .filter(|r| r.guild_id == guild_id && r.user_id == user_id && r.expires_at > now)
+            .map(|r| r.clone())
+            .collect();
+
+        list.sort_by_key(|r| std::cmp::Reverse(r.observed_at));
+        if list.len() > max_limit {
+            list.truncate(max_limit);
+        }
+        Ok(list)
+    }
+
+    pub fn cleanup_expired_identity_history(&self) -> u64 {
+        let now = Utc::now();
+        let before = self.identity_history.len();
+        self.identity_history.retain(|_, r| r.expires_at > now);
+        before.saturating_sub(self.identity_history.len()) as u64
+    }
+
+    pub fn set_member_case_count(&self, guild_id: &str, user_id: &str, count: i64) {
+        self.member_case_counts
+            .insert((guild_id.to_string(), user_id.to_string()), count);
+    }
+
+    pub fn upsert_member_snapshot(
+        &self,
+        params: UpsertMemberSnapshotParams<'_>,
+    ) -> anyhow::Result<MemberSnapshot> {
+        let u_num = validate_snowflake("user_id", params.user_id)?;
+        validate_snowflake("guild_id", params.guild_id)?;
+
+        let account_created_at = snowflake_created_at(u_num);
+        let now = Utc::now();
+
+        let snapshot = MemberSnapshot {
+            guild_id: params.guild_id.to_string(),
+            user_id: params.user_id.to_string(),
+            username: params.username.to_string(),
+            global_name: params.global_name.map(|s| s.to_string()),
+            nickname: params.nickname.map(|s| s.to_string()),
+            role_ids: serde_json::to_value(params.role_ids)
+                .unwrap_or_else(|_| serde_json::json!([])),
+            joined_at: params.joined_at,
+            account_created_at: Some(account_created_at),
+            updated_at: now,
+        };
+
+        self.member_snapshots.insert(
+            (params.guild_id.to_string(), params.user_id.to_string()),
+            snapshot.clone(),
+        );
+        Ok(snapshot)
+    }
+
+    pub fn search_members(
+        &self,
+        guild_id: &str,
+        filter: &MemberSearchFilter,
+    ) -> anyhow::Result<Vec<MemberSearchRow>> {
+        validate_snowflake("guild_id", guild_id)?;
+
+        let limit = filter.limit.unwrap_or(25).clamp(1, 100) as usize;
+        let now = Utc::now();
+
+        let mut matched = Vec::new();
+
+        for entry in self.member_snapshots.iter() {
+            let snap = entry.value();
+            if snap.guild_id != guild_id {
+                continue;
+            }
+
+            let member_roles: Vec<String> =
+                serde_json::from_value(snap.role_ids.clone()).unwrap_or_default();
+
+            if !filter.role_ids.is_empty()
+                && !filter.role_ids.iter().all(|r| member_roles.contains(r))
+            {
+                continue;
+            }
+
+            if !filter.exclude_role_ids.is_empty()
+                && filter
+                    .exclude_role_ids
+                    .iter()
+                    .any(|r| member_roles.contains(r))
+            {
+                continue;
+            }
+
+            if let Some(joined_after) = filter.joined_after {
+                match snap.joined_at {
+                    Some(j) if j >= joined_after => {}
+                    _ => continue,
+                }
+            }
+            if let Some(joined_before) = filter.joined_before {
+                match snap.joined_at {
+                    Some(j) if j <= joined_before => {}
+                    _ => continue,
+                }
+            }
+
+            if let Some(created_after) = filter.account_created_after {
+                match snap.account_created_at {
+                    Some(c) if c >= created_after => {}
+                    _ => continue,
+                }
+            }
+            if let Some(created_before) = filter.account_created_before {
+                match snap.account_created_at {
+                    Some(c) if c <= created_before => {}
+                    _ => continue,
+                }
+            }
+
+            let case_count = self
+                .member_case_counts
+                .get(&(guild_id.to_string(), snap.user_id.clone()))
+                .map(|v| *v)
+                .unwrap_or(0);
+
+            if let Some(min_cases) = filter.min_case_count
+                && case_count < min_cases
+            {
+                continue;
+            }
+
+            let recent_name_changes = self
+                .identity_history
+                .iter()
+                .filter(|r| {
+                    r.guild_id == guild_id
+                        && r.user_id == snap.user_id
+                        && r.expires_at > now
+                        && filter
+                            .identity_changed_after
+                            .is_none_or(|after| r.observed_at >= after)
+                })
+                .count() as i64;
+
+            if filter.identity_changed_after.is_some() && recent_name_changes == 0 {
+                continue;
+            }
+
+            let prog_key = (guild_id.to_string(), snap.user_id.clone());
+            let (xp, level, message_count) = if let Some(p) = self.progression.get(&prog_key) {
+                (Some(p.xp), Some(p.level), Some(p.messages))
+            } else {
+                (None, None, None)
+            };
+
+            matched.push(MemberSearchRow {
+                user_id: snap.user_id.clone(),
+                username: snap.username.clone(),
+                global_name: snap.global_name.clone(),
+                nickname: snap.nickname.clone(),
+                role_ids: member_roles,
+                joined_at: snap.joined_at,
+                account_created_at: snap.account_created_at,
+                moderation_case_count: case_count,
+                xp,
+                level,
+                message_count,
+                recent_name_changes,
+            });
+        }
+
+        matched.sort_by(|a, b| {
+            b.joined_at
+                .cmp(&a.joined_at)
+                .then_with(|| a.user_id.cmp(&b.user_id))
+        });
+
+        if let Some(ref cur) = filter.cursor
+            && let Some(idx) = matched.iter().position(|r| &r.user_id == cur)
+        {
+            matched = matched.into_iter().skip(idx + 1).collect();
+        }
+
+        matched.truncate(limit);
+        Ok(matched)
     }
 
     pub fn archive_progression_season(&self, guild_id: &str, name: &str) -> ProgressionSeason {

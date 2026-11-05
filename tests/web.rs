@@ -654,3 +654,178 @@ async fn test_http_oauth_flow_browser_binding() {
             .unwrap()
     );
 }
+
+#[tokio::test]
+async fn test_member_intelligence_api_endpoints_permissions_and_search() {
+    use rusty_discord_bot::storage::UpsertMemberSnapshotParams;
+
+    let (state, _) = test_web_state().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let session_id = "test_member_intel_session";
+    let user = DashboardUser {
+        id: "100000000000000099".to_owned(),
+        username: "intel_admin_user".to_owned(),
+        global_name: None,
+        avatar: None,
+    };
+    let guild_id = "777000000000000001";
+    let guilds = vec![DashboardGuild {
+        id: guild_id.to_owned(),
+        name: "Intelligence Guild".to_owned(),
+        icon: None,
+        owner: true,
+        permissions: "8".to_owned(),
+    }];
+
+    state
+        .app
+        .sessions
+        .save_session(
+            session_id,
+            user,
+            guilds,
+            "csrf_token_intel".to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .expect("save session");
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let session_cookie = format!("rusty_discord_bot_session={session_id}");
+
+    // Seed snapshots and identity history
+    let joined = Utc::now() - Duration::days(10);
+    state
+        .app
+        .storage
+        .upsert_member_snapshot(UpsertMemberSnapshotParams {
+            guild_id,
+            user_id: "100000000000000001",
+            username: "alice_crypto",
+            global_name: Some("Alice C"),
+            nickname: Some("Cool Alice"),
+            role_ids: &["role_dev".to_string(), "role_vip".to_string()],
+            joined_at: Some(joined),
+        })
+        .await
+        .unwrap();
+
+    state
+        .app
+        .storage
+        .record_member_identity_change(
+            guild_id,
+            "100000000000000001",
+            "nickname",
+            Some("Old Nick"),
+            Some("Cool Alice"),
+            30,
+        )
+        .await
+        .unwrap();
+
+    state
+        .app
+        .storage
+        .record_member_identity_change(
+            guild_id,
+            "100000000000000001",
+            "username",
+            Some("alice_old"),
+            Some("alice_crypto"),
+            30,
+        )
+        .await
+        .unwrap();
+
+    // 1. Unauthenticated request -> 401
+    let unauth_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/members/search"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth_resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let csrf_header = "csrf_token_intel";
+
+    // 2. Search query matches username or nickname -> 200 OK
+    let search_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/members/search"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_header)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(search_resp.status(), reqwest::StatusCode::OK);
+    let search_json: serde_json::Value = search_resp.json().await.unwrap();
+    assert!(search_json["members"].is_array());
+    let members = search_json["members"].as_array().unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0]["user_id"], "100000000000000001");
+    assert_eq!(members[0]["username"], "alice_crypto");
+    assert_eq!(members[0]["nickname"], "Cool Alice");
+    assert_eq!(members[0]["moderation_case_count"], 0);
+
+    // 3. Search filtering by role
+    let role_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/members/search?roles=role_dev"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_header)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(role_resp.status(), reqwest::StatusCode::OK);
+    let role_json: serde_json::Value = role_resp.json().await.unwrap();
+    assert_eq!(role_json["members"].as_array().unwrap().len(), 1);
+
+    // 4. Identity history endpoint -> 200 OK
+    let history_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/members/100000000000000001/identity-history"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_header)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(history_resp.status(), reqwest::StatusCode::OK);
+    let history_json: serde_json::Value = history_resp.json().await.unwrap();
+    assert!(history_json["history"].is_array());
+    let history_items = history_json["history"].as_array().unwrap();
+    assert_eq!(history_items.len(), 2);
+    assert_eq!(history_items[0]["kind"], "username");
+    assert_eq!(history_items[0]["new_value"], "alice_crypto");
+    assert_eq!(history_items[1]["kind"], "nickname");
+    assert_eq!(history_items[1]["new_value"], "Cool Alice");
+
+    // 5. Forbidden guild -> 403
+    let forbidden_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/999000000000000001/members/search"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_header)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forbidden_resp.status(), reqwest::StatusCode::FORBIDDEN);
+}

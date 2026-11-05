@@ -12,14 +12,16 @@ use super::{
     DailyClaimOutcome, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink,
     GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway, GuildModuleSettings,
     IntegrationConnection, IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking,
-    KickStreamSubscription, LinkedAccount, McpToolAuthorization, MemberProgress, ModerationAppeal,
+    KickStreamSubscription, LinkedAccount, McpToolAuthorization, MemberIdentityRecord,
+    MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
     ModerationExecutionIntent, ModuleDraftConfig, PluginGuildInstallation,
     PluginMarketplacePackage, ProgressMetric, ProgressionSeason, RedditSubscription,
     ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent, ServerSnapshot,
     SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
     TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError, TupperProfile,
-    TwitchStreamSubscription, UserErasureReport, VkSubscription, WorkflowDefinition,
-    WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp, validate_snowflake,
+    TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport, VkSubscription,
+    WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
+    snowflake_created_at, validate_snowflake,
 };
 
 pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
@@ -369,6 +371,26 @@ impl PostgresStore {
                 .map(|r| r.rows_affected())
                 .unwrap_or(0);
         related_erased += deleted_rewards as usize;
+
+        let deleted_identities =
+            sqlx::query("DELETE FROM member_identity_history WHERE guild_id = $1 AND user_id = $2")
+                .bind(guild_id)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await
+                .map(|r| r.rows_affected())
+                .unwrap_or(0);
+        related_erased += deleted_identities as usize;
+
+        let deleted_snapshots =
+            sqlx::query("DELETE FROM member_snapshots WHERE guild_id = $1 AND user_id = $2")
+                .bind(guild_id)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await
+                .map(|r| r.rows_affected())
+                .unwrap_or(0);
+        related_erased += deleted_snapshots as usize;
 
         tx.commit().await?;
 
@@ -2500,6 +2522,262 @@ impl PostgresStore {
         .await?;
 
         Ok(())
+    }
+
+    pub async fn record_member_identity_change(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        kind: &str,
+        old_value: Option<&str>,
+        new_value: Option<&str>,
+        retention_days: i64,
+    ) -> anyhow::Result<Option<MemberIdentityRecord>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+        anyhow::ensure!(
+            kind == "username" || kind == "global_name" || kind == "nickname",
+            "invalid identity kind: {kind}"
+        );
+
+        let old_clean = old_value.map(|s| s.trim()).filter(|s| !s.is_empty());
+        let new_clean = new_value.map(|s| s.trim()).filter(|s| !s.is_empty());
+
+        if old_clean == new_clean {
+            return Ok(None);
+        }
+
+        let retention = if retention_days > 0 {
+            retention_days
+        } else {
+            90
+        };
+        let now = Utc::now();
+        let expires_at = now + Duration::days(retention);
+        let id = Uuid::new_v4();
+
+        let rec = sqlx::query_as::<_, MemberIdentityRecord>(
+            r#"
+            INSERT INTO member_identity_history (id, guild_id, user_id, kind, old_value, new_value, observed_at, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            RETURNING id, guild_id, user_id, kind, old_value, new_value, observed_at, expires_at
+            "#
+        )
+        .bind(id)
+        .bind(guild_id)
+        .bind(user_id)
+        .bind(kind)
+        .bind(old_clean)
+        .bind(new_clean)
+        .bind(now)
+        .bind(expires_at)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(Some(rec))
+    }
+
+    pub async fn get_member_identity_history(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<MemberIdentityRecord>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+
+        let max_limit = limit.clamp(1, 100) as i64;
+        let recs = sqlx::query_as::<_, MemberIdentityRecord>(
+            r#"
+            SELECT id, guild_id, user_id, kind, old_value, new_value, observed_at, expires_at
+            FROM member_identity_history
+            WHERE guild_id = $1 AND user_id = $2 AND expires_at > NOW()
+            ORDER BY observed_at DESC
+            LIMIT $3
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .bind(max_limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(recs)
+    }
+
+    pub async fn cleanup_expired_identity_history(&self) -> anyhow::Result<u64> {
+        let res = sqlx::query(
+            r#"
+            DELETE FROM member_identity_history
+            WHERE expires_at <= NOW()
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(res.rows_affected())
+    }
+
+    pub async fn upsert_member_snapshot(
+        &self,
+        params: UpsertMemberSnapshotParams<'_>,
+    ) -> anyhow::Result<MemberSnapshot> {
+        let u_num = validate_snowflake("user_id", params.user_id)?;
+        validate_snowflake("guild_id", params.guild_id)?;
+
+        let account_created_at = snowflake_created_at(u_num);
+        let roles_json =
+            serde_json::to_value(params.role_ids).unwrap_or_else(|_| serde_json::json!([]));
+        let now = Utc::now();
+
+        let rec = sqlx::query_as::<_, MemberSnapshot>(
+            r#"
+            INSERT INTO member_snapshots (guild_id, user_id, username, global_name, nickname, role_ids, joined_at, account_created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (guild_id, user_id) DO UPDATE SET
+                username = EXCLUDED.username,
+                global_name = EXCLUDED.global_name,
+                nickname = EXCLUDED.nickname,
+                role_ids = EXCLUDED.role_ids,
+                joined_at = COALESCE(EXCLUDED.joined_at, member_snapshots.joined_at),
+                account_created_at = EXCLUDED.account_created_at,
+                updated_at = EXCLUDED.updated_at
+            RETURNING guild_id, user_id, username, global_name, nickname, role_ids, joined_at, account_created_at, updated_at
+            "#
+        )
+        .bind(params.guild_id)
+        .bind(params.user_id)
+        .bind(params.username)
+        .bind(params.global_name)
+        .bind(params.nickname)
+        .bind(roles_json)
+        .bind(params.joined_at)
+        .bind(account_created_at)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(rec)
+    }
+
+    pub async fn search_members(
+        &self,
+        guild_id: &str,
+        filter: &MemberSearchFilter,
+    ) -> anyhow::Result<Vec<MemberSearchRow>> {
+        validate_snowflake("guild_id", guild_id)?;
+
+        let limit = filter.limit.unwrap_or(25).clamp(1, 100) as i64;
+
+        #[derive(sqlx::FromRow)]
+        struct RawSearchRow {
+            user_id: String,
+            username: String,
+            global_name: Option<String>,
+            nickname: Option<String>,
+            role_ids: serde_json::Value,
+            joined_at: Option<DateTime<Utc>>,
+            account_created_at: Option<DateTime<Utc>>,
+            moderation_case_count: i64,
+            xp: Option<i64>,
+            level: Option<i32>,
+            message_count: Option<i64>,
+            recent_name_changes: i64,
+        }
+
+        let rows = sqlx::query_as::<_, RawSearchRow>(
+            r#"
+            SELECT
+                ms.user_id,
+                ms.username,
+                ms.global_name,
+                ms.nickname,
+                ms.role_ids,
+                ms.joined_at,
+                ms.account_created_at,
+                COALESCE(mc.case_count, 0) as moderation_case_count,
+                mp.xp,
+                mp.level,
+                mp.messages as message_count,
+                COALESCE(mih.change_count, 0) as recent_name_changes
+            FROM member_snapshots ms
+            LEFT JOIN member_progress mp
+                ON ms.guild_id = mp.guild_id AND ms.user_id = mp.user_id
+            LEFT JOIN (
+                SELECT subject_user_id, COUNT(*) as case_count
+                FROM moderation_cases
+                WHERE guild_id = $1
+                GROUP BY subject_user_id
+            ) mc ON ms.user_id = mc.subject_user_id
+            LEFT JOIN (
+                SELECT user_id, COUNT(*) as change_count, MAX(observed_at) as last_change
+                FROM member_identity_history
+                WHERE guild_id = $1 AND expires_at > NOW()
+                GROUP BY user_id
+            ) mih ON ms.user_id = mih.user_id
+            WHERE ms.guild_id = $1
+              AND ($2::timestamptz IS NULL OR ms.joined_at >= $2)
+              AND ($3::timestamptz IS NULL OR ms.joined_at <= $3)
+              AND ($4::timestamptz IS NULL OR ms.account_created_at >= $4)
+              AND ($5::timestamptz IS NULL OR ms.account_created_at <= $5)
+              AND ($6::bigint IS NULL OR COALESCE(mc.case_count, 0) >= $6)
+              AND ($7::timestamptz IS NULL OR mih.last_change >= $7)
+            ORDER BY ms.joined_at DESC NULLS LAST, ms.user_id ASC
+            "#,
+        )
+        .bind(guild_id)
+        .bind(filter.joined_after)
+        .bind(filter.joined_before)
+        .bind(filter.account_created_after)
+        .bind(filter.account_created_before)
+        .bind(filter.min_case_count)
+        .bind(filter.identity_changed_after)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut matched = Vec::new();
+        for r in rows {
+            let member_roles: Vec<String> = serde_json::from_value(r.role_ids).unwrap_or_default();
+
+            if !filter.role_ids.is_empty()
+                && !filter.role_ids.iter().all(|req| member_roles.contains(req))
+            {
+                continue;
+            }
+
+            if !filter.exclude_role_ids.is_empty()
+                && filter
+                    .exclude_role_ids
+                    .iter()
+                    .any(|exc| member_roles.contains(exc))
+            {
+                continue;
+            }
+
+            matched.push(MemberSearchRow {
+                user_id: r.user_id,
+                username: r.username,
+                global_name: r.global_name,
+                nickname: r.nickname,
+                role_ids: member_roles,
+                joined_at: r.joined_at,
+                account_created_at: r.account_created_at,
+                moderation_case_count: r.moderation_case_count,
+                xp: r.xp,
+                level: r.level,
+                message_count: r.message_count,
+                recent_name_changes: r.recent_name_changes,
+            });
+        }
+
+        if let Some(ref cur) = filter.cursor
+            && let Some(idx) = matched.iter().position(|r| &r.user_id == cur)
+        {
+            matched = matched.into_iter().skip(idx + 1).collect();
+        }
+
+        matched.truncate(limit as usize);
+        Ok(matched)
     }
 
     pub async fn archive_progression_season(

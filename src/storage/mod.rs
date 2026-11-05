@@ -350,6 +350,79 @@ pub fn validate_snowflake(label: &str, id: &str) -> anyhow::Result<u64> {
     Ok(parsed)
 }
 
+pub fn snowflake_created_at(id: u64) -> DateTime<Utc> {
+    let millis = (id >> 22) + 1_420_070_400_000;
+    DateTime::from_timestamp_millis(millis as i64).unwrap_or_else(Utc::now)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct MemberIdentityRecord {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub user_id: String,
+    pub kind: String,
+    pub old_value: Option<String>,
+    pub new_value: Option<String>,
+    pub observed_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct MemberSnapshot {
+    pub guild_id: String,
+    pub user_id: String,
+    pub username: String,
+    pub global_name: Option<String>,
+    pub nickname: Option<String>,
+    pub role_ids: serde_json::Value,
+    pub joined_at: Option<DateTime<Utc>>,
+    pub account_created_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct UpsertMemberSnapshotParams<'a> {
+    pub guild_id: &'a str,
+    pub user_id: &'a str,
+    pub username: &'a str,
+    pub global_name: Option<&'a str>,
+    pub nickname: Option<&'a str>,
+    pub role_ids: &'a [String],
+    pub joined_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct MemberSearchFilter {
+    #[serde(default)]
+    pub role_ids: Vec<String>,
+    #[serde(default)]
+    pub exclude_role_ids: Vec<String>,
+    pub joined_after: Option<DateTime<Utc>>,
+    pub joined_before: Option<DateTime<Utc>>,
+    pub account_created_after: Option<DateTime<Utc>>,
+    pub account_created_before: Option<DateTime<Utc>>,
+    pub min_case_count: Option<i64>,
+    pub identity_changed_after: Option<DateTime<Utc>>,
+    pub limit: Option<u16>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MemberSearchRow {
+    pub user_id: String,
+    pub username: String,
+    pub global_name: Option<String>,
+    pub nickname: Option<String>,
+    pub role_ids: Vec<String>,
+    pub joined_at: Option<DateTime<Utc>>,
+    pub account_created_at: Option<DateTime<Utc>>,
+    pub moderation_case_count: i64,
+    pub xp: Option<i64>,
+    pub level: Option<i32>,
+    pub message_count: Option<i64>,
+    pub recent_name_changes: i64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ProgressionSeason {
     pub id: Uuid,
@@ -2123,6 +2196,83 @@ impl Storage {
         }
     }
 
+    pub async fn record_member_identity_change(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        kind: &str,
+        old_value: Option<&str>,
+        new_value: Option<&str>,
+        retention_days: i64,
+    ) -> anyhow::Result<Option<MemberIdentityRecord>> {
+        match self {
+            Self::Memory(store) => store.record_member_identity_change(
+                guild_id,
+                user_id,
+                kind,
+                old_value,
+                new_value,
+                retention_days,
+            ),
+            Self::Postgres(store) => {
+                store
+                    .record_member_identity_change(
+                        guild_id,
+                        user_id,
+                        kind,
+                        old_value,
+                        new_value,
+                        retention_days,
+                    )
+                    .await
+            }
+        }
+    }
+
+    pub async fn get_member_identity_history(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<MemberIdentityRecord>> {
+        match self {
+            Self::Memory(store) => store.get_member_identity_history(guild_id, user_id, limit),
+            Self::Postgres(store) => {
+                store
+                    .get_member_identity_history(guild_id, user_id, limit)
+                    .await
+            }
+        }
+    }
+
+    pub async fn cleanup_expired_identity_history(&self) -> anyhow::Result<u64> {
+        match self {
+            Self::Memory(store) => Ok(store.cleanup_expired_identity_history()),
+            Self::Postgres(store) => store.cleanup_expired_identity_history().await,
+        }
+    }
+
+    pub async fn upsert_member_snapshot(
+        &self,
+        params: UpsertMemberSnapshotParams<'_>,
+    ) -> anyhow::Result<MemberSnapshot> {
+        match self {
+            Self::Memory(store) => store.upsert_member_snapshot(params),
+            Self::Postgres(store) => store.upsert_member_snapshot(params).await,
+        }
+    }
+
+    pub async fn search_members(
+        &self,
+        guild_id: &str,
+        filter: &MemberSearchFilter,
+    ) -> anyhow::Result<Vec<MemberSearchRow>> {
+        match self {
+            Self::Memory(store) => store.search_members(guild_id, filter),
+            Self::Postgres(store) => store.search_members(guild_id, filter).await,
+        }
+    }
+
     pub async fn archive_progression_season(
         &self,
 
@@ -3892,6 +4042,196 @@ mod tests {
         // And confirms our guard detects the manipulation:
         let expected_suffix = "/guilds/111/members/222/roles/".to_owned() + role_traversal;
         assert!(!parsed.path().ends_with(&expected_suffix));
+    }
+
+    #[tokio::test]
+    async fn test_member_identity_history_dedup_retention_and_isolation() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_1 = "100000000000000001";
+        let guild_2 = "100000000000000002";
+        let user_id = "200000000000000001";
+
+        let change1 = store
+            .record_member_identity_change(
+                guild_1,
+                user_id,
+                "nickname",
+                Some("Alpha"),
+                Some("Beta"),
+                90,
+            )
+            .await
+            .unwrap();
+        assert!(change1.is_some());
+
+        let dup = store
+            .record_member_identity_change(
+                guild_1,
+                user_id,
+                "nickname",
+                Some("Beta"),
+                Some(" Beta "),
+                90,
+            )
+            .await
+            .unwrap();
+        assert!(
+            dup.is_none(),
+            "Identical change must not produce a history record"
+        );
+
+        let change2 = store
+            .record_member_identity_change(
+                guild_1,
+                user_id,
+                "nickname",
+                Some("Beta"),
+                Some("Charlie"),
+                90,
+            )
+            .await
+            .unwrap();
+        assert!(change2.is_some());
+
+        let history = store
+            .get_member_identity_history(guild_1, user_id, 10)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].new_value, Some("Charlie".to_string()));
+        assert_eq!(history[1].new_value, Some("Beta".to_string()));
+
+        let g2_history = store
+            .get_member_identity_history(guild_2, user_id, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            g2_history.len(),
+            0,
+            "Identity history must be strictly per-guild isolated"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_member_search_multicriteria_and_pagination() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_1 = "100000000000000001";
+        let guild_2 = "100000000000000002";
+        let user_a = "200000000000000001";
+        let user_b = "200000000000000002";
+        let user_c = "200000000000000003";
+
+        let now = Utc::now();
+        let one_hour_ago = now - chrono::Duration::hours(1);
+        let two_days_ago = now - chrono::Duration::days(2);
+
+        let role_a = ["9991".to_string()];
+        let role_b = ["9992".to_string()];
+
+        store
+            .upsert_member_snapshot(UpsertMemberSnapshotParams {
+                guild_id: guild_1,
+                user_id: user_a,
+                username: "alice",
+                global_name: Some("AliceInWonderland"),
+                nickname: Some("Ali"),
+                role_ids: &role_a,
+                joined_at: Some(one_hour_ago),
+            })
+            .await
+            .unwrap();
+
+        store
+            .upsert_member_snapshot(UpsertMemberSnapshotParams {
+                guild_id: guild_1,
+                user_id: user_b,
+                username: "bob",
+                global_name: Some("BobTheBuilder"),
+                nickname: None,
+                role_ids: &role_b,
+                joined_at: Some(two_days_ago),
+            })
+            .await
+            .unwrap();
+
+        store
+            .upsert_member_snapshot(UpsertMemberSnapshotParams {
+                guild_id: guild_2,
+                user_id: user_c,
+                username: "charlie",
+                global_name: None,
+                nickname: None,
+                role_ids: &role_a,
+                joined_at: Some(one_hour_ago),
+            })
+            .await
+            .unwrap();
+
+        if let Storage::Memory(ref mem) = store {
+            mem.set_member_case_count(guild_1, user_a, 2);
+        }
+
+        let res_all = store
+            .search_members(guild_1, &MemberSearchFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(res_all.len(), 2);
+        assert_eq!(res_all[0].user_id, user_a);
+        assert_eq!(res_all[1].user_id, user_b);
+
+        let res_role = store
+            .search_members(
+                guild_1,
+                &MemberSearchFilter {
+                    role_ids: vec!["9991".to_string()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(res_role.len(), 1);
+        assert_eq!(res_role[0].user_id, user_a);
+
+        let res_exclude = store
+            .search_members(
+                guild_1,
+                &MemberSearchFilter {
+                    exclude_role_ids: vec!["9991".to_string()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(res_exclude.len(), 1);
+        assert_eq!(res_exclude[0].user_id, user_b);
+
+        let res_cases = store
+            .search_members(
+                guild_1,
+                &MemberSearchFilter {
+                    min_case_count: Some(2),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(res_cases.len(), 1);
+        assert_eq!(res_cases[0].user_id, user_a);
+
+        let res_joined = store
+            .search_members(
+                guild_1,
+                &MemberSearchFilter {
+                    joined_after: Some(now - chrono::Duration::days(1)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(res_joined.len(), 1);
+        assert_eq!(res_joined[0].user_id, user_a);
+
+        assert!(res_all.iter().all(|r| r.user_id != user_c));
     }
 
     #[tokio::test]

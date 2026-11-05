@@ -270,6 +270,14 @@ pub fn build_router(state: WebState) -> Router {
             get(features::list_store_purchases),
         )
         .route(
+            "/api/guilds/{guild_id}/members/search",
+            get(features::search_members),
+        )
+        .route(
+            "/api/guilds/{guild_id}/members/{user_id}/identity-history",
+            get(features::get_member_identity_history),
+        )
+        .route(
             "/api/guilds/{guild_id}/progression/season/reset",
             post(features::reset_progression_season),
         )

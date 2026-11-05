@@ -923,4 +923,99 @@ async fn test_postgres_integration_suite() {
         .unwrap();
     assert_eq!(purchases_list.len(), 1);
     assert_eq!(purchases_list[0].id, purchase.id);
+
+    // 21. Test Member Intelligence in PostgreSQL
+    use rusty_discord_bot::storage::{MemberSearchFilter, UpsertMemberSnapshotParams};
+
+    let intel_guild_id = "777000000000000002";
+    let member_user = "888000000000000001";
+    let joined_dt = Utc::now() - Duration::days(5);
+
+    store
+        .upsert_member_snapshot(UpsertMemberSnapshotParams {
+            guild_id: intel_guild_id,
+            user_id: member_user,
+            username: "bob_builder",
+            global_name: Some("Bob B"),
+            nickname: Some("The Builder"),
+            role_ids: &["architect".to_string(), "builder".to_string()],
+            joined_at: Some(joined_dt),
+        })
+        .await
+        .expect("upsert member snapshot in postgres");
+
+    // Identity history tracking & deduplication
+    let changed_1 = store
+        .record_member_identity_change(
+            intel_guild_id,
+            member_user,
+            "nickname",
+            None,
+            Some("The Builder"),
+            30,
+        )
+        .await
+        .unwrap();
+    assert!(
+        changed_1.is_some(),
+        "first identity insert should be recorded"
+    );
+
+    let changed_dupe = store
+        .record_member_identity_change(
+            intel_guild_id,
+            member_user,
+            "nickname",
+            Some("The Builder"),
+            Some("The Builder"),
+            30,
+        )
+        .await
+        .unwrap();
+    assert!(
+        changed_dupe.is_none(),
+        "identical consecutive identity should be deduplicated"
+    );
+
+    let changed_2 = store
+        .record_member_identity_change(
+            intel_guild_id,
+            member_user,
+            "username",
+            Some("bob_builder"),
+            Some("bob_the_mighty"),
+            30,
+        )
+        .await
+        .unwrap();
+    assert!(changed_2.is_some(), "changed username should be recorded");
+
+    let history = store
+        .get_member_identity_history(intel_guild_id, member_user, 10)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].kind, "username");
+    assert_eq!(history[0].new_value, Some("bob_the_mighty".to_string()));
+    assert_eq!(history[1].kind, "nickname");
+    assert_eq!(history[1].new_value, Some("The Builder".to_string()));
+
+    // Search members with role filter
+    let results = store
+        .search_members(
+            intel_guild_id,
+            &MemberSearchFilter {
+                role_ids: vec!["builder".to_string()],
+                exclude_role_ids: vec!["banned".to_string()],
+                limit: Some(10),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].user_id, member_user);
+    assert_eq!(results[0].username, "bob_builder");
+    assert_eq!(results[0].moderation_case_count, 0);
 }
