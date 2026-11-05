@@ -2682,6 +2682,23 @@ impl PostgresStore {
         Ok(rec)
     }
 
+    pub async fn remove_member_snapshot(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<bool> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+
+        let result =
+            sqlx::query("DELETE FROM member_snapshots WHERE guild_id = $1 AND user_id = $2")
+                .bind(guild_id)
+                .bind(user_id)
+                .execute(&self.pool)
+                .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn search_members(
         &self,
         guild_id: &str,

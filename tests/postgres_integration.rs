@@ -1153,4 +1153,47 @@ async fn test_postgres_integration_suite() {
             .expect("list mappings")
             .is_empty()
     );
+
+    // ==========================================
+    // 13. Member Intelligence Snapshot Departure (#167)
+    // ==========================================
+    let departure_user = "999000000000000099";
+    let departure_guild = "777000000000000099";
+
+    store
+        .upsert_member_snapshot(rusty_discord_bot::storage::UpsertMemberSnapshotParams {
+            guild_id: departure_guild,
+            user_id: departure_user,
+            username: "departing_member",
+            global_name: Some("Departing"),
+            nickname: None,
+            role_ids: &[],
+            joined_at: Some(Utc::now()),
+        })
+        .await
+        .expect("upsert snapshot in postgres");
+
+    let before_removal = store
+        .search_members(
+            departure_guild,
+            &rusty_discord_bot::storage::MemberSearchFilter::default(),
+        )
+        .await
+        .expect("search before departure");
+    assert_eq!(before_removal.len(), 1);
+
+    let removed = store
+        .remove_member_snapshot(departure_guild, departure_user)
+        .await
+        .expect("remove snapshot in postgres");
+    assert!(removed);
+
+    let after_removal = store
+        .search_members(
+            departure_guild,
+            &rusty_discord_bot::storage::MemberSearchFilter::default(),
+        )
+        .await
+        .expect("search after departure");
+    assert!(after_removal.is_empty());
 }

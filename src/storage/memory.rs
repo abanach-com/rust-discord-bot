@@ -1779,6 +1779,13 @@ impl MemoryStore {
         Ok(snapshot)
     }
 
+    pub fn remove_member_snapshot(&self, guild_id: &str, user_id: &str) -> anyhow::Result<bool> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+        let key = (guild_id.to_string(), user_id.to_string());
+        Ok(self.member_snapshots.remove(&key).is_some())
+    }
+
     pub fn search_members(
         &self,
         guild_id: &str,

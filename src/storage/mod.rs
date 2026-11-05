@@ -2318,6 +2318,17 @@ impl Storage {
         }
     }
 
+    pub async fn remove_member_snapshot(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => store.remove_member_snapshot(guild_id, user_id),
+            Self::Postgres(store) => store.remove_member_snapshot(guild_id, user_id).await,
+        }
+    }
+
     pub async fn search_members(
         &self,
         guild_id: &str,
@@ -5032,5 +5043,76 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn test_remove_member_snapshot_departure_and_isolation() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_1 = "111000000000000001";
+        let guild_2 = "111000000000000002";
+        let user_id = "444000000000000001";
+
+        // Add member snapshot in guild 1 and guild 2
+        store
+            .upsert_member_snapshot(UpsertMemberSnapshotParams {
+                guild_id: guild_1,
+                user_id,
+                username: "user444",
+                global_name: Some("User Four"),
+                nickname: Some("Four"),
+                role_ids: &[],
+                joined_at: Some(Utc::now()),
+            })
+            .await
+            .unwrap();
+
+        store
+            .upsert_member_snapshot(UpsertMemberSnapshotParams {
+                guild_id: guild_2,
+                user_id,
+                username: "user444",
+                global_name: Some("User Four"),
+                nickname: None,
+                role_ids: &[],
+                joined_at: Some(Utc::now()),
+            })
+            .await
+            .unwrap();
+
+        // Search in guild 1 finds the user
+        let results = store
+            .search_members(guild_1, &MemberSearchFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].user_id, user_id);
+
+        // Remove snapshot from guild 1 upon departure
+        let removed = store
+            .remove_member_snapshot(guild_1, user_id)
+            .await
+            .unwrap();
+        assert!(removed);
+
+        // Second removal is idempotent
+        let removed_again = store
+            .remove_member_snapshot(guild_1, user_id)
+            .await
+            .unwrap();
+        assert!(!removed_again);
+
+        // Search in guild 1 no longer returns the user
+        let results_after = store
+            .search_members(guild_1, &MemberSearchFilter::default())
+            .await
+            .unwrap();
+        assert!(results_after.is_empty());
+
+        // Snapshot in guild 2 remains intact
+        let results_g2 = store
+            .search_members(guild_2, &MemberSearchFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(results_g2.len(), 1);
     }
 }

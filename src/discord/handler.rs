@@ -690,6 +690,23 @@ impl EventHandler for Handler {
 
         let member_count = ctx.cache.guild(guild_id).map(|g| g.member_count);
 
+        let guild_str = guild_id.get().to_string();
+        let user_str = user.id.get().to_string();
+
+        if let Err(error) = self
+            .state
+            .storage
+            .remove_member_snapshot(&guild_str, &user_str)
+            .await
+        {
+            tracing::error!(
+                ?error,
+                %guild_id,
+                user_id = %user.id,
+                "failed to clear member snapshot after departure"
+            );
+        }
+
         let event = LuaEventContext {
             name: "guild_member_remove".to_owned(),
 
