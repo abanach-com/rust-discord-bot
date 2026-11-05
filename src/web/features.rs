@@ -1011,7 +1011,7 @@ pub async fn get_giveaway(
 ) -> Result<Json<Giveaway>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
 
-    ensure_guild_access(&state, &session, &guild_id).await?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
 
     let ga = state
         .app
@@ -1039,7 +1039,7 @@ pub async fn join_giveaway(
 
     verify_csrf(&headers, &session)?;
 
-    ensure_guild_access(&state, &session, &guild_id).await?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
 
     let ga = state
         .app

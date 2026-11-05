@@ -277,3 +277,101 @@ async fn test_install_xml_rejects_path_traversal_and_symlink_escape() {
 
     let _ = std::fs::remove_dir_all(&private_dir);
 }
+
+#[tokio::test]
+async fn test_legacy_loader_rejects_symlinks_and_loops_without_install_xml() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path();
+
+    // 1. Normal nested script works in legacy mode (no install.xml)
+    let nested_dir = base.join("nested");
+    std::fs::create_dir_all(&nested_dir).expect("create nested dir");
+    std::fs::write(
+        nested_dir.join("sample.lua"),
+        r#"
+        return {
+            manifest = {
+                id = "sample",
+                name = "Sample",
+                version = "1.0.0",
+                description = "Sample",
+                category = "test",
+                commands = {}
+            }
+        }
+        "#,
+    )
+    .expect("write sample.lua");
+
+    let engine =
+        LuaEngine::load(base, limits()).expect("legacy loader should load regular scripts");
+    assert!(
+        engine.manifest("sample").await.is_some(),
+        "sample module should be loaded"
+    );
+
+    // 2. Symlinks outside SCRIPTS_DIR are rejected
+    let private_dir = temp
+        .path()
+        .parent()
+        .unwrap()
+        .join(format!("legacy_outside_{}", uuid::Uuid::new_v4().simple()));
+    let _ = std::fs::create_dir_all(&private_dir);
+    let outside_script = private_dir.join("outside.lua");
+    std::fs::write(
+        &outside_script,
+        r#"
+        return {
+            manifest = {
+                id = "outside",
+                name = "Outside",
+                version = "1.0.0",
+                description = "Outside",
+                category = "test",
+                commands = {}
+            }
+        }
+        "#,
+    )
+    .expect("write outside.lua");
+
+    #[cfg(windows)]
+    let sym_file_ok =
+        std::os::windows::fs::symlink_file(&outside_script, base.join("sym_file.lua")).is_ok();
+    #[cfg(unix)]
+    let sym_file_ok =
+        std::os::unix::fs::symlink(&outside_script, base.join("sym_file.lua")).is_ok();
+
+    if sym_file_ok {
+        let res = engine.reload().await;
+        assert!(res.is_err(), "legacy loader must reject symlinked file");
+        // Active registry must be preserved
+        assert!(
+            engine.manifest("sample").await.is_some(),
+            "active registry must be preserved"
+        );
+        let _ = std::fs::remove_file(base.join("sym_file.lua"));
+    }
+
+    // 3. Symlink directory loop: loop -> .
+    #[cfg(windows)]
+    let sym_dir_ok = std::os::windows::fs::symlink_dir(base, base.join("loop")).is_ok();
+    #[cfg(unix)]
+    let sym_dir_ok = std::os::unix::fs::symlink(base, base.join("loop")).is_ok();
+
+    if sym_dir_ok {
+        let res = engine.reload().await;
+        assert!(
+            res.is_err(),
+            "legacy loader must reject symlink directory loop"
+        );
+        // Active registry must still be preserved
+        assert!(
+            engine.manifest("sample").await.is_some(),
+            "active registry must be preserved"
+        );
+        let _ = std::fs::remove_dir(base.join("loop"));
+    }
+
+    let _ = std::fs::remove_dir_all(&private_dir);
+}

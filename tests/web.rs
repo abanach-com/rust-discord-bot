@@ -3363,3 +3363,294 @@ async fn test_help_forum_hardening_and_lifecycle() {
         Some("inactivity_auto_close")
     );
 }
+
+#[tokio::test]
+async fn test_giveaways_member_access_and_admin_boundary() {
+    let (state, _) = test_web_state().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let guild_id = "111222333444555666";
+    let giveaway = state
+        .app
+        .storage
+        .create_giveaway(
+            guild_id,
+            "channel_123",
+            "Discord Nitro",
+            1,
+            Utc::now() + Duration::days(7),
+        )
+        .await
+        .expect("create test giveaway");
+
+    // Regular member session: member of guild_id, but permissions = "0" (no MANAGE_GUILD)
+    let member_session_id = "regular_member_session_token";
+    let member_user = DashboardUser {
+        id: "member_999".to_owned(),
+        username: "regular_joe".to_owned(),
+        global_name: None,
+        avatar: None,
+    };
+    let member_guilds = vec![DashboardGuild {
+        id: guild_id.to_owned(),
+        name: "Community Guild".to_owned(),
+        icon: None,
+        owner: false,
+        permissions: "0".to_owned(), // regular member, no MANAGE_GUILD
+    }];
+
+    state
+        .app
+        .sessions
+        .save_session(
+            member_session_id,
+            member_user,
+            member_guilds,
+            "csrf_member_123".to_owned(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .expect("save member session");
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let session_cookie = format!("rusty_discord_bot_session={member_session_id}");
+
+    // 1. Regular member can view the giveaway (GET /api/guilds/{guild_id}/giveaways/{giveaway_id}) -> 200 OK
+    let get_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}",
+            giveaway.id
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .expect("get giveaway");
+    assert_eq!(get_resp.status(), reqwest::StatusCode::OK);
+    let ga_json: serde_json::Value = get_resp.json().await.unwrap();
+    assert_eq!(ga_json["prize"], "Discord Nitro");
+
+    // 2. Regular member can join the giveaway with CSRF (POST /api/guilds/{guild_id}/giveaways/{giveaway_id}/join) -> 200 OK, joined: true
+    let join_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}/join",
+            giveaway.id
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", "csrf_member_123")
+        .send()
+        .await
+        .expect("join giveaway");
+    assert_eq!(join_resp.status(), reqwest::StatusCode::OK);
+    let join_json: serde_json::Value = join_resp.json().await.unwrap();
+    assert_eq!(join_json["joined"], true);
+
+    // 3. Second join attempt -> 200 OK, joined: false
+    let join_again_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}/join",
+            giveaway.id
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", "csrf_member_123")
+        .send()
+        .await
+        .expect("join giveaway again");
+    assert_eq!(join_again_resp.status(), reqwest::StatusCode::OK);
+    let join_again_json: serde_json::Value = join_again_resp.json().await.unwrap();
+    assert_eq!(join_again_json["joined"], false);
+
+    // 4. Regular member cannot create giveaways -> 403 Forbidden
+    let create_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/giveaways"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", "csrf_member_123")
+        .json(&serde_json::json!({
+            "channel_id": "channel_123",
+            "prize": "Hacked Nitro",
+            "winners_count": 1,
+            "duration_minutes": 60
+        }))
+        .send()
+        .await
+        .expect("create giveaway as member");
+    assert_eq!(create_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 5. Regular member cannot reroll giveaways -> 403 Forbidden
+    let reroll_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}/reroll",
+            giveaway.id
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", "csrf_member_123")
+        .send()
+        .await
+        .expect("reroll giveaway as member");
+    assert_eq!(reroll_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 6. Non-member access to other guild -> 403 Forbidden
+    let other_guild_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/999888777666/giveaways/{}",
+            giveaway.id
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .expect("other guild giveaway");
+    assert_eq!(other_guild_resp.status(), reqwest::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_guild_events_stream_security_and_reauth_on_revoke() {
+    let (state, perms_cache) = test_web_state().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let guild_id = "stream_guild_100";
+    let user_id = "stream_user_200";
+    let session_id = "stream_session_token_xyz";
+
+    let user = DashboardUser {
+        id: user_id.to_owned(),
+        username: "stream_admin".to_owned(),
+        global_name: None,
+        avatar: None,
+    };
+    let guilds = vec![DashboardGuild {
+        id: guild_id.to_owned(),
+        name: "Stream Guild".to_owned(),
+        icon: None,
+        owner: false,
+        permissions: "32".to_owned(), // MANAGE_GUILD
+    }];
+
+    state
+        .app
+        .sessions
+        .save_session(
+            session_id,
+            user,
+            guilds,
+            "csrf_stream_token".to_owned(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .expect("save stream session");
+
+    // Populate perms_cache
+    perms_cache.insert(
+        (user_id.to_owned(), guild_id.to_owned()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let session_cookie = format!("rusty_discord_bot_session={session_id}");
+
+    // Connect to SSE stream
+    let mut resp = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/events"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .expect("connect to sse");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    // Initial connected event chunk
+    let first_chunk = resp
+        .chunk()
+        .await
+        .expect("receive chunk")
+        .expect("initial chunk");
+    let first_text = String::from_utf8_lossy(&first_chunk);
+    assert!(first_text.contains("connected"));
+
+    // Emit live event while authorized
+    state
+        .app
+        .guild_events
+        .send(rusty_discord_bot::state::GuildRealtimeEvent {
+            guild_id: guild_id.to_owned(),
+            event_type: "case_created".to_owned(),
+            payload: serde_json::json!({ "case_number": 42 }),
+        })
+        .expect("send live event");
+
+    let event_chunk = resp
+        .chunk()
+        .await
+        .expect("receive chunk")
+        .expect("event chunk");
+    let event_text = String::from_utf8_lossy(&event_chunk);
+    assert!(event_text.contains("case_created"));
+
+    // Revoke session from store (e.g. logout or session invalidation)
+    state
+        .app
+        .sessions
+        .delete_session(session_id)
+        .await
+        .expect("delete session");
+
+    // Also invalidate permissions cache
+    perms_cache.insert(
+        (user_id.to_owned(), guild_id.to_owned()),
+        CachedGuildPermission {
+            can_manage: false,
+            checked_at: Utc::now(),
+        },
+    );
+
+    // Emit another event after revocation
+    state
+        .app
+        .guild_events
+        .send(rusty_discord_bot::state::GuildRealtimeEvent {
+            guild_id: guild_id.to_owned(),
+            event_type: "case_created".to_owned(),
+            payload: serde_json::json!({ "case_number": 43 }),
+        })
+        .expect("send event after revoke");
+
+    // The stream must terminate (either next chunk is None, or EOF reached)
+    let terminated_chunk = resp.chunk().await.expect("stream chunk read");
+    assert!(
+        terminated_chunk.is_none(),
+        "stream should terminate on session revocation, but got: {:?}",
+        terminated_chunk.map(|c| String::from_utf8_lossy(&c).to_string())
+    );
+}

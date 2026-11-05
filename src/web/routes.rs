@@ -13,8 +13,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio_stream::StreamExt;
-use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use crate::lua::LuaModuleManifest;
@@ -845,23 +844,74 @@ pub async fn guild_events_stream(
     let (_, session) = authenticate(&state, &headers).await?;
     ensure_guild_access(&state, &session, &guild_id).await?;
 
-    let rx = state.app.guild_events.subscribe();
+    let mut rx = state.app.guild_events.subscribe();
     let target_guild = guild_id.clone();
 
-    let initial = tokio_stream::once(Ok(Event::default()
-        .event("connected")
-        .data(json!({ "guild_id": target_guild }).to_string())));
+    let (tx, rx_out) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
 
-    let stream = BroadcastStream::new(rx).filter_map(move |item| match item {
-        Ok(event) if event.guild_id == target_guild => Some(Ok(Event::default()
-            .event(event.event_type)
-            .data(event.payload.to_string()))),
-        _ => None,
+    let initial = Event::default()
+        .event("connected")
+        .data(json!({ "guild_id": target_guild }).to_string());
+    let _ = tx.send(Ok(initial)).await;
+
+    let worker_state = state.clone();
+    let worker_headers = headers.clone();
+    let worker_guild = target_guild.clone();
+
+    tokio::spawn(async move {
+        let mut reauth_interval = tokio::time::interval(std::time::Duration::from_secs(15));
+        reauth_interval.tick().await;
+
+        loop {
+            tokio::select! {
+                _ = reauth_interval.tick() => {
+                    let Ok((_, fresh_session)) = authenticate(&worker_state, &worker_headers).await else {
+                        break;
+                    };
+                    if ensure_guild_access(&worker_state, &fresh_session, &worker_guild).await.is_err() {
+                        break;
+                    }
+                }
+                next = rx.recv() => {
+                    match next {
+                        Ok(event) => {
+                            if event.guild_id != worker_guild {
+                                continue;
+                            }
+                            let Ok((_, fresh_session)) = authenticate(&worker_state, &worker_headers).await else {
+                                break;
+                            };
+                            if ensure_guild_access(&worker_state, &fresh_session, &worker_guild).await.is_err() {
+                                break;
+                            }
+
+                            let sse_event = Event::default()
+                                .event(event.event_type)
+                                .data(event.payload.to_string());
+                            if tx.send(Ok(sse_event)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            let resync_event = Event::default()
+                                .event("resync")
+                                .data(json!({ "guild_id": worker_guild }).to_string());
+                            if tx.send(Ok(resync_event)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     });
 
-    let combined = initial.chain(stream);
+    let stream = ReceiverStream::new(rx_out);
 
-    Ok(Sse::new(combined).keep_alive(
+    Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(std::time::Duration::from_secs(15))
             .text("keep-alive"),

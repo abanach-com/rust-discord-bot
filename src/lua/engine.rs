@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::{Component, Path, PathBuf},
     sync::{
@@ -26,6 +26,8 @@ use super::{
 const MAX_ACTIONS_PER_EXECUTION: usize = 25;
 const MAX_COMMANDS: usize = 100;
 const MAX_OPTIONS_PER_LEVEL: usize = 25;
+const MAX_DISCOVERY_DEPTH: usize = 16;
+const MAX_DISCOVERY_FILES: usize = 512;
 
 #[derive(Clone, Copy, Debug)]
 pub struct LuaLimits {
@@ -600,17 +602,49 @@ fn build_registry(scripts_dir: &Path, limits: LuaLimits) -> Result<Registry, Lua
             }
             items
         } else {
+            let canonical_root =
+                scripts_dir
+                    .canonicalize()
+                    .map_err(|source| LuaEngineError::Io {
+                        path: scripts_dir.to_path_buf(),
+                        source,
+                    })?;
             let mut paths = Vec::new();
-            collect_lua_files(scripts_dir, &mut paths)?;
+            let mut visited = HashSet::new();
+            collect_lua_files(
+                &canonical_root,
+                &canonical_root,
+                &mut paths,
+                &mut visited,
+                0,
+            )?;
             paths.sort();
             let mut items = Vec::new();
             for p in paths {
                 let config_path = p.parent().map(|dir| dir.join("config.json"));
                 let default_config = if let Some(cfg) = config_path {
                     if cfg.is_file() {
-                        let parent_dir = p.parent().unwrap_or(scripts_dir);
+                        let cfg_meta =
+                            fs::symlink_metadata(&cfg).map_err(|source| LuaEngineError::Io {
+                                path: cfg.clone(),
+                                source,
+                            })?;
+                        if cfg_meta.file_type().is_symlink() {
+                            return Err(LuaEngineError::InvalidModule {
+                                script: cfg.display().to_string(),
+                                message: "symlinks are forbidden during legacy Lua discovery"
+                                    .into(),
+                            });
+                        }
+                        let parent_dir = p.parent().unwrap_or(&canonical_root);
                         let canonical_config =
                             ensure_confined_path(parent_dir, Path::new("config.json"))?;
+                        if !canonical_config.starts_with(&canonical_root) {
+                            return Err(LuaEngineError::InvalidModule {
+                                script: canonical_config.display().to_string(),
+                                message: "config path escapes allowed scripts root".into(),
+                            });
+                        }
                         let text = fs::read_to_string(&canonical_config).map_err(|source| {
                             LuaEngineError::Io {
                                 path: canonical_config.clone(),
@@ -738,24 +772,92 @@ fn build_registry(scripts_dir: &Path, limits: LuaLimits) -> Result<Registry, Lua
     Ok(registry)
 }
 
-fn collect_lua_files(path: &Path, output: &mut Vec<PathBuf>) -> Result<(), LuaEngineError> {
-    let entries = fs::read_dir(path).map_err(|source| LuaEngineError::Io {
-        path: path.to_path_buf(),
+fn collect_lua_files(
+    canonical_root: &Path,
+    current_dir: &Path,
+    output: &mut Vec<PathBuf>,
+    visited: &mut HashSet<PathBuf>,
+    depth: usize,
+) -> Result<(), LuaEngineError> {
+    if depth > MAX_DISCOVERY_DEPTH {
+        return Err(LuaEngineError::InvalidModule {
+            script: current_dir.display().to_string(),
+            message: format!("directory traversal depth exceeded limit of {MAX_DISCOVERY_DEPTH}"),
+        });
+    }
+
+    let canonical_current = current_dir
+        .canonicalize()
+        .map_err(|source| LuaEngineError::Io {
+            path: current_dir.to_path_buf(),
+            source,
+        })?;
+
+    if !canonical_current.starts_with(canonical_root) {
+        return Err(LuaEngineError::InvalidModule {
+            script: current_dir.display().to_string(),
+            message: "directory escapes allowed scripts root".into(),
+        });
+    }
+
+    if !visited.insert(canonical_current) {
+        return Err(LuaEngineError::InvalidModule {
+            script: current_dir.display().to_string(),
+            message: "cyclic directory symlink or reference detected".into(),
+        });
+    }
+
+    let entries = fs::read_dir(current_dir).map_err(|source| LuaEngineError::Io {
+        path: current_dir.to_path_buf(),
         source,
     })?;
 
     for entry in entries {
         let entry = entry.map_err(|source| LuaEngineError::Io {
-            path: path.to_path_buf(),
+            path: current_dir.to_path_buf(),
             source,
         })?;
         let entry_path = entry.path();
-        if entry_path.is_dir() {
-            collect_lua_files(&entry_path, output)?;
-        } else if entry_path
-            .extension()
-            .is_some_and(|extension| extension == "lua")
+        let file_type = entry.file_type().map_err(|source| LuaEngineError::Io {
+            path: entry_path.clone(),
+            source,
+        })?;
+
+        if file_type.is_symlink() {
+            return Err(LuaEngineError::InvalidModule {
+                script: entry_path.display().to_string(),
+                message: "symlinks are forbidden during legacy Lua discovery".into(),
+            });
+        }
+
+        if file_type.is_dir() {
+            collect_lua_files(canonical_root, &entry_path, output, visited, depth + 1)?;
+        } else if file_type.is_file()
+            && entry_path
+                .extension()
+                .is_some_and(|extension| extension == "lua")
         {
+            if output.len() >= MAX_DISCOVERY_FILES {
+                return Err(LuaEngineError::InvalidModule {
+                    script: entry_path.display().to_string(),
+                    message: format!(
+                        "exceeded maximum legacy script limit of {MAX_DISCOVERY_FILES}"
+                    ),
+                });
+            }
+            let canonical_file =
+                entry_path
+                    .canonicalize()
+                    .map_err(|source| LuaEngineError::Io {
+                        path: entry_path.clone(),
+                        source,
+                    })?;
+            if !canonical_file.starts_with(canonical_root) {
+                return Err(LuaEngineError::InvalidModule {
+                    script: entry_path.display().to_string(),
+                    message: "script file escapes allowed scripts root".into(),
+                });
+            }
             output.push(entry_path);
         }
     }
