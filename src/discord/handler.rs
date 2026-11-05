@@ -1645,6 +1645,7 @@ async fn handle_duty_builtin_command(
             is_live_discord: !state.config.discord_token.starts_with("dummy")
                 && state.config.discord_token != "mock"
                 && state.config.discord_token != "offline",
+            dry_run: false,
             http: Some(&ctx.http),
         })
         .await?;
@@ -1685,6 +1686,7 @@ async fn handle_duty_builtin_command(
             is_live_discord: !state.config.discord_token.starts_with("dummy")
                 && state.config.discord_token != "mock"
                 && state.config.discord_token != "offline",
+            dry_run: false,
             http: Some(&ctx.http),
         })
         .await?;
@@ -1754,6 +1756,7 @@ async fn handle_duty_builtin_command(
             is_live_discord: !state.config.discord_token.starts_with("dummy")
                 && state.config.discord_token != "mock"
                 && state.config.discord_token != "offline",
+            dry_run: false,
             http: Some(&ctx.http),
         })
         .await?;

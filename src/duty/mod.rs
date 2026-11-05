@@ -117,7 +117,7 @@ impl ModeratorDutyProfile {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ModeratorDutyState {
     pub guild_id: String,
     pub user_id: String,
@@ -215,12 +215,30 @@ pub fn compute_is_on_call(
     false
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ModeratorDutyRoleGrant {
+    pub guild_id: String,
+    pub user_id: String,
+    pub role_id: String,
+    pub status: String, // "active", "revoke_pending", "revoked", "failed"
+    pub attempts: i32,
+    pub last_error: Option<String>,
+    pub next_attempt_at: DateTime<Utc>,
+    pub generation: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DutyReconcileOutcome {
     pub user_id: String,
     pub expected_on_call: bool,
     pub role_granted: bool,
     pub role_revoked: bool,
+    #[serde(default)]
+    pub would_grant: bool,
+    #[serde(default)]
+    pub would_revoke: bool,
     pub error: Option<String>,
 }
 
@@ -256,6 +274,7 @@ pub struct ReconcileDutyParams<'a> {
     pub bot_highest_role_pos: Option<i64>,
     pub on_call_role_pos: Option<i64>,
     pub is_live_discord: bool,
+    pub dry_run: bool,
     pub http: Option<&'a serenity::all::Http>,
 }
 
@@ -272,20 +291,24 @@ pub async fn reconcile_member_duty_state(
     let on_call_role_id = match params.settings.on_call_role_id {
         Some(ref r) => r.clone(),
         None => {
-            let state = ModeratorDutyState {
-                guild_id: params.guild_id.to_string(),
-                user_id: params.user_id.to_string(),
-                expected_on_call: expected,
-                state_generation: 0,
-                last_reconciled_at: Some(Utc::now()),
-                last_error: Some("No on_call_role_id configured".to_string()),
-            };
-            let _ = params.storage.upsert_duty_state(state).await?;
+            if !params.dry_run {
+                let state = ModeratorDutyState {
+                    guild_id: params.guild_id.to_string(),
+                    user_id: params.user_id.to_string(),
+                    expected_on_call: expected,
+                    state_generation: 0,
+                    last_reconciled_at: Some(Utc::now()),
+                    last_error: Some("No on_call_role_id configured".to_string()),
+                };
+                let _ = params.storage.upsert_duty_state(state).await?;
+            }
             return Ok(DutyReconcileOutcome {
                 user_id: params.user_id.to_string(),
                 expected_on_call: expected,
                 role_granted: false,
                 role_revoked: false,
+                would_grant: false,
+                would_revoke: false,
                 error: Some("No on_call_role_id configured".to_string()),
             });
         }
@@ -294,6 +317,8 @@ pub async fn reconcile_member_duty_state(
     let has_on_call = params.member_roles.contains(&on_call_role_id);
     let mut role_granted = false;
     let mut role_revoked = false;
+    let mut would_grant = false;
+    let mut would_revoke = false;
     let mut error = None;
 
     if expected != has_on_call {
@@ -309,7 +334,14 @@ pub async fn reconcile_member_duty_state(
         }
 
         if error.is_none() {
-            if params.is_live_discord {
+            if params.dry_run {
+                // Issue #187: In dry-run mode, never mutate Discord or falsify role_granted/role_revoked
+                if expected {
+                    would_grant = true;
+                } else {
+                    would_revoke = true;
+                }
+            } else if params.is_live_discord {
                 if let Some(h) = params.http
                     && let (Ok(g_num), Ok(u_num), Ok(r_num)) = (
                         params.guild_id.parse::<u64>(),
@@ -329,6 +361,16 @@ pub async fn reconcile_member_duty_state(
                             error = Some(format!("Discord API add_role error: {e}"));
                         } else {
                             role_granted = true;
+                            // Issue #188: Record bot-owned active grant
+                            let _ = params
+                                .storage
+                                .record_duty_role_grant(
+                                    params.guild_id,
+                                    params.user_id,
+                                    &on_call_role_id,
+                                    "active",
+                                )
+                                .await;
                         }
                     } else if let Err(e) = h
                         .remove_member_role(g_id, u_id, r_id, Some("Moderator off-duty scheduled"))
@@ -337,6 +379,16 @@ pub async fn reconcile_member_duty_state(
                         error = Some(format!("Discord API remove_role error: {e}"));
                     } else {
                         role_revoked = true;
+                        // Issue #188: Mark grant revoked
+                        let _ = params
+                            .storage
+                            .record_duty_role_grant(
+                                params.guild_id,
+                                params.user_id,
+                                &on_call_role_id,
+                                "revoked",
+                            )
+                            .await;
                     }
                 }
             } else if expected {
@@ -347,23 +399,101 @@ pub async fn reconcile_member_duty_state(
         }
     }
 
-    let state = ModeratorDutyState {
-        guild_id: params.guild_id.to_string(),
-        user_id: params.user_id.to_string(),
-        expected_on_call: expected,
-        state_generation: 0,
-        last_reconciled_at: Some(Utc::now()),
-        last_error: error.clone(),
-    };
-    let _ = params.storage.upsert_duty_state(state).await?;
+    // Issue #187: In dry_run mode, do NOT mutate ModeratorDutyState in database
+    if !params.dry_run {
+        let state = ModeratorDutyState {
+            guild_id: params.guild_id.to_string(),
+            user_id: params.user_id.to_string(),
+            expected_on_call: expected,
+            state_generation: 0,
+            last_reconciled_at: Some(Utc::now()),
+            last_error: error.clone(),
+        };
+        let _ = params.storage.upsert_duty_state(state).await?;
+    }
 
     Ok(DutyReconcileOutcome {
         user_id: params.user_id.to_string(),
         expected_on_call: expected,
         role_granted,
         role_revoked,
+        would_grant,
+        would_revoke,
         error,
     })
+}
+
+pub async fn process_duty_role_revocations(
+    storage: &crate::storage::Storage,
+    http: Option<&serenity::all::Http>,
+    guild_id: Option<&str>,
+) -> anyhow::Result<usize> {
+    if let Some(gid) = guild_id {
+        validate_snowflake("guild_id", gid)?;
+    }
+
+    let pending = storage.list_pending_duty_role_revocations(guild_id).await?;
+    let mut processed = 0;
+
+    for mut grant in pending {
+        if let Some(target_gid) = guild_id
+            && grant.guild_id != target_gid
+        {
+            continue;
+        }
+
+        if let Some(client) = http {
+            if let (Ok(g_num), Ok(u_num), Ok(r_num)) = (
+                grant.guild_id.parse::<u64>(),
+                grant.user_id.parse::<u64>(),
+                grant.role_id.parse::<u64>(),
+            ) {
+                let g_id = serenity::all::GuildId::new(g_num);
+                let u_id = serenity::all::UserId::new(u_num);
+                let r_id = serenity::all::RoleId::new(r_num);
+
+                match client
+                    .remove_member_role(
+                        g_id,
+                        u_id,
+                        r_id,
+                        Some("Moderator duty role revoked: profile deleted or role changed"),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        grant.status = "revoked".to_string();
+                        grant.last_error = None;
+                        grant.updated_at = Utc::now();
+                        processed += 1;
+                    }
+                    Err(e) => {
+                        let err_msg = e.to_string();
+                        grant.attempts += 1;
+                        grant.last_error = Some(err_msg);
+                        grant.updated_at = Utc::now();
+                        if grant.attempts >= 5 {
+                            grant.status = "failed".to_string();
+                        } else {
+                            let backoff_secs = 2u64.pow(grant.attempts.min(6) as u32) * 5;
+                            grant.next_attempt_at =
+                                Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
+                        }
+                    }
+                }
+            } else {
+                grant.status = "failed".to_string();
+                grant.last_error = Some("Invalid snowflake ID in duty role grant".to_string());
+            }
+        } else {
+            // Offline / mock mode without live Discord client
+            continue;
+        }
+
+        storage.upsert_duty_role_grant(grant).await?;
+    }
+
+    Ok(processed)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -484,11 +614,15 @@ pub async fn reconcile_all_duty_guilds(
                 bot_highest_role_pos: bot_pos,
                 on_call_role_pos: on_call_pos,
                 is_live_discord: is_live && http.is_some(),
+                dry_run: false,
                 http,
             })
             .await;
             total_reconciled += 1;
         }
+
+        // Issue #188: Process durable role revocations for orphaned roles
+        let _ = process_duty_role_revocations(storage, http, Some(&guild_id)).await;
     }
 
     Ok(total_reconciled)
@@ -698,6 +832,7 @@ mod tests {
             bot_highest_role_pos: Some(100),
             on_call_role_pos: Some(50),
             is_live_discord: false,
+            dry_run: false,
             http: None,
         })
         .await
@@ -718,6 +853,7 @@ mod tests {
             bot_highest_role_pos: Some(100),
             on_call_role_pos: Some(50),
             is_live_discord: false,
+            dry_run: false,
             http: None,
         })
         .await
@@ -769,6 +905,7 @@ mod tests {
             bot_highest_role_pos: Some(10),
             on_call_role_pos: Some(20),
             is_live_discord: false,
+            dry_run: false,
             http: None,
         })
         .await

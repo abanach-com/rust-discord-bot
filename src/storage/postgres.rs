@@ -445,6 +445,14 @@ impl PostgresStore {
                 .execute(&mut *tx)
                 .await;
 
+        let _ = sqlx::query(
+            "DELETE FROM moderator_duty_role_grants WHERE guild_id = $1 AND user_id = $2",
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await;
+
         let deleted_rec_apps = sqlx::query(
             "DELETE FROM recruitment_applications WHERE guild_id = $1 AND applicant_user_id = $2",
         )
@@ -7244,6 +7252,18 @@ impl PostgresStore {
                 .execute(&mut *tx)
                 .await?;
 
+        let _ = sqlx::query(
+            r#"
+            UPDATE moderator_duty_role_grants
+            SET status = 'revoke_pending', next_attempt_at = NOW(), updated_at = NOW()
+            WHERE guild_id = $1 AND user_id = $2 AND status = 'active'
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
         tx.commit().await?;
         Ok(res.rows_affected() > 0)
     }
@@ -7321,6 +7341,169 @@ impl PostgresStore {
         .await?;
 
         Ok(saved)
+    }
+
+    pub async fn get_duty_role_grant(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_id: &str,
+    ) -> anyhow::Result<Option<crate::duty::ModeratorDutyRoleGrant>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+        validate_snowflake("role_id", role_id)?;
+
+        let row = sqlx::query_as::<_, crate::duty::ModeratorDutyRoleGrant>(
+            r#"
+            SELECT guild_id, user_id, role_id, status, attempts, last_error, next_attempt_at, generation, created_at, updated_at
+            FROM moderator_duty_role_grants
+            WHERE guild_id = $1 AND user_id = $2 AND role_id = $3
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .bind(role_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    pub async fn upsert_duty_role_grant(
+        &self,
+        grant: crate::duty::ModeratorDutyRoleGrant,
+    ) -> anyhow::Result<crate::duty::ModeratorDutyRoleGrant> {
+        validate_snowflake("guild_id", &grant.guild_id)?;
+        validate_snowflake("user_id", &grant.user_id)?;
+        validate_snowflake("role_id", &grant.role_id)?;
+
+        let saved = sqlx::query_as::<_, crate::duty::ModeratorDutyRoleGrant>(
+            r#"
+            INSERT INTO moderator_duty_role_grants (
+                guild_id, user_id, role_id, status, attempts, last_error, next_attempt_at, generation, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+            ON CONFLICT (guild_id, user_id, role_id)
+            DO UPDATE SET
+                status = EXCLUDED.status,
+                attempts = EXCLUDED.attempts,
+                last_error = EXCLUDED.last_error,
+                next_attempt_at = EXCLUDED.next_attempt_at,
+                generation = moderator_duty_role_grants.generation + 1,
+                updated_at = NOW()
+            RETURNING guild_id, user_id, role_id, status, attempts, last_error, next_attempt_at, generation, created_at, updated_at
+            "#,
+        )
+        .bind(&grant.guild_id)
+        .bind(&grant.user_id)
+        .bind(&grant.role_id)
+        .bind(&grant.status)
+        .bind(grant.attempts)
+        .bind(&grant.last_error)
+        .bind(grant.next_attempt_at)
+        .bind(grant.generation)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(saved)
+    }
+
+    pub async fn record_duty_role_grant(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_id: &str,
+        status: &str,
+    ) -> anyhow::Result<()> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+        validate_snowflake("role_id", role_id)?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO moderator_duty_role_grants (
+                guild_id, user_id, role_id, status, attempts, last_error, next_attempt_at, generation, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, 0, NULL, NOW(), 1, NOW(), NOW())
+            ON CONFLICT (guild_id, user_id, role_id)
+            DO UPDATE SET
+                status = EXCLUDED.status,
+                attempts = CASE WHEN EXCLUDED.status = 'active' THEN 0 ELSE moderator_duty_role_grants.attempts END,
+                last_error = NULL,
+                generation = moderator_duty_role_grants.generation + 1,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .bind(role_id)
+        .bind(status)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn mark_duty_role_grants_for_revocation(
+        &self,
+        guild_id: &str,
+        user_id: Option<&str>,
+        role_id: Option<&str>,
+    ) -> anyhow::Result<Vec<crate::duty::ModeratorDutyRoleGrant>> {
+        validate_snowflake("guild_id", guild_id)?;
+        if let Some(uid) = user_id {
+            validate_snowflake("user_id", uid)?;
+        }
+        if let Some(rid) = role_id {
+            validate_snowflake("role_id", rid)?;
+        }
+
+        let rows = sqlx::query_as::<_, crate::duty::ModeratorDutyRoleGrant>(
+            r#"
+            UPDATE moderator_duty_role_grants
+            SET status = 'revoke_pending',
+                next_attempt_at = NOW(),
+                generation = generation + 1,
+                updated_at = NOW()
+            WHERE guild_id = $1
+              AND ($2::TEXT IS NULL OR user_id = $2)
+              AND ($3::TEXT IS NULL OR role_id = $3)
+              AND status = 'active'
+            RETURNING guild_id, user_id, role_id, status, attempts, last_error, next_attempt_at, generation, created_at, updated_at
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .bind(role_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn list_pending_duty_role_revocations(
+        &self,
+        guild_id: Option<&str>,
+    ) -> anyhow::Result<Vec<crate::duty::ModeratorDutyRoleGrant>> {
+        if let Some(gid) = guild_id {
+            validate_snowflake("guild_id", gid)?;
+        }
+
+        let rows = sqlx::query_as::<_, crate::duty::ModeratorDutyRoleGrant>(
+            r#"
+            SELECT guild_id, user_id, role_id, status, attempts, last_error, next_attempt_at, generation, created_at, updated_at
+            FROM moderator_duty_role_grants
+            WHERE status = 'revoke_pending'
+              AND next_attempt_at <= NOW()
+              AND ($1::TEXT IS NULL OR guild_id = $1)
+            ORDER BY next_attempt_at ASC
+            "#,
+        )
+        .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
     }
 
     pub async fn get_recruitment_track(

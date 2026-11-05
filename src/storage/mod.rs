@@ -19,8 +19,8 @@ pub use postgres::{PostgresStore, run_safe_migrations};
 pub use crate::policy::CommandPolicyRule;
 
 pub use crate::duty::{
-    DutyTimeRange, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
-    RecurringSchedule, StaffAudience,
+    DutyReconcileOutcome, DutyTimeRange, ModeratorDutyProfile, ModeratorDutyRoleGrant,
+    ModeratorDutySettings, ModeratorDutyState, RecurringSchedule, StaffAudience,
 };
 
 pub use crate::recruitment::{
@@ -2616,6 +2616,73 @@ impl Storage {
         match self {
             Self::Memory(store) => store.upsert_duty_state(state),
             Self::Postgres(store) => store.upsert_duty_state(state).await,
+        }
+    }
+
+    pub async fn get_duty_role_grant(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_id: &str,
+    ) -> anyhow::Result<Option<ModeratorDutyRoleGrant>> {
+        match self {
+            Self::Memory(store) => store.get_duty_role_grant(guild_id, user_id, role_id),
+            Self::Postgres(store) => store.get_duty_role_grant(guild_id, user_id, role_id).await,
+        }
+    }
+
+    pub async fn upsert_duty_role_grant(
+        &self,
+        grant: ModeratorDutyRoleGrant,
+    ) -> anyhow::Result<ModeratorDutyRoleGrant> {
+        match self {
+            Self::Memory(store) => store.upsert_duty_role_grant(grant),
+            Self::Postgres(store) => store.upsert_duty_role_grant(grant).await,
+        }
+    }
+
+    pub async fn record_duty_role_grant(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_id: &str,
+        status: &str,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Memory(store) => store.record_duty_role_grant(guild_id, user_id, role_id, status),
+            Self::Postgres(store) => {
+                store
+                    .record_duty_role_grant(guild_id, user_id, role_id, status)
+                    .await
+            }
+        }
+    }
+
+    pub async fn mark_duty_role_grants_for_revocation(
+        &self,
+        guild_id: &str,
+        user_id: Option<&str>,
+        role_id: Option<&str>,
+    ) -> anyhow::Result<Vec<ModeratorDutyRoleGrant>> {
+        match self {
+            Self::Memory(store) => {
+                store.mark_duty_role_grants_for_revocation(guild_id, user_id, role_id)
+            }
+            Self::Postgres(store) => {
+                store
+                    .mark_duty_role_grants_for_revocation(guild_id, user_id, role_id)
+                    .await
+            }
+        }
+    }
+
+    pub async fn list_pending_duty_role_revocations(
+        &self,
+        guild_id: Option<&str>,
+    ) -> anyhow::Result<Vec<ModeratorDutyRoleGrant>> {
+        match self {
+            Self::Memory(store) => store.list_pending_duty_role_revocations(guild_id),
+            Self::Postgres(store) => store.list_pending_duty_role_revocations(guild_id).await,
         }
     }
 

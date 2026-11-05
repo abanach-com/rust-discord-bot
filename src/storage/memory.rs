@@ -135,6 +135,8 @@ pub struct MemoryStore {
 
     duty_states: Arc<DashMap<(String, String), ModeratorDutyState>>,
 
+    duty_role_grants: Arc<DashMap<(String, String, String), crate::duty::ModeratorDutyRoleGrant>>,
+
     recruitment_tracks: Arc<DashMap<Uuid, crate::recruitment::RecruitmentTrack>>,
 
     recruitment_applications: Arc<DashMap<Uuid, crate::recruitment::RecruitmentApplication>>,
@@ -460,6 +462,9 @@ impl MemoryStore {
 
         self.duty_states
             .retain(|(g, u), _| !(g == guild_id && u == user_id));
+
+        self.duty_role_grants
+            .retain(|(g, u, _), _| !(g == guild_id && u == user_id));
 
         let before_rec_apps = self.recruitment_applications.len();
         self.recruitment_applications
@@ -2525,12 +2530,12 @@ impl MemoryStore {
     pub fn delete_duty_profile(&self, guild_id: &str, user_id: &str) -> anyhow::Result<bool> {
         validate_snowflake("guild_id", guild_id)?;
         validate_snowflake("user_id", user_id)?;
-        let deleted = self
-            .duty_profiles
-            .remove(&(guild_id.to_string(), user_id.to_string()))
-            .is_some();
-        self.duty_states
-            .remove(&(guild_id.to_string(), user_id.to_string()));
+        let key = (guild_id.to_string(), user_id.to_string());
+        let deleted = self.duty_profiles.remove(&key).is_some();
+        if deleted {
+            self.duty_states.remove(&key);
+            let _ = self.mark_duty_role_grants_for_revocation(guild_id, Some(user_id), None);
+        }
         Ok(deleted)
     }
 
@@ -2572,6 +2577,146 @@ impl MemoryStore {
             state.clone(),
         );
         Ok(state)
+    }
+
+    pub fn get_duty_role_grant(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_id: &str,
+    ) -> anyhow::Result<Option<crate::duty::ModeratorDutyRoleGrant>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+        validate_snowflake("role_id", role_id)?;
+        Ok(self
+            .duty_role_grants
+            .get(&(
+                guild_id.to_string(),
+                user_id.to_string(),
+                role_id.to_string(),
+            ))
+            .map(|r| r.value().clone()))
+    }
+
+    pub fn upsert_duty_role_grant(
+        &self,
+        mut grant: crate::duty::ModeratorDutyRoleGrant,
+    ) -> anyhow::Result<crate::duty::ModeratorDutyRoleGrant> {
+        validate_snowflake("guild_id", &grant.guild_id)?;
+        validate_snowflake("user_id", &grant.user_id)?;
+        validate_snowflake("role_id", &grant.role_id)?;
+        grant.updated_at = Utc::now();
+        self.duty_role_grants.insert(
+            (
+                grant.guild_id.clone(),
+                grant.user_id.clone(),
+                grant.role_id.clone(),
+            ),
+            grant.clone(),
+        );
+        Ok(grant)
+    }
+
+    pub fn record_duty_role_grant(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_id: &str,
+        status: &str,
+    ) -> anyhow::Result<()> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+        validate_snowflake("role_id", role_id)?;
+
+        let key = (
+            guild_id.to_string(),
+            user_id.to_string(),
+            role_id.to_string(),
+        );
+        let now = Utc::now();
+
+        if let Some(mut existing) = self.duty_role_grants.get_mut(&key) {
+            existing.status = status.to_string();
+            if status == "active" {
+                existing.attempts = 0;
+                existing.last_error = None;
+            }
+            existing.generation += 1;
+            existing.updated_at = now;
+        } else {
+            let grant = crate::duty::ModeratorDutyRoleGrant {
+                guild_id: guild_id.to_string(),
+                user_id: user_id.to_string(),
+                role_id: role_id.to_string(),
+                status: status.to_string(),
+                attempts: 0,
+                last_error: None,
+                next_attempt_at: now,
+                generation: 1,
+                created_at: now,
+                updated_at: now,
+            };
+            self.duty_role_grants.insert(key, grant);
+        }
+
+        Ok(())
+    }
+
+    pub fn mark_duty_role_grants_for_revocation(
+        &self,
+        guild_id: &str,
+        user_id: Option<&str>,
+        role_id: Option<&str>,
+    ) -> anyhow::Result<Vec<crate::duty::ModeratorDutyRoleGrant>> {
+        validate_snowflake("guild_id", guild_id)?;
+        if let Some(uid) = user_id {
+            validate_snowflake("user_id", uid)?;
+        }
+        if let Some(rid) = role_id {
+            validate_snowflake("role_id", rid)?;
+        }
+
+        let now = Utc::now();
+        let mut updated = Vec::new();
+
+        for mut entry in self.duty_role_grants.iter_mut() {
+            if entry.guild_id == guild_id
+                && user_id.is_none_or(|uid| entry.user_id == uid)
+                && role_id.is_none_or(|rid| entry.role_id == rid)
+                && entry.status == "active"
+            {
+                entry.status = "revoke_pending".to_string();
+                entry.next_attempt_at = now;
+                entry.generation += 1;
+                entry.updated_at = now;
+                updated.push(entry.value().clone());
+            }
+        }
+
+        Ok(updated)
+    }
+
+    pub fn list_pending_duty_role_revocations(
+        &self,
+        guild_id: Option<&str>,
+    ) -> anyhow::Result<Vec<crate::duty::ModeratorDutyRoleGrant>> {
+        if let Some(gid) = guild_id {
+            validate_snowflake("guild_id", gid)?;
+        }
+
+        let now = Utc::now();
+        let list: Vec<_> = self
+            .duty_role_grants
+            .iter()
+            .filter(|g| {
+                g.status == "revoke_pending"
+                    && g.next_attempt_at <= now
+                    && guild_id.is_none_or(|gid| g.guild_id == gid)
+            })
+            .map(|g| g.value().clone())
+            .collect();
+
+        Ok(list)
     }
 
     pub fn archive_progression_season(&self, guild_id: &str, name: &str) -> ProgressionSeason {

@@ -3989,6 +3989,14 @@ pub async fn upsert_duty_settings(
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
     }
 
+    let old_settings = state
+        .app
+        .storage
+        .get_duty_settings(&guild_id)
+        .await
+        .ok()
+        .flatten();
+
     let settings = ModeratorDutySettings {
         guild_id: guild_id.clone(),
         staff_role_id: payload.staff_role_id,
@@ -4004,6 +4012,34 @@ pub async fn upsert_duty_settings(
         .upsert_duty_settings(settings)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    // Issue #188: Jeśli zmieniono on_call_role_id ze starej roli A, oznaczamy stare granty do revoke
+    if let Some(old_role) = old_settings.and_then(|s| s.on_call_role_id)
+        && saved.on_call_role_id.as_deref() != Some(&old_role)
+    {
+        let _ = state
+            .app
+            .storage
+            .mark_duty_role_grants_for_revocation(&guild_id, None, Some(&old_role))
+            .await;
+
+        let token = &state.app.config.discord_token;
+        let has_real_token = !token.is_empty()
+            && !token.starts_with("dummy")
+            && token != "mock"
+            && token != "offline";
+        let http = if has_real_token {
+            Some(serenity::all::Http::new(token))
+        } else {
+            None
+        };
+        let _ = crate::duty::process_duty_role_revocations(
+            &state.app.storage,
+            http.as_ref(),
+            Some(&guild_id),
+        )
+        .await;
+    }
 
     let _ = state
         .app
@@ -4164,6 +4200,24 @@ pub async fn delete_duty_profile(
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     if deleted {
+        // Issue #188: Usuwamy profil i od razu próbujemy przetworzyć zaległe odwołania ról
+        let token = &state.app.config.discord_token;
+        let has_real_token = !token.is_empty()
+            && !token.starts_with("dummy")
+            && token != "mock"
+            && token != "offline";
+        let http = if has_real_token {
+            Some(serenity::all::Http::new(token))
+        } else {
+            None
+        };
+        let _ = crate::duty::process_duty_role_revocations(
+            &state.app.storage,
+            http.as_ref(),
+            Some(&guild_id),
+        )
+        .await;
+
         let _ = state
             .app
             .storage
@@ -4323,23 +4377,27 @@ pub async fn reconcile_guild_duty(
                 Err(e) => {
                     let err_msg =
                         format!("Failed to fetch Discord member {}: {e}", profile.user_id);
-                    let _ = state
-                        .app
-                        .storage
-                        .upsert_duty_state(ModeratorDutyState {
-                            guild_id: guild_id.clone(),
-                            user_id: profile.user_id.clone(),
-                            expected_on_call: false,
-                            state_generation: 0,
-                            last_reconciled_at: Some(Utc::now()),
-                            last_error: Some(err_msg.clone()),
-                        })
-                        .await;
+                    if !dry_run {
+                        let _ = state
+                            .app
+                            .storage
+                            .upsert_duty_state(ModeratorDutyState {
+                                guild_id: guild_id.clone(),
+                                user_id: profile.user_id.clone(),
+                                expected_on_call: false,
+                                state_generation: 0,
+                                last_reconciled_at: Some(Utc::now()),
+                                last_error: Some(err_msg.clone()),
+                            })
+                            .await;
+                    }
                     outcomes.push(crate::duty::DutyReconcileOutcome {
                         user_id: profile.user_id.clone(),
                         expected_on_call: false,
                         role_granted: false,
                         role_revoked: false,
+                        would_grant: false,
+                        would_revoke: false,
                         error: Some(err_msg),
                     });
                     continue;
@@ -4359,6 +4417,7 @@ pub async fn reconcile_guild_duty(
             bot_highest_role_pos: bot_pos,
             on_call_role_pos: on_call_pos,
             is_live_discord,
+            dry_run,
             http: if is_live_discord { http.as_ref() } else { None },
         })
         .await

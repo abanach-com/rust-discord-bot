@@ -1665,7 +1665,18 @@ async fn test_moderator_duty_api() {
     let off_json: serde_json::Value = off_resp.json().await.unwrap();
     assert_eq!(off_json["profile"]["manual_override"], "force_off");
 
-    // 9a. Reconcile guild duty with dry_run=true
+    // 9a. Reconcile guild duty with dry_run=true (Issue #187: pure preview, no DB mutation)
+    let state_before = state
+        .app
+        .storage
+        .get_duty_state(guild_id, user_id)
+        .await
+        .unwrap();
+    assert!(
+        state_before.is_none(),
+        "No state should exist before live reconcile"
+    );
+
     let rec_dry = client
         .post(format!(
             "{base_url}/api/guilds/{guild_id}/duty/reconcile?dry_run=true"
@@ -1680,6 +1691,19 @@ async fn test_moderator_duty_api() {
     assert_eq!(rec_dry_json["reconciled"], true);
     assert_eq!(rec_dry_json["dry_run"], true);
     assert_eq!(rec_dry_json["count"], 1);
+    assert_eq!(rec_dry_json["outcomes"][0]["role_granted"], false);
+    assert_eq!(rec_dry_json["outcomes"][0]["role_revoked"], false);
+
+    let state_after_dry = state
+        .app
+        .storage
+        .get_duty_state(guild_id, user_id)
+        .await
+        .unwrap();
+    assert!(
+        state_after_dry.is_none(),
+        "Dry-run reconcile MUST NOT mutate ModeratorDutyState"
+    );
 
     // 9b. Reconcile guild duty live apply
     let rec_resp = client
@@ -1695,7 +1719,15 @@ async fn test_moderator_duty_api() {
     assert_eq!(rec_json["dry_run"], false);
     assert_eq!(rec_json["count"], 1);
 
-    // 10. Delete profile
+    // Simulate an active bot-owned role grant to test Issue #188 (deletion creates revoke_pending)
+    state
+        .app
+        .storage
+        .record_duty_role_grant(guild_id, user_id, "400000000000000001", "active")
+        .await
+        .unwrap();
+
+    // 10. Delete profile (Issue #188: must mark grant as revoke_pending instead of orphaning)
     let del_resp = client
         .delete(format!(
             "{base_url}/api/guilds/{guild_id}/duty/profiles/{user_id}"
@@ -1706,6 +1738,18 @@ async fn test_moderator_duty_api() {
         .await
         .unwrap();
     assert_eq!(del_resp.status(), reqwest::StatusCode::OK);
+
+    let grant_after_del = state
+        .app
+        .storage
+        .get_duty_role_grant(guild_id, user_id, "400000000000000001")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        grant_after_del.status, "revoke_pending",
+        "Deleting profile MUST queue orphaned bot-owned role for revocation"
+    );
 
     // 11. List is empty again
     let list_p2 = client
