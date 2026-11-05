@@ -2938,6 +2938,13 @@ impl Storage {
         }
     }
 
+    pub async fn list_enabled_help_forum_guilds(&self) -> anyhow::Result<Vec<String>> {
+        match self {
+            Self::Memory(store) => store.list_enabled_help_forum_guilds(),
+            Self::Postgres(store) => store.list_enabled_help_forum_guilds().await,
+        }
+    }
+
     pub async fn upsert_help_forum_config(
         &self,
         config: HelpForumConfig,

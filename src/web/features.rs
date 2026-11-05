@@ -5213,6 +5213,42 @@ pub async fn upsert_help_forum(
         updated_at: Utc::now(),
     };
 
+    let token = &state.app.config.discord_token;
+    let has_real_token =
+        !token.is_empty() && !token.starts_with("dummy") && token != "mock" && token != "offline";
+
+    if has_real_token {
+        let http = serenity::all::Http::new(token);
+        let cid_num: u64 = config
+            .forum_channel_id
+            .parse()
+            .map_err(|_| ApiError::bad_request("Invalid forum_channel_id"))?;
+        let channel = http
+            .get_channel(serenity::all::ChannelId::new(cid_num))
+            .await
+            .map_err(|e| {
+                ApiError::bad_request(format!(
+                    "Forum channel not found or inaccessible by bot: {e}"
+                ))
+            })?;
+
+        let guild_channel = channel.guild().ok_or_else(|| {
+            ApiError::bad_request("The specified channel must be a guild channel")
+        })?;
+
+        if guild_channel.guild_id.get().to_string() != guild_id {
+            return Err(ApiError::bad_request(
+                "Forum channel belongs to another guild",
+            ));
+        }
+
+        if guild_channel.kind != serenity::all::ChannelType::Forum {
+            return Err(ApiError::bad_request(
+                "The specified channel must be a Discord Forum channel",
+            ));
+        }
+    }
+
     let saved = state
         .app
         .storage
@@ -5360,18 +5396,31 @@ pub async fn close_help_forum_session_endpoint(
         ));
     }
 
-    let closed = state
-        .app
-        .storage
-        .close_help_forum_session(
-            &guild_id,
-            &thread_id,
-            &payload.status,
-            payload.reason.as_deref().or(Some("closed_via_dashboard")),
-            None,
-        )
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let token = &state.app.config.discord_token;
+    let has_real_token =
+        !token.is_empty() && !token.starts_with("dummy") && token != "mock" && token != "offline";
+    let http = if has_real_token {
+        Some(serenity::all::Http::new(token))
+    } else {
+        None
+    };
+
+    let target_status = match payload.status.as_str() {
+        "solved" | "inactive" | "deleted" => payload.status.as_str(),
+        _ => "solved",
+    };
+
+    let closed = crate::help_forum::close_help_forum_session_with_discord(
+        &state.app.storage,
+        http.as_ref(),
+        &guild_id,
+        &thread_id,
+        target_status,
+        payload.reason.as_deref().or(Some("closed_via_dashboard")),
+        None,
+    )
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let _ = state
         .app

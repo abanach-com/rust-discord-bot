@@ -31,6 +31,7 @@ async fn main() -> Result<()> {
     let discord_shutdown_rx = shutdown_tx.subscribe();
     let janitor_shutdown_rx = shutdown_tx.subscribe();
     let duty_shutdown_rx = shutdown_tx.subscribe();
+    let help_forum_shutdown_rx = shutdown_tx.subscribe();
 
     let web_handle = tokio::spawn(rusty_discord_bot::web::serve_with_shutdown(
         state.clone(),
@@ -50,11 +51,19 @@ async fn main() -> Result<()> {
         duty_shutdown_rx,
         std::time::Duration::from_secs(60),
     ));
+    let help_forum_handle = tokio::spawn(
+        rusty_discord_bot::help_forum::run_help_forum_reconciler_loop(
+            state.clone(),
+            help_forum_shutdown_rx,
+            std::time::Duration::from_secs(60),
+        ),
+    );
 
     tokio::pin!(web_handle);
     tokio::pin!(discord_handle);
     tokio::pin!(janitor_handle);
     tokio::pin!(duty_handle);
+    tokio::pin!(help_forum_handle);
 
     let result = tokio::select! {
         res = &mut web_handle => {
@@ -111,6 +120,9 @@ async fn main() -> Result<()> {
         }
         if !duty_handle.is_finished() {
             let _ = (&mut duty_handle).await;
+        }
+        if !help_forum_handle.is_finished() {
+            let _ = (&mut help_forum_handle).await;
         }
     };
 

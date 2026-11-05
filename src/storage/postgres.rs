@@ -8186,6 +8186,21 @@ impl PostgresStore {
         Ok(rows)
     }
 
+    pub async fn list_enabled_help_forum_guilds(&self) -> anyhow::Result<Vec<String>> {
+        let rows = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT DISTINCT guild_id
+            FROM help_forum_configs
+            WHERE enabled = TRUE
+            ORDER BY guild_id ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
     pub async fn upsert_help_forum_config(
         &self,
         config: HelpForumConfig,
@@ -8405,7 +8420,7 @@ impl PostgresStore {
             SET status = $3,
                 closed_at = NOW(),
                 closing_reason = $4
-            WHERE guild_id = $1 AND thread_id = $2 AND status = 'open'
+            WHERE guild_id = $1 AND thread_id = $2 AND status IN ('open', 'needs_tag')
               AND ($5::bigint IS NULL OR generation = $5)
             "#,
         )

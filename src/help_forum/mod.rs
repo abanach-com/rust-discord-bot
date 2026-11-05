@@ -188,6 +188,110 @@ pub fn calculate_stats_from_sessions(
     }
 }
 
+pub async fn close_help_forum_session_with_discord(
+    storage: &crate::storage::Storage,
+    http: Option<&serenity::http::Http>,
+    guild_id: &str,
+    thread_id: &str,
+    new_status: &str,
+    reason: Option<&str>,
+    expected_generation: Option<i64>,
+) -> anyhow::Result<bool> {
+    validate_snowflake("guild_id", guild_id)?;
+    validate_snowflake("thread_id", thread_id)?;
+
+    let session = storage.get_help_forum_session(guild_id, thread_id).await?;
+    let Some(session) = session else {
+        return Ok(false);
+    };
+
+    if session.status != "open" && session.status != "needs_tag" {
+        return Ok(false);
+    }
+
+    if let Some(exp_gen) = expected_generation
+        && session.generation != exp_gen
+    {
+        return Ok(false);
+    }
+
+    let config = storage
+        .get_help_forum_config(guild_id, &session.forum_channel_id)
+        .await?;
+    let (archive, lock) = match &config {
+        Some(cfg) => (cfg.archive_on_close, cfg.lock_on_close),
+        None => (true, true),
+    };
+
+    let needs_discord_action = archive || lock;
+    if needs_discord_action && let Some(client) = http {
+        let tid_num: u64 = thread_id.parse()?;
+        let chan_id = serenity::all::ChannelId::new(tid_num);
+        let mut map = serde_json::Map::new();
+        if archive {
+            map.insert("archived".to_string(), serde_json::Value::Bool(true));
+        }
+        if lock {
+            map.insert("locked".to_string(), serde_json::Value::Bool(true));
+        }
+
+        let edit_res = client
+            .edit_channel(
+                chan_id,
+                &serde_json::Value::Object(map),
+                Some("Help forum post closed"),
+            )
+            .await;
+
+        if let Err(err) = edit_res {
+            let is_404 = match &err {
+                serenity::all::Error::Http(serenity::all::HttpError::UnsuccessfulRequest(resp)) => {
+                    resp.status_code == reqwest::StatusCode::NOT_FOUND
+                }
+                _ => false,
+            };
+
+            if !is_404 {
+                anyhow::bail!("Discord HTTP error archiving/locking thread {thread_id}: {err}");
+            }
+        }
+    }
+
+    let closed = storage
+        .close_help_forum_session(
+            guild_id,
+            thread_id,
+            new_status,
+            reason,
+            Some(session.generation),
+        )
+        .await?;
+
+    if !closed {
+        if needs_discord_action && let Some(client) = http {
+            let tid_num: u64 = thread_id.parse()?;
+            let chan_id = serenity::all::ChannelId::new(tid_num);
+            let mut repair_map = serde_json::Map::new();
+            if archive {
+                repair_map.insert("archived".to_string(), serde_json::Value::Bool(false));
+            }
+            if lock {
+                repair_map.insert("locked".to_string(), serde_json::Value::Bool(false));
+            }
+            let _ = client
+                .edit_channel(
+                    chan_id,
+                    &serde_json::Value::Object(repair_map),
+                    Some("Help forum race repair: activity detected, reopening"),
+                )
+                .await;
+        }
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
 pub async fn reconcile_idle_help_forums(
     storage: &crate::storage::Storage,
     http: Option<&serenity::http::Http>,
@@ -210,44 +314,86 @@ pub async fn reconcile_idle_help_forums(
         for session in sessions {
             let idle_duration = Duration::minutes(cfg.idle_close_minutes as i64);
             if now - session.last_activity_at >= idle_duration {
-                // If live Discord HTTP client available, archive and optionally lock thread
-                if let (Some(client), Ok(tid_num)) = (http, session.thread_id.parse::<u64>()) {
-                    let chan_id = serenity::all::ChannelId::new(tid_num);
-                    let mut map = serde_json::Map::new();
-                    if cfg.archive_on_close {
-                        map.insert("archived".to_string(), serde_json::Value::Bool(true));
+                let close_res = close_help_forum_session_with_discord(
+                    storage,
+                    http,
+                    guild_id,
+                    &session.thread_id,
+                    "inactive",
+                    Some("inactivity_auto_close"),
+                    Some(session.generation),
+                )
+                .await;
+
+                match close_res {
+                    Ok(true) => closed_count += 1,
+                    Ok(false) => {
+                        tracing::debug!(
+                            guild_id,
+                            thread_id = %session.thread_id,
+                            "Help forum session close skipped (concurrent activity or already closed)"
+                        );
                     }
-                    if cfg.lock_on_close {
-                        map.insert("locked".to_string(), serde_json::Value::Bool(true));
+                    Err(err) => {
+                        tracing::warn!(
+                            guild_id,
+                            thread_id = %session.thread_id,
+                            ?err,
+                            "Failed to auto-close idle help forum thread; will retry on next reconcile cycle"
+                        );
                     }
-
-                    let _ = client
-                        .edit_channel(
-                            chan_id,
-                            &serde_json::Value::Object(map),
-                            Some("Help forum inactivity auto-close"),
-                        )
-                        .await;
-                }
-
-                let closed = storage
-                    .close_help_forum_session(
-                        guild_id,
-                        &session.thread_id,
-                        "inactive",
-                        Some("inactivity_auto_close"),
-                        Some(session.generation),
-                    )
-                    .await?;
-
-                if closed {
-                    closed_count += 1;
                 }
             }
         }
     }
 
     Ok(closed_count)
+}
+
+pub async fn run_help_forum_reconciler_loop(
+    state: crate::state::AppState,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+    interval_duration: std::time::Duration,
+) {
+    let mut interval = tokio::time::interval(interval_duration);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let token = &state.config.discord_token;
+    let has_real_token =
+        !token.is_empty() && !token.starts_with("dummy") && token != "mock" && token != "offline";
+    let http = if has_real_token {
+        Some(serenity::all::Http::new(token))
+    } else {
+        None
+    };
+
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.recv() => {
+                tracing::info!("Help forum reconciler loop shutting down gracefully");
+                break;
+            }
+            _ = interval.tick() => {
+                if state.is_shutting_down.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+
+                let guilds = match state.storage.list_enabled_help_forum_guilds().await {
+                    Ok(g) => g,
+                    Err(err) => {
+                        tracing::warn!(?err, "Failed to list enabled help forum guilds for reconciliation");
+                        continue;
+                    }
+                };
+
+                for guild_id in guilds {
+                    if let Err(err) = reconcile_idle_help_forums(&state.storage, http.as_ref(), &guild_id).await {
+                        tracing::warn!(guild_id = %guild_id, ?err, "Failed to reconcile idle help forums for guild");
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -386,5 +532,152 @@ mod tests {
         assert_eq!(stats.unanswered_count, 1);
         assert_eq!(stats.median_first_response_secs, Some(90.0)); // (60 + 120) / 2
         assert_eq!(stats.median_lifetime_secs, Some(900.0)); // (600 + 1200) / 2
+    }
+
+    #[tokio::test]
+    async fn test_list_enabled_help_forum_guilds() {
+        let store = crate::storage::MemoryStore::default();
+        let storage = crate::storage::Storage::Memory(store);
+
+        let g1 = "100000000000000001";
+        let g2 = "100000000000000002";
+        let g3 = "100000000000000003";
+
+        // G1: 2 configs, both enabled
+        let c1 = HelpForumConfig {
+            guild_id: g1.to_string(),
+            forum_channel_id: "200000000000000001".to_string(),
+            enabled: true,
+            ..Default::default()
+        };
+        storage.upsert_help_forum_config(c1).await.unwrap();
+
+        let c2 = HelpForumConfig {
+            guild_id: g1.to_string(),
+            forum_channel_id: "200000000000000002".to_string(),
+            enabled: true,
+            ..Default::default()
+        };
+        storage.upsert_help_forum_config(c2).await.unwrap();
+
+        // G2: 1 config, disabled
+        let c3 = HelpForumConfig {
+            guild_id: g2.to_string(),
+            forum_channel_id: "200000000000000003".to_string(),
+            enabled: false,
+            ..Default::default()
+        };
+        storage.upsert_help_forum_config(c3).await.unwrap();
+
+        // G3: 1 config, enabled
+        let c4 = HelpForumConfig {
+            guild_id: g3.to_string(),
+            forum_channel_id: "200000000000000004".to_string(),
+            enabled: true,
+            ..Default::default()
+        };
+        storage.upsert_help_forum_config(c4).await.unwrap();
+
+        let enabled_guilds = storage.list_enabled_help_forum_guilds().await.unwrap();
+        assert_eq!(enabled_guilds.len(), 2);
+        assert!(enabled_guilds.contains(&g1.to_string()));
+        assert!(enabled_guilds.contains(&g3.to_string()));
+        assert!(!enabled_guilds.contains(&g2.to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_close_and_idle_reconciliation() {
+        let store = crate::storage::MemoryStore::default();
+        let storage = crate::storage::Storage::Memory(store);
+
+        let guild_id = "100000000000000001";
+        let forum_id = "200000000000000001";
+        let thread_1 = "300000000000000001";
+        let thread_2 = "300000000000000002";
+
+        let cfg = HelpForumConfig {
+            guild_id: guild_id.to_string(),
+            forum_channel_id: forum_id.to_string(),
+            enabled: true,
+            idle_close_minutes: 60, // 1 hour
+            ..Default::default()
+        };
+        storage.upsert_help_forum_config(cfg).await.unwrap();
+
+        let now = Utc::now();
+
+        // Thread 1: idle for 2 hours -> should be auto-closed
+        let s1 = HelpForumSession {
+            guild_id: guild_id.to_string(),
+            forum_channel_id: forum_id.to_string(),
+            thread_id: thread_1.to_string(),
+            owner_user_id: "400000000000000001".to_string(),
+            status: "open".to_string(),
+            opened_at: now - Duration::hours(3),
+            last_activity_at: now - Duration::hours(2),
+            first_helper_response_at: None,
+            closed_at: None,
+            closing_reason: None,
+            generation: 1,
+        };
+        storage.create_help_forum_session(s1).await.unwrap();
+
+        // Thread 2: active 10 minutes ago -> should remain open
+        let s2 = HelpForumSession {
+            guild_id: guild_id.to_string(),
+            forum_channel_id: forum_id.to_string(),
+            thread_id: thread_2.to_string(),
+            owner_user_id: "400000000000000002".to_string(),
+            status: "open".to_string(),
+            opened_at: now - Duration::hours(1),
+            last_activity_at: now - Duration::minutes(10),
+            first_helper_response_at: None,
+            closed_at: None,
+            closing_reason: None,
+            generation: 1,
+        };
+        storage.create_help_forum_session(s2).await.unwrap();
+
+        // Reconcile
+        let closed_count = reconcile_idle_help_forums(&storage, None, guild_id)
+            .await
+            .unwrap();
+        assert_eq!(closed_count, 1);
+
+        let t1 = storage
+            .get_help_forum_session(guild_id, thread_1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(t1.status, "inactive");
+        assert_eq!(t1.closing_reason.as_deref(), Some("inactivity_auto_close"));
+
+        let t2 = storage
+            .get_help_forum_session(guild_id, thread_2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(t2.status, "open");
+
+        // Now manually close thread 2 via close_help_forum_session_with_discord
+        let closed_manual = close_help_forum_session_with_discord(
+            &storage,
+            None,
+            guild_id,
+            thread_2,
+            "solved",
+            Some("manual_solve"),
+            Some(t2.generation),
+        )
+        .await
+        .unwrap();
+        assert!(closed_manual);
+
+        let t2_closed = storage
+            .get_help_forum_session(guild_id, thread_2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(t2_closed.status, "solved");
     }
 }

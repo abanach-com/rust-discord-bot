@@ -4834,6 +4834,16 @@ impl MemoryStore {
         Ok(list)
     }
 
+    pub fn list_enabled_help_forum_guilds(&self) -> anyhow::Result<Vec<String>> {
+        let mut guilds = std::collections::BTreeSet::new();
+        for item in self.help_forum_configs.iter() {
+            if item.enabled {
+                guilds.insert(item.guild_id.clone());
+            }
+        }
+        Ok(guilds.into_iter().collect())
+    }
+
     pub fn upsert_help_forum_config(
         &self,
         mut config: crate::help_forum::HelpForumConfig,
@@ -4973,7 +4983,7 @@ impl MemoryStore {
             None => return Ok(false),
         };
 
-        if entry.status != "open" {
+        if entry.status != "open" && entry.status != "needs_tag" {
             return Ok(false);
         }
 

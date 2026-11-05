@@ -208,6 +208,14 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 | Ticket forms | Planned |
 | Application/recruitment forms and review pipeline | Implemented |
 | Help Forum lifecycle, solved state, and inactivity auto-archive | Implemented |
+
+### 6.1 Help Forum Lifecycle & Hardening (Issues #164, #190, #191, #192, #193, #194, #195)
+- **Background Inactivity Reconciler**: Dedicated daemon loop `run_help_forum_reconciler_loop` with configurable interval (`reconciliation_interval_secs`, default 60s), gracefully integrated with Tokio cancellation token (#190).
+- **Atomic Concurrency & Discord Error Safety**: `close_help_forum_session_with_discord` verifies generation tokens, prevents DB state corruption on Discord 403/500 errors, and provides automatic repair (unarchive/unlock) if optimistic concurrency fails (#191).
+- **Unified Closure Workflow**: Both web dashboard `POST .../close` and slash command `/help solved` share a single robust closure pipeline with audit trails (#192).
+- **Tag Enforcement (`require_question_tag`)**: Threads created without tags transition to `needs_tag` status with automated guidance; promoted to `open` upon tag addition via `thread_update` (#193).
+- **Mention Security**: Automated welcome messages and tag warnings explicitly suppress `@everyone`, `@here`, and role mentions using `CreateAllowedMentions::new()` to prevent notification spam (#194).
+- **Tenant & Channel Type Validation**: Web configuration validates Discord `ChannelType::Forum` and guild ownership to prevent cross-guild channel hijacking (#195).
 | Internal notes | Planned |
 | User transcript export | Planned |
 | HTML/PDF transcripts | Implemented |

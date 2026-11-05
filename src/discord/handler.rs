@@ -918,6 +918,15 @@ impl EventHandler for Handler {
         let Some(parent_id) = thread.parent_id else {
             return;
         };
+
+        // Defense-in-depth: Ensure the parent channel is a Discord Forum channel (Issue #195)
+        if let Some(guild) = ctx.cache.guild(thread.guild_id)
+            && let Some(parent) = guild.channels.get(&parent_id)
+            && parent.kind != serenity::all::ChannelType::Forum
+        {
+            return;
+        }
+
         let guild_id_str = thread.guild_id.get().to_string();
         let forum_id_str = parent_id.get().to_string();
 
@@ -935,12 +944,20 @@ impl EventHandler for Handler {
                     .unwrap_or_default();
                 let thread_id_str = thread.id.get().to_string();
 
+                let is_missing_required_tag =
+                    cfg.require_question_tag && thread.applied_tags.is_empty();
+                let initial_status = if is_missing_required_tag {
+                    "needs_tag"
+                } else {
+                    "open"
+                };
+
                 let session = crate::help_forum::HelpForumSession {
                     guild_id: guild_id_str,
                     forum_channel_id: forum_id_str,
                     thread_id: thread_id_str,
                     owner_user_id: owner_id_str,
-                    status: "open".to_string(),
+                    status: initial_status.to_string(),
                     opened_at: chrono::Utc::now(),
                     last_activity_at: chrono::Utc::now(),
                     first_helper_response_at: None,
@@ -950,8 +967,65 @@ impl EventHandler for Handler {
                 };
                 let _ = storage.create_help_forum_session(session).await;
 
+                if is_missing_required_tag {
+                    // Send tag requirement notice with empty allowed mentions (Issue #193, #194)
+                    let notice = serenity::builder::CreateMessage::new()
+                        .content("⚠️ **Question tag required**: This help forum requires a question tag. Please apply a tag to your post to activate it.")
+                        .allowed_mentions(serenity::builder::CreateAllowedMentions::new());
+                    if let Err(err) = thread.id.send_message(&http, notice).await {
+                        tracing::warn!(thread_id = %thread.id, ?err, "Failed to send help forum tag requirement notice");
+                    }
+                } else if let Some(welcome) = &cfg.welcome_message {
+                    // Send welcome message with empty allowed mentions (Issue #194)
+                    let msg = serenity::builder::CreateMessage::new()
+                        .content(welcome)
+                        .allowed_mentions(serenity::builder::CreateAllowedMentions::new());
+                    if let Err(err) = thread.id.send_message(&http, msg).await {
+                        tracing::warn!(thread_id = %thread.id, ?err, "Failed to send help forum welcome message");
+                    }
+                }
+            }
+        });
+    }
+
+    async fn thread_update(&self, ctx: Context, _old: Option<GuildChannel>, new: GuildChannel) {
+        let Some(parent_id) = new.parent_id else {
+            return;
+        };
+
+        let guild_id_str = new.guild_id.get().to_string();
+        let forum_id_str = parent_id.get().to_string();
+        let thread_id_str = new.id.get().to_string();
+
+        let storage = self.state.storage.clone();
+        let http = ctx.http.clone();
+        tokio::spawn(async move {
+            let session = match storage
+                .get_help_forum_session(&guild_id_str, &thread_id_str)
+                .await
+            {
+                Ok(Some(s)) => s,
+                _ => return,
+            };
+
+            // If session was waiting for a tag, and tag was now added: promote to 'open' (Issue #193)
+            if session.status == "needs_tag"
+                && !new.applied_tags.is_empty()
+                && let Ok(Some(cfg)) = storage
+                    .get_help_forum_config(&guild_id_str, &forum_id_str)
+                    .await
+            {
+                let mut updated = session;
+                updated.status = "open".to_string();
+                updated.last_activity_at = chrono::Utc::now();
+                updated.generation += 1;
+                let _ = storage.create_help_forum_session(updated).await;
+
                 if let Some(welcome) = &cfg.welcome_message {
-                    let _ = thread.id.say(&http, welcome).await;
+                    let msg = serenity::builder::CreateMessage::new()
+                        .content(welcome)
+                        .allowed_mentions(serenity::builder::CreateAllowedMentions::new());
+                    let _ = new.id.send_message(&http, msg).await;
                 }
             }
         });
@@ -1917,39 +1991,27 @@ async fn handle_help_builtin_command(
         return Ok(());
     }
 
-    let closed = state
-        .storage
-        .close_help_forum_session(
-            &guild_id_str,
-            &thread_id_str,
-            "solved",
-            Some("marked_solved_by_user"),
-            None,
-        )
-        .await?;
+    let token = &state.config.discord_token;
+    let has_real_token =
+        !token.is_empty() && !token.starts_with("dummy") && token != "mock" && token != "offline";
+    let http = if has_real_token {
+        Some(ctx.http.as_ref())
+    } else {
+        None
+    };
+
+    let closed = crate::help_forum::close_help_forum_session_with_discord(
+        &state.storage,
+        http,
+        &guild_id_str,
+        &thread_id_str,
+        "solved",
+        Some("marked_solved_by_user"),
+        Some(session.generation),
+    )
+    .await?;
 
     if closed {
-        if !state.config.discord_token.starts_with("dummy")
-            && state.config.discord_token != "mock"
-            && state.config.discord_token != "offline"
-        {
-            let mut map = serde_json::Map::new();
-            if config.archive_on_close {
-                map.insert("archived".to_string(), serde_json::Value::Bool(true));
-            }
-            if config.lock_on_close {
-                map.insert("locked".to_string(), serde_json::Value::Bool(true));
-            }
-            let _ = ctx
-                .http
-                .edit_channel(
-                    command.channel_id,
-                    &serde_json::Value::Object(map),
-                    Some("Help forum marked as solved"),
-                )
-                .await;
-        }
-
         respond_or_edit(
             ctx,
             command,
@@ -1964,7 +2026,7 @@ async fn handle_help_builtin_command(
             command,
             deferred,
             responded,
-            "⚠️ Unable to close the help post; it may have already been closed.",
+            "⚠️ Unable to close the help post; it may have already been closed or activity arrived.",
         )
         .await?;
     }

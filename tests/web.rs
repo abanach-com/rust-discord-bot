@@ -2988,3 +2988,225 @@ async fn test_asset_analytics_api_and_isolation() {
     let items = inv_json.as_array().unwrap();
     assert_eq!(items.len(), 3); // party, spin, cool_cat sticker
 }
+
+#[tokio::test]
+async fn test_help_forum_hardening_and_lifecycle() {
+    let (state, _perms) = test_web_state().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let app = build_router(state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve axum");
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+
+    let g1 = "666000000000000001";
+    let g2 = "666000000000000002";
+    let user_id = "777000000000000001";
+    let forum_id = "888000000000000001";
+    let thread_id = "999000000000000001";
+    let csrf_token = "csrf_token_help_forum_hardening";
+
+    state
+        .app
+        .sessions
+        .save_session(
+            "session_hardening",
+            DashboardUser {
+                id: user_id.to_owned(),
+                username: "HelpAdmin".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: g1.to_owned(),
+                name: "Guild 1".to_owned(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_owned(),
+            }],
+            csrf_token.to_owned(),
+            Utc::now() + Duration::hours(24),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let auth_cookie = "rusty_discord_bot_session=session_hardening";
+
+    // 1. Issue #195: Malformed forum_channel_id is rejected with 400
+    let invalid_config = client
+        .post(format!("{base_url}/api/guilds/{g1}/help-forums"))
+        .header(COOKIE, auth_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "forum_channel_id": "not-a-valid-snowflake",
+            "enabled": true,
+            "idle_close_minutes": 60,
+            "owner_can_close": true,
+            "helper_role_ids": [],
+            "lock_on_close": true,
+            "archive_on_close": true,
+            "require_question_tag": true,
+            "welcome_message": "Welcome @everyone to the forum!"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid_config.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 2. Issue #193: Save config with require_question_tag = true
+    let valid_config = client
+        .post(format!("{base_url}/api/guilds/{g1}/help-forums"))
+        .header(COOKIE, auth_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "forum_channel_id": forum_id,
+            "enabled": true,
+            "idle_close_minutes": 60,
+            "owner_can_close": true,
+            "helper_role_ids": [],
+            "lock_on_close": true,
+            "archive_on_close": true,
+            "require_question_tag": true,
+            "welcome_message": "Welcome to the forum!"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(valid_config.status(), reqwest::StatusCode::OK);
+
+    // Verify list_enabled_help_forum_guilds returns G1 (Issue #190)
+    let enabled_guilds = state
+        .app
+        .storage
+        .list_enabled_help_forum_guilds()
+        .await
+        .unwrap();
+    assert!(enabled_guilds.contains(&g1.to_string()));
+    assert!(!enabled_guilds.contains(&g2.to_string()));
+
+    // 3. Issue #193: Create session with 'needs_tag' status
+    let session = rusty_discord_bot::storage::HelpForumSession {
+        guild_id: g1.to_string(),
+        forum_channel_id: forum_id.to_string(),
+        thread_id: thread_id.to_string(),
+        owner_user_id: user_id.to_string(),
+        status: "needs_tag".to_string(),
+        opened_at: Utc::now() - Duration::hours(2),
+        last_activity_at: Utc::now() - Duration::hours(2),
+        first_helper_response_at: None,
+        closed_at: None,
+        closing_reason: None,
+        generation: 1,
+    };
+    state
+        .app
+        .storage
+        .create_help_forum_session(session)
+        .await
+        .unwrap();
+
+    let fetched = state
+        .app
+        .storage
+        .get_help_forum_session(g1, thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetched.status, "needs_tag");
+
+    // 4. Issue #192: Dashboard close endpoint closes the post using close_help_forum_session_with_discord
+    let close_res = client
+        .post(format!(
+            "{base_url}/api/guilds/{g1}/help-forums/{thread_id}/close"
+        ))
+        .header(COOKIE, auth_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "status": "solved",
+            "reason": "Solved via dashboard"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(close_res.status(), reqwest::StatusCode::OK);
+    let close_json: serde_json::Value = close_res.json().await.unwrap();
+    assert_eq!(close_json["closed"], true);
+
+    let session_closed = state
+        .app
+        .storage
+        .get_help_forum_session(g1, thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(session_closed.status, "solved");
+    assert_eq!(
+        session_closed.closing_reason.as_deref(),
+        Some("Solved via dashboard")
+    );
+
+    // 5. Issue #190 & #191: Test background reconciler logic across guilds
+    let idle_thread = "999000000000000002";
+    let idle_session = rusty_discord_bot::storage::HelpForumSession {
+        guild_id: g1.to_string(),
+        forum_channel_id: forum_id.to_string(),
+        thread_id: idle_thread.to_string(),
+        owner_user_id: user_id.to_string(),
+        status: "open".to_string(),
+        opened_at: Utc::now() - Duration::hours(5),
+        last_activity_at: Utc::now() - Duration::hours(3), // idle > 60 mins
+        first_helper_response_at: None,
+        closed_at: None,
+        closing_reason: None,
+        generation: 1,
+    };
+    state
+        .app
+        .storage
+        .create_help_forum_session(idle_session)
+        .await
+        .unwrap();
+
+    // Reconcile across all enabled guilds
+    let mut total_reconciled = 0;
+    for gid in state
+        .app
+        .storage
+        .list_enabled_help_forum_guilds()
+        .await
+        .unwrap()
+    {
+        total_reconciled += rusty_discord_bot::help_forum::reconcile_idle_help_forums(
+            &state.app.storage,
+            None,
+            &gid,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(total_reconciled, 1);
+
+    let idle_after = state
+        .app
+        .storage
+        .get_help_forum_session(g1, idle_thread)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(idle_after.status, "inactive");
+    assert_eq!(
+        idle_after.closing_reason.as_deref(),
+        Some("inactivity_auto_close")
+    );
+}
