@@ -149,6 +149,28 @@ impl EventHandler for Handler {
                 }
             }
         });
+
+        // Reconcile voice companion channel leases after startup/restart (#161)
+        let companion_state = self.state.clone();
+        let companion_ctx = ctx.clone();
+        let guild_ids: Vec<GuildId> = ready.guilds.iter().map(|g| g.id).collect();
+        tokio::spawn(async move {
+            for gid in guild_ids {
+                if let Err(e) = crate::discord::companion::reconcile_guild_companion_channels(
+                    &companion_ctx,
+                    &companion_state,
+                    gid,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        guild_id = %gid,
+                        ?e,
+                        "Failed companion channel reconciliation during startup"
+                    );
+                }
+            }
+        });
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
@@ -768,8 +790,11 @@ impl EventHandler for Handler {
         .await;
     }
 
-    async fn voice_state_update(&self, ctx: Context, _old: Option<VoiceState>, new: VoiceState) {
-        if let Some(guild_id) = new.guild_id {
+    async fn voice_state_update(&self, ctx: Context, old: Option<VoiceState>, new: VoiceState) {
+        if let Some(guild_id) = new
+            .guild_id
+            .or_else(|| old.as_ref().and_then(|o| o.guild_id))
+        {
             let bot_id = ctx.cache.current_user().id;
 
             if new.user_id == bot_id
@@ -777,6 +802,28 @@ impl EventHandler for Handler {
                 && let Some(manager) = songbird::get(&ctx).await
             {
                 let _ = manager.remove(guild_id).await;
+            }
+
+            if new.user_id != bot_id {
+                let old_voice = old.and_then(|o| o.channel_id);
+                let new_voice = new.channel_id;
+                if let Err(err) = crate::discord::companion::reconcile_companion_channel_access(
+                    &ctx,
+                    &self.state,
+                    guild_id,
+                    new.user_id,
+                    old_voice,
+                    new_voice,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        guild_id = %guild_id,
+                        user_id = %new.user_id,
+                        ?err,
+                        "Failed to reconcile companion channel access on voice state update"
+                    );
+                }
             }
         }
     }

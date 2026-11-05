@@ -10,21 +10,21 @@ use uuid::Uuid;
 
 use super::{
     AdjustMemberProgressParams, AiGuildBudget, AiKnowledgeDocument, AuditLogEntry, CardCollection,
-    CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome, CommunityPoll, CountingGame,
-    CustomAutomation, DailyClaimOutcome, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription,
-    GameAccountLink, GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway,
-    GuildModuleSettings, IntegrationConnection, IntegrationDeliveryLog,
-    IntegrationWebhookSubscription, InviteTracking, KickStreamSubscription, LinkedAccount,
-    McpToolAuthorization, MemberIdentityRecord, MemberProgress, MemberSearchFilter,
-    MemberSearchRow, MemberSnapshot, ModerationAppeal, ModerationExecutionIntent,
-    ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
-    ProgressionSeason, RedditSubscription, ReputationGrantOutcome, RetainedRecordNotice,
-    ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry, SteamLfgPost,
-    StickyMessage, StoreItem, StorePurchase, TelegramBridge, TelegramMessageMapping,
-    TimedRoleGrant, Tournament, TupperError, TupperProfile, TwitchStreamSubscription,
-    UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WorkflowDefinition,
-    WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp, snowflake_created_at,
-    validate_snowflake,
+    CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome, CommunityPoll,
+    CompanionChannelLease, CompanionChannelMapping, CountingGame, CustomAutomation,
+    DailyClaimOutcome, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink,
+    GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway, GuildModuleSettings,
+    IntegrationConnection, IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking,
+    KickStreamSubscription, LinkedAccount, McpToolAuthorization, MemberIdentityRecord,
+    MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
+    ModerationExecutionIntent, ModuleDraftConfig, PluginGuildInstallation,
+    PluginMarketplacePackage, ProgressMetric, ProgressionSeason, RedditSubscription,
+    ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent, ServerSnapshot,
+    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
+    TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError, TupperProfile,
+    TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport, VkSubscription,
+    WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
+    snowflake_created_at, validate_snowflake,
 };
 
 type ModuleKey = (String, String);
@@ -118,6 +118,10 @@ pub struct MemoryStore {
     member_case_counts: Arc<DashMap<(String, String), i64>>,
 
     cleanup_plans: Arc<DashMap<Uuid, CleanupPlan>>,
+
+    companion_mappings: Arc<DashMap<Uuid, CompanionChannelMapping>>,
+
+    companion_leases: Arc<DashMap<(String, String, String), CompanionChannelLease>>,
 
     faqs: Arc<DashMap<Uuid, FaqEntry>>,
 
@@ -408,6 +412,11 @@ impl MemoryStore {
         self.cleanup_plans
             .retain(|_, p| !(p.guild_id == guild_id && p.actor_user_id == user_id));
         related_erased += before_plans.saturating_sub(self.cleanup_plans.len());
+
+        let before_leases = self.companion_leases.len();
+        self.companion_leases
+            .retain(|(g, _, u), _| !(g == guild_id && u == user_id));
+        related_erased += before_leases.saturating_sub(self.companion_leases.len());
 
         let retained_records = vec![
             RetainedRecordNotice {
@@ -1962,6 +1971,167 @@ impl MemoryStore {
             return Ok(Some(plan.clone()));
         }
         Ok(None)
+    }
+
+    pub fn list_companion_mappings(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<CompanionChannelMapping>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let mut list: Vec<_> = self
+            .companion_mappings
+            .iter()
+            .filter(|m| m.guild_id == guild_id)
+            .map(|m| m.clone())
+            .collect();
+        list.sort_by_key(|a| a.created_at);
+        Ok(list)
+    }
+
+    pub fn upsert_companion_mapping(
+        &self,
+        guild_id: &str,
+        voice_channel_id: &str,
+        text_channel_id: &str,
+        allow_send_messages: bool,
+        allow_read_history: bool,
+    ) -> anyhow::Result<CompanionChannelMapping> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("voice_channel_id", voice_channel_id)?;
+        validate_snowflake("text_channel_id", text_channel_id)?;
+
+        // Remove existing mapping for the voice channel if present
+        let existing_id = self
+            .companion_mappings
+            .iter()
+            .find(|m| m.guild_id == guild_id && m.voice_channel_id == voice_channel_id)
+            .map(|m| m.id);
+        if let Some(id) = existing_id {
+            self.companion_mappings.remove(&id);
+        }
+
+        let mapping = CompanionChannelMapping {
+            id: Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            voice_channel_id: voice_channel_id.to_string(),
+            text_channel_id: text_channel_id.to_string(),
+            allow_send_messages,
+            allow_read_history,
+            created_at: Utc::now(),
+        };
+        self.companion_mappings.insert(mapping.id, mapping.clone());
+        Ok(mapping)
+    }
+
+    pub fn delete_companion_mapping(
+        &self,
+        guild_id: &str,
+        mapping_id: Uuid,
+    ) -> anyhow::Result<bool> {
+        validate_snowflake("guild_id", guild_id)?;
+        if let Some((_, m)) = self.companion_mappings.remove(&mapping_id) {
+            if m.guild_id == guild_id {
+                return Ok(true);
+            }
+            // Put back if different guild
+            self.companion_mappings.insert(mapping_id, m);
+        }
+        Ok(false)
+    }
+
+    pub fn get_companion_mapping_by_voice(
+        &self,
+        guild_id: &str,
+        voice_channel_id: &str,
+    ) -> anyhow::Result<Option<CompanionChannelMapping>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("voice_channel_id", voice_channel_id)?;
+        let mapping = self
+            .companion_mappings
+            .iter()
+            .find(|m| m.guild_id == guild_id && m.voice_channel_id == voice_channel_id)
+            .map(|m| m.clone());
+        Ok(mapping)
+    }
+
+    pub fn record_companion_lease(
+        &self,
+        guild_id: &str,
+        voice_channel_id: &str,
+        text_channel_id: &str,
+        user_id: &str,
+        generation: Uuid,
+    ) -> anyhow::Result<CompanionChannelLease> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("voice_channel_id", voice_channel_id)?;
+        validate_snowflake("text_channel_id", text_channel_id)?;
+        validate_snowflake("user_id", user_id)?;
+
+        let lease = CompanionChannelLease {
+            guild_id: guild_id.to_string(),
+            voice_channel_id: voice_channel_id.to_string(),
+            text_channel_id: text_channel_id.to_string(),
+            user_id: user_id.to_string(),
+            granted_at: Utc::now(),
+            generation,
+        };
+        let key = (
+            guild_id.to_string(),
+            text_channel_id.to_string(),
+            user_id.to_string(),
+        );
+        self.companion_leases.insert(key, lease.clone());
+        Ok(lease)
+    }
+
+    pub fn get_companion_lease(
+        &self,
+        guild_id: &str,
+        text_channel_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Option<CompanionChannelLease>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("text_channel_id", text_channel_id)?;
+        validate_snowflake("user_id", user_id)?;
+
+        let key = (
+            guild_id.to_string(),
+            text_channel_id.to_string(),
+            user_id.to_string(),
+        );
+        Ok(self.companion_leases.get(&key).map(|l| l.clone()))
+    }
+
+    pub fn delete_companion_lease(
+        &self,
+        guild_id: &str,
+        text_channel_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Option<CompanionChannelLease>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("text_channel_id", text_channel_id)?;
+        validate_snowflake("user_id", user_id)?;
+
+        let key = (
+            guild_id.to_string(),
+            text_channel_id.to_string(),
+            user_id.to_string(),
+        );
+        Ok(self.companion_leases.remove(&key).map(|(_, l)| l))
+    }
+
+    pub fn list_active_companion_leases(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<CompanionChannelLease>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let list: Vec<_> = self
+            .companion_leases
+            .iter()
+            .filter(|l| l.guild_id == guild_id)
+            .map(|l| l.clone())
+            .collect();
+        Ok(list)
     }
 
     pub fn archive_progression_season(&self, guild_id: &str, name: &str) -> ProgressionSeason {

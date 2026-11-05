@@ -1068,4 +1068,89 @@ async fn test_postgres_integration_suite() {
         second_consumed.is_none(),
         "Already consumed plan must not be consumed again"
     );
+
+    // ==========================================
+    // 12. Voice Companion Channels (#161)
+    // ==========================================
+    let companion_guild_id = "777000000000000010";
+    let companion_voice_id = "888000000000000010";
+    let companion_text_id = "888000000000000020";
+    let companion_user_id = "999000000000000010";
+    let companion_gen = Uuid::new_v4();
+
+    // 12.1. Create mapping
+    let mapping = store
+        .upsert_companion_mapping(
+            companion_guild_id,
+            companion_voice_id,
+            companion_text_id,
+            true,
+            true,
+        )
+        .await
+        .expect("upsert companion mapping in postgres");
+    assert_eq!(mapping.voice_channel_id, companion_voice_id);
+    assert_eq!(mapping.text_channel_id, companion_text_id);
+
+    // 12.2. Get by voice
+    let by_voice = store
+        .get_companion_mapping_by_voice(companion_guild_id, companion_voice_id)
+        .await
+        .expect("get mapping by voice")
+        .expect("mapping must exist");
+    assert_eq!(by_voice.id, mapping.id);
+
+    // 12.3. Record lease
+    let lease = store
+        .record_companion_lease(
+            companion_guild_id,
+            companion_voice_id,
+            companion_text_id,
+            companion_user_id,
+            companion_gen,
+        )
+        .await
+        .expect("record companion lease in postgres");
+    assert_eq!(lease.generation, companion_gen);
+
+    // 12.4. Get lease
+    let fetched_lease = store
+        .get_companion_lease(companion_guild_id, companion_text_id, companion_user_id)
+        .await
+        .expect("get companion lease")
+        .expect("lease must exist");
+    assert_eq!(fetched_lease.voice_channel_id, companion_voice_id);
+
+    // 12.5. List active leases
+    let leases = store
+        .list_active_companion_leases(companion_guild_id)
+        .await
+        .expect("list active companion leases");
+    assert_eq!(leases.len(), 1);
+
+    // 12.6. User erasure clears leases
+    let erasure = store
+        .erase_guild_user_data(companion_guild_id, companion_user_id)
+        .await
+        .expect("erasure should clear companion leases");
+    assert!(erasure.related_records_erased >= 1);
+    let leases_after_erasure = store
+        .list_active_companion_leases(companion_guild_id)
+        .await
+        .expect("list after erasure");
+    assert!(leases_after_erasure.is_empty());
+
+    // 12.7. Delete mapping
+    let deleted_m = store
+        .delete_companion_mapping(companion_guild_id, mapping.id)
+        .await
+        .expect("delete companion mapping");
+    assert!(deleted_m);
+    assert!(
+        store
+            .list_companion_mappings(companion_guild_id)
+            .await
+            .expect("list mappings")
+            .is_empty()
+    );
 }

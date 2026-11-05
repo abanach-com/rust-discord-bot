@@ -8,21 +8,21 @@ use uuid::Uuid;
 
 use super::{
     AdjustMemberProgressParams, AiGuildBudget, AiKnowledgeDocument, AuditLogEntry, CardCollection,
-    CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome, CommunityPoll, CountingGame,
-    CustomAutomation, DailyClaimOutcome, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription,
-    GameAccountLink, GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway,
-    GuildModuleSettings, IntegrationConnection, IntegrationDeliveryLog,
-    IntegrationWebhookSubscription, InviteTracking, KickStreamSubscription, LinkedAccount,
-    McpToolAuthorization, MemberIdentityRecord, MemberProgress, MemberSearchFilter,
-    MemberSearchRow, MemberSnapshot, ModerationAppeal, ModerationExecutionIntent,
-    ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
-    ProgressionSeason, RedditSubscription, ReputationGrantOutcome, RetainedRecordNotice,
-    ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry, SteamLfgPost,
-    StickyMessage, StoreItem, StorePurchase, TelegramBridge, TelegramMessageMapping,
-    TimedRoleGrant, Tournament, TupperError, TupperProfile, TwitchStreamSubscription,
-    UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WorkflowDefinition,
-    WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp, snowflake_created_at,
-    validate_snowflake,
+    CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome, CommunityPoll,
+    CompanionChannelLease, CompanionChannelMapping, CountingGame, CustomAutomation,
+    DailyClaimOutcome, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink,
+    GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway, GuildModuleSettings,
+    IntegrationConnection, IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking,
+    KickStreamSubscription, LinkedAccount, McpToolAuthorization, MemberIdentityRecord,
+    MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
+    ModerationExecutionIntent, ModuleDraftConfig, PluginGuildInstallation,
+    PluginMarketplacePackage, ProgressMetric, ProgressionSeason, RedditSubscription,
+    ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent, ServerSnapshot,
+    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
+    TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError, TupperProfile,
+    TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport, VkSubscription,
+    WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
+    snowflake_created_at, validate_snowflake,
 };
 
 pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
@@ -402,6 +402,17 @@ impl PostgresStore {
                 .map(|r| r.rows_affected())
                 .unwrap_or(0);
         related_erased += deleted_plans as usize;
+
+        let deleted_leases = sqlx::query(
+            "DELETE FROM companion_channel_leases WHERE guild_id = $1 AND user_id = $2",
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map(|r| r.rows_affected())
+        .unwrap_or(0);
+        related_erased += deleted_leases as usize;
 
         tx.commit().await?;
 
@@ -2876,6 +2887,215 @@ impl PostgresStore {
         .await?;
 
         Ok(plan)
+    }
+
+    pub async fn list_companion_mappings(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<CompanionChannelMapping>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let rows = sqlx::query_as::<_, CompanionChannelMapping>(
+            r#"
+            SELECT id, guild_id, voice_channel_id, text_channel_id, allow_send_messages, allow_read_history, created_at
+            FROM companion_channel_mappings
+            WHERE guild_id = $1
+            ORDER BY created_at ASC
+            "#,
+        )
+        .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn upsert_companion_mapping(
+        &self,
+        guild_id: &str,
+        voice_channel_id: &str,
+        text_channel_id: &str,
+        allow_send_messages: bool,
+        allow_read_history: bool,
+    ) -> anyhow::Result<CompanionChannelMapping> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("voice_channel_id", voice_channel_id)?;
+        validate_snowflake("text_channel_id", text_channel_id)?;
+
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+
+        let mapping = sqlx::query_as::<_, CompanionChannelMapping>(
+            r#"
+            INSERT INTO companion_channel_mappings (
+                id, guild_id, voice_channel_id, text_channel_id,
+                allow_send_messages, allow_read_history, created_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (guild_id, voice_channel_id)
+            DO UPDATE SET
+                text_channel_id = EXCLUDED.text_channel_id,
+                allow_send_messages = EXCLUDED.allow_send_messages,
+                allow_read_history = EXCLUDED.allow_read_history
+            RETURNING id, guild_id, voice_channel_id, text_channel_id, allow_send_messages, allow_read_history, created_at
+            "#,
+        )
+        .bind(id)
+        .bind(guild_id)
+        .bind(voice_channel_id)
+        .bind(text_channel_id)
+        .bind(allow_send_messages)
+        .bind(allow_read_history)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(mapping)
+    }
+
+    pub async fn delete_companion_mapping(
+        &self,
+        guild_id: &str,
+        mapping_id: Uuid,
+    ) -> anyhow::Result<bool> {
+        validate_snowflake("guild_id", guild_id)?;
+        let result =
+            sqlx::query("DELETE FROM companion_channel_mappings WHERE id = $1 AND guild_id = $2")
+                .bind(mapping_id)
+                .bind(guild_id)
+                .execute(&self.pool)
+                .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn get_companion_mapping_by_voice(
+        &self,
+        guild_id: &str,
+        voice_channel_id: &str,
+    ) -> anyhow::Result<Option<CompanionChannelMapping>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("voice_channel_id", voice_channel_id)?;
+        let mapping = sqlx::query_as::<_, CompanionChannelMapping>(
+            r#"
+            SELECT id, guild_id, voice_channel_id, text_channel_id, allow_send_messages, allow_read_history, created_at
+            FROM companion_channel_mappings
+            WHERE guild_id = $1 AND voice_channel_id = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(voice_channel_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(mapping)
+    }
+
+    pub async fn record_companion_lease(
+        &self,
+        guild_id: &str,
+        voice_channel_id: &str,
+        text_channel_id: &str,
+        user_id: &str,
+        generation: Uuid,
+    ) -> anyhow::Result<CompanionChannelLease> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("voice_channel_id", voice_channel_id)?;
+        validate_snowflake("text_channel_id", text_channel_id)?;
+        validate_snowflake("user_id", user_id)?;
+
+        let now = Utc::now();
+        let lease = sqlx::query_as::<_, CompanionChannelLease>(
+            r#"
+            INSERT INTO companion_channel_leases (
+                guild_id, voice_channel_id, text_channel_id, user_id, granted_at, generation
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (guild_id, text_channel_id, user_id)
+            DO UPDATE SET
+                voice_channel_id = EXCLUDED.voice_channel_id,
+                granted_at = EXCLUDED.granted_at,
+                generation = EXCLUDED.generation
+            RETURNING guild_id, voice_channel_id, text_channel_id, user_id, granted_at, generation
+            "#,
+        )
+        .bind(guild_id)
+        .bind(voice_channel_id)
+        .bind(text_channel_id)
+        .bind(user_id)
+        .bind(now)
+        .bind(generation)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(lease)
+    }
+
+    pub async fn get_companion_lease(
+        &self,
+        guild_id: &str,
+        text_channel_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Option<CompanionChannelLease>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("text_channel_id", text_channel_id)?;
+        validate_snowflake("user_id", user_id)?;
+
+        let lease = sqlx::query_as::<_, CompanionChannelLease>(
+            r#"
+            SELECT guild_id, voice_channel_id, text_channel_id, user_id, granted_at, generation
+            FROM companion_channel_leases
+            WHERE guild_id = $1 AND text_channel_id = $2 AND user_id = $3
+            "#,
+        )
+        .bind(guild_id)
+        .bind(text_channel_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(lease)
+    }
+
+    pub async fn delete_companion_lease(
+        &self,
+        guild_id: &str,
+        text_channel_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Option<CompanionChannelLease>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("text_channel_id", text_channel_id)?;
+        validate_snowflake("user_id", user_id)?;
+
+        let lease = sqlx::query_as::<_, CompanionChannelLease>(
+            r#"
+            DELETE FROM companion_channel_leases
+            WHERE guild_id = $1 AND text_channel_id = $2 AND user_id = $3
+            RETURNING guild_id, voice_channel_id, text_channel_id, user_id, granted_at, generation
+            "#,
+        )
+        .bind(guild_id)
+        .bind(text_channel_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(lease)
+    }
+
+    pub async fn list_active_companion_leases(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<CompanionChannelLease>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let leases = sqlx::query_as::<_, CompanionChannelLease>(
+            r#"
+            SELECT guild_id, voice_channel_id, text_channel_id, user_id, granted_at, generation
+            FROM companion_channel_leases
+            WHERE guild_id = $1
+            ORDER BY granted_at ASC
+            "#,
+        )
+        .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(leases)
     }
 
     pub async fn archive_progression_season(

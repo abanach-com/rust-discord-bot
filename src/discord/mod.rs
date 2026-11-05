@@ -1,4 +1,5 @@
 mod commands;
+pub mod companion;
 pub mod components;
 pub mod events;
 pub mod executor;

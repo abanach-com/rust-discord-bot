@@ -459,6 +459,27 @@ impl CleanupPlan {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct CompanionChannelMapping {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub voice_channel_id: String,
+    pub text_channel_id: String,
+    pub allow_send_messages: bool,
+    pub allow_read_history: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct CompanionChannelLease {
+    pub guild_id: String,
+    pub voice_channel_id: String,
+    pub text_channel_id: String,
+    pub user_id: String,
+    pub granted_at: DateTime<Utc>,
+    pub generation: Uuid,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ProgressionSeason {
     pub id: Uuid,
 
@@ -2362,6 +2383,144 @@ impl Storage {
                     .consume_cleanup_plan(guild_id, plan_id, actor_user_id)
                     .await
             }
+        }
+    }
+
+    pub async fn list_companion_mappings(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<CompanionChannelMapping>> {
+        match self {
+            Self::Memory(store) => store.list_companion_mappings(guild_id),
+            Self::Postgres(store) => store.list_companion_mappings(guild_id).await,
+        }
+    }
+
+    pub async fn upsert_companion_mapping(
+        &self,
+        guild_id: &str,
+        voice_channel_id: &str,
+        text_channel_id: &str,
+        allow_send_messages: bool,
+        allow_read_history: bool,
+    ) -> anyhow::Result<CompanionChannelMapping> {
+        match self {
+            Self::Memory(store) => store.upsert_companion_mapping(
+                guild_id,
+                voice_channel_id,
+                text_channel_id,
+                allow_send_messages,
+                allow_read_history,
+            ),
+            Self::Postgres(store) => {
+                store
+                    .upsert_companion_mapping(
+                        guild_id,
+                        voice_channel_id,
+                        text_channel_id,
+                        allow_send_messages,
+                        allow_read_history,
+                    )
+                    .await
+            }
+        }
+    }
+
+    pub async fn delete_companion_mapping(
+        &self,
+        guild_id: &str,
+        mapping_id: Uuid,
+    ) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => store.delete_companion_mapping(guild_id, mapping_id),
+            Self::Postgres(store) => store.delete_companion_mapping(guild_id, mapping_id).await,
+        }
+    }
+
+    pub async fn get_companion_mapping_by_voice(
+        &self,
+        guild_id: &str,
+        voice_channel_id: &str,
+    ) -> anyhow::Result<Option<CompanionChannelMapping>> {
+        match self {
+            Self::Memory(store) => store.get_companion_mapping_by_voice(guild_id, voice_channel_id),
+            Self::Postgres(store) => {
+                store
+                    .get_companion_mapping_by_voice(guild_id, voice_channel_id)
+                    .await
+            }
+        }
+    }
+
+    pub async fn record_companion_lease(
+        &self,
+        guild_id: &str,
+        voice_channel_id: &str,
+        text_channel_id: &str,
+        user_id: &str,
+        generation: Uuid,
+    ) -> anyhow::Result<CompanionChannelLease> {
+        match self {
+            Self::Memory(store) => store.record_companion_lease(
+                guild_id,
+                voice_channel_id,
+                text_channel_id,
+                user_id,
+                generation,
+            ),
+            Self::Postgres(store) => {
+                store
+                    .record_companion_lease(
+                        guild_id,
+                        voice_channel_id,
+                        text_channel_id,
+                        user_id,
+                        generation,
+                    )
+                    .await
+            }
+        }
+    }
+
+    pub async fn get_companion_lease(
+        &self,
+        guild_id: &str,
+        text_channel_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Option<CompanionChannelLease>> {
+        match self {
+            Self::Memory(store) => store.get_companion_lease(guild_id, text_channel_id, user_id),
+            Self::Postgres(store) => {
+                store
+                    .get_companion_lease(guild_id, text_channel_id, user_id)
+                    .await
+            }
+        }
+    }
+
+    pub async fn delete_companion_lease(
+        &self,
+        guild_id: &str,
+        text_channel_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Option<CompanionChannelLease>> {
+        match self {
+            Self::Memory(store) => store.delete_companion_lease(guild_id, text_channel_id, user_id),
+            Self::Postgres(store) => {
+                store
+                    .delete_companion_lease(guild_id, text_channel_id, user_id)
+                    .await
+            }
+        }
+    }
+
+    pub async fn list_active_companion_leases(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<CompanionChannelLease>> {
+        match self {
+            Self::Memory(store) => store.list_active_companion_leases(guild_id),
+            Self::Postgres(store) => store.list_active_companion_leases(guild_id).await,
         }
     }
 
@@ -4720,6 +4879,158 @@ mod tests {
         assert!(
             consume_expired.is_none(),
             "Expired plan must not be consumed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_companion_channel_mapping_and_lease_lifecycle() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_id = "111000000000000001";
+        let voice_id = "222000000000000001";
+        let text_id = "333000000000000001";
+        let user_id = "444000000000000001";
+        let generation = Uuid::new_v4();
+
+        // 1. Initial listing is empty
+        let initial_mappings = store.list_companion_mappings(guild_id).await.unwrap();
+        assert!(initial_mappings.is_empty());
+
+        // 2. Create mapping
+        let created = store
+            .upsert_companion_mapping(guild_id, voice_id, text_id, true, false)
+            .await
+            .unwrap();
+        assert_eq!(created.guild_id, guild_id);
+        assert_eq!(created.voice_channel_id, voice_id);
+        assert_eq!(created.text_channel_id, text_id);
+        assert!(created.allow_send_messages);
+        assert!(!created.allow_read_history);
+
+        // 3. Get mapping by voice
+        let by_voice = store
+            .get_companion_mapping_by_voice(guild_id, voice_id)
+            .await
+            .unwrap()
+            .expect("mapping should exist");
+        assert_eq!(by_voice.id, created.id);
+
+        // 4. Overwrite mapping for same voice channel
+        let updated_text = "333000000000000002";
+        let updated = store
+            .upsert_companion_mapping(guild_id, voice_id, updated_text, true, true)
+            .await
+            .unwrap();
+        assert_eq!(updated.text_channel_id, updated_text);
+        assert!(updated.allow_read_history);
+
+        let list_after_update = store.list_companion_mappings(guild_id).await.unwrap();
+        assert_eq!(list_after_update.len(), 1);
+        assert_eq!(list_after_update[0].text_channel_id, updated_text);
+
+        // 5. Leases lifecycle
+        let no_lease = store
+            .get_companion_lease(guild_id, updated_text, user_id)
+            .await
+            .unwrap();
+        assert!(no_lease.is_none());
+
+        let lease = store
+            .record_companion_lease(guild_id, voice_id, updated_text, user_id, generation)
+            .await
+            .unwrap();
+        assert_eq!(lease.guild_id, guild_id);
+        assert_eq!(lease.generation, generation);
+
+        let fetched_lease = store
+            .get_companion_lease(guild_id, updated_text, user_id)
+            .await
+            .unwrap()
+            .expect("lease must exist");
+        assert_eq!(fetched_lease.generation, generation);
+
+        let active_leases = store.list_active_companion_leases(guild_id).await.unwrap();
+        assert_eq!(active_leases.len(), 1);
+
+        // 6. Delete lease
+        let deleted_lease = store
+            .delete_companion_lease(guild_id, updated_text, user_id)
+            .await
+            .unwrap()
+            .expect("deleted lease returned");
+        assert_eq!(deleted_lease.user_id, user_id);
+
+        let active_after_del = store.list_active_companion_leases(guild_id).await.unwrap();
+        assert!(active_after_del.is_empty());
+
+        // 7. Delete mapping
+        let deleted_mapping = store
+            .delete_companion_mapping(guild_id, updated.id)
+            .await
+            .unwrap();
+        assert!(deleted_mapping);
+        assert!(
+            store
+                .list_companion_mappings(guild_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_companion_channel_multi_guild_isolation_and_erasure() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_1 = "111000000000000001";
+        let guild_2 = "111000000000000002";
+        let voice_1 = "222000000000000001";
+        let text_1 = "333000000000000001";
+        let user_1 = "444000000000000001";
+
+        let m1 = store
+            .upsert_companion_mapping(guild_1, voice_1, text_1, true, true)
+            .await
+            .unwrap();
+        let _l1 = store
+            .record_companion_lease(guild_1, voice_1, text_1, user_1, Uuid::new_v4())
+            .await
+            .unwrap();
+
+        // Guild 2 has empty mappings and leases
+        assert!(
+            store
+                .list_companion_mappings(guild_2)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_active_companion_leases(guild_2)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // Cross-guild deletion is rejected
+        let del_cross = store
+            .delete_companion_mapping(guild_2, m1.id)
+            .await
+            .unwrap();
+        assert!(!del_cross);
+        assert_eq!(
+            store.list_companion_mappings(guild_1).await.unwrap().len(),
+            1
+        );
+
+        // Erasure of user in guild 1 removes their lease
+        let erasure = store.erase_guild_user_data(guild_1, user_1).await.unwrap();
+        assert!(erasure.related_records_erased > 0);
+        assert!(
+            store
+                .list_active_companion_leases(guild_1)
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 }

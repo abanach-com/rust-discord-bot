@@ -358,6 +358,22 @@ pub fn build_router(state: WebState) -> Router {
             get(features::cleanup_dynamic_voice),
         )
         .route(
+            "/api/guilds/{guild_id}/voice/companion/mappings",
+            get(features::list_companion_mappings).post(features::upsert_companion_mapping),
+        )
+        .route(
+            "/api/guilds/{guild_id}/voice/companion/mappings/{mapping_id}",
+            delete(features::delete_companion_mapping),
+        )
+        .route(
+            "/api/guilds/{guild_id}/voice/companion/leases",
+            get(features::list_companion_leases),
+        )
+        .route(
+            "/api/guilds/{guild_id}/voice/companion/reconcile",
+            post(features::reconcile_companion_channels),
+        )
+        .route(
             "/api/guilds/{guild_id}/feeds",
             get(features::list_feeds).post(features::create_feed),
         )

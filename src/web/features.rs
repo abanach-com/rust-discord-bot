@@ -7,7 +7,7 @@ use axum::{
 
 use chrono::{DateTime, Utc};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use serde_json::{Value, json};
 
@@ -19,6 +19,7 @@ use crate::storage::{
     CardCollection, CardTrade, CleanupPlan, CommunityPoll, CustomAutomation, DynamicVoiceRoom,
     EventRoster, FaqEntry, FeedSubscription, GameAccountLink, Giveaway, InviteTracking,
     ProgressionSeason, ScheduledEvent, ServerSnapshot, StickyMessage, StoreItem, TupperProfile,
+    validate_snowflake,
 };
 
 use super::{
@@ -2908,6 +2909,276 @@ pub async fn query_ai_assistant(
 
         })))
     }
+}
+
+// ==========================================
+// Voice Companion Channels (#161)
+// ==========================================
+
+#[derive(Debug, Deserialize)]
+pub struct UpsertCompanionMappingPayload {
+    pub voice_channel_id: Option<String>,
+    pub text_channel_id: Option<String>,
+    #[serde(default = "default_true")]
+    pub allow_send_messages: bool,
+    #[serde(default = "default_true")]
+    pub allow_read_history: bool,
+    pub mappings: Option<Vec<CompanionMappingItem>>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct CompanionMappingItem {
+    pub voice_channel_id: String,
+    pub text_channel_id: String,
+    #[serde(default = "default_true")]
+    pub allow_send_messages: bool,
+    #[serde(default = "default_true")]
+    pub allow_read_history: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+const MAX_COMPANION_MAPPINGS_PER_GUILD: usize = 50;
+
+pub async fn list_companion_mappings(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let mappings = state
+        .app
+        .storage
+        .list_companion_mappings(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(json!({ "mappings": mappings })))
+}
+
+pub async fn upsert_companion_mapping(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<UpsertCompanionMappingPayload>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let existing = state
+        .app
+        .storage
+        .list_companion_mappings(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let items_to_save: Vec<CompanionMappingItem> = if let Some(mappings) = payload.mappings {
+        mappings
+    } else if let (Some(v), Some(t)) = (payload.voice_channel_id, payload.text_channel_id) {
+        vec![CompanionMappingItem {
+            voice_channel_id: v,
+            text_channel_id: t,
+            allow_send_messages: payload.allow_send_messages,
+            allow_read_history: payload.allow_read_history,
+        }]
+    } else {
+        return Err(ApiError::bad_request(
+            "Missing voice_channel_id or text_channel_id",
+        ));
+    };
+
+    if items_to_save.is_empty() {
+        return Err(ApiError::bad_request("No mappings provided"));
+    }
+
+    let mut saved_mappings = Vec::new();
+    for item in items_to_save {
+        validate_snowflake("voice_channel_id", &item.voice_channel_id)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        validate_snowflake("text_channel_id", &item.text_channel_id)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+        if item.voice_channel_id == item.text_channel_id {
+            return Err(ApiError::bad_request(
+                "Voice channel and text companion channel cannot be the same",
+            ));
+        }
+
+        let is_existing = existing
+            .iter()
+            .any(|m| m.voice_channel_id == item.voice_channel_id);
+        if !is_existing && existing.len() >= MAX_COMPANION_MAPPINGS_PER_GUILD {
+            return Err(ApiError::bad_request(format!(
+                "Companion mapping limit reached (max {MAX_COMPANION_MAPPINGS_PER_GUILD} per guild)"
+            )));
+        }
+
+        let mapping = state
+            .app
+            .storage
+            .upsert_companion_mapping(
+                &guild_id,
+                &item.voice_channel_id,
+                &item.text_channel_id,
+                item.allow_send_messages,
+                item.allow_read_history,
+            )
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+
+        let _ = state
+            .app
+            .storage
+            .record_audit(
+                Some(&guild_id),
+                Some(&session.user.id),
+                "companion_channels",
+                "mapping_upserted",
+                json!({
+                    "mapping_id": mapping.id,
+                    "voice_channel_id": mapping.voice_channel_id,
+                    "text_channel_id": mapping.text_channel_id,
+                    "allow_send_messages": mapping.allow_send_messages,
+                    "allow_read_history": mapping.allow_read_history,
+                }),
+            )
+            .await;
+
+        saved_mappings.push(mapping);
+    }
+
+    Ok(Json(json!({ "mappings": saved_mappings })))
+}
+
+pub async fn delete_companion_mapping(
+    State(state): State<WebState>,
+    Path((guild_id, mapping_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let deleted = state
+        .app
+        .storage
+        .delete_companion_mapping(&guild_id, mapping_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    if !deleted {
+        return Err(ApiError::not_found("Companion mapping not found"));
+    }
+
+    let _ = state
+        .app
+        .storage
+        .record_audit(
+            Some(&guild_id),
+            Some(&session.user.id),
+            "companion_channels",
+            "mapping_deleted",
+            json!({ "mapping_id": mapping_id }),
+        )
+        .await;
+
+    Ok(Json(json!({ "deleted": true, "mapping_id": mapping_id })))
+}
+
+pub async fn list_companion_leases(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let leases = state
+        .app
+        .storage
+        .list_active_companion_leases(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(json!({ "leases": leases })))
+}
+
+pub async fn reconcile_companion_channels(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let mappings = state
+        .app
+        .storage
+        .list_companion_mappings(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let active_leases = state
+        .app
+        .storage
+        .list_active_companion_leases(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let mut revoked_count = 0;
+    // Remove any orphaned leases whose voice channel is no longer in mappings
+    for lease in &active_leases {
+        let mapping_exists = mappings
+            .iter()
+            .any(|m| m.voice_channel_id == lease.voice_channel_id);
+        if !mapping_exists {
+            let _ = state
+                .app
+                .storage
+                .delete_companion_lease(&guild_id, &lease.text_channel_id, &lease.user_id)
+                .await;
+            revoked_count += 1;
+        }
+    }
+
+    let remaining_leases = state
+        .app
+        .storage
+        .list_active_companion_leases(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .len();
+
+    let _ = state
+        .app
+        .storage
+        .record_audit(
+            Some(&guild_id),
+            Some(&session.user.id),
+            "companion_channels",
+            "manual_reconciliation",
+            json!({
+                "revoked": revoked_count,
+                "active_leases": remaining_leases
+            }),
+        )
+        .await;
+
+    Ok(Json(json!({
+        "reconciled": true,
+        "revoked": revoked_count,
+        "active_leases": remaining_leases,
+    })))
 }
 
 #[cfg(test)]

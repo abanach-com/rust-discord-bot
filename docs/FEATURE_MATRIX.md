@@ -81,6 +81,7 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 | Nickname policies | Planned |
 | Voice channel rename/limit controls | Planned |
 | Temporary voice channels | Implemented |
+| Voice companion text channels | Implemented |
 | Server counters in channel names | Planned |
 
 ## 3. Moderation and safety

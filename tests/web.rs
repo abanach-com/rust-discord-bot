@@ -930,3 +930,202 @@ async fn test_cleanup_preview_and_confirm_endpoints_and_isolation() {
         .unwrap();
     assert_eq!(second_confirm.status(), reqwest::StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn test_voice_companion_channels_api() {
+    let (state, _perms) = test_web_state().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let app = build_router(state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve axum");
+    });
+
+    let admin_user_id = "555000000000000001";
+    let guild_id = "777000000000000001";
+    let csrf_token = "valid_csrf_token_companion";
+    let admin_session_id = "test_companion_admin_session";
+
+    state
+        .app
+        .sessions
+        .save_session(
+            admin_session_id,
+            DashboardUser {
+                id: admin_user_id.to_owned(),
+                username: "Admin".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_owned(),
+                name: "Test Guild".to_owned(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_owned(),
+            }],
+            csrf_token.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let session_cookie = format!("rusty_discord_bot_session={admin_session_id}");
+
+    // 1. Initial list of mappings is empty
+    let list_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/voice/companion/mappings"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_resp.status(), reqwest::StatusCode::OK);
+    let list_json: serde_json::Value = list_resp.json().await.unwrap();
+    assert_eq!(list_json["mappings"].as_array().unwrap().len(), 0);
+
+    // 2. Reject request without CSRF
+    let no_csrf = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/voice/companion/mappings"
+        ))
+        .header(COOKIE, &session_cookie)
+        .json(&serde_json::json!({
+            "voice_channel_id": "888000000000000001",
+            "text_channel_id": "888000000000000002"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 3. Reject same voice and text channel
+    let same_ch = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/voice/companion/mappings"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "voice_channel_id": "888000000000000001",
+            "text_channel_id": "888000000000000001"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(same_ch.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 4. Reject invalid snowflake
+    let bad_snow = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/voice/companion/mappings"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "voice_channel_id": "not_a_snowflake",
+            "text_channel_id": "888000000000000002"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_snow.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 5. Valid create mapping
+    let create_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/voice/companion/mappings"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "voice_channel_id": "888000000000000001",
+            "text_channel_id": "888000000000000002",
+            "allow_send_messages": true,
+            "allow_read_history": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), reqwest::StatusCode::OK);
+    let created_json: serde_json::Value = create_resp.json().await.unwrap();
+    let mappings_arr = created_json["mappings"].as_array().unwrap();
+    assert_eq!(mappings_arr.len(), 1);
+    let mapping_id = mappings_arr[0]["id"].as_str().unwrap();
+
+    // 6. List returns 1 mapping
+    let list_resp2 = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/voice/companion/mappings"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_resp2.status(), reqwest::StatusCode::OK);
+    let list_json2: serde_json::Value = list_resp2.json().await.unwrap();
+    assert_eq!(list_json2["mappings"].as_array().unwrap().len(), 1);
+
+    // 7. List leases returns empty
+    let leases_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/voice/companion/leases"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(leases_resp.status(), reqwest::StatusCode::OK);
+    let leases_json: serde_json::Value = leases_resp.json().await.unwrap();
+    assert_eq!(leases_json["leases"].as_array().unwrap().len(), 0);
+
+    // 8. Reconcile endpoint
+    let rec_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/voice/companion/reconcile"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rec_resp.status(), reqwest::StatusCode::OK);
+    let rec_json: serde_json::Value = rec_resp.json().await.unwrap();
+    assert_eq!(rec_json["reconciled"], true);
+
+    // 9. Delete mapping
+    let del_resp = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/voice/companion/mappings/{mapping_id}"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del_resp.status(), reqwest::StatusCode::OK);
+
+    // 10. List is empty again
+    let list_resp3 = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/voice/companion/mappings"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_resp3.status(), reqwest::StatusCode::OK);
+    let list_json3: serde_json::Value = list_resp3.json().await.unwrap();
+    assert_eq!(list_json3["mappings"].as_array().unwrap().len(), 0);
+}

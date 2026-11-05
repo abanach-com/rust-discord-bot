@@ -187,7 +187,7 @@ Components V2 messages require their dedicated message flag and use component co
 | Account-age and membership-age gates | Planned |
 | Invite attribution | Planned |
 | Presence/status/activity events | Planned; privileged intent where required |
-| Voice-state events | Planned |
+| Voice-state events | Implemented (Voice Companion Channels reconciliation & Songbird teardown) |
 | User/member/profile information commands | Planned |
 | Avatar/banner display | Planned |
 | Birthday and anniversary workflows | Planned |
@@ -266,7 +266,7 @@ Music adapters must respect source-platform terms and copyright rules. ZuckerBot
 | Channel/thread events | Planned |
 | Guild/member/role events | Planned |
 | Invite/integration/webhook events | Planned |
-| Voice-state/server/effect events | Planned |
+| Voice-state/server/effect events | Partial (voice-state updates handled for companion channels and voice cleanup) |
 | Stage and Scheduled Event events | Planned |
 | AutoMod configuration/execution events | Planned |
 | Poll vote events | Planned |
