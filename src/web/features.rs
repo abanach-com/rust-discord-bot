@@ -16,9 +16,9 @@ use uuid::Uuid;
 use crate::discord::events::generate_icalendar_event;
 
 use crate::storage::{
-    CardCollection, CardTrade, CommunityPoll, CustomAutomation, DynamicVoiceRoom, EventRoster,
-    FaqEntry, FeedSubscription, GameAccountLink, Giveaway, InviteTracking, ProgressionSeason,
-    ScheduledEvent, ServerSnapshot, StickyMessage, StoreItem, TupperProfile,
+    CardCollection, CardTrade, CleanupPlan, CommunityPoll, CustomAutomation, DynamicVoiceRoom,
+    EventRoster, FaqEntry, FeedSubscription, GameAccountLink, Giveaway, InviteTracking,
+    ProgressionSeason, ScheduledEvent, ServerSnapshot, StickyMessage, StoreItem, TupperProfile,
 };
 
 use super::{
@@ -1350,6 +1350,66 @@ pub async fn get_member_identity_history(
         "history": history,
         "count": history.len()
     })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CleanupPreviewRequest {
+    pub channel_id: String,
+    pub message_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CleanupConfirmRequest {
+    pub plan_id: Uuid,
+}
+
+pub async fn preview_cleanup(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<CleanupPreviewRequest>,
+) -> Result<Json<CleanupPlan>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+
+    let plan = state
+        .app
+        .storage
+        .create_cleanup_plan(
+            &guild_id,
+            &payload.channel_id,
+            &session.user.id,
+            &payload.message_ids,
+            60,
+        )
+        .await
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    Ok(Json(plan))
+}
+
+pub async fn confirm_cleanup(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<CleanupConfirmRequest>,
+) -> Result<Json<CleanupPlan>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+
+    let plan = state
+        .app
+        .storage
+        .consume_cleanup_plan(&guild_id, payload.plan_id, &session.user.id)
+        .await
+        .map_err(|e| ApiError::bad_request(e.to_string()))?
+        .ok_or_else(|| {
+            ApiError::bad_request("Cleanup plan not found, expired, or already consumed.")
+        })?;
+
+    Ok(Json(plan))
 }
 
 #[derive(Debug, Deserialize)]

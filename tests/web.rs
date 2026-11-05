@@ -829,3 +829,104 @@ async fn test_member_intelligence_api_endpoints_permissions_and_search() {
         .unwrap();
     assert_eq!(forbidden_resp.status(), reqwest::StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn test_cleanup_preview_and_confirm_endpoints_and_isolation() {
+    let (state, _) = test_web_state().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let guild_id = "777000000000000050";
+    let admin_user_id = "100000000000000050";
+    let admin_session_id = "test_cleanup_admin_session";
+    let csrf_token = "csrf_token_cleanup";
+
+    state
+        .app
+        .sessions
+        .save_session(
+            admin_session_id,
+            DashboardUser {
+                id: admin_user_id.to_owned(),
+                username: "mod_admin".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_owned(),
+                name: "Cleanup Guild".to_owned(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_owned(),
+            }],
+            csrf_token.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let session_cookie = format!("rusty_discord_bot_session={admin_session_id}");
+
+    // 1. Preview cleanup generates plan
+    let preview_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/cleanup/preview"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "channel_id": "888000000000000050",
+            "message_ids": ["999000000000000001", "999000000000000002"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(preview_resp.status(), reqwest::StatusCode::OK);
+    let plan_json: serde_json::Value = preview_resp.json().await.unwrap();
+    let plan_id = plan_json["id"].as_str().unwrap();
+    assert_eq!(plan_json["actor_user_id"], admin_user_id);
+    assert_eq!(plan_json["channel_id"], "888000000000000050");
+    assert!(plan_json["consumed_at"].is_null());
+
+    // 2. Confirm cleanup succeeds
+    let confirm_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/cleanup/confirm"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "plan_id": plan_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(confirm_resp.status(), reqwest::StatusCode::OK);
+    let confirmed_json: serde_json::Value = confirm_resp.json().await.unwrap();
+    assert!(confirmed_json["consumed_at"].is_string());
+
+    // 3. Second confirm fails (idempotent atomic consumption)
+    let second_confirm = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/cleanup/confirm"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "plan_id": plan_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second_confirm.status(), reqwest::StatusCode::BAD_REQUEST);
+}

@@ -8,20 +8,21 @@ use uuid::Uuid;
 
 use super::{
     AdjustMemberProgressParams, AiGuildBudget, AiKnowledgeDocument, AuditLogEntry, CardCollection,
-    CardTrade, CoinTransfer, CoinTransferOutcome, CommunityPoll, CountingGame, CustomAutomation,
-    DailyClaimOutcome, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink,
-    GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway, GuildModuleSettings,
-    IntegrationConnection, IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking,
-    KickStreamSubscription, LinkedAccount, McpToolAuthorization, MemberIdentityRecord,
-    MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
-    ModerationExecutionIntent, ModuleDraftConfig, PluginGuildInstallation,
-    PluginMarketplacePackage, ProgressMetric, ProgressionSeason, RedditSubscription,
-    ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent, ServerSnapshot,
-    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
-    TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError, TupperProfile,
-    TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport, VkSubscription,
-    WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
-    snowflake_created_at, validate_snowflake,
+    CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome, CommunityPoll, CountingGame,
+    CustomAutomation, DailyClaimOutcome, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription,
+    GameAccountLink, GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway,
+    GuildModuleSettings, IntegrationConnection, IntegrationDeliveryLog,
+    IntegrationWebhookSubscription, InviteTracking, KickStreamSubscription, LinkedAccount,
+    McpToolAuthorization, MemberIdentityRecord, MemberProgress, MemberSearchFilter,
+    MemberSearchRow, MemberSnapshot, ModerationAppeal, ModerationExecutionIntent,
+    ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
+    ProgressionSeason, RedditSubscription, ReputationGrantOutcome, RetainedRecordNotice,
+    ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry, SteamLfgPost,
+    StickyMessage, StoreItem, StorePurchase, TelegramBridge, TelegramMessageMapping,
+    TimedRoleGrant, Tournament, TupperError, TupperProfile, TwitchStreamSubscription,
+    UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WorkflowDefinition,
+    WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp, snowflake_created_at,
+    validate_snowflake,
 };
 
 pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
@@ -391,6 +392,16 @@ impl PostgresStore {
                 .map(|r| r.rows_affected())
                 .unwrap_or(0);
         related_erased += deleted_snapshots as usize;
+
+        let deleted_plans =
+            sqlx::query("DELETE FROM cleanup_plans WHERE guild_id = $1 AND actor_user_id = $2")
+                .bind(guild_id)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await
+                .map(|r| r.rows_affected())
+                .unwrap_or(0);
+        related_erased += deleted_plans as usize;
 
         tx.commit().await?;
 
@@ -2778,6 +2789,93 @@ impl PostgresStore {
 
         matched.truncate(limit as usize);
         Ok(matched)
+    }
+
+    pub async fn create_cleanup_plan(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        actor_user_id: &str,
+        message_ids: &[String],
+        ttl_seconds: i64,
+    ) -> anyhow::Result<CleanupPlan> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("channel_id", channel_id)?;
+        validate_snowflake("actor_user_id", actor_user_id)?;
+
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let expires_at = now + chrono::Duration::seconds(ttl_seconds);
+        let msg_json = serde_json::to_value(message_ids)?;
+
+        let plan = sqlx::query_as::<_, CleanupPlan>(
+            r#"
+            INSERT INTO cleanup_plans (id, guild_id, channel_id, actor_user_id, message_ids, created_at, expires_at, consumed_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, NULL)
+            RETURNING id, guild_id, channel_id, actor_user_id, message_ids, created_at, expires_at, consumed_at
+            "#
+        )
+        .bind(id)
+        .bind(guild_id)
+        .bind(channel_id)
+        .bind(actor_user_id)
+        .bind(msg_json)
+        .bind(now)
+        .bind(expires_at)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(plan)
+    }
+
+    pub async fn get_cleanup_plan(
+        &self,
+        guild_id: &str,
+        plan_id: Uuid,
+    ) -> anyhow::Result<Option<CleanupPlan>> {
+        validate_snowflake("guild_id", guild_id)?;
+
+        let plan = sqlx::query_as::<_, CleanupPlan>(
+            r#"
+            SELECT id, guild_id, channel_id, actor_user_id, message_ids, created_at, expires_at, consumed_at
+            FROM cleanup_plans
+            WHERE id = $1 AND guild_id = $2
+            "#
+        )
+        .bind(plan_id)
+        .bind(guild_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(plan)
+    }
+
+    pub async fn consume_cleanup_plan(
+        &self,
+        guild_id: &str,
+        plan_id: Uuid,
+        actor_user_id: &str,
+    ) -> anyhow::Result<Option<CleanupPlan>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("actor_user_id", actor_user_id)?;
+
+        let now = Utc::now();
+        let plan = sqlx::query_as::<_, CleanupPlan>(
+            r#"
+            UPDATE cleanup_plans
+            SET consumed_at = $1
+            WHERE id = $2 AND guild_id = $3 AND actor_user_id = $4 AND consumed_at IS NULL AND expires_at >= $1
+            RETURNING id, guild_id, channel_id, actor_user_id, message_ids, created_at, expires_at, consumed_at
+            "#
+        )
+        .bind(now)
+        .bind(plan_id)
+        .bind(guild_id)
+        .bind(actor_user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(plan)
     }
 
     pub async fn archive_progression_season(

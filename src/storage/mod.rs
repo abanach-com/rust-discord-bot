@@ -422,6 +422,42 @@ pub struct MemberSearchRow {
     pub recent_name_changes: i64,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CleanupFilter {
+    pub author_id: Option<String>,
+    #[serde(default)]
+    pub bots_only: bool,
+    #[serde(default)]
+    pub humans_only: bool,
+    pub contains: Option<String>,
+    pub has_link: Option<bool>,
+    pub has_attachment: Option<bool>,
+    #[serde(default)]
+    pub duplicate_only: bool,
+    #[serde(default)]
+    pub include_pinned: bool,
+    pub before_message_id: Option<String>,
+    pub after_message_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct CleanupPlan {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub channel_id: String,
+    pub actor_user_id: String,
+    pub message_ids: Value,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub consumed_at: Option<DateTime<Utc>>,
+}
+
+impl CleanupPlan {
+    pub fn message_ids_vec(&self) -> Vec<String> {
+        serde_json::from_value(self.message_ids.clone()).unwrap_or_default()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ProgressionSeason {
     pub id: Uuid,
@@ -2269,6 +2305,63 @@ impl Storage {
         match self {
             Self::Memory(store) => store.search_members(guild_id, filter),
             Self::Postgres(store) => store.search_members(guild_id, filter).await,
+        }
+    }
+
+    pub async fn create_cleanup_plan(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        actor_user_id: &str,
+        message_ids: &[String],
+        ttl_seconds: i64,
+    ) -> anyhow::Result<CleanupPlan> {
+        match self {
+            Self::Memory(store) => store.create_cleanup_plan(
+                guild_id,
+                channel_id,
+                actor_user_id,
+                message_ids,
+                ttl_seconds,
+            ),
+            Self::Postgres(store) => {
+                store
+                    .create_cleanup_plan(
+                        guild_id,
+                        channel_id,
+                        actor_user_id,
+                        message_ids,
+                        ttl_seconds,
+                    )
+                    .await
+            }
+        }
+    }
+
+    pub async fn get_cleanup_plan(
+        &self,
+        guild_id: &str,
+        plan_id: Uuid,
+    ) -> anyhow::Result<Option<CleanupPlan>> {
+        match self {
+            Self::Memory(store) => store.get_cleanup_plan(guild_id, plan_id),
+            Self::Postgres(store) => store.get_cleanup_plan(guild_id, plan_id).await,
+        }
+    }
+
+    pub async fn consume_cleanup_plan(
+        &self,
+        guild_id: &str,
+        plan_id: Uuid,
+        actor_user_id: &str,
+    ) -> anyhow::Result<Option<CleanupPlan>> {
+        match self {
+            Self::Memory(store) => store.consume_cleanup_plan(guild_id, plan_id, actor_user_id),
+            Self::Postgres(store) => {
+                store
+                    .consume_cleanup_plan(guild_id, plan_id, actor_user_id)
+                    .await
+            }
         }
     }
 
@@ -4547,5 +4640,86 @@ mod tests {
                 r.position
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_plan_lifecycle_isolation_and_atomic_consumption() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_1 = "100000000000000001";
+        let guild_2 = "100000000000000002";
+        let channel_id = "200000000000000001";
+        let actor_1 = "300000000000000001";
+        let actor_2 = "300000000000000002";
+        let msgs = vec![
+            "400000000000000001".to_string(),
+            "400000000000000002".to_string(),
+        ];
+
+        // 1. Create plan with 60s TTL
+        let plan = store
+            .create_cleanup_plan(guild_1, channel_id, actor_1, &msgs, 60)
+            .await
+            .expect("create cleanup plan");
+        assert_eq!(plan.guild_id, guild_1);
+        assert_eq!(plan.channel_id, channel_id);
+        assert_eq!(plan.actor_user_id, actor_1);
+        assert_eq!(plan.message_ids_vec(), msgs);
+        assert!(plan.consumed_at.is_none());
+
+        // 2. Cross-guild get returns None
+        let g2_get = store.get_cleanup_plan(guild_2, plan.id).await.unwrap();
+        assert!(g2_get.is_none());
+
+        // 3. Confirm by another actor in same guild fails
+        let wrong_actor = store
+            .consume_cleanup_plan(guild_1, plan.id, actor_2)
+            .await
+            .unwrap();
+        assert!(
+            wrong_actor.is_none(),
+            "Actor mismatch must fail consumption"
+        );
+
+        // 4. Confirm in another guild fails
+        let wrong_guild = store
+            .consume_cleanup_plan(guild_2, plan.id, actor_1)
+            .await
+            .unwrap();
+        assert!(
+            wrong_guild.is_none(),
+            "Guild mismatch must fail consumption"
+        );
+
+        // 5. Correct actor and guild succeeds
+        let consumed = store
+            .consume_cleanup_plan(guild_1, plan.id, actor_1)
+            .await
+            .unwrap()
+            .expect("consumption should succeed");
+        assert!(consumed.consumed_at.is_some());
+
+        // 6. Second confirm fails (idempotent atomic consumption)
+        let second_consume = store
+            .consume_cleanup_plan(guild_1, plan.id, actor_1)
+            .await
+            .unwrap();
+        assert!(
+            second_consume.is_none(),
+            "Already consumed plan must not be consumed again"
+        );
+
+        // 7. Expired plan test
+        let expired_plan = store
+            .create_cleanup_plan(guild_1, channel_id, actor_1, &msgs, -10)
+            .await
+            .unwrap();
+        let consume_expired = store
+            .consume_cleanup_plan(guild_1, expired_plan.id, actor_1)
+            .await
+            .unwrap();
+        assert!(
+            consume_expired.is_none(),
+            "Expired plan must not be consumed"
+        );
     }
 }

@@ -276,6 +276,21 @@ pub enum LuaAction {
         channel_id: Option<String>,
         amount: u8,
     },
+    Cleanup {
+        #[serde(default)]
+        channel_id: Option<String>,
+        #[serde(default = "default_cleanup_limit")]
+        scan_limit: u16,
+        #[serde(default = "default_cleanup_limit")]
+        delete_limit: u16,
+        #[serde(default)]
+        filter: crate::storage::CleanupFilter,
+        #[serde(default)]
+        dry_run: bool,
+    },
+    ConfirmCleanup {
+        plan_id: String,
+    },
     Music {
         operation: MusicOperation,
         #[serde(default)]
@@ -375,6 +390,38 @@ impl LuaAction {
                 }
                 Ok(())
             }
+            Self::Cleanup {
+                channel_id,
+                scan_limit,
+                delete_limit,
+                filter,
+                ..
+            } => {
+                if let Some(channel_id) = channel_id {
+                    validate_snowflake(channel_id)?;
+                }
+                if *scan_limit == 0 || *scan_limit > 1000 {
+                    return Err("cleanup scan_limit must be between 1 and 1000".to_owned());
+                }
+                if *delete_limit == 0 || *delete_limit > 1000 {
+                    return Err("cleanup delete_limit must be between 1 and 1000".to_owned());
+                }
+                if let Some(ref aid) = filter.author_id {
+                    validate_snowflake(aid)?;
+                }
+                if let Some(ref bid) = filter.before_message_id {
+                    validate_snowflake(bid)?;
+                }
+                if let Some(ref aid) = filter.after_message_id {
+                    validate_snowflake(aid)?;
+                }
+                Ok(())
+            }
+            Self::ConfirmCleanup { plan_id } => {
+                uuid::Uuid::parse_str(plan_id)
+                    .map_err(|_| "plan_id must be a valid UUID".to_owned())?;
+                Ok(())
+            }
             Self::Music { query, operation } => {
                 if matches!(operation, MusicOperation::Play)
                     && query.as_deref().is_none_or(str::is_empty)
@@ -453,6 +500,10 @@ fn validate_snowflake(value: &str) -> Result<(), String> {
 
 const fn default_true() -> bool {
     true
+}
+
+const fn default_cleanup_limit() -> u16 {
+    100
 }
 
 fn empty_object() -> Value {

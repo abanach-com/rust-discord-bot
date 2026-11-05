@@ -10,20 +10,21 @@ use uuid::Uuid;
 
 use super::{
     AdjustMemberProgressParams, AiGuildBudget, AiKnowledgeDocument, AuditLogEntry, CardCollection,
-    CardTrade, CoinTransfer, CoinTransferOutcome, CommunityPoll, CountingGame, CustomAutomation,
-    DailyClaimOutcome, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink,
-    GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway, GuildModuleSettings,
-    IntegrationConnection, IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking,
-    KickStreamSubscription, LinkedAccount, McpToolAuthorization, MemberIdentityRecord,
-    MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
-    ModerationExecutionIntent, ModuleDraftConfig, PluginGuildInstallation,
-    PluginMarketplacePackage, ProgressMetric, ProgressionSeason, RedditSubscription,
-    ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent, ServerSnapshot,
-    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
-    TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError, TupperProfile,
-    TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport, VkSubscription,
-    WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
-    snowflake_created_at, validate_snowflake,
+    CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome, CommunityPoll, CountingGame,
+    CustomAutomation, DailyClaimOutcome, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription,
+    GameAccountLink, GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway,
+    GuildModuleSettings, IntegrationConnection, IntegrationDeliveryLog,
+    IntegrationWebhookSubscription, InviteTracking, KickStreamSubscription, LinkedAccount,
+    McpToolAuthorization, MemberIdentityRecord, MemberProgress, MemberSearchFilter,
+    MemberSearchRow, MemberSnapshot, ModerationAppeal, ModerationExecutionIntent,
+    ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
+    ProgressionSeason, RedditSubscription, ReputationGrantOutcome, RetainedRecordNotice,
+    ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry, SteamLfgPost,
+    StickyMessage, StoreItem, StorePurchase, TelegramBridge, TelegramMessageMapping,
+    TimedRoleGrant, Tournament, TupperError, TupperProfile, TwitchStreamSubscription,
+    UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WorkflowDefinition,
+    WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp, snowflake_created_at,
+    validate_snowflake,
 };
 
 type ModuleKey = (String, String);
@@ -115,6 +116,8 @@ pub struct MemoryStore {
     member_snapshots: Arc<DashMap<(String, String), MemberSnapshot>>,
 
     member_case_counts: Arc<DashMap<(String, String), i64>>,
+
+    cleanup_plans: Arc<DashMap<Uuid, CleanupPlan>>,
 
     faqs: Arc<DashMap<Uuid, FaqEntry>>,
 
@@ -400,6 +403,11 @@ impl MemoryStore {
         {
             related_erased += 1;
         }
+
+        let before_plans = self.cleanup_plans.len();
+        self.cleanup_plans
+            .retain(|_, p| !(p.guild_id == guild_id && p.actor_user_id == user_id));
+        related_erased += before_plans.saturating_sub(self.cleanup_plans.len());
 
         let retained_records = vec![
             RetainedRecordNotice {
@@ -1890,6 +1898,70 @@ impl MemoryStore {
 
         matched.truncate(limit);
         Ok(matched)
+    }
+
+    pub fn create_cleanup_plan(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        actor_user_id: &str,
+        message_ids: &[String],
+        ttl_seconds: i64,
+    ) -> anyhow::Result<CleanupPlan> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("channel_id", channel_id)?;
+        validate_snowflake("actor_user_id", actor_user_id)?;
+
+        let now = Utc::now();
+        let plan = CleanupPlan {
+            id: Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            channel_id: channel_id.to_string(),
+            actor_user_id: actor_user_id.to_string(),
+            message_ids: serde_json::to_value(message_ids)
+                .unwrap_or_else(|_| serde_json::json!([])),
+            created_at: now,
+            expires_at: now + chrono::Duration::seconds(ttl_seconds),
+            consumed_at: None,
+        };
+        self.cleanup_plans.insert(plan.id, plan.clone());
+        Ok(plan)
+    }
+
+    pub fn get_cleanup_plan(
+        &self,
+        guild_id: &str,
+        plan_id: Uuid,
+    ) -> anyhow::Result<Option<CleanupPlan>> {
+        validate_snowflake("guild_id", guild_id)?;
+        if let Some(plan) = self.cleanup_plans.get(&plan_id)
+            && plan.guild_id == guild_id
+        {
+            return Ok(Some(plan.clone()));
+        }
+        Ok(None)
+    }
+
+    pub fn consume_cleanup_plan(
+        &self,
+        guild_id: &str,
+        plan_id: Uuid,
+        actor_user_id: &str,
+    ) -> anyhow::Result<Option<CleanupPlan>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("actor_user_id", actor_user_id)?;
+
+        let now = Utc::now();
+        if let Some(mut plan) = self.cleanup_plans.get_mut(&plan_id)
+            && plan.guild_id == guild_id
+            && plan.actor_user_id == actor_user_id
+            && plan.consumed_at.is_none()
+            && plan.expires_at >= now
+        {
+            plan.consumed_at = Some(now);
+            return Ok(Some(plan.clone()));
+        }
+        Ok(None)
     }
 
     pub fn archive_progression_season(&self, guild_id: &str, name: &str) -> ProgressionSeason {

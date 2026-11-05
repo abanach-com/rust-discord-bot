@@ -1018,4 +1018,54 @@ async fn test_postgres_integration_suite() {
     assert_eq!(results[0].user_id, member_user);
     assert_eq!(results[0].username, "bob_builder");
     assert_eq!(results[0].moderation_case_count, 0);
+
+    // 22. Test Cleanup Plans in PostgreSQL
+    let cleanup_actor_1 = "444000000000000001";
+    let cleanup_actor_2 = "444000000000000002";
+    let cleanup_channel = "555000000000000001";
+    let test_messages = vec![
+        "666000000000000001".to_string(),
+        "666000000000000002".to_string(),
+    ];
+
+    let plan = store
+        .create_cleanup_plan(
+            intel_guild_id,
+            cleanup_channel,
+            cleanup_actor_1,
+            &test_messages,
+            60,
+        )
+        .await
+        .expect("create cleanup plan in postgres");
+    assert_eq!(plan.guild_id, intel_guild_id);
+    assert_eq!(plan.channel_id, cleanup_channel);
+    assert_eq!(plan.actor_user_id, cleanup_actor_1);
+    assert_eq!(plan.message_ids_vec(), test_messages);
+    assert!(plan.consumed_at.is_none());
+
+    // Cross-actor consumption fails
+    let wrong_actor = store
+        .consume_cleanup_plan(intel_guild_id, plan.id, cleanup_actor_2)
+        .await
+        .unwrap();
+    assert!(wrong_actor.is_none(), "Wrong actor must be rejected");
+
+    // Correct actor consumption succeeds
+    let consumed = store
+        .consume_cleanup_plan(intel_guild_id, plan.id, cleanup_actor_1)
+        .await
+        .unwrap()
+        .expect("consumption should succeed");
+    assert!(consumed.consumed_at.is_some());
+
+    // Second consumption fails (atomic / idempotent)
+    let second_consumed = store
+        .consume_cleanup_plan(intel_guild_id, plan.id, cleanup_actor_1)
+        .await
+        .unwrap();
+    assert!(
+        second_consumed.is_none(),
+        "Already consumed plan must not be consumed again"
+    );
 }

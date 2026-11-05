@@ -4,6 +4,8 @@ use anyhow::{Context as _, Result, anyhow};
 
 use chrono::{Duration, Utc};
 
+use uuid::Uuid;
+
 use serenity::{
     all::{
         ChannelId, ChannelType, CommandInteraction, GuildId, Member, MessageId, Permissions, Role,
@@ -969,6 +971,242 @@ async fn execute_action(
             Ok(None)
         }
 
+        LuaAction::Cleanup {
+            channel_id,
+            scan_limit,
+            delete_limit,
+            filter,
+            dry_run,
+        } => {
+            let guild_id = require_guild(origin)?;
+            let actor_id = origin
+                .actor_id
+                .ok_or_else(|| anyhow!("cleanup actions require a user context"))?;
+            let channel_id = resolve_and_validate_channel(
+                ctx,
+                origin,
+                channel_id.as_deref(),
+                ChannelPurpose::ManageMessages,
+            )
+            .await?;
+
+            let fetch_limit = (*scan_limit).clamp(1, 100);
+            let mut get_messages = GetMessages::new().limit(fetch_limit as u8);
+            if let Some(ref bid) = filter.before_message_id {
+                let parsed = bid
+                    .parse::<u64>()
+                    .map_err(|e| anyhow!("invalid before_message_id: {e}"))?;
+                get_messages = get_messages.before(MessageId::new(parsed));
+            }
+            if let Some(ref aid) = filter.after_message_id {
+                let parsed = aid
+                    .parse::<u64>()
+                    .map_err(|e| anyhow!("invalid after_message_id: {e}"))?;
+                get_messages = get_messages.after(MessageId::new(parsed));
+            }
+
+            let messages = channel_id.messages(&ctx.http, get_messages).await?;
+            let two_weeks_ago = Utc::now() - chrono::Duration::days(14);
+
+            let mut scanned = 0usize;
+            let mut matched_messages = Vec::new();
+            let mut older_than_bulk_window = 0usize;
+            let mut bulk_deletable = 0usize;
+            let mut pinned_skipped = 0usize;
+            let mut seen_duplicates = std::collections::HashSet::new();
+
+            for msg in &messages {
+                scanned += 1;
+
+                if !filter.include_pinned && msg.pinned {
+                    pinned_skipped += 1;
+                    continue;
+                }
+
+                if let Some(ref auth) = filter.author_id
+                    && msg.author.id.to_string() != *auth
+                {
+                    continue;
+                }
+
+                if filter.bots_only && !msg.author.bot {
+                    continue;
+                }
+
+                if filter.humans_only && msg.author.bot {
+                    continue;
+                }
+
+                if let Some(ref sub) = filter.contains
+                    && !msg.content.to_lowercase().contains(&sub.to_lowercase())
+                {
+                    continue;
+                }
+
+                let contains_link = msg.content.contains("http://")
+                    || msg.content.contains("https://")
+                    || msg.content.contains("discord.gg/");
+                if let Some(hl) = filter.has_link
+                    && hl != contains_link
+                {
+                    continue;
+                }
+
+                if let Some(ha) = filter.has_attachment
+                    && ha != (!msg.attachments.is_empty())
+                {
+                    continue;
+                }
+
+                if filter.duplicate_only {
+                    let normalized = msg.content.trim().to_lowercase();
+                    if !seen_duplicates.insert(normalized) {
+                        // Seen duplicate
+                    } else {
+                        // First time seen, keep original
+                        continue;
+                    }
+                }
+
+                let msg_created = crate::storage::snowflake_created_at(msg.id.get());
+                if msg_created < two_weeks_ago {
+                    older_than_bulk_window += 1;
+                } else {
+                    bulk_deletable += 1;
+                }
+
+                matched_messages.push(msg);
+                if matched_messages.len() >= *delete_limit as usize {
+                    break;
+                }
+            }
+
+            let matched_ids = matched_messages
+                .iter()
+                .map(|m| m.id.to_string())
+                .collect::<Vec<_>>();
+
+            if *dry_run {
+                let plan = state
+                    .storage
+                    .create_cleanup_plan(
+                        &guild_id.to_string(),
+                        &channel_id.to_string(),
+                        &actor_id.to_string(),
+                        &matched_ids,
+                        60,
+                    )
+                    .await?;
+
+                audit_action(
+                    state,
+                    origin,
+                    module_id,
+                    "cleanup_preview",
+                    serde_json::json!({
+                        "channel_id": channel_id.to_string(),
+                        "scanned": scanned,
+                        "matched": matched_ids.len(),
+                        "bulk_deletable": bulk_deletable,
+                        "older_than_bulk_window": older_than_bulk_window,
+                        "pinned_skipped": pinned_skipped,
+                        "plan_id": plan.id.to_string(),
+                        "expires_in_seconds": 60,
+                    }),
+                )
+                .await?;
+
+                let reply_text = format!(
+                    "**Cleanup Preview**\n• Scanned: {scanned}\n• Matched: {}\n• Bulk deletable (<14d): {bulk_deletable}\n• Older than 14d: {older_than_bulk_window}\n• Pinned skipped: {pinned_skipped}\n• Plan ID: `{}`\n*To execute, run confirm within 60s.*",
+                    matched_ids.len(),
+                    plan.id
+                );
+
+                send_message(ctx, channel_id, &reply_text).await?;
+                return Ok(None);
+            }
+
+            // Direct execution
+            let ids_to_delete = matched_messages.iter().map(|m| m.id).collect::<Vec<_>>();
+            let (deleted_count, failed_count) =
+                delete_partitioned_messages(ctx, channel_id, &ids_to_delete, two_weeks_ago).await?;
+
+            audit_action(
+                state,
+                origin,
+                module_id,
+                "cleanup_executed",
+                serde_json::json!({
+                    "channel_id": channel_id.to_string(),
+                    "scanned": scanned,
+                    "matched": matched_ids.len(),
+                    "deleted_count": deleted_count,
+                    "failed_count": failed_count,
+                }),
+            )
+            .await?;
+
+            let reply_text = format!(
+                "**Cleanup Complete**\n• Successfully deleted: {deleted_count}\n• Failed: {failed_count}"
+            );
+            send_message(ctx, channel_id, &reply_text).await?;
+
+            Ok(None)
+        }
+
+        LuaAction::ConfirmCleanup { plan_id } => {
+            let guild_id = require_guild(origin)?;
+            let actor_id = origin
+                .actor_id
+                .ok_or_else(|| anyhow!("cleanup confirmation requires a user context"))?;
+            let plan_uuid =
+                Uuid::parse_str(plan_id).map_err(|e| anyhow!("invalid plan_id: {e}"))?;
+
+            let plan = state
+                .storage
+                .consume_cleanup_plan(&guild_id.to_string(), plan_uuid, &actor_id.to_string())
+                .await?
+                .ok_or_else(|| anyhow!("cleanup plan not found, expired, or already consumed"))?;
+
+            let channel_id_u64 = plan
+                .channel_id
+                .parse::<u64>()
+                .map_err(|e| anyhow!("invalid channel_id in plan: {e}"))?;
+            let channel_id = ChannelId::new(channel_id_u64);
+
+            let msg_ids = plan
+                .message_ids_vec()
+                .into_iter()
+                .filter_map(|s| s.parse::<u64>().ok().map(MessageId::new))
+                .collect::<Vec<_>>();
+
+            let two_weeks_ago = Utc::now() - chrono::Duration::days(14);
+            let (deleted_count, failed_count) =
+                delete_partitioned_messages(ctx, channel_id, &msg_ids, two_weeks_ago).await?;
+
+            audit_action(
+                state,
+                origin,
+                module_id,
+                "cleanup_confirmed",
+                serde_json::json!({
+                    "channel_id": plan.channel_id,
+                    "plan_id": plan.id.to_string(),
+                    "total_requested": msg_ids.len(),
+                    "deleted_count": deleted_count,
+                    "failed_count": failed_count,
+                }),
+            )
+            .await?;
+
+            let reply_text = format!(
+                "**Cleanup Complete**\n• Successfully deleted: {deleted_count}\n• Failed: {failed_count}"
+            );
+            send_message(ctx, channel_id, &reply_text).await?;
+
+            Ok(None)
+        }
+
         LuaAction::Music { operation, query } => {
             let guild_id = require_guild(origin)?;
 
@@ -1482,6 +1720,65 @@ async fn audit_action(
     }
 
     Ok(())
+}
+
+async fn delete_partitioned_messages(
+    ctx: &Context,
+    channel_id: ChannelId,
+    message_ids: &[MessageId],
+    two_weeks_ago: chrono::DateTime<Utc>,
+) -> Result<(usize, usize)> {
+    let mut bulk_ids = Vec::new();
+    let mut old_ids = Vec::new();
+
+    for &mid in message_ids {
+        let created = crate::storage::snowflake_created_at(mid.get());
+        if created >= two_weeks_ago {
+            bulk_ids.push(mid);
+        } else {
+            old_ids.push(mid);
+        }
+    }
+
+    let mut deleted_count = 0usize;
+    let mut failed_count = 0usize;
+
+    for chunk in bulk_ids.chunks(100) {
+        if chunk.len() == 1 {
+            match channel_id.delete_message(&ctx.http, chunk[0]).await {
+                Ok(()) => deleted_count += 1,
+                Err(err) => {
+                    tracing::warn!(error = %err, message_id = %chunk[0], "Failed to delete single message in bulk window");
+                    failed_count += 1;
+                }
+            }
+        } else if chunk.len() > 1 {
+            match channel_id.delete_messages(&ctx.http, chunk).await {
+                Ok(()) => deleted_count += chunk.len(),
+                Err(err) => {
+                    tracing::warn!(error = %err, count = chunk.len(), "Failed to bulk delete messages");
+                    for &mid in chunk {
+                        match channel_id.delete_message(&ctx.http, mid).await {
+                            Ok(()) => deleted_count += 1,
+                            Err(_) => failed_count += 1,
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for &mid in &old_ids {
+        match channel_id.delete_message(&ctx.http, mid).await {
+            Ok(()) => deleted_count += 1,
+            Err(err) => {
+                tracing::warn!(error = %err, message_id = %mid, "Failed to delete older message individually");
+                failed_count += 1;
+            }
+        }
+    }
+
+    Ok((deleted_count, failed_count))
 }
 
 #[cfg(test)]

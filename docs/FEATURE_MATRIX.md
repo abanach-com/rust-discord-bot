@@ -92,6 +92,7 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 | Ban action | Implemented |
 | Message delete action | Implemented |
 | Purge up to 100 messages | Implemented |
+| Advanced Cleanup: filtered purge, preview/confirm, 14-day bulk window partition | Implemented |
 | Privileged action audit | Implemented |
 | Example blocked-word AutoMod module | Implemented |
 | Configurable default timeout | Implemented |

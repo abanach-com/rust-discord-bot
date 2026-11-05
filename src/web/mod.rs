@@ -278,6 +278,14 @@ pub fn build_router(state: WebState) -> Router {
             get(features::get_member_identity_history),
         )
         .route(
+            "/api/guilds/{guild_id}/cleanup/preview",
+            post(features::preview_cleanup),
+        )
+        .route(
+            "/api/guilds/{guild_id}/cleanup/confirm",
+            post(features::confirm_cleanup),
+        )
+        .route(
             "/api/guilds/{guild_id}/progression/season/reset",
             post(features::reset_progression_season),
         )
