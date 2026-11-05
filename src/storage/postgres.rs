@@ -7139,6 +7139,20 @@ impl PostgresStore {
         Ok(rows)
     }
 
+    pub async fn list_guilds_with_duty_profiles(&self) -> anyhow::Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            r#"
+            SELECT DISTINCT guild_id
+            FROM moderator_duty_profiles
+            ORDER BY guild_id ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(|(g,)| g).collect())
+    }
+
     pub async fn upsert_duty_profile(
         &self,
         profile: ModeratorDutyProfile,

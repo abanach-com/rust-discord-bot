@@ -18,9 +18,9 @@ use crate::discord::events::generate_icalendar_event;
 use crate::storage::{
     CardCollection, CardTrade, CleanupPlan, CommandPolicyRule, CommunityPoll, CustomAutomation,
     DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink, Giveaway,
-    InviteTracking, ModeratorDutyProfile, ModeratorDutySettings, ProgressionSeason,
-    RecurringSchedule, ScheduledEvent, ServerSnapshot, StickyMessage, StoreItem, TupperProfile,
-    validate_snowflake,
+    InviteTracking, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
+    ProgressionSeason, RecurringSchedule, ScheduledEvent, ServerSnapshot, StickyMessage, StoreItem,
+    TupperProfile, validate_snowflake,
 };
 
 use super::{
@@ -4251,15 +4251,23 @@ pub async fn set_duty_override(
     Ok(Json(json!({ "profile": saved })))
 }
 
+#[derive(Deserialize, Default)]
+pub struct ReconcileDutyQuery {
+    pub dry_run: Option<bool>,
+}
+
 pub async fn reconcile_guild_duty(
     State(state): State<WebState>,
     Path(guild_id): Path<String>,
+    Query(query): Query<ReconcileDutyQuery>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
     verify_csrf(&headers, &session)?;
     ensure_guild_access(&state, &session, &guild_id).await?;
     validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let dry_run = query.dry_run.unwrap_or(false);
 
     let settings = state
         .app
@@ -4283,23 +4291,74 @@ pub async fn reconcile_guild_duty(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    let mut outcomes = Vec::new();
-    let is_live_discord = !state.app.config.discord_token.starts_with("dummy")
-        && state.app.config.discord_token != "mock"
-        && state.app.config.discord_token != "offline";
+    let token = &state.app.config.discord_token;
+    let has_real_token =
+        !token.is_empty() && !token.starts_with("dummy") && token != "mock" && token != "offline";
 
+    let http = if has_real_token {
+        Some(serenity::all::Http::new(token))
+    } else {
+        None
+    };
+
+    let is_live_discord = !dry_run && http.is_some();
+
+    let mut outcomes = Vec::new();
     for profile in profiles {
+        let (member_roles, bot_pos, on_call_pos) = if let Some(ref h) = http {
+            match crate::duty::fetch_discord_member_duty_context(
+                h,
+                &guild_id,
+                &profile.user_id,
+                settings.on_call_role_id.as_deref(),
+            )
+            .await
+            {
+                Ok(ctx) => (
+                    ctx.member_roles,
+                    ctx.bot_highest_role_pos,
+                    ctx.on_call_role_pos,
+                ),
+                Err(e) => {
+                    let err_msg =
+                        format!("Failed to fetch Discord member {}: {e}", profile.user_id);
+                    let _ = state
+                        .app
+                        .storage
+                        .upsert_duty_state(ModeratorDutyState {
+                            guild_id: guild_id.clone(),
+                            user_id: profile.user_id.clone(),
+                            expected_on_call: false,
+                            state_generation: 0,
+                            last_reconciled_at: Some(Utc::now()),
+                            last_error: Some(err_msg.clone()),
+                        })
+                        .await;
+                    outcomes.push(crate::duty::DutyReconcileOutcome {
+                        user_id: profile.user_id.clone(),
+                        expected_on_call: false,
+                        role_granted: false,
+                        role_revoked: false,
+                        error: Some(err_msg),
+                    });
+                    continue;
+                }
+            }
+        } else {
+            (Vec::new(), None, None)
+        };
+
         let outcome = crate::duty::reconcile_member_duty_state(crate::duty::ReconcileDutyParams {
             storage: &state.app.storage,
             guild_id: &guild_id,
             user_id: &profile.user_id,
             settings: &settings,
             profile: &profile,
-            member_roles: &[],
-            bot_highest_role_pos: None,
-            on_call_role_pos: None,
+            member_roles: &member_roles,
+            bot_highest_role_pos: bot_pos,
+            on_call_role_pos: on_call_pos,
             is_live_discord,
-            http: None,
+            http: if is_live_discord { http.as_ref() } else { None },
         })
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
@@ -4308,6 +4367,7 @@ pub async fn reconcile_guild_duty(
 
     Ok(Json(json!({
         "reconciled": true,
+        "dry_run": dry_run,
         "count": outcomes.len(),
         "outcomes": outcomes,
     })))

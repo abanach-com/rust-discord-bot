@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
         std::time::Duration::from_secs(3600),
     ));
     let duty_handle = tokio::spawn(rusty_discord_bot::duty::run_moderator_duty_reconciler_loop(
-        state.storage.clone(),
+        state.clone(),
         duty_shutdown_rx,
         std::time::Duration::from_secs(60),
     ));

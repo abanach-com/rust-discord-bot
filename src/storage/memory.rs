@@ -2466,6 +2466,17 @@ impl MemoryStore {
         Ok(list)
     }
 
+    pub fn list_guilds_with_duty_profiles(&self) -> anyhow::Result<Vec<String>> {
+        let mut list: Vec<String> = self
+            .duty_profiles
+            .iter()
+            .map(|r| r.key().0.clone())
+            .collect();
+        list.sort();
+        list.dedup();
+        Ok(list)
+    }
+
     pub fn upsert_duty_profile(
         &self,
         mut profile: ModeratorDutyProfile,

@@ -366,14 +366,153 @@ pub async fn reconcile_member_duty_state(
     })
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct DiscordMemberDutyContext {
+    pub member_roles: Vec<String>,
+    pub bot_highest_role_pos: Option<i64>,
+    pub on_call_role_pos: Option<i64>,
+}
+
+pub async fn fetch_discord_member_duty_context(
+    http: &serenity::all::Http,
+    guild_id: &str,
+    user_id: &str,
+    on_call_role_id: Option<&str>,
+) -> anyhow::Result<DiscordMemberDutyContext> {
+    let g_num = guild_id.parse::<u64>()?;
+    let u_num = user_id.parse::<u64>()?;
+    let g_id = serenity::all::GuildId::new(g_num);
+    let u_id = serenity::all::UserId::new(u_num);
+
+    let member = http.get_member(g_id, u_id).await?;
+    let member_roles: Vec<String> = member.roles.iter().map(|r| r.get().to_string()).collect();
+
+    let mut bot_highest_role_pos = None;
+    let mut on_call_role_pos = None;
+
+    if let Ok(guild) = http.get_guild(g_id).await {
+        if let Some(on_call_id) = on_call_role_id
+            && let Ok(on_call_num) = on_call_id.parse::<u64>()
+            && let Some(role) = guild.roles.get(&serenity::all::RoleId::new(on_call_num))
+        {
+            on_call_role_pos = Some(role.position as i64);
+        }
+
+        if let Ok(bot_user) = http.get_current_user().await
+            && let Ok(bot_member) = http.get_member(g_id, bot_user.id).await
+        {
+            let max_pos = bot_member
+                .roles
+                .iter()
+                .filter_map(|rid| guild.roles.get(rid))
+                .map(|r| r.position as i64)
+                .max()
+                .unwrap_or(0);
+            bot_highest_role_pos = Some(max_pos);
+        }
+    }
+
+    Ok(DiscordMemberDutyContext {
+        member_roles,
+        bot_highest_role_pos,
+        on_call_role_pos,
+    })
+}
+
+pub async fn reconcile_all_duty_guilds(
+    storage: &crate::storage::Storage,
+    http: Option<&serenity::all::Http>,
+    is_live: bool,
+) -> anyhow::Result<usize> {
+    let guilds = storage.list_guilds_with_duty_profiles().await?;
+    let mut total_reconciled = 0;
+
+    for guild_id in guilds {
+        let settings = storage
+            .get_duty_settings(&guild_id)
+            .await?
+            .unwrap_or_else(|| ModeratorDutySettings {
+                guild_id: guild_id.clone(),
+                staff_role_id: None,
+                on_call_role_id: None,
+                max_override_duration_mins: 1440,
+                fallback_channel_id: None,
+                updated_at: Utc::now(),
+            });
+
+        let profiles = storage.list_duty_profiles(&guild_id).await?;
+        for profile in profiles {
+            let (member_roles, bot_pos, on_call_pos) = if is_live && let Some(h) = http {
+                match fetch_discord_member_duty_context(
+                    h,
+                    &guild_id,
+                    &profile.user_id,
+                    settings.on_call_role_id.as_deref(),
+                )
+                .await
+                {
+                    Ok(ctx) => (
+                        ctx.member_roles,
+                        ctx.bot_highest_role_pos,
+                        ctx.on_call_role_pos,
+                    ),
+                    Err(e) => {
+                        let _ = storage
+                            .upsert_duty_state(ModeratorDutyState {
+                                guild_id: guild_id.clone(),
+                                user_id: profile.user_id.clone(),
+                                expected_on_call: false,
+                                state_generation: 0,
+                                last_reconciled_at: Some(Utc::now()),
+                                last_error: Some(format!("Failed to fetch Discord member: {e}")),
+                            })
+                            .await;
+                        continue;
+                    }
+                }
+            } else {
+                (Vec::new(), None, None)
+            };
+
+            let _ = reconcile_member_duty_state(ReconcileDutyParams {
+                storage,
+                guild_id: &guild_id,
+                user_id: &profile.user_id,
+                settings: &settings,
+                profile: &profile,
+                member_roles: &member_roles,
+                bot_highest_role_pos: bot_pos,
+                on_call_role_pos: on_call_pos,
+                is_live_discord: is_live && http.is_some(),
+                http,
+            })
+            .await;
+            total_reconciled += 1;
+        }
+    }
+
+    Ok(total_reconciled)
+}
+
 pub async fn run_moderator_duty_reconciler_loop(
-    _storage: crate::storage::Storage,
+    state: crate::AppState,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
     interval_duration: std::time::Duration,
 ) {
     tracing::info!("Starting Moderator Duty reconciliation watchdog loop");
     let mut interval = tokio::time::interval(interval_duration);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let is_live = !state.config.discord_token.starts_with("dummy")
+        && state.config.discord_token != "mock"
+        && state.config.discord_token != "offline"
+        && !state.config.discord_token.is_empty();
+
+    let http = if is_live {
+        Some(serenity::all::Http::new(&state.config.discord_token))
+    } else {
+        None
+    };
 
     loop {
         tokio::select! {
@@ -382,7 +521,9 @@ pub async fn run_moderator_duty_reconciler_loop(
                 break;
             }
             _ = interval.tick() => {
-                // Periodic watchdog iteration
+                if let Err(e) = reconcile_all_duty_guilds(&state.storage, http.as_ref(), is_live).await {
+                    tracing::error!(error = %e, "Error in moderator duty watchdog loop iteration");
+                }
             }
         }
     }
@@ -680,5 +821,47 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(target_on_call, Some(on_call_role));
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_all_duty_guilds_watchdog_iteration() {
+        let store = crate::storage::Storage::Memory(crate::storage::MemoryStore::default());
+        let guild_1 = "100000000000000001";
+        let user_1 = "200000000000000001";
+        let on_call_role = "400000000000000001".to_string();
+
+        let settings = ModeratorDutySettings {
+            guild_id: guild_1.to_string(),
+            staff_role_id: None,
+            on_call_role_id: Some(on_call_role),
+            max_override_duration_mins: 1440,
+            fallback_channel_id: None,
+            updated_at: Utc::now(),
+        };
+        store.upsert_duty_settings(settings).await.unwrap();
+
+        let mut profile = ModeratorDutyProfile::new(
+            guild_1.to_string(),
+            user_1.to_string(),
+            "UTC".to_string(),
+            RecurringSchedule::default(),
+        )
+        .unwrap();
+        profile.manual_override = Some("force_on".to_string());
+        store.upsert_duty_profile(profile).await.unwrap();
+
+        let count = reconcile_all_duty_guilds(&store, None, false)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let state = store
+            .get_duty_state(guild_1, user_1)
+            .await
+            .unwrap()
+            .expect("duty state exists");
+        assert!(state.expected_on_call);
+        assert!(state.last_reconciled_at.is_some());
+        assert!(state.last_error.is_none());
     }
 }

@@ -1665,7 +1665,23 @@ async fn test_moderator_duty_api() {
     let off_json: serde_json::Value = off_resp.json().await.unwrap();
     assert_eq!(off_json["profile"]["manual_override"], "force_off");
 
-    // 9. Reconcile guild duty
+    // 9a. Reconcile guild duty with dry_run=true
+    let rec_dry = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/duty/reconcile?dry_run=true"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rec_dry.status(), reqwest::StatusCode::OK);
+    let rec_dry_json: serde_json::Value = rec_dry.json().await.unwrap();
+    assert_eq!(rec_dry_json["reconciled"], true);
+    assert_eq!(rec_dry_json["dry_run"], true);
+    assert_eq!(rec_dry_json["count"], 1);
+
+    // 9b. Reconcile guild duty live apply
     let rec_resp = client
         .post(format!("{base_url}/api/guilds/{guild_id}/duty/reconcile"))
         .header(COOKIE, &session_cookie)
@@ -1676,6 +1692,7 @@ async fn test_moderator_duty_api() {
     assert_eq!(rec_resp.status(), reqwest::StatusCode::OK);
     let rec_json: serde_json::Value = rec_resp.json().await.unwrap();
     assert_eq!(rec_json["reconciled"], true);
+    assert_eq!(rec_json["dry_run"], false);
     assert_eq!(rec_json["count"], 1);
 
     // 10. Delete profile

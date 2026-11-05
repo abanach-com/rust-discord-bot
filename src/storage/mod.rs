@@ -2556,6 +2556,13 @@ impl Storage {
         }
     }
 
+    pub async fn list_guilds_with_duty_profiles(&self) -> anyhow::Result<Vec<String>> {
+        match self {
+            Self::Memory(store) => store.list_guilds_with_duty_profiles(),
+            Self::Postgres(store) => store.list_guilds_with_duty_profiles().await,
+        }
+    }
+
     pub async fn upsert_duty_profile(
         &self,
         profile: ModeratorDutyProfile,
