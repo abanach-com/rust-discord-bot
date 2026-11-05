@@ -319,6 +319,87 @@ async fn test_postgres_integration_suite() {
         "access_token must not be persisted at rest"
     );
 
+    // Verify last_seen_at throttling in PostgreSQL:
+    // 100 consecutive get_session calls must NOT update last_seen_at
+    let initial_last_seen = sessions
+        .get_stored_session_last_seen(&session_id)
+        .await
+        .unwrap()
+        .expect("last_seen_at should exist");
+
+    for _ in 0..100 {
+        let s = sessions.get_session(&session_id).await.unwrap();
+        assert!(s.is_some());
+    }
+
+    let after_100_calls = sessions
+        .get_stored_session_last_seen(&session_id)
+        .await
+        .unwrap()
+        .expect("last_seen_at should exist");
+
+    assert_eq!(
+        initial_last_seen, after_100_calls,
+        "PostgreSQL last_seen_at must not be updated during repeated calls within 60s"
+    );
+
+    // Simulate session idle for > 60s by setting last_seen_at = NOW() - INTERVAL '120 seconds'
+    let raw_pool = sqlx::postgres::PgPoolOptions::new()
+        .connect(&database_url)
+        .await
+        .unwrap();
+    let hash = rusty_discord_bot::session::hash_session_id(&session_id);
+    sqlx::query(
+        "UPDATE dashboard_sessions SET last_seen_at = NOW() - INTERVAL '120 seconds' WHERE session_hash = $1",
+    )
+    .bind(&hash)
+    .execute(&raw_pool)
+    .await
+    .unwrap();
+
+    let old_last_seen = sessions
+        .get_stored_session_last_seen(&session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(old_last_seen < initial_last_seen);
+
+    // Now get_session must update last_seen_at
+    let s_qualifying = sessions.get_session(&session_id).await.unwrap();
+    assert!(s_qualifying.is_some());
+
+    let updated_last_seen = sessions
+        .get_stored_session_last_seen(&session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        updated_last_seen > old_last_seen,
+        "get_session must update last_seen_at after >= 60s threshold"
+    );
+
+    // Concurrent access test: multiple parallel requests on qualifying session
+    sqlx::query(
+        "UPDATE dashboard_sessions SET last_seen_at = NOW() - INTERVAL '120 seconds' WHERE session_hash = $1",
+    )
+    .bind(&hash)
+    .execute(&raw_pool)
+    .await
+    .unwrap();
+
+    let mut handles = Vec::new();
+    for _ in 0..10 {
+        let s_clone = sessions.clone();
+        let sid = session_id.clone();
+        handles.push(tokio::spawn(async move {
+            s_clone.get_session(&sid).await.unwrap()
+        }));
+    }
+    for h in handles {
+        let res = h.await.unwrap();
+        assert!(res.is_some());
+    }
+
     // Test OAuth state single-use consumption
     let oauth_token = format!("oauth_state_{}", Uuid::new_v4());
     sessions.save_oauth_state(&oauth_token).await.unwrap();

@@ -56,7 +56,9 @@ impl MemorySessionStore {
                 self.sessions.remove(&hash);
                 return Ok(None);
             }
-            entry.last_seen_at = now;
+            if entry.last_seen_at <= now - Duration::seconds(60) {
+                entry.last_seen_at = now;
+            }
             let user: DashboardUser = serde_json::from_value(entry.user_data.clone())?;
             let guilds: Vec<DashboardGuild> = serde_json::from_value(entry.guilds_data.clone())?;
             return Ok(Some(Session {
@@ -68,6 +70,12 @@ impl MemorySessionStore {
             }));
         }
         Ok(None)
+    }
+
+    #[must_use]
+    pub fn get_stored_session(&self, session_id: &str) -> Option<StoredSession> {
+        let hash = hash_session_id(session_id);
+        self.sessions.get(&hash).map(|e| e.clone())
     }
 
     pub fn delete_session(&self, session_id: &str) -> anyhow::Result<()> {

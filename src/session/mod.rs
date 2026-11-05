@@ -78,6 +78,16 @@ impl SessionStore {
         }
     }
 
+    pub async fn get_stored_session_last_seen(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<DateTime<chrono::Utc>>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_stored_session(session_id).map(|s| s.last_seen_at)),
+            Self::Postgres(store) => store.get_stored_session_last_seen(session_id).await,
+        }
+    }
+
     pub async fn delete_session(&self, session_id: &str) -> Result<()> {
         match self {
             Self::Memory(store) => store.delete_session(session_id),

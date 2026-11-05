@@ -112,3 +112,43 @@ async fn test_expired_session_cleanup() {
     let cleaned = store.cleanup_expired_sessions().unwrap();
     assert_eq!(cleaned, 0); // already removed on get
 }
+
+#[tokio::test]
+async fn test_session_last_seen_throttling() {
+    let store = MemorySessionStore::new();
+    let session_id = "throttled-session";
+    let user = DashboardUser {
+        id: "123".to_string(),
+        username: "test_user".to_string(),
+        global_name: None,
+        avatar: None,
+    };
+
+    store
+        .save_session(
+            session_id,
+            user,
+            vec![],
+            "csrf_secret".to_string(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .unwrap();
+
+    let initial = store
+        .get_stored_session(session_id)
+        .expect("stored session exists");
+    let t0 = initial.last_seen_at;
+
+    // Call get_session 100 times in rapid succession
+    for _ in 0..100 {
+        let s = store.get_session(session_id).unwrap();
+        assert!(s.is_some());
+    }
+
+    let after_rapid_calls = store.get_stored_session(session_id).unwrap();
+    assert_eq!(
+        after_rapid_calls.last_seen_at, t0,
+        "last_seen_at must NOT be updated when calls occur within 60s window (0 write amplification)"
+    );
+}

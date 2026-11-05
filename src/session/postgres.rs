@@ -9,6 +9,7 @@ struct SessionRow {
     guilds_data: serde_json::Value,
     csrf_token: String,
     expires_at: DateTime<Utc>,
+    last_seen_at: DateTime<Utc>,
 }
 
 #[derive(Clone)]
@@ -76,7 +77,7 @@ impl PostgresSessionStore {
         let hash = hash_session_id(session_id);
         let record = sqlx::query_as::<_, SessionRow>(
             r#"
-            SELECT user_data, guilds_data, csrf_token, expires_at
+            SELECT user_data, guilds_data, csrf_token, expires_at, last_seen_at
             FROM dashboard_sessions
             WHERE session_hash = $1
             "#,
@@ -94,19 +95,27 @@ impl PostgresSessionStore {
             return Ok(None);
         }
 
-        let pool = self.pool.clone();
-        let h = hash.clone();
-        tokio::spawn(async move {
-            let _ = sqlx::query(
-                "UPDATE dashboard_sessions SET last_seen_at = NOW() WHERE session_hash = $1",
-            )
-            .bind(h)
-            .execute(&pool)
-            .await;
-        });
-
         let user: DashboardUser = serde_json::from_value(row.user_data)?;
         let guilds: Vec<DashboardGuild> = serde_json::from_value(row.guilds_data)?;
+
+        // Throttle activity updates to at most once every 60 seconds.
+        // The SQL UPDATE re-verifies the 60-second threshold atomically to prevent
+        // multiple concurrent requests on the same session from competing for row locks.
+        if row.last_seen_at <= Utc::now() - Duration::seconds(60)
+            && let Err(error) = sqlx::query(
+                r#"
+                UPDATE dashboard_sessions
+                SET last_seen_at = NOW()
+                WHERE session_hash = $1
+                  AND last_seen_at <= NOW() - INTERVAL '60 seconds'
+                "#,
+            )
+            .bind(&hash)
+            .execute(&self.pool)
+            .await
+        {
+            tracing::warn!(?error, "could not update dashboard session activity");
+        }
 
         Ok(Some(Session {
             user,
@@ -115,6 +124,20 @@ impl PostgresSessionStore {
             expires_at: row.expires_at,
             access_token: None, // Discord token not retained in persistent session
         }))
+    }
+
+    pub async fn get_stored_session_last_seen(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<Option<DateTime<Utc>>> {
+        let hash = hash_session_id(session_id);
+        let record = sqlx::query_scalar::<_, DateTime<Utc>>(
+            "SELECT last_seen_at FROM dashboard_sessions WHERE session_hash = $1",
+        )
+        .bind(hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(record)
     }
 
     pub async fn delete_session(&self, session_id: &str) -> anyhow::Result<()> {
