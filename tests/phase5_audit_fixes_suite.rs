@@ -42,6 +42,8 @@ fn test_config() -> Config {
         trusted_proxies: ["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()]
             .into_iter()
             .collect(),
+        offline_mode: false,
+        discord_api_base_url: "https://discord.com/api/v10".to_string(),
     }
 }
 

@@ -31,13 +31,7 @@ pub async fn run_with_shutdown(
     state: AppState,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) -> Result<()> {
-    if state.config.discord_token.starts_with("dummy")
-        || state.config.discord_token == "mock"
-        || state.config.discord_token == "offline"
-        || std::env::var("OFFLINE_MODE")
-            .map(|v| v == "1" || v == "true")
-            .unwrap_or(false)
-    {
+    if state.config.is_offline_mode() {
         tracing::warn!("offline/mock test mode active: skipping live Discord Gateway connection");
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_secs(86400 * 365)) => {}

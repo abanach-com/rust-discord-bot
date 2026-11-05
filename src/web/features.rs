@@ -469,43 +469,86 @@ pub struct TestAutomationRequest {
 
 pub async fn test_automation(
     State(state): State<WebState>,
-
     Path((guild_id, automation_id)): Path<(String, Uuid)>,
-
     headers: HeaderMap,
-
     Json(payload): Json<TestAutomationRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
-
     ensure_guild_access(&state, &session, &guild_id).await?;
 
-    let depth = payload.depth.unwrap_or(1);
+    let rules = state
+        .app
+        .storage
+        .list_custom_automations(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
+    let rule = rules
+        .into_iter()
+        .find(|r| r.id == automation_id)
+        .ok_or_else(|| ApiError::not_found("Automation not found in this guild"))?;
+
+    if !rule.enabled {
+        return Err(ApiError::bad_request("Automation is disabled"));
+    }
+
+    let depth = payload.depth.unwrap_or(1);
     if depth > 5 {
         return Ok(Json(json!({
-
             "success": false,
-
             "error": "Cyclic trigger limit exceeded (max loop depth = 5)",
-
-            "depth": depth
-
+            "depth": depth,
+            "dry_run": true,
+            "automation_id": automation_id,
         })));
     }
 
+    let mut conditions_matched = true;
+    if let Some(cond_obj) = rule.conditions_json.as_object()
+        && !cond_obj.is_empty()
+    {
+        if let Some(event_obj) = payload.event_payload.as_object() {
+            for (k, v) in cond_obj {
+                if event_obj.get(k) != Some(v) {
+                    conditions_matched = false;
+                    break;
+                }
+            }
+        } else {
+            conditions_matched = false;
+        }
+    }
+
+    let mut planned_actions = Vec::new();
+    let mut skipped_reasons = Vec::new();
+    if conditions_matched {
+        if let Some(act_obj) = rule.actions_json.as_object() {
+            for key in act_obj.keys() {
+                planned_actions.push(key.clone());
+            }
+        } else if let Some(act_arr) = rule.actions_json.as_array() {
+            for item in act_arr {
+                if let Some(s) = item.as_str() {
+                    planned_actions.push(s.to_string());
+                } else if let Some(obj) = item.as_object()
+                    && let Some(t) = obj.get("type").and_then(|v| v.as_str())
+                {
+                    planned_actions.push(t.to_string());
+                }
+            }
+        }
+    } else {
+        skipped_reasons.push("Conditions did not match event payload".to_string());
+    }
+
     Ok(Json(json!({
-
         "success": true,
-
         "automation_id": automation_id,
-
         "depth": depth,
-
-        "executed_actions": ["send_message", "add_role"],
-
-        "variables_evaluated": {"user": session.user.username}
-
+        "dry_run": true,
+        "matched_conditions": conditions_matched,
+        "planned_actions": planned_actions,
+        "skipped_reasons": skipped_reasons,
     })))
 }
 
@@ -619,49 +662,120 @@ pub struct BroadcastAnnouncementRequest {
 
 pub async fn broadcast_announcement(
     State(state): State<WebState>,
-
     Path(guild_id): Path<String>,
-
     headers: HeaderMap,
-
     Json(payload): Json<BroadcastAnnouncementRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
-
     verify_csrf(&headers, &session)?;
-
     ensure_guild_access(&state, &session, &guild_id).await?;
 
-    let mut successes = Vec::new();
+    crate::storage::validate_snowflake("guild_id", &guild_id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
+    if payload.target_channels.is_empty() {
+        return Err(ApiError::bad_request("target_channels cannot be empty"));
+    }
+    if payload.target_channels.len() > 50 {
+        return Err(ApiError::bad_request(
+            "target_channels exceeds maximum limit of 50",
+        ));
+    }
+    for ch in &payload.target_channels {
+        crate::storage::validate_snowflake("channel_id", ch)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    }
+    if payload.title.trim().is_empty() {
+        return Err(ApiError::bad_request("title cannot be empty"));
+    }
+    if payload.description.trim().is_empty() {
+        return Err(ApiError::bad_request("description cannot be empty"));
+    }
+    if payload.title.len() > 256 || payload.description.len() > 2000 {
+        return Err(ApiError::bad_request(
+            "title or description exceeds character limits",
+        ));
+    }
+
+    if state.app.config.is_offline_mode() {
+        return Err(ApiError::bad_request(
+            "Broadcast delivery is not supported in offline mode; no messages were sent.",
+        ));
+    }
+
+    let http = serenity::all::Http::new(&state.app.config.discord_token);
+    let mut successes = Vec::new();
     let mut failures = Vec::new();
 
     for ch in &payload.target_channels {
-        if ch.ends_with("_unauthorized") {
+        let Ok(c_num) = ch.parse::<u64>() else {
             failures.push(json!({
-
                 "channel_id": ch,
-
-                "error": "Missing SEND_MESSAGES permission",
-
-                "retry_token": format!("retry_{}", ch)
-
+                "error": "Invalid channel snowflake",
+                "retryable": false,
             }));
-        } else {
-            successes.push(ch.clone());
+            continue;
+        };
+        let chan_id = serenity::all::ChannelId::new(c_num);
+
+        let channel = match http.get_channel(chan_id).await {
+            Ok(c) => c,
+            Err(e) => {
+                failures.push(json!({
+                    "channel_id": ch,
+                    "error": format!("Channel not found or inaccessible: {e}"),
+                    "retryable": true,
+                    "retry_token": format!("retry_{ch}"),
+                }));
+                continue;
+            }
+        };
+
+        let Some(guild_chan) = channel.guild() else {
+            failures.push(json!({
+                "channel_id": ch,
+                "error": "The specified channel must be a guild channel",
+                "retryable": false,
+            }));
+            continue;
+        };
+
+        if guild_chan.guild_id.get().to_string() != guild_id {
+            failures.push(json!({
+                "channel_id": ch,
+                "error": "Channel belongs to another guild",
+                "retryable": false,
+            }));
+            continue;
+        }
+
+        let embed = serenity::all::CreateEmbed::new()
+            .title(&payload.title)
+            .description(&payload.description);
+        let builder = serenity::all::CreateMessage::new()
+            .embed(embed)
+            .allowed_mentions(serenity::all::CreateAllowedMentions::new());
+
+        match chan_id.send_message(&http, builder).await {
+            Ok(_) => {
+                successes.push(ch.clone());
+            }
+            Err(e) => {
+                failures.push(json!({
+                    "channel_id": ch,
+                    "error": format!("Failed to deliver message: {e}"),
+                    "retryable": true,
+                    "retry_token": format!("retry_{ch}"),
+                }));
+            }
         }
     }
 
     Ok(Json(json!({
-
         "success_count": successes.len(),
-
         "successes": successes,
-
         "failure_count": failures.len(),
-
-        "failures": failures
-
+        "failures": failures,
     })))
 }
 
@@ -2858,61 +2972,90 @@ pub struct AiQueryRequest {
 }
 
 pub async fn query_ai_assistant(
-    State(_state): State<WebState>,
-
+    State(state): State<WebState>,
     Path(guild_id): Path<String>,
-
     headers: HeaderMap,
-
     Json(payload): Json<AiQueryRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let (_, session) = authenticate(&_state, &headers).await?;
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
 
-    ensure_guild_access(&_state, &session, &guild_id).await?;
+    let clean_query = payload.question.trim();
+    if clean_query.is_empty() {
+        return Err(ApiError::bad_request("Question cannot be empty"));
+    }
 
-    // Hard monthly token budget check
+    // Authoritative server-side monthly token budget check
+    let budget = state
+        .app
+        .storage
+        .get_or_create_ai_budget(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    if payload.monthly_token_budget_used.unwrap_or(0) >= 1_000_000 {
+    if budget.is_halted || budget.used_tokens >= budget.monthly_token_limit {
         return Ok(Json(json!({
-
             "answered": false,
-
-            "escalated_to_staff": true,
-
-            "reason": "Monthly AI token budget exceeded. Escalated to support staff."
-
+            "response": "Monthly AI token budget exceeded for this guild.",
+            "citations": [],
+            "escalated_to_staff": false,
+            "status": "budget_exceeded",
         })));
     }
 
-    let q = payload.question.to_lowercase();
+    let mut docs = state
+        .app
+        .storage
+        .search_ai_documents(&guild_id, &[], clean_query)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    if q.contains("regulamin") || q.contains("rules") || q.contains("pomoc") || q.contains("help") {
-        Ok(Json(json!({
-
-            "answered": true,
-
-            "response": "According to rule 3, please maintain respectful conduct and follow netiquette.",
-
-            "citations": ["#regulamin", "docs/COMMUNITY_RULES.md"],
-
-            "escalated_to_staff": false
-
-        })))
-    } else {
-        // Hallucination guard: when corpus is insufficient, defer to human staff
-
-        Ok(Json(json!({
-
-            "answered": false,
-
-            "response": "Sorry, our knowledge base does not contain an answer to this query. Forwarded to moderators.",
-
-            "citations": [],
-
-            "escalated_to_staff": true
-
-        })))
+    if docs.is_empty() {
+        for word in clean_query.split_whitespace() {
+            let word = word.trim_matches(|c: char| !c.is_alphanumeric());
+            if word.len() >= 4 {
+                let found = state
+                    .app
+                    .storage
+                    .search_ai_documents(&guild_id, &[], word)
+                    .await
+                    .map_err(|e| ApiError::internal(e.to_string()))?;
+                if !found.is_empty() {
+                    docs = found;
+                    break;
+                }
+            }
+        }
     }
+
+    if let Some(doc) = docs.first() {
+        let citations = docs
+            .iter()
+            .map(|d| {
+                if !d.source_type.is_empty() {
+                    format!("{}: {}", d.source_type, d.title)
+                } else {
+                    d.title.clone()
+                }
+            })
+            .collect::<Vec<String>>();
+
+        return Ok(Json(json!({
+            "answered": true,
+            "response": doc.content,
+            "citations": citations,
+            "escalated_to_staff": false,
+            "document_id": doc.id,
+        })));
+    }
+
+    Ok(Json(json!({
+        "answered": false,
+        "response": "FAQ assistant is not configured for this guild or no matching sources found.",
+        "citations": [],
+        "escalated_to_staff": false,
+        "status": "no_sources",
+    })))
 }
 
 // ==========================================

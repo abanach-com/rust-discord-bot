@@ -443,6 +443,14 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
 | MCP Protocol Client/Server | Implemented | Model Context Protocol tool allowlists, mutating action approval gates (#106) |
 | Plugin Marketplace & Verification | Implemented | Semver manifests, SHA-256 cryptographic check, transactional install/rollback (#107) |
 
+## 14. Platform & API Hardening (Issues #202, #203, #204, #205, #206)
+
+- **Authoritative Broadcast Delivery (#202)**: Validates target channel snowflakes, verifies guild ownership, enforces `CreateAllowedMentions` to prevent unauthorized @everyone/role pings, and fails closed in offline mode rather than reporting fake delivery success.
+- **Custom Automation Simulation & Tenant Isolation (#203)**: `/automations/{id}/test` enforces guild-scoped lookup (returning 404 for unknown or cross-guild rules), checks active status (400 Bad Request if disabled), enforces cyclic recursion limits (depth > 5), and evaluates planned actions without side effects or unverified executions.
+- **Grounded AI Knowledge & Server Budget Enforcement (#204)**: `/ai/query` queries approved guild knowledge documents via `search_ai_documents` with tenant isolation and channel ACLs. Prohibits hallucinated regulations and unverified citations. Authoritatively enforces server-side token budget limits against client tampering, returning `status: "no_sources"` and `escalated_to_staff: false` when unindexed.
+- **Unified Offline Mode & Live Member Verification (#205)**: Centralized `Config::offline_mode` and `is_offline_mode()` across Gateway and web dashboard. Prevents `OFFLINE_MODE=false` or empty values from bypassing live Discord membership verification in store and web routes, failing closed with 403 on Discord 404/403.
+- **Steam LFG Self-Service Access (#206)**: Relaxed permission checks on `/steam/lfg` endpoints from `MANAGE_GUILD` to `ensure_guild_member_access`, allowing regular community members to view, create, and join teams while maintaining CSRF validation, tenant isolation, and author attribution.
+
 ## Delivery order
 
 ### Phase 0 — foundation

@@ -630,6 +630,8 @@ async fn moderation_api_strictly_validates_expected_version_and_guards_concurren
         trusted_proxies: ["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()]
             .into_iter()
             .collect(),
+        offline_mode: false,
+        discord_api_base_url: "https://discord.com/api/v10".to_string(),
     };
 
     let state = AppState::bootstrap(config)

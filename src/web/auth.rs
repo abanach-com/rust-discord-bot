@@ -409,11 +409,6 @@ pub async fn ensure_guild_member_access(
     session: &Session,
     guild_id: &str,
 ) -> Result<(), ApiError> {
-    crate::storage::validate_snowflake("guild_id", guild_id)
-        .map_err(|e| ApiError::bad_request(e.to_string()))?;
-    crate::storage::validate_snowflake("user_id", &session.user.id)
-        .map_err(|e| ApiError::bad_request(e.to_string()))?;
-
     // 1. If user is in session guilds and has manage rights (or manage rights already cached), they are definitely a member
     let cache_key = (session.user.id.clone(), guild_id.to_owned());
     let now = Utc::now();
@@ -430,17 +425,17 @@ pub async fn ensure_guild_member_access(
     }
 
     // 3. In mock or test mode, session.guilds presence is sufficient
-    if state.app.config.discord_token.starts_with("dummy")
-        || state.app.config.discord_token.starts_with("mock")
-        || state.app.config.discord_token == "offline"
-        || std::env::var("OFFLINE_MODE").is_ok()
-    {
+    if state.app.config.is_offline_mode() {
         return Ok(());
     }
 
     // 4. In live mode with Discord API: verify membership via Bot token
-    let base_url = std::env::var("DISCORD_API_BASE_URL")
-        .unwrap_or_else(|_| "https://discord.com/api/v10".to_string());
+    crate::storage::validate_snowflake("guild_id", guild_id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    crate::storage::validate_snowflake("user_id", &session.user.id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let base_url = &state.app.config.discord_api_base_url;
     let member_url = format!("{base_url}/guilds/{guild_id}/members/{}", session.user.id);
     let response = state
         .app
@@ -478,9 +473,7 @@ pub async fn revalidate_guild_permission(
     session: &Session,
     guild_id: &str,
 ) -> Result<bool, ApiError> {
-    if state.app.config.discord_token.starts_with("dummy")
-        || state.app.config.discord_token.starts_with("mock")
-    {
+    if state.app.config.is_offline_mode() {
         return Ok(session
             .guilds
             .iter()
@@ -774,6 +767,8 @@ mod tests {
             trusted_proxies: ["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()]
                 .into_iter()
                 .collect(),
+            offline_mode: false,
+            discord_api_base_url: "https://discord.com/api/v10".to_string(),
         }
     }
 

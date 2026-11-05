@@ -43,6 +43,8 @@ fn test_config() -> Config {
         trusted_proxies: ["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()]
             .into_iter()
             .collect(),
+        offline_mode: false,
+        discord_api_base_url: "https://discord.com/api/v10".to_string(),
     }
 }
 
@@ -212,25 +214,68 @@ async fn test_phase2_community_operations_and_media_suite() {
     let auto_data: serde_json::Value = create_auto_resp.json().await.unwrap();
     let auto_id = auto_data["id"].as_str().unwrap();
 
-    // Test loop guard: depth <= 5 executes; depth > 5 triggers loop guard
+    // Test automation dry-run (#203)
+    // 1. Non-existent automation -> 404 Not Found
+    let fake_auto_id = uuid::Uuid::new_v4();
+    let test_fake = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/automations/{fake_auto_id}/test"
+        ))
+        .header(COOKIE, &session_cookie)
+        .json(&serde_json::json!({"event_payload": {"emoji": "⭐"}, "depth": 1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(test_fake.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // 2. Matching event payload -> planned_actions contains ["add_role"]
     let test_loop_ok = client
         .post(format!(
             "{base_url}/api/guilds/{guild_id}/automations/{auto_id}/test"
         ))
         .header(COOKIE, &session_cookie)
-        .json(&serde_json::json!({"event_payload": {}, "depth": 3}))
+        .json(&serde_json::json!({"event_payload": {"emoji": "⭐"}, "depth": 3}))
         .send()
         .await
         .unwrap();
+    assert_eq!(test_loop_ok.status(), reqwest::StatusCode::OK);
     let loop_ok_data: serde_json::Value = test_loop_ok.json().await.unwrap();
     assert_eq!(loop_ok_data["success"], true);
+    assert_eq!(loop_ok_data["dry_run"], true);
+    assert_eq!(loop_ok_data["matched_conditions"], true);
+    assert_eq!(
+        loop_ok_data["planned_actions"],
+        serde_json::json!(["add_role"])
+    );
 
+    // 3. Non-matching event payload -> planned_actions is empty
+    let test_mismatch = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/automations/{auto_id}/test"
+        ))
+        .header(COOKIE, &session_cookie)
+        .json(&serde_json::json!({"event_payload": {"emoji": "❌"}, "depth": 1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(test_mismatch.status(), reqwest::StatusCode::OK);
+    let mismatch_data: serde_json::Value = test_mismatch.json().await.unwrap();
+    assert_eq!(mismatch_data["success"], true);
+    assert_eq!(mismatch_data["matched_conditions"], false);
+    assert!(
+        mismatch_data["planned_actions"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    // 4. Depth > 5 -> loop guard
     let test_loop_exceeded = client
         .post(format!(
             "{base_url}/api/guilds/{guild_id}/automations/{auto_id}/test"
         ))
         .header(COOKIE, &session_cookie)
-        .json(&serde_json::json!({"event_payload": {}, "depth": 6}))
+        .json(&serde_json::json!({"event_payload": {"emoji": "⭐"}, "depth": 6}))
         .send()
         .await
         .unwrap();
@@ -296,9 +341,36 @@ async fn test_phase2_community_operations_and_media_suite() {
         .unwrap();
     assert_eq!(get_sticky_resp.status(), reqwest::StatusCode::OK);
 
-    // Broadcast with partial failure
-    let broadcast_req = serde_json::json!({
-        "target_channels": ["chan_1", "chan_2", "chan_3_unauthorized"],
+    // Broadcast delivery validation (#202)
+    // 1. Non-snowflake channel IDs are rejected
+    let bad_broadcast_req = serde_json::json!({
+        "target_channels": ["chan_1", "chan_2"],
+        "title": "Server Update",
+        "description": "Maintenance completed."
+    });
+    let bad_broadcast_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/broadcast"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&bad_broadcast_req)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        bad_broadcast_resp.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+    let bad_bcast_body: serde_json::Value = bad_broadcast_resp.json().await.unwrap();
+    assert!(
+        bad_bcast_body["error"]
+            .as_str()
+            .unwrap()
+            .contains("channel_id must contain only decimal digits")
+    );
+
+    // 2. In offline/dummy mode, broadcast fails closed without claiming delivery
+    let valid_broadcast_req = serde_json::json!({
+        "target_channels": ["111000000000000001", "111000000000000002"],
         "title": "Server Update",
         "description": "Maintenance completed."
     });
@@ -306,14 +378,18 @@ async fn test_phase2_community_operations_and_media_suite() {
         .post(format!("{base_url}/api/guilds/{guild_id}/broadcast"))
         .header(COOKIE, &session_cookie)
         .header("x-csrf-token", csrf_token)
-        .json(&broadcast_req)
+        .json(&valid_broadcast_req)
         .send()
         .await
         .unwrap();
-    assert_eq!(broadcast_resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(broadcast_resp.status(), reqwest::StatusCode::BAD_REQUEST);
     let bcast_body: serde_json::Value = broadcast_resp.json().await.unwrap();
-    assert_eq!(bcast_body["success_count"], 2);
-    assert_eq!(bcast_body["failure_count"], 1);
+    assert!(
+        bcast_body["error"]
+            .as_str()
+            .unwrap()
+            .contains("Broadcast delivery is not supported in offline mode")
+    );
 
     // Embed mobile preview
     let preview_resp = client
@@ -1108,4 +1184,271 @@ async fn test_guild_store_member_access_and_purchase_isolation() {
     let purch_list = member_purch_json["purchases"].as_array().unwrap();
     assert_eq!(purch_list.len(), 1);
     assert_eq!(purch_list[0]["role_id"], "999000000000000010");
+
+    // Test G: Steam LFG Self-Service Member Access (#206)
+    // 1. Regular member CAN list steam lfg without MANAGE_GUILD
+    let member_lfg_list = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/steam/lfg"))
+        .header(COOKIE, &member_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(member_lfg_list.status(), reqwest::StatusCode::OK);
+    let lfg_posts: Vec<serde_json::Value> = member_lfg_list.json().await.unwrap();
+    assert!(lfg_posts.is_empty());
+
+    // 2. Non-member CANNOT list steam lfg -> 403 Forbidden
+    let non_member_lfg_list = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/steam/lfg"))
+        .header(COOKIE, &non_member_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(non_member_lfg_list.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 3. Regular member CAN create steam lfg post with CSRF without MANAGE_GUILD
+    let create_lfg_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/steam/lfg"))
+        .header(COOKIE, &member_cookie)
+        .header("x-csrf-token", member_csrf)
+        .json(&serde_json::json!({
+            "game_id": "730",
+            "game_name": "Counter-Strike 2",
+            "description": "Premier 5-stack grind",
+            "max_players": 5,
+            "ttl_minutes": 60
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_lfg_resp.status(), reqwest::StatusCode::OK);
+    let lfg_post_data: serde_json::Value = create_lfg_resp.json().await.unwrap();
+    let lfg_post_id = lfg_post_data["id"].as_str().unwrap();
+    assert_eq!(lfg_post_data["author_id"], member_user_id);
+    assert_eq!(lfg_post_data["max_players"], 5);
+
+    // 4. Non-member CANNOT create steam lfg post -> 403 Forbidden
+    let non_member_lfg_create = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/steam/lfg"))
+        .header(COOKIE, &non_member_cookie)
+        .header("x-csrf-token", non_member_csrf)
+        .json(&serde_json::json!({
+            "game_id": "730",
+            "game_name": "Counter-Strike 2",
+            "description": "Hacked",
+            "max_players": 5
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        non_member_lfg_create.status(),
+        reqwest::StatusCode::FORBIDDEN
+    );
+
+    // 5. Admin (also a member) CAN join steam lfg with CSRF
+    let admin_join_lfg = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/steam/lfg/{lfg_post_id}/join"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", admin_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin_join_lfg.status(), reqwest::StatusCode::OK);
+    let joined_lfg_data: serde_json::Value = admin_join_lfg.json().await.unwrap();
+    let players = joined_lfg_data["current_players"].as_array().unwrap();
+    assert_eq!(players.len(), 2);
+
+    // 6. Non-member CANNOT join steam lfg -> 403 Forbidden
+    let non_member_join_lfg = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/steam/lfg/{lfg_post_id}/join"
+        ))
+        .header(COOKIE, &non_member_cookie)
+        .header("x-csrf-token", non_member_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(non_member_join_lfg.status(), reqwest::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_offline_mode_false_live_membership_verification() {
+    let mock_member_exists = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mock_exists_clone = mock_member_exists.clone();
+
+    // 1. Spin up mock Discord HTTP API server
+    let discord_mock_app = axum::Router::new().route(
+        "/guilds/{guild_id}/members/{user_id}",
+        axum::routing::get(move || {
+            let exists = mock_exists_clone.clone();
+            async move {
+                if exists.load(std::sync::atomic::Ordering::SeqCst) {
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(serde_json::json!({
+                            "user": {"id": "12345"},
+                            "roles": []
+                        })),
+                    )
+                } else {
+                    (
+                        axum::http::StatusCode::NOT_FOUND,
+                        axum::Json(serde_json::json!({
+                            "code": 10007,
+                            "message": "Unknown Member"
+                        })),
+                    )
+                }
+            }
+        }),
+    );
+    let discord_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind discord mock");
+    let discord_addr = discord_listener.local_addr().expect("discord mock addr");
+    tokio::spawn(async move {
+        axum::serve(discord_listener, discord_mock_app)
+            .await
+            .unwrap();
+    });
+
+    // 2. Configure app state with real bot token format, offline_mode = false, pointing to mock Discord server
+    let mut config = test_config();
+    config.discord_token = "live_bot_token_production_secret".to_string();
+    config.offline_mode = false;
+    config.discord_api_base_url = format!("http://{discord_addr}");
+
+    let app = AppState::bootstrap(config).await.expect("bootstrap");
+    let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
+    let web_state = WebState {
+        app,
+        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        permissions_cache,
+    };
+
+    let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind web listener");
+    let web_addr = web_listener.local_addr().expect("web addr");
+    let router = build_router(web_state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            web_listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{web_addr}");
+    let guild_id = "888000000000000001";
+    let user_id = "888000000000000002";
+    let session_id = "sess_live_verify_test";
+    let csrf_token = "csrf_live_verify_test";
+
+    // Create item in store
+    let item = web_state
+        .app
+        .storage
+        .create_store_item(
+            guild_id,
+            "Test Live Item",
+            "desc",
+            100,
+            Some("999000000000000001"),
+            Some(5),
+        )
+        .await
+        .unwrap();
+    web_state
+        .app
+        .storage
+        .adjust_member_progress(guild_id, user_id, 0, 500, 0)
+        .await
+        .unwrap();
+
+    // Session has guild snapshot from login time, but permissions = 0
+    web_state
+        .app
+        .sessions
+        .save_session(
+            session_id,
+            DashboardUser {
+                id: user_id.to_string(),
+                username: "former_member".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Guild 888".to_string(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_string(),
+            }],
+            csrf_token.to_string(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let session_cookie = format!("rusty_discord_bot_session={session_id}");
+
+    // Case 1: Member was removed from guild (Discord API returns 404)
+    // -> ensure_guild_member_access FAILS CLOSED with 403 Forbidden!
+    mock_member_exists.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    let get_items_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/store/items"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_items_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let buy_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/store/purchase"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({"item_id": item.id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(buy_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Coins and stock unchanged
+    let progress = web_state
+        .app
+        .storage
+        .get_member_progress(guild_id, user_id)
+        .await
+        .unwrap();
+    assert_eq!(progress.coins, 500);
+
+    // Case 2: Member IS in guild (Discord API returns 200)
+    // -> access granted!
+    mock_member_exists.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let get_items_ok = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/store/items"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_items_ok.status(), reqwest::StatusCode::OK);
+
+    let buy_ok = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/store/purchase"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({"item_id": item.id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(buy_ok.status(), reqwest::StatusCode::OK);
 }

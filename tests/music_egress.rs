@@ -106,6 +106,8 @@ async fn test_music_resolver_network_egress_and_ssrf_boundary() {
         .into_iter()
         .collect(),
         trusted_proxies: ["127.0.0.1".parse().unwrap()].into_iter().collect(),
+        offline_mode: false,
+        discord_api_base_url: "https://discord.com/api/v10".to_string(),
     };
 
     let state = AppState::bootstrap(config).await.expect("bootstrap");

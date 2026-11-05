@@ -24,7 +24,7 @@ use crate::storage::{
 
 use super::{
     WebState,
-    auth::{authenticate, ensure_guild_access, verify_csrf},
+    auth::{authenticate, ensure_guild_access, ensure_guild_member_access, verify_csrf},
     routes::ApiError,
 };
 
@@ -511,7 +511,7 @@ pub async fn create_steam_lfg(
 ) -> Result<Json<SteamLfgPost>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
     verify_csrf(&headers, &session)?;
-    ensure_guild_access(&state, &session, &guild_id).await?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
 
     let ttl = payload.ttl_minutes.unwrap_or(60).clamp(5, 1440);
     let post = SteamLfgPost {
@@ -544,7 +544,7 @@ pub async fn list_steam_lfg(
     headers: HeaderMap,
 ) -> Result<Json<Vec<SteamLfgPost>>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
-    ensure_guild_access(&state, &session, &guild_id).await?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
 
     let game_id = params.get("game_id").map(|s| s.as_str());
     let posts = state
@@ -564,7 +564,7 @@ pub async fn join_steam_lfg(
 ) -> Result<Json<SteamLfgPost>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
     verify_csrf(&headers, &session)?;
-    ensure_guild_access(&state, &session, &guild_id).await?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
 
     let updated = state
         .app

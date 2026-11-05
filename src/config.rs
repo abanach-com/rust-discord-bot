@@ -24,6 +24,8 @@ pub struct Config {
     pub lua_command_timeout_ms: u64,
     pub music_allowed_hosts: HashSet<String>,
     pub trusted_proxies: HashSet<std::net::IpAddr>,
+    pub offline_mode: bool,
+    pub discord_api_base_url: String,
 }
 
 impl Config {
@@ -90,10 +92,21 @@ impl Config {
                 .filter(|value| !value.is_empty())
                 .filter_map(|value| value.parse::<std::net::IpAddr>().ok())
                 .collect(),
+            offline_mode: env_bool("OFFLINE_MODE", false)?,
+            discord_api_base_url: env::var("DISCORD_API_BASE_URL")
+                .unwrap_or_else(|_| "https://discord.com/api/v10".to_owned()),
         };
 
         config.validate()?;
         Ok(config)
+    }
+
+    pub fn is_offline_mode(&self) -> bool {
+        self.discord_token.starts_with("dummy")
+            || self.discord_token == "mock"
+            || self.discord_token.starts_with("mock")
+            || self.discord_token == "offline"
+            || self.offline_mode
     }
 
     fn validate(&self) -> Result<()> {
@@ -174,15 +187,90 @@ where
     }
 }
 
+fn parse_bool_str(name: &str, value: &str) -> Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(anyhow!(
+            "{name} must be one of: true, false, 1, 0, yes, no, on, off"
+        )),
+    }
+}
+
 fn env_bool(name: &str, default: bool) -> Result<bool> {
     match optional_non_empty(name) {
         None => Ok(default),
-        Some(value) => match value.to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => Ok(true),
-            "0" | "false" | "no" | "off" => Ok(false),
-            _ => Err(anyhow!(
-                "{name} must be one of: true, false, 1, 0, yes, no, on, off"
-            )),
-        },
+        Some(value) => parse_bool_str(name, &value),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_offline_mode_logic() {
+        let mut cfg = Config {
+            discord_token: "real_discord_bot_token_123".to_string(),
+            discord_application_id: 1,
+            discord_client_id: "1".to_string(),
+            discord_client_secret: "secret".to_string(),
+            discord_oauth_redirect_url: "http://localhost".to_string(),
+            discord_dev_guild_id: None,
+            dashboard_bind: "127.0.0.1:8080".parse().unwrap(),
+            dashboard_public_url: "http://localhost".to_string(),
+            database_url: None,
+            scripts_dir: PathBuf::from("scripts"),
+            session_cookie_secure: false,
+            session_ttl_seconds: 604800,
+            lua_memory_limit_bytes: 1024 * 1024,
+            lua_instruction_limit: 100_000,
+            lua_hook_granularity: 100,
+            lua_max_parallel: 8,
+            lua_max_per_guild: 2,
+            lua_command_timeout_ms: 1000,
+            music_allowed_hosts: HashSet::new(),
+            trusted_proxies: HashSet::new(),
+            offline_mode: false,
+            discord_api_base_url: "https://discord.com/api/v10".to_string(),
+        };
+
+        // Real token with offline_mode false -> NOT offline mode
+        assert!(!cfg.is_offline_mode());
+
+        // Real token with offline_mode true -> offline mode
+        cfg.offline_mode = true;
+        assert!(cfg.is_offline_mode());
+
+        // Dummy/mock tokens -> always offline mode
+        cfg.offline_mode = false;
+        cfg.discord_token = "dummy_token".to_string();
+        assert!(cfg.is_offline_mode());
+
+        cfg.discord_token = "mock".to_string();
+        assert!(cfg.is_offline_mode());
+
+        cfg.discord_token = "offline".to_string();
+        assert!(cfg.is_offline_mode());
+    }
+
+    #[test]
+    fn test_parse_bool_str() {
+        assert!(parse_bool_str("FLAG", "true").unwrap());
+        assert!(parse_bool_str("FLAG", "1").unwrap());
+        assert!(parse_bool_str("FLAG", "yes").unwrap());
+        assert!(parse_bool_str("FLAG", "on").unwrap());
+
+        assert!(!parse_bool_str("FLAG", "false").unwrap());
+        assert!(!parse_bool_str("FLAG", "0").unwrap());
+        assert!(!parse_bool_str("FLAG", "no").unwrap());
+        assert!(!parse_bool_str("FLAG", "off").unwrap());
+
+        assert!(parse_bool_str("FLAG", "invalid").is_err());
+        assert!(parse_bool_str("FLAG", "2").is_err());
+
+        // Default returned for unset env var
+        assert!(!env_bool("NON_EXISTENT_VAR_XYZ_9876", false).unwrap());
+        assert!(env_bool("NON_EXISTENT_VAR_XYZ_9876", true).unwrap());
     }
 }

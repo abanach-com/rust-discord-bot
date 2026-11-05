@@ -152,11 +152,11 @@ impl AppState {
         crate::storage::validate_snowflake("user_id", user_id)?;
         crate::storage::validate_snowflake("role_id", role_id)?;
 
-        let is_offline = (self.config.discord_token.starts_with("dummy")
-            || self.config.discord_token.starts_with("mock")
-            || self.config.discord_token == "offline"
-            || std::env::var("OFFLINE_MODE").is_ok())
-            && std::env::var("DISCORD_API_BASE_URL").is_err();
+        let is_offline = self.config.is_offline_mode()
+            && self
+                .config
+                .discord_api_base_url
+                .starts_with("https://discord.com");
 
         if is_offline {
             tracing::debug!(
@@ -168,8 +168,7 @@ impl AppState {
             return Ok(());
         }
 
-        let base_url = std::env::var("DISCORD_API_BASE_URL")
-            .unwrap_or_else(|_| "https://discord.com/api/v10".to_string());
+        let base_url = &self.config.discord_api_base_url;
         let url_string = format!("{base_url}/guilds/{guild_id}/members/{user_id}/roles/{role_id}");
         let parsed_url = reqwest::Url::parse(&url_string)?;
         let expected_suffix = format!("/guilds/{guild_id}/members/{user_id}/roles/{role_id}");

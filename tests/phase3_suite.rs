@@ -7,6 +7,7 @@ use rusty_discord_bot::{
     config::Config,
     session::{DashboardGuild, DashboardUser},
     state::AppState,
+    storage::AiKnowledgeDocument,
     web::{
         WebState,
         auth::{CachedGuildPermission, LoginRateLimiter},
@@ -38,6 +39,8 @@ fn test_config() -> Config {
         trusted_proxies: ["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()]
             .into_iter()
             .collect(),
+        offline_mode: false,
+        discord_api_base_url: "https://discord.com/api/v10".to_string(),
     }
 }
 
@@ -419,8 +422,9 @@ async fn test_phase3_games_rp_and_knowledge_suite() {
     assert_eq!(trans_body["target_language"], "en");
     assert_eq!(trans_body["ephemeral"], true);
 
-    // Grounded AI assistant: within budget & corpus found
-    let ai_rules_resp = client
+    // Grounded AI assistant (#204):
+    // 1. Without indexed sources -> answered: false, empty citations, no fake escalation
+    let ai_empty_resp = client
         .post(format!("{base_url}/api/guilds/{guild_id}/ai/query"))
         .header(COOKIE, &session_cookie)
         .json(&serde_json::json!({
@@ -430,28 +434,93 @@ async fn test_phase3_games_rp_and_knowledge_suite() {
         .send()
         .await
         .unwrap();
-    assert_eq!(ai_rules_resp.status(), reqwest::StatusCode::OK);
-    let ai_rules_body: serde_json::Value = ai_rules_resp.json().await.unwrap();
-    assert_eq!(ai_rules_body["answered"], true);
-    assert!(
-        ai_rules_body["citations"]
-            .as_array()
-            .unwrap()
-            .contains(&serde_json::json!("#regulamin"))
-    );
+    assert_eq!(ai_empty_resp.status(), reqwest::StatusCode::OK);
+    let ai_empty_body: serde_json::Value = ai_empty_resp.json().await.unwrap();
+    assert_eq!(ai_empty_body["answered"], false);
+    assert!(ai_empty_body["citations"].as_array().unwrap().is_empty());
+    assert_eq!(ai_empty_body["escalated_to_staff"], false);
+    assert_eq!(ai_empty_body["status"], "no_sources");
 
-    // Grounded AI assistant: budget exceeded escalation
-    let ai_budget_exceeded = client
+    // 2. Index an authentic knowledge document
+    let test_doc = AiKnowledgeDocument {
+        id: uuid::Uuid::new_v4(),
+        guild_id: guild_id.to_string(),
+        channel_acl: serde_json::json!([]),
+        title: "Regulamin Społeczności".to_string(),
+        content: "Zasada 1: Szanuj innych użytkowników. Obowiązuje kultura osobista.".to_string(),
+        source_type: "community_rules".to_string(),
+        created_at: Utc::now(),
+    };
+    state
+        .app
+        .storage
+        .create_ai_document(test_doc)
+        .await
+        .expect("create ai doc");
+
+    // 3. Querying for regulamin now finds the authentic source
+    let ai_found_resp = client
         .post(format!("{base_url}/api/guilds/{guild_id}/ai/query"))
         .header(COOKIE, &session_cookie)
         .json(&serde_json::json!({
-            "question": "Pytanie o cokolwiek",
-            "monthly_token_budget_used": 1_200_000
+            "question": "Jaki jest regulamin serwera?",
+            "monthly_token_budget_used": 50000
         }))
         .send()
         .await
         .unwrap();
-    assert_eq!(ai_budget_exceeded.status(), reqwest::StatusCode::OK);
-    let ai_budget_body: serde_json::Value = ai_budget_exceeded.json().await.unwrap();
-    assert_eq!(ai_budget_body["escalated_to_staff"], true);
+    assert_eq!(ai_found_resp.status(), reqwest::StatusCode::OK);
+    let ai_found_body: serde_json::Value = ai_found_resp.json().await.unwrap();
+    assert_eq!(ai_found_body["answered"], true);
+    assert_eq!(
+        ai_found_body["response"],
+        "Zasada 1: Szanuj innych użytkowników. Obowiązuje kultura osobista."
+    );
+    assert_eq!(
+        ai_found_body["citations"],
+        serde_json::json!(["community_rules: Regulamin Społeczności"])
+    );
+    assert_eq!(ai_found_body["escalated_to_staff"], false);
+
+    // 4. Querying for an unindexed topic -> answered: false, empty citations
+    let ai_unknown_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/ai/query"))
+        .header(COOKIE, &session_cookie)
+        .json(&serde_json::json!({
+            "question": "Jaki jest przepis na sernik?",
+            "monthly_token_budget_used": 50000
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ai_unknown_resp.status(), reqwest::StatusCode::OK);
+    let ai_unknown_body: serde_json::Value = ai_unknown_resp.json().await.unwrap();
+    assert_eq!(ai_unknown_body["answered"], false);
+    assert!(ai_unknown_body["citations"].as_array().unwrap().is_empty());
+    assert_eq!(ai_unknown_body["escalated_to_staff"], false);
+
+    // 5. Server-side token budget check: exhausted server budget halts queries,
+    //    even if client attempts to pass monthly_token_budget_used: 0
+    state
+        .app
+        .storage
+        .record_ai_usage(guild_id, 1_000_000, 10.0)
+        .await
+        .expect("record ai usage to exceed limit");
+
+    let ai_budget_halted = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/ai/query"))
+        .header(COOKIE, &session_cookie)
+        .json(&serde_json::json!({
+            "question": "Jaki jest regulamin serwera?",
+            "monthly_token_budget_used": 0 // Client attempt to spoof budget
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ai_budget_halted.status(), reqwest::StatusCode::OK);
+    let ai_budget_body: serde_json::Value = ai_budget_halted.json().await.unwrap();
+    assert_eq!(ai_budget_body["answered"], false);
+    assert_eq!(ai_budget_body["status"], "budget_exceeded");
+    assert_eq!(ai_budget_body["escalated_to_staff"], false);
 }
