@@ -2950,7 +2950,7 @@ impl PostgresStore {
         validate_snowflake("guild_id", guild_id)?;
         let rows = sqlx::query_as::<_, CompanionChannelMapping>(
             r#"
-            SELECT id, guild_id, voice_channel_id, text_channel_id, allow_send_messages, allow_read_history, created_at
+            SELECT id, guild_id, voice_channel_id, text_channel_id, allow_send_messages, allow_read_history, enabled, created_at
             FROM companion_channel_mappings
             WHERE guild_id = $1
             ORDER BY created_at ASC
@@ -2977,19 +2977,22 @@ impl PostgresStore {
         let id = Uuid::new_v4();
         let now = Utc::now();
 
+        let mut tx = self.pool.begin().await?;
+
         let mapping = sqlx::query_as::<_, CompanionChannelMapping>(
             r#"
             INSERT INTO companion_channel_mappings (
                 id, guild_id, voice_channel_id, text_channel_id,
-                allow_send_messages, allow_read_history, created_at
+                allow_send_messages, allow_read_history, enabled, created_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, $5, $6, true, $7)
             ON CONFLICT (guild_id, voice_channel_id)
             DO UPDATE SET
                 text_channel_id = EXCLUDED.text_channel_id,
                 allow_send_messages = EXCLUDED.allow_send_messages,
-                allow_read_history = EXCLUDED.allow_read_history
-            RETURNING id, guild_id, voice_channel_id, text_channel_id, allow_send_messages, allow_read_history, created_at
+                allow_read_history = EXCLUDED.allow_read_history,
+                enabled = true
+            RETURNING id, guild_id, voice_channel_id, text_channel_id, allow_send_messages, allow_read_history, enabled, created_at
             "#,
         )
         .bind(id)
@@ -2999,8 +3002,27 @@ impl PostgresStore {
         .bind(allow_send_messages)
         .bind(allow_read_history)
         .bind(now)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
+
+        // Issue #175: Invalidate any active leases for this voice channel that target an old text channel
+        sqlx::query(
+            r#"
+            UPDATE companion_channel_leases
+            SET status = 'revoke_pending', next_attempt_at = NOW()
+            WHERE guild_id = $1
+              AND voice_channel_id = $2
+              AND text_channel_id <> $3
+              AND status IN ('active', 'revoke_pending')
+            "#,
+        )
+        .bind(guild_id)
+        .bind(voice_channel_id)
+        .bind(text_channel_id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
 
         Ok(mapping)
     }
@@ -3029,7 +3051,7 @@ impl PostgresStore {
         validate_snowflake("voice_channel_id", voice_channel_id)?;
         let mapping = sqlx::query_as::<_, CompanionChannelMapping>(
             r#"
-            SELECT id, guild_id, voice_channel_id, text_channel_id, allow_send_messages, allow_read_history, created_at
+            SELECT id, guild_id, voice_channel_id, text_channel_id, allow_send_messages, allow_read_history, enabled, created_at
             FROM companion_channel_mappings
             WHERE guild_id = $1 AND voice_channel_id = $2
             "#,

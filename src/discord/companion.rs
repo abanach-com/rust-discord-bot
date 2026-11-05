@@ -474,7 +474,7 @@ pub async fn reconcile_guild_companion_channels(
         }
     }
 
-    // 2. Check active leases: if user is not in the mapped voice channel, revoke!
+    // 2. Check active leases: if user is not in the mapped voice channel or mapping changed/disabled, revoke!
     for lease in active_leases {
         let is_valid = match lease.user_id.parse::<u64>() {
             Ok(uid) => {
@@ -483,10 +483,18 @@ pub async fn reconcile_guild_companion_channels(
                     .and_then(|vs| vs.channel_id)
                     .map(|c| c.get().to_string());
 
-                match current_voice_channel {
+                let current_voice_matches_lease = match current_voice_channel {
                     Some(ref v) => v == &lease.voice_channel_id,
                     None => false,
-                }
+                };
+
+                let still_mapped_to_this_text = mappings.iter().any(|m| {
+                    m.voice_channel_id == lease.voice_channel_id
+                        && m.text_channel_id == lease.text_channel_id
+                        && m.enabled
+                });
+
+                current_voice_matches_lease && still_mapped_to_this_text
             }
             Err(_) => false,
         };

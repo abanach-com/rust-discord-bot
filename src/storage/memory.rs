@@ -2049,27 +2049,46 @@ impl MemoryStore {
         validate_snowflake("voice_channel_id", voice_channel_id)?;
         validate_snowflake("text_channel_id", text_channel_id)?;
 
-        // Remove existing mapping for the voice channel if present
-        let existing_id = self
+        // Preserve mapping ID and creation timestamp when updating an existing mapping
+        let existing = self
             .companion_mappings
             .iter()
             .find(|m| m.guild_id == guild_id && m.voice_channel_id == voice_channel_id)
-            .map(|m| m.id);
-        if let Some(id) = existing_id {
-            self.companion_mappings.remove(&id);
-        }
+            .map(|m| (m.id, m.created_at));
+
+        let now = Utc::now();
+        let (id, created_at) = if let Some((old_id, old_created)) = existing {
+            self.companion_mappings.remove(&old_id);
+            (old_id, old_created)
+        } else {
+            (Uuid::new_v4(), now)
+        };
 
         let mapping = CompanionChannelMapping {
-            id: Uuid::new_v4(),
+            id,
             guild_id: guild_id.to_string(),
             voice_channel_id: voice_channel_id.to_string(),
             text_channel_id: text_channel_id.to_string(),
             allow_send_messages,
             allow_read_history,
-            created_at: Utc::now(),
+            created_at,
             enabled: true,
         };
         self.companion_mappings.insert(mapping.id, mapping.clone());
+
+        // Issue #175: Invalidate any active/pending leases for this voice channel that target an old text channel
+        for mut lease_entry in self.companion_leases.iter_mut() {
+            let lease = lease_entry.value_mut();
+            if lease.guild_id == guild_id
+                && lease.voice_channel_id == voice_channel_id
+                && lease.text_channel_id != text_channel_id
+                && (lease.status == "active" || lease.status == "revoke_pending")
+            {
+                lease.status = "revoke_pending".to_string();
+                lease.next_attempt_at = Some(now);
+            }
+        }
+
         Ok(mapping)
     }
 

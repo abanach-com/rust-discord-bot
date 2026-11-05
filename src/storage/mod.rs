@@ -5388,6 +5388,48 @@ mod tests {
         let active_after_del = store.list_active_companion_leases(guild_id).await.unwrap();
         assert!(active_after_del.is_empty());
 
+        // 6b. Test Issue #175: Updating mapping target invalidates active leases for that voice channel
+        let new_gen = Uuid::new_v4();
+        store
+            .record_companion_lease(RecordCompanionLeaseParams {
+                guild_id,
+                voice_channel_id: voice_id,
+                text_channel_id: updated_text,
+                user_id,
+                generation: new_gen,
+                allow_bits: 1024,
+                deny_bits: 0,
+            })
+            .await
+            .unwrap();
+
+        let third_text = "333000000000000003";
+        let third = store
+            .upsert_companion_mapping(guild_id, voice_id, third_text, true, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            third.id, created.id,
+            "mapping ID must remain stable across updates"
+        );
+        assert_eq!(third.text_channel_id, third_text);
+        assert!(third.enabled);
+
+        let invalidated = store
+            .get_companion_lease(guild_id, updated_text, user_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            invalidated.status, "revoke_pending",
+            "updating mapping target must mark old lease revoke_pending (#175)"
+        );
+
+        let _ = store
+            .delete_companion_lease(guild_id, updated_text, user_id)
+            .await
+            .unwrap();
+
         // 7. Delete mapping
         let deleted_mapping = store
             .delete_companion_mapping(guild_id, updated.id)

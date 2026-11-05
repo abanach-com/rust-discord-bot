@@ -3091,9 +3091,12 @@ pub async fn upsert_companion_mapping(
             }
         }
 
-        let is_existing = existing
+        let old_text_channel = existing
             .iter()
-            .any(|m| m.voice_channel_id == item.voice_channel_id);
+            .find(|m| m.voice_channel_id == item.voice_channel_id)
+            .map(|m| m.text_channel_id.clone());
+
+        let is_existing = old_text_channel.is_some();
         if !is_existing && existing.len() >= MAX_COMPANION_MAPPINGS_PER_GUILD {
             return Err(ApiError::bad_request(format!(
                 "Companion mapping limit reached (max {MAX_COMPANION_MAPPINGS_PER_GUILD} per guild)"
@@ -3112,6 +3115,48 @@ pub async fn upsert_companion_mapping(
             )
             .await
             .map_err(|e| ApiError::internal(e.to_string()))?;
+
+        // Issue #175: If text_channel_id changed, trigger immediate Discord revoke for pending leases on old text channel
+        if let Some(ref old_text) = old_text_channel
+            && old_text != &item.text_channel_id
+        {
+            let pending = state
+                .app
+                .storage
+                .list_pending_revoke_companion_leases(&guild_id)
+                .await
+                .unwrap_or_default();
+            for lease in pending {
+                if lease.voice_channel_id == item.voice_channel_id
+                    && &lease.text_channel_id == old_text
+                {
+                    if !state.app.config.discord_token.starts_with("dummy")
+                        && state.app.config.discord_token != "mock"
+                        && state.app.config.discord_token != "offline"
+                    {
+                        let http = serenity::all::Http::new(&state.app.config.discord_token);
+                        if let (Ok(c_num), Ok(u_num)) = (
+                            lease.text_channel_id.parse::<u64>(),
+                            lease.user_id.parse::<u64>(),
+                        ) {
+                            let _ = serenity::all::ChannelId::new(c_num)
+                                .delete_permission(
+                                    &http,
+                                    serenity::all::PermissionOverwriteType::Member(
+                                        serenity::all::UserId::new(u_num),
+                                    ),
+                                )
+                                .await;
+                        }
+                    }
+                    let _ = state
+                        .app
+                        .storage
+                        .delete_companion_lease(&guild_id, &lease.text_channel_id, &lease.user_id)
+                        .await;
+                }
+            }
+        }
 
         let _ = state
             .app

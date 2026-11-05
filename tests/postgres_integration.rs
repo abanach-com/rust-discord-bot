@@ -1267,14 +1267,82 @@ async fn test_postgres_integration_suite() {
         .expect("upsert companion mapping in postgres");
     assert_eq!(mapping.voice_channel_id, companion_voice_id);
     assert_eq!(mapping.text_channel_id, companion_text_id);
+    assert!(mapping.enabled, "mapping must have enabled = true (#174)");
 
-    // 12.2. Get by voice
+    // 12.2. Get by voice & list mappings
     let by_voice = store
         .get_companion_mapping_by_voice(companion_guild_id, companion_voice_id)
         .await
         .expect("get mapping by voice")
         .expect("mapping must exist");
     assert_eq!(by_voice.id, mapping.id);
+    assert!(
+        by_voice.enabled,
+        "mapping by voice must have enabled = true (#174)"
+    );
+
+    let list_mappings = store
+        .list_companion_mappings(companion_guild_id)
+        .await
+        .expect("list companion mappings");
+    assert_eq!(list_mappings.len(), 1);
+    assert!(list_mappings[0].enabled);
+
+    // 12.2b. Test Mapping Destination Change V->A to V->B invalidates old lease (#175)
+    let companion_text_id_2 = "888000000000000030";
+    let lease_pre = store
+        .record_companion_lease(rusty_discord_bot::storage::RecordCompanionLeaseParams {
+            guild_id: companion_guild_id,
+            voice_channel_id: companion_voice_id,
+            text_channel_id: companion_text_id,
+            user_id: companion_user_id,
+            generation: companion_gen,
+            allow_bits: 1024,
+            deny_bits: 0,
+        })
+        .await
+        .expect("record active lease on text A");
+    assert_eq!(lease_pre.status, "active");
+
+    let updated_mapping = store
+        .upsert_companion_mapping(
+            companion_guild_id,
+            companion_voice_id,
+            companion_text_id_2,
+            true,
+            true,
+        )
+        .await
+        .expect("upsert updated text destination in postgres");
+    assert_eq!(
+        updated_mapping.id, mapping.id,
+        "mapping ID must remain stable across updates"
+    );
+    assert_eq!(updated_mapping.text_channel_id, companion_text_id_2);
+    assert!(updated_mapping.enabled);
+
+    let old_lease = store
+        .get_companion_lease(companion_guild_id, companion_text_id, companion_user_id)
+        .await
+        .expect("get old lease")
+        .expect("old lease exists");
+    assert_eq!(
+        old_lease.status, "revoke_pending",
+        "updating mapping target must mark old lease revoke_pending (#175)"
+    );
+
+    // Restore text destination back to companion_text_id for remaining test steps
+    let restored_mapping = store
+        .upsert_companion_mapping(
+            companion_guild_id,
+            companion_voice_id,
+            companion_text_id,
+            true,
+            true,
+        )
+        .await
+        .expect("restore mapping");
+    assert_eq!(restored_mapping.id, mapping.id);
 
     // 12.3. Record lease
     let lease = store
