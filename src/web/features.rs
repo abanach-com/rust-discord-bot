@@ -1114,6 +1114,11 @@ pub async fn create_store_item(
         return Err(ApiError::bad_request("stock must be non-negative"));
     }
 
+    if let Some(ref r_id) = payload.role_id {
+        crate::storage::validate_snowflake("role_id", r_id)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    }
+
     let item = state
         .app
         .storage
@@ -1126,7 +1131,7 @@ pub async fn create_store_item(
             payload.stock,
         )
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     Ok(Json(item))
 }

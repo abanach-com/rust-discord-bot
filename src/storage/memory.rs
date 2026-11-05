@@ -21,7 +21,7 @@ use super::{
     SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
     TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError, TupperProfile,
     TwitchStreamSubscription, UserErasureReport, VkSubscription, WorkflowDefinition,
-    WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
+    WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp, validate_snowflake,
 };
 
 type ModuleKey = (String, String);
@@ -1524,6 +1524,9 @@ impl MemoryStore {
 
         let price = item.price;
         anyhow::ensure!(price >= 0, "stored store item has invalid negative price");
+        if let Some(ref r_id) = item.role_id {
+            validate_snowflake("role_id", r_id)?;
+        }
 
         let now = Utc::now();
 

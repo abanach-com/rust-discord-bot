@@ -140,16 +140,9 @@ impl AppState {
         user_id: &str,
         role_id: &str,
     ) -> anyhow::Result<()> {
-        for (name, id) in [
-            ("guild_id", guild_id),
-            ("user_id", user_id),
-            ("role_id", role_id),
-        ] {
-            anyhow::ensure!(!id.trim().is_empty(), "{name} cannot be empty");
-            if let Ok(num) = id.parse::<u64>() {
-                anyhow::ensure!(num != 0, "{name} snowflake cannot be 0");
-            }
-        }
+        crate::storage::validate_snowflake("guild_id", guild_id)?;
+        crate::storage::validate_snowflake("user_id", user_id)?;
+        crate::storage::validate_snowflake("role_id", role_id)?;
 
         let is_offline = (self.config.discord_token.starts_with("dummy")
             || self.config.discord_token.starts_with("mock")
@@ -169,7 +162,13 @@ impl AppState {
 
         let base_url = std::env::var("DISCORD_API_BASE_URL")
             .unwrap_or_else(|_| "https://discord.com/api/v10".to_string());
-        let url = format!("{base_url}/guilds/{guild_id}/members/{user_id}/roles/{role_id}");
+        let url_string = format!("{base_url}/guilds/{guild_id}/members/{user_id}/roles/{role_id}");
+        let parsed_url = reqwest::Url::parse(&url_string)?;
+        let expected_suffix = format!("/guilds/{guild_id}/members/{user_id}/roles/{role_id}");
+        anyhow::ensure!(
+            parsed_url.path().ends_with(&expected_suffix),
+            "URL path manipulation or traversal detected"
+        );
 
         let mut attempts = 0;
         const MAX_ATTEMPTS: u32 = 3;
@@ -178,7 +177,7 @@ impl AppState {
             attempts += 1;
             let response = self
                 .http_client
-                .put(&url)
+                .put(parsed_url.clone())
                 .header(
                     reqwest::header::AUTHORIZATION,
                     format!("Bot {}", self.config.discord_token),

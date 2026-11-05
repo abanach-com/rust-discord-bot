@@ -65,8 +65,8 @@ async fn test_web_state() -> (
 #[tokio::test]
 async fn test_phase2_community_operations_and_media_suite() {
     let (state, _) = test_web_state().await;
-    let guild_id = "guild_phase2";
-    let user_id = "user_phase2_admin";
+    let guild_id = "100000000000000001";
+    let user_id = "200000000000000001";
     let session_id = "test_phase2_session_token";
     let csrf_token = "csrf_phase2_token";
 
@@ -515,9 +515,28 @@ async fn test_phase2_community_operations_and_media_suite() {
         "name": "Custom Color Role",
         "description": "Unlock VIP pastel colors",
         "price": 250,
-        "role_id": "role_color_vip",
+        "role_id": "100000000000000002",
         "stock": 5
     });
+
+    // Verify path traversal in role_id is rejected with 400 Bad Request (#157)
+    let traversal_req = serde_json::json!({
+        "name": "Malicious Item",
+        "description": "Exploit attempt",
+        "price": 100,
+        "role_id": "../../../../../guilds/333/members/444/roles/555",
+        "stock": 5
+    });
+    let traversal_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/store/items"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&traversal_req)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(traversal_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
     let item_resp = client
         .post(format!("{base_url}/api/guilds/{guild_id}/store/items"))
         .header(COOKIE, &session_cookie)
@@ -558,7 +577,7 @@ async fn test_phase2_community_operations_and_media_suite() {
     let list_purchases_body: serde_json::Value = list_purchases_resp.json().await.unwrap();
     let purchases = list_purchases_body["purchases"].as_array().unwrap();
     assert_eq!(purchases.len(), 1);
-    assert_eq!(purchases[0]["role_id"], "role_color_vip");
+    assert_eq!(purchases[0]["role_id"], "100000000000000002");
     assert_eq!(purchases[0]["fulfillment_status"], "completed");
 
     // Archive season

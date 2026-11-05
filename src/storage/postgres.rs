@@ -19,7 +19,7 @@ use super::{
     SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
     TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError, TupperProfile,
     TwitchStreamSubscription, UserErasureReport, VkSubscription, WorkflowDefinition,
-    WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
+    WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp, validate_snowflake,
 };
 
 pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
@@ -2368,6 +2368,10 @@ impl PostgresStore {
             item.price >= 0,
             "stored store item has invalid negative price"
         );
+
+        if let Some(ref r_id) = item.role_id {
+            validate_snowflake("role_id", r_id)?;
+        }
 
         if let Some(stock) = item.stock {
             if stock <= 0 {

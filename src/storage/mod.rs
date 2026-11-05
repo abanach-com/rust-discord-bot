@@ -336,6 +336,20 @@ pub struct StorePurchase {
     pub created_at: DateTime<Utc>,
 }
 
+pub fn validate_snowflake(label: &str, id: &str) -> anyhow::Result<u64> {
+    let trimmed = id.trim();
+    anyhow::ensure!(!trimmed.is_empty(), "{label} cannot be empty");
+    anyhow::ensure!(
+        trimmed.chars().all(|c| c.is_ascii_digit()),
+        "{label} must contain only decimal digits"
+    );
+    let parsed = trimmed
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("{label} must be a valid decimal Discord snowflake"))?;
+    anyhow::ensure!(parsed != 0, "{label} must be nonzero");
+    Ok(parsed)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ProgressionSeason {
     pub id: Uuid,
@@ -2025,6 +2039,9 @@ impl Storage {
     ) -> anyhow::Result<StoreItem> {
         anyhow::ensure!(price >= 0, "price must be non-negative");
         anyhow::ensure!(stock.is_none_or(|n| n >= 0), "stock must be non-negative");
+        if let Some(r_id) = role_id {
+            validate_snowflake("role_id", r_id)?;
+        }
 
         match self {
             Self::Memory(store) => {
@@ -3716,7 +3733,7 @@ mod tests {
                 "VIP Role",
                 "Grants VIP status",
                 200,
-                Some("role_12345"),
+                Some("123456789012345678"),
                 Some(10),
             )
             .await
@@ -3731,7 +3748,7 @@ mod tests {
         assert_eq!(remaining, 300);
         assert_eq!(purchase.item_id, item.id);
         assert_eq!(purchase.price_paid, 200);
-        assert_eq!(purchase.role_id, Some("role_12345".to_string()));
+        assert_eq!(purchase.role_id, Some("123456789012345678".to_string()));
         assert_eq!(purchase.fulfillment_status, "pending");
         assert!(purchase.fulfilled_at.is_none());
 
@@ -3755,7 +3772,126 @@ mod tests {
             .unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, purchase.id);
-        assert_eq!(list[0].role_id, Some("role_12345".to_string()));
+        assert_eq!(list[0].role_id, Some("123456789012345678".to_string()));
+    }
+
+    #[test]
+    fn test_validate_snowflake_comprehensive_rules() {
+        // Valid snowflakes
+        assert_eq!(
+            validate_snowflake("role_id", "100000000000000001").unwrap(),
+            100000000000000001
+        );
+        assert_eq!(validate_snowflake("role_id", " 42 ").unwrap(), 42);
+
+        // Empty and whitespace
+        assert!(validate_snowflake("role_id", "").is_err());
+        assert!(validate_snowflake("role_id", "   ").is_err());
+
+        // Zero
+        assert!(validate_snowflake("role_id", "0").is_err());
+        assert!(validate_snowflake("role_id", "0000").is_err());
+
+        // Non-digits, traversal, and invalid characters
+        assert!(validate_snowflake("role_id", "role_color_vip").is_err());
+        assert!(
+            validate_snowflake("role_id", "../../../../../guilds/333/members/444/roles/555")
+                .is_err()
+        );
+        assert!(validate_snowflake("role_id", "123/456").is_err());
+        assert!(validate_snowflake("role_id", "123?456").is_err());
+        assert!(validate_snowflake("role_id", "123#456").is_err());
+        assert!(validate_snowflake("role_id", "-100").is_err());
+        assert!(validate_snowflake("role_id", "12.34").is_err());
+
+        // u64 overflow (2^64)
+        assert!(validate_snowflake("role_id", "18446744073709551616").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_store_item_rejects_traversal_role_id() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_id = "guild_123";
+
+        let bad_role = store
+            .create_store_item(
+                guild_id,
+                "Malicious Item",
+                "desc",
+                100,
+                Some("../../../../../guilds/333/members/444/roles/555"),
+                Some(5),
+            )
+            .await;
+        assert!(bad_role.is_err());
+        assert!(
+            bad_role
+                .unwrap_err()
+                .to_string()
+                .contains("must contain only decimal digits")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_purchase_store_item_rejects_corrupted_traversal_role_without_debit() {
+        let mem = MemoryStore::default();
+        let bad_item_id = Uuid::new_v4();
+        let guild_id = "guild_456";
+        let user_id = "user_789";
+
+        // Give user 1000 coins
+        mem.adjust_member_progress(guild_id, user_id, 0, 1000, 0);
+
+        // Directly insert a corrupted store item that somehow bypassed validation (e.g. legacy DB row)
+        mem.store_items.insert(
+            bad_item_id,
+            StoreItem {
+                id: bad_item_id,
+                guild_id: guild_id.to_owned(),
+                name: "Corrupted Item".to_owned(),
+                description: "Test".to_owned(),
+                price: 250,
+                role_id: Some("../../../../../guilds/333/members/444/roles/555".to_owned()),
+                stock: Some(5),
+                created_at: Utc::now(),
+            },
+        );
+
+        let store = Storage::Memory(mem);
+        let res = store
+            .purchase_store_item(guild_id, user_id, bad_item_id)
+            .await;
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("must contain only decimal digits")
+        );
+
+        // Verify balance was NOT modified (user still has 1000)
+        let progress = store.get_member_progress(guild_id, user_id).await.unwrap();
+        assert_eq!(
+            progress.coins, 1000,
+            "coins must NOT be deducted for invalid role item"
+        );
+
+        // Verify stock was NOT decremented
+        let items = store.list_store_items(guild_id).await.unwrap();
+        let item = items.iter().find(|i| i.id == bad_item_id).unwrap();
+        assert_eq!(item.stock, Some(5), "stock must NOT be decremented");
+    }
+
+    #[test]
+    fn test_url_standard_normalization_behavior() {
+        let base = "https://discord.com/api/v10";
+        let role_traversal = "../../../../../guilds/333/members/444/roles/555";
+        let full = format!("{base}/guilds/111/members/222/roles/{role_traversal}");
+        let parsed = reqwest::Url::parse(&full).unwrap();
+        // Demonstrates that WHATWG URL Standard normalizes ../ away into /api/v10/guilds/333/members/444/roles/555
+        assert_eq!(parsed.path(), "/api/v10/guilds/333/members/444/roles/555");
+        // And confirms our guard detects the manipulation:
+        let expected_suffix = "/guilds/111/members/222/roles/".to_owned() + role_traversal;
+        assert!(!parsed.path().ends_with(&expected_suffix));
     }
 
     #[tokio::test]

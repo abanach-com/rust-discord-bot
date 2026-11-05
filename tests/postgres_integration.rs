@@ -862,11 +862,11 @@ async fn test_postgres_integration_suite() {
         );
     }
 
-    // 10. Issue #156: Store purchase role snapshot and fulfillment tracking in PostgreSQL
+    // 10. Issue #156 & #158: Store purchase role snapshot and fulfillment tracking in PostgreSQL
     let store_user = format!("pg_store_buyer_{}", Uuid::new_v4().simple());
     sqlx::query(
         r#"
-        INSERT INTO member_progression (guild_id, user_id, xp, level, coins, updated_at)
+        INSERT INTO member_progress (guild_id, user_id, xp, level, coins, updated_at)
         VALUES ($1, $2, 500, 5, 1000, NOW())
         "#,
     )
@@ -882,7 +882,7 @@ async fn test_postgres_integration_suite() {
             "Emerald VIP",
             "Special role for VIPs",
             400,
-            Some("role_emerald_999"),
+            Some("999000000000000001"),
             Some(5),
         )
         .await
@@ -896,7 +896,7 @@ async fn test_postgres_integration_suite() {
     assert_eq!(purchased_item.id, item.id);
     assert_eq!(remaining_coins, 600);
     assert_eq!(purchase.price_paid, 400);
-    assert_eq!(purchase.role_id, Some("role_emerald_999".to_string()));
+    assert_eq!(purchase.role_id, Some("999000000000000001".to_string()));
     assert_eq!(purchase.fulfillment_status, "pending");
     assert!(purchase.fulfilled_at.is_none());
 
@@ -914,7 +914,7 @@ async fn test_postgres_integration_suite() {
     assert_eq!(fetched_purchase.fulfillment_status, "completed");
     assert_eq!(
         fetched_purchase.role_id,
-        Some("role_emerald_999".to_string())
+        Some("999000000000000001".to_string())
     );
 
     let purchases_list = store
