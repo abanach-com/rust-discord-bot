@@ -1000,6 +1000,73 @@ async fn test_postgres_integration_suite() {
     assert_eq!(history[1].kind, "nickname");
     assert_eq!(history[1].new_value, Some("The Builder".to_string()));
 
+    // 21b. Test Identity History Janitor & Expiration Cleanup in Postgres
+    let expired_id = Uuid::new_v4();
+    let past_observed = Utc::now() - chrono::Duration::days(120);
+    let past_expiry = Utc::now() - chrono::Duration::days(30);
+    sqlx::query(
+        r#"
+        INSERT INTO member_identity_history
+            (id, guild_id, user_id, kind, old_value, new_value, observed_at, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        "#,
+    )
+    .bind(expired_id)
+    .bind(intel_guild_id)
+    .bind(member_user)
+    .bind("global_name")
+    .bind(Some("OldBob"))
+    .bind(Some("ExpiredBob"))
+    .bind(past_observed)
+    .bind(past_expiry)
+    .execute(store.pool())
+    .await
+    .expect("insert expired identity history record");
+
+    let count_before: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM member_identity_history WHERE guild_id = $1 AND user_id = $2",
+    )
+    .bind(intel_guild_id)
+    .bind(member_user)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(count_before.0, 3);
+
+    let history_before = store
+        .get_member_identity_history(intel_guild_id, member_user, 10)
+        .await
+        .unwrap();
+    assert_eq!(history_before.len(), 2);
+
+    let pruned = store
+        .cleanup_expired_identity_history()
+        .await
+        .expect("cleanup expired identity history");
+    assert!(pruned >= 1, "at least 1 record should be pruned");
+
+    let pruned_again = store
+        .cleanup_expired_identity_history()
+        .await
+        .expect("second cleanup");
+    assert_eq!(pruned_again, 0);
+
+    let count_after: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM member_identity_history WHERE guild_id = $1 AND user_id = $2",
+    )
+    .bind(intel_guild_id)
+    .bind(member_user)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(count_after.0, 2);
+
+    let history_after = store
+        .get_member_identity_history(intel_guild_id, member_user, 10)
+        .await
+        .unwrap();
+    assert_eq!(history_after.len(), 2);
+
     // Search members with role filter
     let results = store
         .search_members(

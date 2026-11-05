@@ -2628,16 +2628,29 @@ impl PostgresStore {
     }
 
     pub async fn cleanup_expired_identity_history(&self) -> anyhow::Result<u64> {
-        let res = sqlx::query(
-            r#"
-            DELETE FROM member_identity_history
-            WHERE expires_at <= NOW()
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
+        let mut total_deleted = 0u64;
+        loop {
+            let res = sqlx::query(
+                r#"
+                DELETE FROM member_identity_history
+                WHERE id IN (
+                    SELECT id FROM member_identity_history
+                    WHERE expires_at <= NOW()
+                    LIMIT 1000
+                )
+                "#,
+            )
+            .execute(&self.pool)
+            .await?;
 
-        Ok(res.rows_affected())
+            let affected = res.rows_affected();
+            total_deleted += affected;
+            if affected < 1000 {
+                break;
+            }
+        }
+
+        Ok(total_deleted)
     }
 
     pub async fn upsert_member_snapshot(

@@ -1744,6 +1744,14 @@ impl MemoryStore {
         before.saturating_sub(self.identity_history.len()) as u64
     }
 
+    pub fn insert_raw_identity_record(&self, record: MemberIdentityRecord) {
+        self.identity_history.insert(record.id, record);
+    }
+
+    pub fn raw_identity_history_count(&self) -> usize {
+        self.identity_history.len()
+    }
+
     pub fn set_member_case_count(&self, guild_id: &str, user_id: &str, count: i64) {
         self.member_case_counts
             .insert((guild_id.to_string(), user_id.to_string()), count);

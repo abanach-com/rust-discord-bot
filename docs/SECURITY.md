@@ -152,6 +152,13 @@ Do not log:
 
 New event logs require retention and redaction decisions. Voice recording is explicitly outside the accepted scope until consent, jurisdiction and deletion behavior are designed.
 
+## Member Identity History Retention and Janitor
+
+- **Logical Hiding vs. Physical Deletion**: At query time (`get_member_identity_history`), entries with `expires_at <= NOW()` are logically filtered out and hidden from API responses. Physical storage reclamation is handled by the automated janitor (`Storage::cleanup_expired_identity_history`).
+- **Periodic Janitor**: An automated background supervisor task (`run_identity_history_janitor`) runs hourly, batch-deleting expired records in chunks of 1000 in PostgreSQL to avoid table locks and autovacuum spikes, and purging expired records from `MemoryStore`.
+- **Isolation from Moderation Cases**: Moderation case records follow disciplinary audit log retention rules and are never pruned by the identity janitor.
+- **GDPR / Privacy Erasure**: Explicit erasure requests (`erase_guild_user_data`) immediately wipe all identity history, snapshots, and related data for a user without waiting for TTL expiration.
+
 ## Dependency and release security
 
 Before production release:

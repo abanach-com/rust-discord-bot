@@ -29,6 +29,7 @@ async fn main() -> Result<()> {
 
     let web_shutdown_rx = shutdown_tx.subscribe();
     let discord_shutdown_rx = shutdown_tx.subscribe();
+    let janitor_shutdown_rx = shutdown_tx.subscribe();
 
     let web_handle = tokio::spawn(rusty_discord_bot::web::serve_with_shutdown(
         state.clone(),
@@ -38,9 +39,15 @@ async fn main() -> Result<()> {
         state.clone(),
         discord_shutdown_rx,
     ));
+    let janitor_handle = tokio::spawn(rusty_discord_bot::storage::run_identity_history_janitor(
+        state.storage.clone(),
+        janitor_shutdown_rx,
+        std::time::Duration::from_secs(3600),
+    ));
 
     tokio::pin!(web_handle);
     tokio::pin!(discord_handle);
+    tokio::pin!(janitor_handle);
 
     let result = tokio::select! {
         res = &mut web_handle => {
@@ -91,6 +98,9 @@ async fn main() -> Result<()> {
         }
         if !discord_handle.is_finished() {
             let _ = (&mut discord_handle).await;
+        }
+        if !janitor_handle.is_finished() {
+            let _ = (&mut janitor_handle).await;
         }
     };
 

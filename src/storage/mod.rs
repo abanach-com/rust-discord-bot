@@ -354,6 +354,44 @@ pub fn snowflake_created_at(id: u64) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(millis as i64).unwrap_or_else(Utc::now)
 }
 
+/// Background janitor periodically pruning expired identity history records.
+pub async fn run_identity_history_janitor(
+    storage: Storage,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+    interval: std::time::Duration,
+) {
+    let mut timer = tokio::time::interval(interval);
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    tracing::info!(
+        interval_secs = interval.as_secs(),
+        "started member identity history janitor"
+    );
+
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.recv() => {
+                tracing::info!("member identity history janitor received shutdown signal");
+                break;
+            }
+            _ = timer.tick() => {
+                match storage.cleanup_expired_identity_history().await {
+                    Ok(count) => {
+                        if count > 0 {
+                            tracing::info!(count, "expired member identity history records pruned");
+                        } else {
+                            tracing::debug!("expired member identity history check completed (0 pruned)");
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(?error, "failed to cleanup expired member identity history records");
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct MemberIdentityRecord {
     pub id: Uuid,
@@ -2337,6 +2375,19 @@ impl Storage {
         match self {
             Self::Memory(store) => Ok(store.cleanup_expired_identity_history()),
             Self::Postgres(store) => store.cleanup_expired_identity_history().await,
+        }
+    }
+
+    pub fn insert_raw_identity_record(&self, record: MemberIdentityRecord) {
+        if let Self::Memory(store) = self {
+            store.insert_raw_identity_record(record);
+        }
+    }
+
+    pub fn raw_identity_history_count(&self) -> Option<usize> {
+        match self {
+            Self::Memory(store) => Some(store.raw_identity_history_count()),
+            Self::Postgres(_) => None,
         }
     }
 
@@ -4453,6 +4504,96 @@ mod tests {
             g2_history.len(),
             0,
             "Identity history must be strictly per-guild isolated"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_member_identity_history_janitor_and_lifecycle() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_id = "100000000000000001";
+        let user_id = "200000000000000001";
+        let now = Utc::now();
+
+        // 1. Insert a non-expired record and an expired record
+        let active_rec = MemberIdentityRecord {
+            id: Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            user_id: user_id.to_string(),
+            kind: "nickname".to_string(),
+            old_value: Some("OldNick".to_string()),
+            new_value: Some("ActiveNick".to_string()),
+            observed_at: now - chrono::Duration::days(1),
+            expires_at: now + chrono::Duration::days(30),
+        };
+        let expired_rec = MemberIdentityRecord {
+            id: Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            user_id: user_id.to_string(),
+            kind: "nickname".to_string(),
+            old_value: Some("ActiveNick".to_string()),
+            new_value: Some("ExpiredNick".to_string()),
+            observed_at: now - chrono::Duration::days(95),
+            expires_at: now - chrono::Duration::days(5),
+        };
+
+        store.insert_raw_identity_record(active_rec);
+        store.insert_raw_identity_record(expired_rec);
+
+        // Both are physically present in the store
+        assert_eq!(store.raw_identity_history_count(), Some(2));
+
+        // Logical read filters out expired record
+        let logical_history = store
+            .get_member_identity_history(guild_id, user_id, 10)
+            .await
+            .unwrap();
+        assert_eq!(logical_history.len(), 1);
+        assert_eq!(logical_history[0].new_value, Some("ActiveNick".to_string()));
+
+        // Run cleanup - should prune exactly 1 record
+        let pruned = store.cleanup_expired_identity_history().await.unwrap();
+        assert_eq!(pruned, 1);
+        assert_eq!(store.raw_identity_history_count(), Some(1));
+
+        // Second run is idempotent
+        let pruned_again = store.cleanup_expired_identity_history().await.unwrap();
+        assert_eq!(pruned_again, 0);
+        assert_eq!(store.raw_identity_history_count(), Some(1));
+
+        // 2. Test janitor loop execution and graceful shutdown
+        let janitor_store = store.clone();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
+
+        // Insert another expired record
+        let expired_rec_2 = MemberIdentityRecord {
+            id: Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            user_id: user_id.to_string(),
+            kind: "global_name".to_string(),
+            old_value: None,
+            new_value: Some("OldGlobal".to_string()),
+            observed_at: now - chrono::Duration::days(100),
+            expires_at: now - chrono::Duration::days(10),
+        };
+        store.insert_raw_identity_record(expired_rec_2);
+        assert_eq!(store.raw_identity_history_count(), Some(2));
+
+        let janitor_task = tokio::spawn(run_identity_history_janitor(
+            janitor_store,
+            shutdown_rx,
+            std::time::Duration::from_millis(20),
+        ));
+
+        // Wait for janitor to tick
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        assert_eq!(store.raw_identity_history_count(), Some(1));
+
+        // Trigger shutdown and wait for janitor to stop cleanly
+        let _ = shutdown_tx.send(());
+        let res = tokio::time::timeout(std::time::Duration::from_millis(500), janitor_task).await;
+        assert!(
+            res.is_ok(),
+            "janitor must terminate cleanly upon shutdown signal"
         );
     }
 
