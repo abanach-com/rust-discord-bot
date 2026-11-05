@@ -17,9 +17,9 @@ use super::{
     PluginMarketplacePackage, ProgressMetric, ProgressionSeason, RedditSubscription,
     ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent, ServerSnapshot,
     SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, TelegramBridge,
-    TelegramMessageMapping, TimedRoleGrant, Tournament, TupperProfile, TwitchStreamSubscription,
-    UserErasureReport, VkSubscription, WorkflowDefinition, WorkflowRunExecution, XpAward,
-    YouTubeChannelSubscription, level_for_xp,
+    TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError, TupperProfile,
+    TwitchStreamSubscription, UserErasureReport, VkSubscription, WorkflowDefinition,
+    WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
 };
 
 pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
@@ -3720,7 +3720,7 @@ impl PostgresStore {
         avatar_url: Option<&str>,
 
         prefix_or_brackets: &str,
-    ) -> anyhow::Result<TupperProfile> {
+    ) -> Result<TupperProfile, TupperError> {
         let id = Uuid::new_v4();
 
         let now = Utc::now();
@@ -3755,7 +3755,22 @@ impl PostgresStore {
 
         .fetch_one(&self.pool)
 
-        .await?;
+        .await
+        .map_err(|err| match &err {
+            sqlx::Error::Database(dberr) => {
+                let is_unique = dberr.is_unique_violation()
+                    || dberr.code().as_deref() == Some("23505");
+                let matches_constraint = dberr
+                    .constraint()
+                    .is_none_or(|c| c == "uq_tupper_user_prefix");
+                if is_unique && matches_constraint {
+                    TupperError::PrefixConflict
+                } else {
+                    TupperError::Database(err)
+                }
+            }
+            _ => TupperError::Database(err),
+        })?;
 
         Ok(rec)
     }

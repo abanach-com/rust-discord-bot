@@ -127,6 +127,22 @@ impl From<crate::moderation_cases::CaseError> for ApiError {
     }
 }
 
+impl From<crate::storage::TupperError> for ApiError {
+    fn from(error: crate::storage::TupperError) -> Self {
+        match error {
+            crate::storage::TupperError::PrefixConflict => {
+                Self::conflict("Tupper prefix already exists for this user")
+            }
+            crate::storage::TupperError::Database(err) => {
+                Self::internal(format!("Tupper database error: {err}"))
+            }
+            crate::storage::TupperError::Other(err) => {
+                Self::internal(format!("Tupper storage error: {err}"))
+            }
+        }
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let mut body = json!({ "error": self.message });

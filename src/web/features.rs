@@ -2415,7 +2415,7 @@ pub async fn create_tupper(
             &payload.prefix_or_brackets,
         )
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(ApiError::from)?;
 
     Ok(Json(profile))
 }

@@ -19,7 +19,7 @@ use super::{
     PluginMarketplacePackage, ProgressMetric, ProgressionSeason, RedditSubscription,
     ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent, ServerSnapshot,
     SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
-    TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperProfile,
+    TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError, TupperProfile,
     TwitchStreamSubscription, UserErasureReport, VkSubscription, WorkflowDefinition,
     WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
 };
@@ -105,6 +105,8 @@ pub struct MemoryStore {
     poll_votes: Arc<DashMap<(Uuid, String), usize>>,
 
     tuppers: Arc<DashMap<Uuid, TupperProfile>>,
+
+    tupper_prefix_index: Arc<DashMap<(String, String, String), Uuid>>,
 
     faqs: Arc<DashMap<Uuid, FaqEntry>>,
 
@@ -2329,28 +2331,40 @@ impl MemoryStore {
         avatar_url: Option<&str>,
 
         prefix_or_brackets: &str,
-    ) -> TupperProfile {
-        let id = Uuid::new_v4();
+    ) -> Result<TupperProfile, TupperError> {
+        let key = (
+            guild_id.to_owned(),
+            user_id.to_owned(),
+            prefix_or_brackets.to_owned(),
+        );
 
-        let profile = TupperProfile {
-            id,
+        match self.tupper_prefix_index.entry(key) {
+            dashmap::mapref::entry::Entry::Occupied(_) => Err(TupperError::PrefixConflict),
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let id = Uuid::new_v4();
+                entry.insert(id);
 
-            guild_id: guild_id.to_owned(),
+                let profile = TupperProfile {
+                    id,
 
-            user_id: user_id.to_owned(),
+                    guild_id: guild_id.to_owned(),
 
-            name: name.to_owned(),
+                    user_id: user_id.to_owned(),
 
-            avatar_url: avatar_url.map(|s| s.to_owned()),
+                    name: name.to_owned(),
 
-            prefix_or_brackets: prefix_or_brackets.to_owned(),
+                    avatar_url: avatar_url.map(|s| s.to_owned()),
 
-            created_at: Utc::now(),
-        };
+                    prefix_or_brackets: prefix_or_brackets.to_owned(),
 
-        self.tuppers.insert(id, profile.clone());
+                    created_at: Utc::now(),
+                };
 
-        profile
+                self.tuppers.insert(id, profile.clone());
+
+                Ok(profile)
+            }
+        }
     }
 
     pub fn list_tupper_profiles(&self, guild_id: &str, user_id: &str) -> Vec<TupperProfile> {

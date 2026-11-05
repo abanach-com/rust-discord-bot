@@ -314,6 +314,62 @@ async fn test_phase3_games_rp_and_knowledge_suite() {
         .unwrap();
     assert_eq!(tupper_resp.status(), reqwest::StatusCode::OK);
 
+    // Duplicate prefix for the same user & guild must return 409 Conflict (Issue #154)
+    let dup_tupper_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/tuppers"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "name": "Eldrin Second Form",
+            "prefix_or_brackets": "m:"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        dup_tupper_resp.status(),
+        reqwest::StatusCode::CONFLICT,
+        "Duplicate tupper prefix for the same user must return 409 Conflict"
+    );
+    let dup_body: serde_json::Value = dup_tupper_resp.json().await.unwrap();
+    assert_eq!(
+        dup_body["error"],
+        "Tupper prefix already exists for this user"
+    );
+
+    // Creating profile with distinct prefix succeeds
+    let distinct_tupper_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/tuppers"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "name": "Grommash the Warrior",
+            "prefix_or_brackets": "w:"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(distinct_tupper_resp.status(), reqwest::StatusCode::OK);
+
+    // List tuppers verifies exactly 2 profiles exist, and original was not mutated
+    let list_tuppers_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/tuppers"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_tuppers_resp.status(), reqwest::StatusCode::OK);
+    let tupper_list: Vec<serde_json::Value> = list_tuppers_resp.json().await.unwrap();
+    assert_eq!(tupper_list.len(), 2);
+    let original = tupper_list
+        .iter()
+        .find(|t| t["prefix_or_brackets"] == "m:")
+        .unwrap();
+    assert_eq!(
+        original["name"], "Eldrin the Mage",
+        "Original profile name must not be mutated"
+    );
+
     // ==========================================
     // 3. Agent 20 (#91): FAQ, Translations & AI Assistant
     // ==========================================

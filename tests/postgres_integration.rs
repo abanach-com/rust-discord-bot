@@ -628,4 +628,106 @@ async fn test_postgres_integration_suite() {
     assert_eq!(budget_2.guild_id, ai_guild_2);
     assert_eq!(budget_2.used_tokens, 0);
     assert_eq!(budget_2.used_usd, 0.0);
+
+    // 8. Issue #154: Test Tupper profile prefix uniqueness and conflict handling in PostgreSQL
+    let tupper_guild_1 = format!("pg_tupper_g1_{}", Uuid::new_v4().simple());
+    let tupper_guild_2 = format!("pg_tupper_g2_{}", Uuid::new_v4().simple());
+    let tupper_user_a = "pg_tupper_user_a";
+    let tupper_user_b = "pg_tupper_user_b";
+
+    // 8.1. Initial creation succeeds
+    let t1 = store
+        .create_tupper_profile(&tupper_guild_1, tupper_user_a, "Hero A", None, "t:")
+        .await
+        .expect("initial tupper creation in PostgreSQL");
+    assert_eq!(t1.name, "Hero A");
+    assert_eq!(t1.prefix_or_brackets, "t:");
+
+    // 8.2. Duplicate prefix for same user and guild returns TupperError::PrefixConflict
+    let dup_res = store
+        .create_tupper_profile(
+            &tupper_guild_1,
+            tupper_user_a,
+            "Hero A Duplicate",
+            None,
+            "t:",
+        )
+        .await;
+    match dup_res {
+        Err(rusty_discord_bot::storage::TupperError::PrefixConflict) => {}
+        other => panic!("Expected TupperError::PrefixConflict, got {other:?}"),
+    }
+
+    // Verify row was not inserted/modified in PostgreSQL
+    let profiles = store
+        .list_tupper_profiles(&tupper_guild_1, tupper_user_a)
+        .await
+        .expect("list tupper profiles");
+    assert_eq!(profiles.len(), 1);
+    assert_eq!(profiles[0].name, "Hero A");
+
+    // 8.3. Same prefix for distinct user in same guild succeeds
+    let t_user_b = store
+        .create_tupper_profile(&tupper_guild_1, tupper_user_b, "Hero B", None, "t:")
+        .await
+        .expect("same prefix for distinct user in PostgreSQL");
+    assert_eq!(t_user_b.user_id, tupper_user_b);
+
+    // 8.4. Same prefix for same user in distinct guild succeeds
+    let t_guild_2 = store
+        .create_tupper_profile(&tupper_guild_2, tupper_user_a, "Hero Guild 2", None, "t:")
+        .await
+        .expect("same prefix in distinct guild in PostgreSQL");
+    assert_eq!(t_guild_2.guild_id, tupper_guild_2);
+
+    // 8.5. 20 concurrent creation attempts for the same (guild, user, prefix) in PostgreSQL
+    let concurrent_user = "pg_tupper_concurrent_user";
+    let mut handles = Vec::new();
+    for i in 0..20 {
+        let store_clone = store.clone();
+        let g_id = tupper_guild_1.clone();
+        handles.push(tokio::spawn(async move {
+            store_clone
+                .create_tupper_profile(
+                    &g_id,
+                    concurrent_user,
+                    &format!("Concurrent Tupper {i}"),
+                    None,
+                    "c:",
+                )
+                .await
+        }));
+    }
+
+    let mut successes = 0;
+    let mut conflicts = 0;
+    for handle in handles {
+        match handle.await.expect("join handle") {
+            Ok(_) => successes += 1,
+            Err(rusty_discord_bot::storage::TupperError::PrefixConflict) => conflicts += 1,
+            Err(e) => panic!("Unexpected error: {e:?}"),
+        }
+    }
+    assert_eq!(
+        successes, 1,
+        "Exactly one concurrent attempt must succeed in PostgreSQL"
+    );
+    assert_eq!(
+        conflicts, 19,
+        "Exactly 19 concurrent attempts must fail with PrefixConflict in PostgreSQL"
+    );
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tupper_profiles WHERE guild_id = $1 AND user_id = $2 AND prefix_or_brackets = $3",
+    )
+    .bind(&tupper_guild_1)
+    .bind(concurrent_user)
+    .bind("c:")
+    .fetch_one(store.pool())
+    .await
+    .expect("count concurrent tupper rows");
+    assert_eq!(
+        count, 1,
+        "Exactly one tupper profile row must exist in PostgreSQL"
+    );
 }

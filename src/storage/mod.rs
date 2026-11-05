@@ -526,6 +526,16 @@ pub struct TupperProfile {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum TupperError {
+    #[error("Tupper prefix already exists for this user")]
+    PrefixConflict,
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct FaqEntry {
     pub id: Uuid,
@@ -2544,15 +2554,11 @@ impl Storage {
         avatar_url: Option<&str>,
 
         prefix_or_brackets: &str,
-    ) -> anyhow::Result<TupperProfile> {
+    ) -> Result<TupperProfile, TupperError> {
         match self {
-            Self::Memory(store) => Ok(store.create_tupper_profile(
-                guild_id,
-                user_id,
-                name,
-                avatar_url,
-                prefix_or_brackets,
-            )),
+            Self::Memory(store) => {
+                store.create_tupper_profile(guild_id, user_id, name, avatar_url, prefix_or_brackets)
+            }
 
             Self::Postgres(store) => {
                 store
@@ -3731,5 +3737,81 @@ mod tests {
         // 6. Negative values are rejected
         assert!(store.record_ai_usage(guild_1, -10, 0.0).await.is_err());
         assert!(store.record_ai_usage(guild_1, 10, -0.5).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_tupper_profile_prefix_uniqueness_and_concurrency() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_1 = "tupper_guild_1";
+        let guild_2 = "tupper_guild_2";
+        let user_a = "user_a";
+        let user_b = "user_b";
+
+        // 1. Initial creation succeeds
+        let t1 = store
+            .create_tupper_profile(guild_1, user_a, "Hero 1", None, "h:")
+            .await
+            .expect("initial tupper creation");
+        assert_eq!(t1.name, "Hero 1");
+        assert_eq!(t1.prefix_or_brackets, "h:");
+
+        // 2. Duplicate prefix for same user and guild returns PrefixConflict
+        let dup = store
+            .create_tupper_profile(guild_1, user_a, "Hero 2", None, "h:")
+            .await;
+        assert!(matches!(dup, Err(TupperError::PrefixConflict)));
+
+        // 3. Same prefix for distinct user in same guild succeeds
+        let t_user_b = store
+            .create_tupper_profile(guild_1, user_b, "Hero B", None, "h:")
+            .await
+            .expect("same prefix for distinct user must succeed");
+        assert_eq!(t_user_b.user_id, user_b);
+
+        // 4. Same prefix for same user in distinct guild succeeds
+        let t_guild_2 = store
+            .create_tupper_profile(guild_2, user_a, "Hero Guild 2", None, "h:")
+            .await
+            .expect("same prefix in distinct guild must succeed");
+        assert_eq!(t_guild_2.guild_id, guild_2);
+
+        // 5. Concurrent creation: 20 parallel tasks attempting to register the same prefix
+        let concurrent_user = "user_concurrent";
+        let mut handles = Vec::new();
+        for i in 0..20 {
+            let store_clone = store.clone();
+            handles.push(tokio::spawn(async move {
+                store_clone
+                    .create_tupper_profile(
+                        guild_1,
+                        concurrent_user,
+                        &format!("Concurrent Hero {i}"),
+                        None,
+                        "c:",
+                    )
+                    .await
+            }));
+        }
+
+        let mut successes = 0;
+        let mut conflicts = 0;
+        for handle in handles {
+            match handle.await.unwrap() {
+                Ok(_) => successes += 1,
+                Err(TupperError::PrefixConflict) => conflicts += 1,
+                Err(e) => panic!("Unexpected error: {e:?}"),
+            }
+        }
+        assert_eq!(successes, 1, "Exactly one concurrent attempt must succeed");
+        assert_eq!(
+            conflicts, 19,
+            "Exactly 19 concurrent attempts must fail with PrefixConflict"
+        );
+
+        let list = store
+            .list_tupper_profiles(guild_1, concurrent_user)
+            .await
+            .unwrap();
+        assert_eq!(list.len(), 1);
     }
 }
