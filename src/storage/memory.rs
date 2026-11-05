@@ -5094,7 +5094,7 @@ impl MemoryStore {
                     if item.is_guild_owned.is_some() {
                         existing.is_guild_owned = item.is_guild_owned;
                     }
-                    existing.is_active = item.is_active;
+                    // Issue #201: DO NOT overwrite existing.is_active from delayed usage batch
                     if item.last_seen_at > existing.last_seen_at {
                         existing.last_seen_at = item.last_seen_at;
                     }
@@ -5106,6 +5106,66 @@ impl MemoryStore {
         }
 
         Ok(count)
+    }
+
+    pub fn reconcile_guild_inventory(
+        &self,
+        guild_id: &str,
+        kind: crate::asset_analytics::AssetKind,
+        active_items: &[crate::asset_analytics::AssetInventoryItem],
+    ) -> anyhow::Result<usize> {
+        validate_snowflake("guild_id", guild_id)?;
+        let kind_str = kind.as_str();
+        let mut active_set = std::collections::HashSet::new();
+
+        for item in active_items {
+            validate_snowflake("asset_id", &item.asset_id)?;
+            active_set.insert(item.asset_id.clone());
+
+            let key = (
+                guild_id.to_string(),
+                kind_str.to_string(),
+                item.asset_id.clone(),
+            );
+            self.asset_inventory
+                .entry(key)
+                .and_modify(|existing| {
+                    if item.name.is_some() {
+                        existing.name = item.name.clone();
+                    }
+                    existing.animated = item.animated;
+                    existing.is_guild_owned = Some(true);
+                    existing.is_active = true;
+                    if item.last_seen_at > existing.last_seen_at {
+                        existing.last_seen_at = item.last_seen_at;
+                    }
+                    if item.first_seen_at < existing.first_seen_at {
+                        existing.first_seen_at = item.first_seen_at;
+                    }
+                })
+                .or_insert_with(|| {
+                    let mut i = item.clone();
+                    i.is_guild_owned = Some(true);
+                    i.is_active = true;
+                    i
+                });
+        }
+
+        let mut deactivated = 0;
+        for mut entry in self.asset_inventory.iter_mut() {
+            let item = entry.value_mut();
+            if item.guild_id == guild_id
+                && item.asset_kind == kind_str
+                && item.is_guild_owned == Some(true)
+                && !active_set.contains(&item.asset_id)
+                && item.is_active
+            {
+                item.is_active = false;
+                deactivated += 1;
+            }
+        }
+
+        Ok(deactivated)
     }
 
     pub fn get_asset_usage_summary(

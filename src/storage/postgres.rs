@@ -8533,7 +8533,6 @@ impl PostgresStore {
                     name = COALESCE(EXCLUDED.name, guild_asset_inventory.name),
                     animated = EXCLUDED.animated,
                     is_guild_owned = COALESCE(EXCLUDED.is_guild_owned, guild_asset_inventory.is_guild_owned),
-                    is_active = EXCLUDED.is_active,
                     last_seen_at = GREATEST(guild_asset_inventory.last_seen_at, EXCLUDED.last_seen_at)
                 "#,
             )
@@ -8644,6 +8643,67 @@ impl PostgresStore {
         .execute(&self.pool)
         .await?;
 
+        Ok(res.rows_affected() as usize)
+    }
+
+    /// Atomically reconciles the full active asset list for a guild and kind (Issue #201).
+    /// Upserts all active items and sets missing guild-owned items to is_active = false.
+    pub async fn reconcile_guild_inventory(
+        &self,
+        guild_id: &str,
+        kind: crate::asset_analytics::AssetKind,
+        active_items: &[crate::asset_analytics::AssetInventoryItem],
+    ) -> anyhow::Result<usize> {
+        validate_snowflake("guild_id", guild_id)?;
+        let kind_str = kind.as_str();
+
+        let mut tx = self.pool.begin().await?;
+
+        let mut active_ids = Vec::with_capacity(active_items.len());
+        for item in active_items {
+            validate_snowflake("asset_id", &item.asset_id)?;
+            active_ids.push(item.asset_id.clone());
+
+            sqlx::query(
+                r#"
+                INSERT INTO guild_asset_inventory (
+                    guild_id, asset_kind, asset_id, name, animated, is_guild_owned, is_active, first_seen_at, last_seen_at
+                ) VALUES ($1, $2, $3, $4, $5, true, true, $6, $7)
+                ON CONFLICT (guild_id, asset_kind, asset_id)
+                DO UPDATE SET
+                    name = COALESCE(EXCLUDED.name, guild_asset_inventory.name),
+                    animated = EXCLUDED.animated,
+                    is_guild_owned = true,
+                    is_active = true,
+                    last_seen_at = GREATEST(guild_asset_inventory.last_seen_at, EXCLUDED.last_seen_at)
+                "#,
+            )
+            .bind(guild_id)
+            .bind(kind_str)
+            .bind(&item.asset_id)
+            .bind(&item.name)
+            .bind(item.animated)
+            .bind(item.first_seen_at)
+            .bind(item.last_seen_at)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        // Deactivate all guild-owned assets for this guild and kind not in active_ids
+        let res = sqlx::query(
+            r#"
+            UPDATE guild_asset_inventory
+            SET is_active = false
+            WHERE guild_id = $1 AND asset_kind = $2 AND is_guild_owned = true AND NOT (asset_id = ANY($3))
+            "#,
+        )
+        .bind(guild_id)
+        .bind(kind_str)
+        .bind(&active_ids)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
         Ok(res.rows_affected() as usize)
     }
 

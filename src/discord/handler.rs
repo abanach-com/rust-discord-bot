@@ -180,28 +180,71 @@ impl EventHandler for Handler {
         _is_new: Option<bool>,
     ) {
         let guild_id_str = guild.id.to_string();
-        let emojis: Vec<crate::asset_analytics::ParsedCustomEmoji> = guild
+        let now = chrono::Utc::now();
+
+        // 1. Reconcile emojis (Issue #201: cold-start deactivates emojis removed offline)
+        let emoji_items: Vec<crate::asset_analytics::AssetInventoryItem> = guild
             .emojis
             .values()
-            .map(|e| crate::asset_analytics::ParsedCustomEmoji {
-                name: e.name.clone(),
-                id: e.id.to_string(),
+            .map(|e| crate::asset_analytics::AssetInventoryItem {
+                guild_id: guild_id_str.clone(),
+                asset_kind: "emoji".to_string(),
+                asset_id: e.id.to_string(),
+                name: Some(e.name.clone()),
                 animated: e.animated,
+                is_guild_owned: Some(true),
+                is_active: true,
+                first_seen_at: now,
+                last_seen_at: now,
             })
             .collect();
-        let stickers: Vec<crate::asset_analytics::ParsedSticker> = guild
+        let emoji_ids: Vec<String> = emoji_items.iter().map(|i| i.asset_id.clone()).collect();
+        self.state.asset_analytics.sync_active_assets(
+            &guild_id_str,
+            crate::asset_analytics::AssetKind::Emoji,
+            &emoji_ids,
+        );
+        let _ = self
+            .state
+            .storage
+            .reconcile_guild_inventory(
+                &guild_id_str,
+                crate::asset_analytics::AssetKind::Emoji,
+                &emoji_items,
+            )
+            .await;
+
+        // 2. Reconcile stickers
+        let sticker_items: Vec<crate::asset_analytics::AssetInventoryItem> = guild
             .stickers
             .values()
-            .map(|s| crate::asset_analytics::ParsedSticker {
-                id: s.id.to_string(),
-                name: s.name.clone(),
+            .map(|s| crate::asset_analytics::AssetInventoryItem {
+                guild_id: guild_id_str.clone(),
+                asset_kind: "sticker".to_string(),
+                asset_id: s.id.to_string(),
+                name: Some(s.name.clone()),
                 animated: s.format_type != serenity::all::StickerFormatType::Png,
+                is_guild_owned: Some(true),
+                is_active: true,
+                first_seen_at: now,
+                last_seen_at: now,
             })
             .collect();
-
-        self.state
-            .asset_analytics
-            .record_inventory_snapshot(&guild_id_str, &emojis, &stickers);
+        let sticker_ids: Vec<String> = sticker_items.iter().map(|i| i.asset_id.clone()).collect();
+        self.state.asset_analytics.sync_active_assets(
+            &guild_id_str,
+            crate::asset_analytics::AssetKind::Sticker,
+            &sticker_ids,
+        );
+        let _ = self
+            .state
+            .storage
+            .reconcile_guild_inventory(
+                &guild_id_str,
+                crate::asset_analytics::AssetKind::Sticker,
+                &sticker_items,
+            )
+            .await;
     }
 
     async fn guild_emojis_update(
@@ -211,26 +254,34 @@ impl EventHandler for Handler {
         current_state: std::collections::HashMap<serenity::all::EmojiId, serenity::all::Emoji>,
     ) {
         let guild_id_str = guild_id.to_string();
-        let emojis: Vec<crate::asset_analytics::ParsedCustomEmoji> = current_state
+        let now = chrono::Utc::now();
+        let emoji_items: Vec<crate::asset_analytics::AssetInventoryItem> = current_state
             .values()
-            .map(|e| crate::asset_analytics::ParsedCustomEmoji {
-                name: e.name.clone(),
-                id: e.id.to_string(),
+            .map(|e| crate::asset_analytics::AssetInventoryItem {
+                guild_id: guild_id_str.clone(),
+                asset_kind: "emoji".to_string(),
+                asset_id: e.id.to_string(),
+                name: Some(e.name.clone()),
                 animated: e.animated,
+                is_guild_owned: Some(true),
+                is_active: true,
+                first_seen_at: now,
+                last_seen_at: now,
             })
             .collect();
-        self.state
-            .asset_analytics
-            .record_inventory_snapshot(&guild_id_str, &emojis, &[]);
-
-        let active_ids: Vec<String> = current_state.keys().map(|id| id.to_string()).collect();
+        let emoji_ids: Vec<String> = emoji_items.iter().map(|i| i.asset_id.clone()).collect();
+        self.state.asset_analytics.sync_active_assets(
+            &guild_id_str,
+            crate::asset_analytics::AssetKind::Emoji,
+            &emoji_ids,
+        );
         let _ = self
             .state
             .storage
-            .sync_guild_inventory_active_state(
+            .reconcile_guild_inventory(
                 &guild_id_str,
                 crate::asset_analytics::AssetKind::Emoji,
-                &active_ids,
+                &emoji_items,
             )
             .await;
     }
@@ -242,26 +293,34 @@ impl EventHandler for Handler {
         current_state: std::collections::HashMap<serenity::all::StickerId, serenity::all::Sticker>,
     ) {
         let guild_id_str = guild_id.to_string();
-        let stickers: Vec<crate::asset_analytics::ParsedSticker> = current_state
+        let now = chrono::Utc::now();
+        let sticker_items: Vec<crate::asset_analytics::AssetInventoryItem> = current_state
             .values()
-            .map(|s| crate::asset_analytics::ParsedSticker {
-                id: s.id.to_string(),
-                name: s.name.clone(),
+            .map(|s| crate::asset_analytics::AssetInventoryItem {
+                guild_id: guild_id_str.clone(),
+                asset_kind: "sticker".to_string(),
+                asset_id: s.id.to_string(),
+                name: Some(s.name.clone()),
                 animated: s.format_type != serenity::all::StickerFormatType::Png,
+                is_guild_owned: Some(true),
+                is_active: true,
+                first_seen_at: now,
+                last_seen_at: now,
             })
             .collect();
-        self.state
-            .asset_analytics
-            .record_inventory_snapshot(&guild_id_str, &[], &stickers);
-
-        let active_ids: Vec<String> = current_state.keys().map(|id| id.to_string()).collect();
+        let sticker_ids: Vec<String> = sticker_items.iter().map(|i| i.asset_id.clone()).collect();
+        self.state.asset_analytics.sync_active_assets(
+            &guild_id_str,
+            crate::asset_analytics::AssetKind::Sticker,
+            &sticker_ids,
+        );
         let _ = self
             .state
             .storage
-            .sync_guild_inventory_active_state(
+            .reconcile_guild_inventory(
                 &guild_id_str,
                 crate::asset_analytics::AssetKind::Sticker,
-                &active_ids,
+                &sticker_items,
             )
             .await;
     }

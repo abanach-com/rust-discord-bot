@@ -4771,6 +4771,22 @@ impl Storage {
         }
     }
 
+    pub async fn reconcile_guild_inventory(
+        &self,
+        guild_id: &str,
+        kind: crate::asset_analytics::AssetKind,
+        active_items: &[crate::asset_analytics::AssetInventoryItem],
+    ) -> anyhow::Result<usize> {
+        match self {
+            Self::Memory(store) => store.reconcile_guild_inventory(guild_id, kind, active_items),
+            Self::Postgres(store) => {
+                store
+                    .reconcile_guild_inventory(guild_id, kind, active_items)
+                    .await
+            }
+        }
+    }
+
     pub async fn prune_asset_analytics(
         &self,
         guild_id: Option<&str>,

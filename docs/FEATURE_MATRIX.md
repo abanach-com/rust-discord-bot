@@ -387,12 +387,13 @@ Music integrations must comply with source-platform terms, copyright rules and D
   - `POST /api/guilds/{guild_id}/assets/flush`
   - `/emoji stats [period]`, `/emoji unused [days]`, `/sticker stats [period]`
 
-### 11.2 Emoji & Sticker Analytics Hardening & Lifecycle (Issues #196, #197, #198, #199, #200)
+### 11.2 Emoji & Sticker Analytics Hardening & Lifecycle (Issues #196, #197, #198, #199, #200, #201)
 - **Exact Calendar Windows**: Semantics of `7d` and `30d` windows fixed to exactly 7 and 30 calendar days inclusive (today + 6 / 29 prior days) (#196).
 - **Periodic Flush Loop & Graceful Shutdown**: `run_asset_analytics_flush_loop` worker runs every 30s with single-flight mutex serialization and bounded 5s flush on shutdown (#197).
 - **Accurate Inactive Asset Detection & Inventory Sync**: `/emoji unused` inspects full inventory with guild ownership filtering, properly identifying never-used and long-unused emojis. Automatic cache synchronization on `guild_create`, `guild_emojis_update`, and `guild_stickers_update` (#198).
 - **Strict Ownership Classification**: External stickers and emojis are verified against cached guild asset sets, classifying missing cache as unknown (`None`) rather than falsely owned (`true`) (#199).
 - **SQL Aggregation & Paged Inventory**: Server-side aggregation via `GROUP BY` and `FILTER` prevents unbounded daily row transfer. Added composite index `(guild_id, asset_kind, usage_date)` and pagination (`limit`, `offset`, `cursor`) on `/assets/inventory` (#200).
+- **Authoritative Inventory Reconciliation & Stale Flush Immunity**: `reconcile_guild_inventory` atomically upserts active assets and deactivates removed ones on `guild_create` (cold-start) and update events. `record_asset_usage_batch` never overwrites `is_active` on conflict, preventing delayed flushes from reactivating deleted emojis or stickers (#201).
 
 ## 12. AI-assisted features
 

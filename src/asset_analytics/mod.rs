@@ -481,6 +481,17 @@ impl AssetAnalyticsBatcher {
         }
     }
 
+    /// Synchronizes active asset IDs for a guild and kind in the in-memory inventory buffer (Issue #201).
+    pub fn sync_active_assets(&self, guild_id: &str, kind: AssetKind, active_ids: &[String]) {
+        let active_set: HashSet<&str> = active_ids.iter().map(|s| s.as_str()).collect();
+        for mut entry in self.inventory.iter_mut() {
+            let (gid, k, aid) = entry.key();
+            if gid == guild_id && *k == kind && entry.value().is_guild_owned == Some(true) {
+                entry.value_mut().is_active = active_set.contains(aid.as_str());
+            }
+        }
+    }
+
     /// Directly record raw asset usage (e.g. for testing or explicit recording).
     #[allow(clippy::too_many_arguments)]
     pub fn record_asset_usage(
@@ -1574,5 +1585,117 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(summary.total_usages, 99);
+    }
+
+    #[tokio::test]
+    async fn test_delayed_flush_does_not_reactivate_deleted_assets() {
+        let store = crate::storage::MemoryStore::default();
+        let storage = crate::storage::Storage::Memory(store);
+        let batcher = AssetAnalyticsBatcher::new(storage.clone());
+
+        let guild_id = "100000000000000001";
+        let emoji_a = "200000000000000001";
+        let emoji_b = "200000000000000002";
+        let now = Utc::now();
+
+        // 1. Initial guild state: both A and B are active
+        let active_items = vec![
+            AssetInventoryItem {
+                guild_id: guild_id.to_string(),
+                asset_kind: "emoji".to_string(),
+                asset_id: emoji_a.to_string(),
+                name: Some("emoji_a".to_string()),
+                animated: false,
+                is_guild_owned: Some(true),
+                is_active: true,
+                first_seen_at: now,
+                last_seen_at: now,
+            },
+            AssetInventoryItem {
+                guild_id: guild_id.to_string(),
+                asset_kind: "emoji".to_string(),
+                asset_id: emoji_b.to_string(),
+                name: Some("emoji_b".to_string()),
+                animated: false,
+                is_guild_owned: Some(true),
+                is_active: true,
+                first_seen_at: now,
+                last_seen_at: now,
+            },
+        ];
+        storage
+            .reconcile_guild_inventory(guild_id, AssetKind::Emoji, &active_items)
+            .await
+            .unwrap();
+
+        // 2. Incoming message uses emoji A -> buffered in batcher with is_active: true
+        batcher.record_message(
+            guild_id,
+            "300000000000000001",
+            &format!("<:emoji_a:{emoji_a}>"),
+            &[],
+            Some(&[emoji_a.to_string(), emoji_b.to_string()]),
+            None,
+        );
+        assert_eq!(batcher.pending_counts_len(), 1);
+
+        // 3. Emoji A is deleted from Discord! guild_emojis_update fires with ONLY B active
+        let updated_active = vec![AssetInventoryItem {
+            guild_id: guild_id.to_string(),
+            asset_kind: "emoji".to_string(),
+            asset_id: emoji_b.to_string(),
+            name: Some("emoji_b".to_string()),
+            animated: false,
+            is_guild_owned: Some(true),
+            is_active: true,
+            first_seen_at: now,
+            last_seen_at: now,
+        }];
+        batcher.sync_active_assets(guild_id, AssetKind::Emoji, &[emoji_b.to_string()]);
+        storage
+            .reconcile_guild_inventory(guild_id, AssetKind::Emoji, &updated_active)
+            .await
+            .unwrap();
+
+        // Verify storage immediately sees A as is_active = false
+        let inv_before_flush = storage
+            .list_asset_inventory(guild_id, Some(AssetKind::Emoji))
+            .await
+            .unwrap();
+        let item_a_before = inv_before_flush
+            .iter()
+            .find(|i| i.asset_id == emoji_a)
+            .unwrap();
+        assert!(
+            !item_a_before.is_active,
+            "Emoji A must be marked inactive after reconciliation"
+        );
+
+        // 4. Delayed periodic flush runs!
+        batcher.flush().await.unwrap();
+
+        // 5. CRITICAL INVARIANT (Issue #201): Delayed flush must NOT reactivate emoji A!
+        let inv_after_flush = storage
+            .list_asset_inventory(guild_id, Some(AssetKind::Emoji))
+            .await
+            .unwrap();
+        let item_a_after = inv_after_flush
+            .iter()
+            .find(|i| i.asset_id == emoji_a)
+            .unwrap();
+        assert!(
+            !item_a_after.is_active,
+            "Delayed flush must NOT reactivate deleted emoji A"
+        );
+        assert_eq!(
+            item_a_after.usage_total, 1,
+            "Usage count must still be properly recorded"
+        );
+
+        let item_b_after = inv_after_flush
+            .iter()
+            .find(|i| i.asset_id == emoji_b)
+            .unwrap();
+        assert!(item_b_after.is_active, "Emoji B must remain active");
     }
 }
