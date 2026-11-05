@@ -69,6 +69,7 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 | Command cooldowns | Implemented |
 | Per-user and per-role rate limits | Implemented |
 | Unified Command Policy Engine (ACL per user/role/channel + canrun/explain) | Implemented |
+| Staff Recruitment Pipeline (custom forms, stages, multi-person reviews, role fulfillment outbox) | Implemented |
 | Channel templates | Planned |
 | Server backup/export | Implemented |
 | Server configuration import | Implemented |
@@ -205,6 +206,7 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 | Claim/unclaim | Planned |
 | Priorities and service levels | Planned |
 | Ticket forms | Planned |
+| Application/recruitment forms and review pipeline | Implemented |
 | Internal notes | Planned |
 | User transcript export | Planned |
 | HTML/PDF transcripts | Implemented |

@@ -17,12 +17,13 @@ use super::{
     MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
     ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
     ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
-    ProgressionSeason, RecordCompanionLeaseParams, RedditSubscription, ReputationGrantOutcome,
+    ProgressionSeason, RecordCompanionLeaseParams, RecruitmentApplication, RecruitmentReview,
+    RecruitmentRoleFulfillment, RecruitmentTrack, RedditSubscription, ReputationGrantOutcome,
     RetainedRecordNotice, ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry,
     SteamLfgPost, StickyMessage, StoreItem, StorePurchase, TelegramBridge, TelegramMessageMapping,
-    TimedRoleGrant, Tournament, TupperError, TupperProfile, TwitchStreamSubscription,
-    UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WorkflowDefinition,
-    WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
+    TimedRoleGrant, Tournament, TransitionApplicationParams, TupperError, TupperProfile,
+    TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport, VkSubscription,
+    WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
     parse_member_search_cursor, snowflake_created_at, validate_snowflake,
 };
 
@@ -442,6 +443,28 @@ impl PostgresStore {
                 .bind(user_id)
                 .execute(&mut *tx)
                 .await;
+
+        let deleted_rec_apps = sqlx::query(
+            "DELETE FROM recruitment_applications WHERE guild_id = $1 AND applicant_user_id = $2",
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map(|r| r.rows_affected())
+        .unwrap_or(0);
+        related_erased += deleted_rec_apps as usize;
+
+        let deleted_rec_revs = sqlx::query(
+            "DELETE FROM recruitment_reviews WHERE guild_id = $1 AND reviewer_user_id = $2",
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map(|r| r.rows_affected())
+        .unwrap_or(0);
+        related_erased += deleted_rec_revs as usize;
 
         tx.commit().await?;
 
@@ -7286,6 +7309,452 @@ impl PostgresStore {
         .await?;
 
         Ok(saved)
+    }
+
+    pub async fn get_recruitment_track(
+        &self,
+        guild_id: &str,
+        track_id: Uuid,
+    ) -> anyhow::Result<Option<RecruitmentTrack>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let row = sqlx::query_as::<_, RecruitmentTrack>(
+            r#"
+            SELECT id, guild_id, slug, name, enabled, target_role_id, config, version, created_at, updated_at
+            FROM recruitment_tracks
+            WHERE id = $1 AND guild_id = $2
+            "#,
+        )
+        .bind(track_id)
+        .bind(guild_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    pub async fn get_recruitment_track_by_slug(
+        &self,
+        guild_id: &str,
+        slug: &str,
+    ) -> anyhow::Result<Option<RecruitmentTrack>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let row = sqlx::query_as::<_, RecruitmentTrack>(
+            r#"
+            SELECT id, guild_id, slug, name, enabled, target_role_id, config, version, created_at, updated_at
+            FROM recruitment_tracks
+            WHERE guild_id = $1 AND slug = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(slug)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    pub async fn list_recruitment_tracks(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<RecruitmentTrack>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let rows = sqlx::query_as::<_, RecruitmentTrack>(
+            r#"
+            SELECT id, guild_id, slug, name, enabled, target_role_id, config, version, created_at, updated_at
+            FROM recruitment_tracks
+            WHERE guild_id = $1
+            ORDER BY created_at ASC
+            "#,
+        )
+        .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn upsert_recruitment_track(
+        &self,
+        track: RecruitmentTrack,
+    ) -> anyhow::Result<RecruitmentTrack> {
+        validate_snowflake("guild_id", &track.guild_id)?;
+        crate::recruitment::validate_track_fields(
+            &track.guild_id,
+            &track.slug,
+            &track.name,
+            track.target_role_id.as_deref(),
+        )?;
+
+        let conflicting = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*) FROM recruitment_tracks
+            WHERE guild_id = $1 AND slug = $2 AND id != $3
+            "#,
+        )
+        .bind(&track.guild_id)
+        .bind(&track.slug)
+        .bind(track.id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        if conflicting > 0 {
+            anyhow::bail!(
+                "Recruitment track slug '{}' already exists in this server",
+                track.slug
+            );
+        }
+
+        let saved = sqlx::query_as::<_, RecruitmentTrack>(
+            r#"
+            INSERT INTO recruitment_tracks (
+                id, guild_id, slug, name, enabled, target_role_id, config, version, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 1, NOW())
+            ON CONFLICT (id) DO UPDATE SET
+                guild_id = EXCLUDED.guild_id,
+                slug = EXCLUDED.slug,
+                name = EXCLUDED.name,
+                enabled = EXCLUDED.enabled,
+                target_role_id = EXCLUDED.target_role_id,
+                config = EXCLUDED.config,
+                version = recruitment_tracks.version + 1,
+                updated_at = NOW()
+            WHERE recruitment_tracks.guild_id = EXCLUDED.guild_id
+            RETURNING id, guild_id, slug, name, enabled, target_role_id, config, version, created_at, updated_at
+            "#,
+        )
+        .bind(track.id)
+        .bind(&track.guild_id)
+        .bind(&track.slug)
+        .bind(&track.name)
+        .bind(track.enabled)
+        .bind(&track.target_role_id)
+        .bind(&track.config)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(saved_track) = saved else {
+            anyhow::bail!("Track ID belongs to another guild");
+        };
+
+        Ok(saved_track)
+    }
+
+    pub async fn delete_recruitment_track(
+        &self,
+        guild_id: &str,
+        track_id: Uuid,
+    ) -> anyhow::Result<bool> {
+        validate_snowflake("guild_id", guild_id)?;
+        let result = sqlx::query(
+            r#"
+            DELETE FROM recruitment_tracks
+            WHERE id = $1 AND guild_id = $2
+            "#,
+        )
+        .bind(track_id)
+        .bind(guild_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn get_recruitment_application(
+        &self,
+        guild_id: &str,
+        id: Uuid,
+    ) -> anyhow::Result<Option<RecruitmentApplication>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let row = sqlx::query_as::<_, RecruitmentApplication>(
+            r#"
+            SELECT id, guild_id, track_id, applicant_user_id, track_version, status,
+                   submitted_answers, current_stage, version, submitted_at, updated_at,
+                   decided_at, decision_reason, decided_by
+            FROM recruitment_applications
+            WHERE id = $1 AND guild_id = $2
+            "#,
+        )
+        .bind(id)
+        .bind(guild_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    pub async fn list_recruitment_applications(
+        &self,
+        guild_id: &str,
+        track_id: Option<Uuid>,
+        status: Option<&str>,
+        applicant_user_id: Option<&str>,
+    ) -> anyhow::Result<Vec<RecruitmentApplication>> {
+        validate_snowflake("guild_id", guild_id)?;
+        if let Some(uid) = applicant_user_id {
+            validate_snowflake("applicant_user_id", uid)?;
+        }
+
+        let rows = sqlx::query_as::<_, RecruitmentApplication>(
+            r#"
+            SELECT id, guild_id, track_id, applicant_user_id, track_version, status,
+                   submitted_answers, current_stage, version, submitted_at, updated_at,
+                   decided_at, decision_reason, decided_by
+            FROM recruitment_applications
+            WHERE guild_id = $1
+              AND ($2::uuid IS NULL OR track_id = $2)
+              AND ($3::text IS NULL OR status = $3)
+              AND ($4::text IS NULL OR applicant_user_id = $4)
+            ORDER BY submitted_at DESC
+            "#,
+        )
+        .bind(guild_id)
+        .bind(track_id)
+        .bind(status)
+        .bind(applicant_user_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn create_recruitment_application(
+        &self,
+        app: RecruitmentApplication,
+    ) -> anyhow::Result<RecruitmentApplication> {
+        validate_snowflake("guild_id", &app.guild_id)?;
+        validate_snowflake("applicant_user_id", &app.applicant_user_id)?;
+
+        let created = sqlx::query_as::<_, RecruitmentApplication>(
+            r#"
+            INSERT INTO recruitment_applications (
+                id, guild_id, track_id, applicant_user_id, track_version, status,
+                submitted_answers, current_stage, version, submitted_at, updated_at,
+                decided_at, decision_reason, decided_by
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, NOW(), NOW(), $9, $10, $11)
+            RETURNING id, guild_id, track_id, applicant_user_id, track_version, status,
+                      submitted_answers, current_stage, version, submitted_at, updated_at,
+                      decided_at, decision_reason, decided_by
+            "#,
+        )
+        .bind(app.id)
+        .bind(&app.guild_id)
+        .bind(app.track_id)
+        .bind(&app.applicant_user_id)
+        .bind(app.track_version)
+        .bind(&app.status)
+        .bind(&app.submitted_answers)
+        .bind(&app.current_stage)
+        .bind(app.decided_at)
+        .bind(&app.decision_reason)
+        .bind(&app.decided_by)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(created)
+    }
+
+    pub async fn update_recruitment_application_transition(
+        &self,
+        params: TransitionApplicationParams<'_>,
+    ) -> anyhow::Result<RecruitmentApplication> {
+        validate_snowflake("guild_id", params.guild_id)?;
+
+        let updated = sqlx::query_as::<_, RecruitmentApplication>(
+            r#"
+            UPDATE recruitment_applications
+            SET status = $1,
+                current_stage = $2,
+                version = recruitment_applications.version + 1,
+                updated_at = NOW(),
+                decided_at = CASE WHEN $1 IN ('accepted', 'rejected', 'withdrawn') THEN NOW() ELSE recruitment_applications.decided_at END,
+                decided_by = CASE WHEN $1 IN ('accepted', 'rejected', 'withdrawn') THEN $3 ELSE recruitment_applications.decided_by END,
+                decision_reason = CASE WHEN $1 IN ('accepted', 'rejected', 'withdrawn') THEN $4 ELSE recruitment_applications.decision_reason END
+            WHERE id = $5 AND guild_id = $6 AND version = $7
+            RETURNING id, guild_id, track_id, applicant_user_id, track_version, status,
+                      submitted_answers, current_stage, version, submitted_at, updated_at,
+                      decided_at, decision_reason, decided_by
+            "#,
+        )
+        .bind(params.new_status)
+        .bind(params.new_stage)
+        .bind(params.decided_by)
+        .bind(params.decision_reason)
+        .bind(params.id)
+        .bind(params.guild_id)
+        .bind(params.expected_version)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if let Some(app) = updated {
+            return Ok(app);
+        }
+
+        let existing = sqlx::query_scalar::<_, i64>(
+            "SELECT version FROM recruitment_applications WHERE id = $1 AND guild_id = $2",
+        )
+        .bind(params.id)
+        .bind(params.guild_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if existing.is_some() {
+            anyhow::bail!(
+                "Optimistic concurrency conflict: application was modified by another reviewer"
+            );
+        } else {
+            anyhow::bail!("Application not found");
+        }
+    }
+
+    pub async fn count_active_user_applications(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        track_id: Uuid,
+    ) -> anyhow::Result<u32> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+
+        let count = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::bigint
+            FROM recruitment_applications
+            WHERE guild_id = $1 AND applicant_user_id = $2 AND track_id = $3
+              AND status IN ('draft', 'submitted', 'screening', 'interview')
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .bind(track_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(count as u32)
+    }
+
+    pub async fn list_recruitment_reviews(
+        &self,
+        application_id: Uuid,
+    ) -> anyhow::Result<Vec<RecruitmentReview>> {
+        let rows = sqlx::query_as::<_, RecruitmentReview>(
+            r#"
+            SELECT id, application_id, guild_id, reviewer_user_id, recommendation, note, created_at, updated_at
+            FROM recruitment_reviews
+            WHERE application_id = $1
+            ORDER BY created_at ASC
+            "#,
+        )
+        .bind(application_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn upsert_recruitment_review(
+        &self,
+        review: RecruitmentReview,
+    ) -> anyhow::Result<RecruitmentReview> {
+        validate_snowflake("guild_id", &review.guild_id)?;
+        validate_snowflake("reviewer_user_id", &review.reviewer_user_id)?;
+
+        let saved = sqlx::query_as::<_, RecruitmentReview>(
+            r#"
+            INSERT INTO recruitment_reviews (
+                id, application_id, guild_id, reviewer_user_id, recommendation, note, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+            ON CONFLICT (application_id, reviewer_user_id) DO UPDATE SET
+                recommendation = EXCLUDED.recommendation,
+                note = EXCLUDED.note,
+                updated_at = NOW()
+            RETURNING id, application_id, guild_id, reviewer_user_id, recommendation, note, created_at, updated_at
+            "#,
+        )
+        .bind(review.id)
+        .bind(review.application_id)
+        .bind(&review.guild_id)
+        .bind(&review.reviewer_user_id)
+        .bind(&review.recommendation)
+        .bind(&review.note)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(saved)
+    }
+
+    pub async fn get_role_fulfillment(
+        &self,
+        application_id: Uuid,
+    ) -> anyhow::Result<Option<RecruitmentRoleFulfillment>> {
+        let row = sqlx::query_as::<_, RecruitmentRoleFulfillment>(
+            r#"
+            SELECT application_id, guild_id, user_id, role_id, status, attempts, last_error, next_attempt_at, created_at, updated_at
+            FROM recruitment_role_fulfillment
+            WHERE application_id = $1
+            "#,
+        )
+        .bind(application_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    pub async fn upsert_role_fulfillment(
+        &self,
+        fulfillment: RecruitmentRoleFulfillment,
+    ) -> anyhow::Result<RecruitmentRoleFulfillment> {
+        validate_snowflake("guild_id", &fulfillment.guild_id)?;
+        validate_snowflake("user_id", &fulfillment.user_id)?;
+        validate_snowflake("role_id", &fulfillment.role_id)?;
+
+        let saved = sqlx::query_as::<_, RecruitmentRoleFulfillment>(
+            r#"
+            INSERT INTO recruitment_role_fulfillment (
+                application_id, guild_id, user_id, role_id, status, attempts, last_error, next_attempt_at, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+            ON CONFLICT (application_id) DO UPDATE SET
+                status = EXCLUDED.status,
+                attempts = EXCLUDED.attempts,
+                last_error = EXCLUDED.last_error,
+                next_attempt_at = EXCLUDED.next_attempt_at,
+                updated_at = NOW()
+            RETURNING application_id, guild_id, user_id, role_id, status, attempts, last_error, next_attempt_at, created_at, updated_at
+            "#,
+        )
+        .bind(fulfillment.application_id)
+        .bind(&fulfillment.guild_id)
+        .bind(&fulfillment.user_id)
+        .bind(&fulfillment.role_id)
+        .bind(&fulfillment.status)
+        .bind(fulfillment.attempts)
+        .bind(&fulfillment.last_error)
+        .bind(fulfillment.next_attempt_at)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(saved)
+    }
+
+    pub async fn list_pending_role_fulfillments(
+        &self,
+    ) -> anyhow::Result<Vec<RecruitmentRoleFulfillment>> {
+        let rows = sqlx::query_as::<_, RecruitmentRoleFulfillment>(
+            r#"
+            SELECT application_id, guild_id, user_id, role_id, status, attempts, last_error, next_attempt_at, created_at, updated_at
+            FROM recruitment_role_fulfillment
+            WHERE status = 'pending' AND next_attempt_at <= NOW()
+            ORDER BY next_attempt_at ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
     }
 }
 

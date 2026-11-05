@@ -7,6 +7,7 @@ pub mod metrics;
 pub mod moderation_cases;
 pub mod policy;
 pub mod rate_limit;
+pub mod recruitment;
 pub mod scheduler;
 pub mod session;
 pub mod state;

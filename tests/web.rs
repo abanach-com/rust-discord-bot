@@ -1718,3 +1718,425 @@ async fn test_moderator_duty_api() {
     let list_p2_json: serde_json::Value = list_p2.json().await.unwrap();
     assert_eq!(list_p2_json["profiles"].as_array().unwrap().len(), 0);
 }
+
+#[tokio::test]
+async fn test_staff_recruitment_pipeline_full_lifecycle() {
+    let (state, _perms) = test_web_state().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let app = build_router(state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve axum");
+    });
+    let guild_id = "777000000000000001";
+    let admin_user_id = "999000000000000001";
+    let reviewer2_user_id = "999000000000000002";
+    let candidate_user_id = "888000000000000001";
+    let csrf_token = "valid_csrf_token_recruitment";
+
+    // 1. Setup Admin session
+    let admin_session_id = "admin_recruitment_session";
+    state
+        .app
+        .sessions
+        .save_session(
+            admin_session_id,
+            DashboardUser {
+                id: admin_user_id.to_owned(),
+                username: "AdminUser".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_owned(),
+                name: "Test Guild".to_owned(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_owned(),
+            }],
+            csrf_token.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Setup Second Reviewer session
+    let reviewer2_session_id = "reviewer2_recruitment_session";
+    state
+        .app
+        .sessions
+        .save_session(
+            reviewer2_session_id,
+            DashboardUser {
+                id: reviewer2_user_id.to_owned(),
+                username: "ReviewerTwo".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_owned(),
+                name: "Test Guild".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "8".to_owned(),
+            }],
+            csrf_token.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Setup Candidate session (normal guild member, permissions: "0")
+    let candidate_session_id = "candidate_recruitment_session";
+    state
+        .app
+        .sessions
+        .save_session(
+            candidate_session_id,
+            DashboardUser {
+                id: candidate_user_id.to_owned(),
+                username: "CandidateUser".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_owned(),
+                name: "Test Guild".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_owned(),
+            }],
+            csrf_token.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let admin_cookie = format!("rusty_discord_bot_session={admin_session_id}");
+    let reviewer2_cookie = format!("rusty_discord_bot_session={reviewer2_session_id}");
+    let candidate_cookie = format!("rusty_discord_bot_session={candidate_session_id}");
+
+    // 2. Candidate lists tracks - initially empty
+    let tracks_res = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/recruitment/tracks"
+        ))
+        .header(COOKIE, &candidate_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tracks_res.status(), reqwest::StatusCode::OK);
+    let tracks_json: serde_json::Value = tracks_res.json().await.unwrap();
+    assert_eq!(tracks_json["tracks"].as_array().unwrap().len(), 0);
+
+    // 3. Admin creates recruitment track with 2-person approval requirement
+    let create_track_res = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/recruitment/tracks"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "slug": "moderator",
+            "name": "Moderator Application",
+            "enabled": true,
+            "target_role_id": "555000000000000001",
+            "config": {
+                "final_approvals": 2,
+                "max_active_per_user": 1,
+                "cooldown_days": 14,
+                "auto_role_on_accept": true,
+                "questions": [
+                    {
+                        "id": "q_exp",
+                        "label": "Why do you want to be a moderator?",
+                        "field_type": "paragraph",
+                        "required": true
+                    },
+                    {
+                        "id": "q_tz",
+                        "label": "Timezone",
+                        "field_type": "select",
+                        "required": true,
+                        "options": ["UTC", "CET", "EST"]
+                    }
+                ]
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_track_res.status(), reqwest::StatusCode::OK);
+    let track_json: serde_json::Value = create_track_res.json().await.unwrap();
+    let track_id = track_json["track"]["id"].as_str().unwrap().to_owned();
+
+    // 4. Candidate submits invalid application (missing required field)
+    let invalid_apply = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/recruitment/tracks/moderator/apply"
+        ))
+        .header(COOKIE, &candidate_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "answers": [
+                { "question_id": "q_tz", "answer": "CET" }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid_apply.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 5. Candidate submits valid application
+    let valid_apply = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/recruitment/tracks/moderator/apply"))
+        .header(COOKIE, &candidate_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "answers": [
+                { "question_id": "q_exp", "answer": "I have 3 years of Discord moderation experience." },
+                { "question_id": "q_tz", "answer": "CET" }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(valid_apply.status(), reqwest::StatusCode::OK);
+    let app_json: serde_json::Value = valid_apply.json().await.unwrap();
+    let app_id = app_json["application"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(app_json["application"]["status"], "submitted");
+
+    // 6. Candidate tries to apply again (max_active_per_user limit)
+    let duplicate_apply = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/recruitment/tracks/moderator/apply"
+        ))
+        .header(COOKIE, &candidate_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "answers": [
+                { "question_id": "q_exp", "answer": "Second application" },
+                { "question_id": "q_tz", "answer": "UTC" }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(duplicate_apply.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 7. Candidate cannot review their own application
+    let self_review = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/recruitment/applications/{app_id}/review"
+        ))
+        .header(COOKIE, &candidate_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "recommendation": "approve",
+            "note": "I approve myself!"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(self_review.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 8. Admin reviews with 'approve'
+    let review1_res = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/recruitment/applications/{app_id}/review"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "recommendation": "approve",
+            "note": "Strong track record."
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(review1_res.status(), reqwest::StatusCode::OK);
+
+    // 9. Admin attempts to accept with only 1 approval when 2 are required
+    let early_accept = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/recruitment/applications/{app_id}/transition"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "expected_version": 1,
+            "new_status": "accepted",
+            "new_stage": "accepted",
+            "decision_reason": "Accepted early"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(early_accept.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 10. Reviewer 2 reviews with 'approve'
+    let review2_res = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/recruitment/applications/{app_id}/review"
+        ))
+        .header(COOKIE, &reviewer2_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "recommendation": "approve",
+            "note": "Second approval confirmed."
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(review2_res.status(), reqwest::StatusCode::OK);
+
+    // 11. Optimistic concurrency conflict test (stale version)
+    let conflict_res = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/recruitment/applications/{app_id}/transition"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "expected_version": 999,
+            "new_status": "accepted",
+            "new_stage": "accepted"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(conflict_res.status(), reqwest::StatusCode::CONFLICT);
+
+    // 12. Successful acceptance with expected_version = 1
+    let accept_res = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/recruitment/applications/{app_id}/transition"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "expected_version": 1,
+            "new_status": "accepted",
+            "new_stage": "accepted",
+            "decision_reason": "Welcome to the team!"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(accept_res.status(), reqwest::StatusCode::OK);
+    let accepted_json: serde_json::Value = accept_res.json().await.unwrap();
+    assert_eq!(accepted_json["application"]["status"], "accepted");
+    assert_eq!(
+        accepted_json["application"]["reviews"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        accepted_json["application"]["fulfillment"]["status"],
+        "pending"
+    );
+
+    // 13. Process role fulfillment batch
+    let fulfill_res = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/recruitment/fulfillment/process"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(fulfill_res.status(), reqwest::StatusCode::OK);
+    let fulfill_json: serde_json::Value = fulfill_res.json().await.unwrap();
+    assert_eq!(fulfill_json["processed"], 1);
+
+    // 14. Candidate view check: privacy protection (no reviewer identity or notes)
+    let candidate_view_res = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/recruitment/applications/{app_id}"
+        ))
+        .header(COOKIE, &candidate_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(candidate_view_res.status(), reqwest::StatusCode::OK);
+    let cand_view_json: serde_json::Value = candidate_view_res.json().await.unwrap();
+    assert_eq!(cand_view_json["application"]["status"], "accepted");
+    assert!(cand_view_json["application"].get("reviews").is_none());
+    assert!(cand_view_json["application"].get("decided_by").is_none());
+
+    // 15. Candidate applies to second track and withdraws application
+    let track2_res = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/recruitment/tracks"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "slug": "helper",
+            "name": "Community Helper",
+            "enabled": true,
+            "config": {
+                "questions": []
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(track2_res.status(), reqwest::StatusCode::OK);
+
+    let apply2_res = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/recruitment/tracks/helper/apply"
+        ))
+        .header(COOKIE, &candidate_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({ "answers": [] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(apply2_res.status(), reqwest::StatusCode::OK);
+    let app2_id = apply2_res.json::<serde_json::Value>().await.unwrap()["application"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let withdraw_res = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/recruitment/applications/{app2_id}/withdraw"
+        ))
+        .header(COOKIE, &candidate_cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(withdraw_res.status(), reqwest::StatusCode::OK);
+    let withdrawn_json: serde_json::Value = withdraw_res.json().await.unwrap();
+    assert_eq!(withdrawn_json["application"]["status"], "withdrawn");
+
+    // Clean up track
+    let del_track_res = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/recruitment/tracks/{track_id}"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del_track_res.status(), reqwest::StatusCode::OK);
+}

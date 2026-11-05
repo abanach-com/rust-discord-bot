@@ -19,8 +19,9 @@ use crate::storage::{
     CardCollection, CardTrade, CleanupPlan, CommandPolicyRule, CommunityPoll, CustomAutomation,
     DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink, Giveaway,
     InviteTracking, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
-    ProgressionSeason, RecurringSchedule, ScheduledEvent, ServerSnapshot, StickyMessage, StoreItem,
-    TupperProfile, validate_snowflake,
+    ProgressionSeason, RecruitmentApplication, RecruitmentReview, RecruitmentRoleFulfillment,
+    RecruitmentTrack, RecruitmentTrackConfig, RecurringSchedule, ScheduledEvent, ServerSnapshot,
+    StickyMessage, StoreItem, SubmittedAnswer, TupperProfile, validate_snowflake,
 };
 
 use super::{
@@ -4371,6 +4372,659 @@ pub async fn reconcile_guild_duty(
         "count": outcomes.len(),
         "outcomes": outcomes,
     })))
+}
+
+// ==========================================
+// Agent 16 (#166): Staff Recruitment Pipeline
+// ==========================================
+
+#[derive(Debug, Deserialize)]
+pub struct UpsertRecruitmentTrackRequest {
+    pub id: Option<Uuid>,
+    pub slug: String,
+    pub name: String,
+    #[serde(default = "default_track_enabled")]
+    pub enabled: bool,
+    pub target_role_id: Option<String>,
+    #[serde(default)]
+    pub config: RecruitmentTrackConfig,
+}
+
+fn default_track_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApplyRecruitmentTrackRequest {
+    pub answers: Vec<SubmittedAnswer>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReviewRecruitmentApplicationRequest {
+    pub recommendation: String,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TransitionRecruitmentApplicationRequest {
+    pub expected_version: i64,
+    pub new_status: String,
+    pub new_stage: String,
+    pub decision_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListRecruitmentApplicationsQuery {
+    pub track_id: Option<Uuid>,
+    pub status: Option<String>,
+    pub mine: Option<bool>,
+}
+
+pub async fn list_recruitment_tracks(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    let is_staff = ensure_guild_access(&state, &session, &guild_id)
+        .await
+        .is_ok();
+    if !is_staff {
+        ensure_guild_member_access(&state, &session, &guild_id).await?;
+    }
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let tracks = state
+        .app
+        .storage
+        .list_recruitment_tracks(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let filtered: Vec<_> = if is_staff {
+        tracks
+    } else {
+        tracks.into_iter().filter(|t| t.enabled).collect()
+    };
+
+    Ok(Json(json!({ "tracks": filtered })))
+}
+
+pub async fn upsert_recruitment_track(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<UpsertRecruitmentTrackRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let track = RecruitmentTrack {
+        id: payload.id.unwrap_or_else(Uuid::new_v4),
+        guild_id: guild_id.clone(),
+        slug: payload.slug,
+        name: payload.name,
+        enabled: payload.enabled,
+        target_role_id: payload.target_role_id,
+        config: sqlx::types::Json(payload.config),
+        version: 1,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+
+    let saved = state
+        .app
+        .storage
+        .upsert_recruitment_track(track)
+        .await
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let _ = state
+        .app
+        .storage
+        .record_audit(
+            Some(&guild_id),
+            Some(&session.user.id),
+            "recruitment",
+            "track_upserted",
+            json!({
+                "track_id": saved.id,
+                "slug": saved.slug,
+                "enabled": saved.enabled,
+            }),
+        )
+        .await;
+
+    Ok(Json(json!({ "track": saved })))
+}
+
+pub async fn delete_recruitment_track(
+    State(state): State<WebState>,
+    Path((guild_id, track_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let deleted = state
+        .app
+        .storage
+        .delete_recruitment_track(&guild_id, track_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    if !deleted {
+        return Err(ApiError::not_found("Recruitment track not found"));
+    }
+
+    let _ = state
+        .app
+        .storage
+        .record_audit(
+            Some(&guild_id),
+            Some(&session.user.id),
+            "recruitment",
+            "track_deleted",
+            json!({ "track_id": track_id }),
+        )
+        .await;
+
+    Ok(Json(json!({ "deleted": true })))
+}
+
+pub async fn list_recruitment_applications(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    Query(query): Query<ListRecruitmentApplicationsQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    let is_staff = ensure_guild_access(&state, &session, &guild_id)
+        .await
+        .is_ok();
+    if !is_staff {
+        ensure_guild_member_access(&state, &session, &guild_id).await?;
+    }
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let is_mine = !is_staff || query.mine.unwrap_or(false);
+    let applicant_filter = if is_mine {
+        Some(session.user.id.as_str())
+    } else {
+        None
+    };
+
+    let apps = state
+        .app
+        .storage
+        .list_recruitment_applications(
+            &guild_id,
+            query.track_id,
+            query.status.as_deref(),
+            applicant_filter,
+        )
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    if is_mine && !is_staff {
+        let views: Vec<_> = apps.into_iter().map(|a| a.to_candidate_view()).collect();
+        return Ok(Json(json!({ "applications": views })));
+    }
+
+    let mut staff_views = Vec::with_capacity(apps.len());
+    for app in apps {
+        let reviews = state
+            .app
+            .storage
+            .list_recruitment_reviews(app.id)
+            .await
+            .unwrap_or_default();
+        let fulfillment = state
+            .app
+            .storage
+            .get_role_fulfillment(app.id)
+            .await
+            .unwrap_or_default();
+        staff_views.push(app.to_staff_view(reviews, fulfillment));
+    }
+
+    Ok(Json(json!({ "applications": staff_views })))
+}
+
+pub async fn get_recruitment_application(
+    State(state): State<WebState>,
+    Path((guild_id, app_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    let is_staff = ensure_guild_access(&state, &session, &guild_id)
+        .await
+        .is_ok();
+    if !is_staff {
+        ensure_guild_member_access(&state, &session, &guild_id).await?;
+    }
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let app = state
+        .app
+        .storage
+        .get_recruitment_application(&guild_id, app_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Recruitment application not found"))?;
+
+    if !is_staff {
+        if app.applicant_user_id != session.user.id {
+            return Err(ApiError::forbidden("Access denied to application"));
+        }
+        return Ok(Json(json!({ "application": app.to_candidate_view() })));
+    }
+
+    let reviews = state
+        .app
+        .storage
+        .list_recruitment_reviews(app.id)
+        .await
+        .unwrap_or_default();
+    let fulfillment = state
+        .app
+        .storage
+        .get_role_fulfillment(app.id)
+        .await
+        .unwrap_or_default();
+
+    Ok(Json(
+        json!({ "application": app.to_staff_view(reviews, fulfillment) }),
+    ))
+}
+
+pub async fn apply_recruitment_track(
+    State(state): State<WebState>,
+    Path((guild_id, slug)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(payload): Json<ApplyRecruitmentTrackRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let track = state
+        .app
+        .storage
+        .get_recruitment_track_by_slug(&guild_id, &slug)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Recruitment track not found"))?;
+
+    if !track.enabled {
+        return Err(ApiError::bad_request(
+            "Recruitment track is currently disabled",
+        ));
+    }
+
+    let active_count = state
+        .app
+        .storage
+        .count_active_user_applications(&guild_id, &session.user.id, track.id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    if active_count >= track.config.max_active_per_user {
+        return Err(ApiError::bad_request(
+            "You have reached the maximum number of active applications for this track",
+        ));
+    }
+
+    if track.config.cooldown_days > 0 {
+        let rejected_apps = state
+            .app
+            .storage
+            .list_recruitment_applications(
+                &guild_id,
+                Some(track.id),
+                Some("rejected"),
+                Some(&session.user.id),
+            )
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+
+        if let Some(last_rejected) = rejected_apps.first()
+            && let Some(decided_at) = last_rejected.decided_at
+            && Utc::now() - decided_at < chrono::Duration::days(track.config.cooldown_days as i64)
+        {
+            return Err(ApiError::bad_request(format!(
+                "You must wait {} days after a rejected application before reapplying",
+                track.config.cooldown_days
+            )));
+        }
+    }
+
+    crate::recruitment::validate_submitted_answers(&track.config.questions, &payload.answers)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let app = RecruitmentApplication {
+        id: Uuid::new_v4(),
+        guild_id: guild_id.clone(),
+        track_id: track.id,
+        applicant_user_id: session.user.id.clone(),
+        track_version: track.version,
+        status: "submitted".to_string(),
+        submitted_answers: sqlx::types::Json(payload.answers),
+        current_stage: "submitted".to_string(),
+        version: 1,
+        submitted_at: Utc::now(),
+        updated_at: Utc::now(),
+        decided_at: None,
+        decision_reason: None,
+        decided_by: None,
+    };
+
+    let saved = state
+        .app
+        .storage
+        .create_recruitment_application(app)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let _ = state
+        .app
+        .storage
+        .record_audit(
+            Some(&guild_id),
+            Some(&session.user.id),
+            "recruitment",
+            "application_submitted",
+            json!({
+                "application_id": saved.id,
+                "track_id": track.id,
+                "slug": track.slug,
+            }),
+        )
+        .await;
+
+    Ok(Json(json!({ "application": saved.to_candidate_view() })))
+}
+
+pub async fn review_recruitment_application(
+    State(state): State<WebState>,
+    Path((guild_id, app_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+    Json(payload): Json<ReviewRecruitmentApplicationRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let app = state
+        .app
+        .storage
+        .get_recruitment_application(&guild_id, app_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Recruitment application not found"))?;
+
+    if app.applicant_user_id == session.user.id {
+        return Err(ApiError::forbidden(
+            "Reviewers cannot review their own recruitment applications",
+        ));
+    }
+
+    if !["approve", "reject", "needs_info", "abstain"].contains(&payload.recommendation.as_str()) {
+        return Err(ApiError::bad_request("Invalid recommendation value"));
+    }
+
+    let review = RecruitmentReview {
+        id: Uuid::new_v4(),
+        application_id: app.id,
+        guild_id: guild_id.clone(),
+        reviewer_user_id: session.user.id.clone(),
+        recommendation: payload.recommendation,
+        note: payload.note,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+
+    let saved = state
+        .app
+        .storage
+        .upsert_recruitment_review(review)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let _ = state
+        .app
+        .storage
+        .record_audit(
+            Some(&guild_id),
+            Some(&session.user.id),
+            "recruitment",
+            "review_submitted",
+            json!({
+                "application_id": app.id,
+                "recommendation": saved.recommendation,
+            }),
+        )
+        .await;
+
+    Ok(Json(json!({ "review": saved })))
+}
+
+pub async fn transition_recruitment_application(
+    State(state): State<WebState>,
+    Path((guild_id, app_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+    Json(payload): Json<TransitionRecruitmentApplicationRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let app = state
+        .app
+        .storage
+        .get_recruitment_application(&guild_id, app_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Recruitment application not found"))?;
+
+    let track = state
+        .app
+        .storage
+        .get_recruitment_track(&guild_id, app.track_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Associated recruitment track not found"))?;
+
+    if ![
+        "draft",
+        "submitted",
+        "screening",
+        "interview",
+        "accepted",
+        "rejected",
+        "withdrawn",
+        "expired",
+    ]
+    .contains(&payload.new_status.as_str())
+    {
+        return Err(ApiError::bad_request("Invalid application status"));
+    }
+
+    let reviews = state
+        .app
+        .storage
+        .list_recruitment_reviews(app.id)
+        .await
+        .unwrap_or_default();
+
+    if payload.new_status == "accepted" {
+        let approvals = crate::recruitment::count_distinct_approvals(&reviews);
+        if approvals < track.config.final_approvals as usize {
+            return Err(ApiError::bad_request(format!(
+                "Application requires at least {} distinct approvals before acceptance, but has {}",
+                track.config.final_approvals, approvals
+            )));
+        }
+    }
+
+    let updated = match state
+        .app
+        .storage
+        .update_recruitment_application_transition(crate::storage::TransitionApplicationParams {
+            id: app.id,
+            guild_id: &guild_id,
+            expected_version: payload.expected_version,
+            new_status: &payload.new_status,
+            new_stage: &payload.new_stage,
+            decided_by: Some(&session.user.id),
+            decision_reason: payload.decision_reason.as_deref(),
+        })
+        .await
+    {
+        Ok(res) => res,
+        Err(e) if e.to_string().contains("Optimistic concurrency conflict") => {
+            return Err(ApiError::conflict(e.to_string()));
+        }
+        Err(e) => return Err(ApiError::internal(e.to_string())),
+    };
+
+    let mut fulfillment = None;
+    if payload.new_status == "accepted"
+        && track.config.auto_role_on_accept
+        && let Some(role_id) = &track.target_role_id
+    {
+        let item = RecruitmentRoleFulfillment {
+            application_id: app.id,
+            guild_id: guild_id.clone(),
+            user_id: app.applicant_user_id.clone(),
+            role_id: role_id.clone(),
+            status: "pending".to_string(),
+            attempts: 0,
+            last_error: None,
+            next_attempt_at: Utc::now(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        fulfillment = state.app.storage.upsert_role_fulfillment(item).await.ok();
+    }
+
+    let _ = state
+        .app
+        .storage
+        .record_audit(
+            Some(&guild_id),
+            Some(&session.user.id),
+            "recruitment",
+            "application_transitioned",
+            json!({
+                "application_id": app.id,
+                "new_status": payload.new_status,
+                "new_stage": payload.new_stage,
+                "version": updated.version,
+            }),
+        )
+        .await;
+
+    Ok(Json(
+        json!({ "application": updated.to_staff_view(reviews, fulfillment) }),
+    ))
+}
+
+pub async fn withdraw_recruitment_application(
+    State(state): State<WebState>,
+    Path((guild_id, app_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let app = state
+        .app
+        .storage
+        .get_recruitment_application(&guild_id, app_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Recruitment application not found"))?;
+
+    if app.applicant_user_id != session.user.id {
+        return Err(ApiError::forbidden(
+            "You can only withdraw your own applications",
+        ));
+    }
+
+    if !["submitted", "screening", "interview", "draft"].contains(&app.status.as_str()) {
+        return Err(ApiError::bad_request(
+            "Application is not in an active stage and cannot be withdrawn",
+        ));
+    }
+
+    let updated = state
+        .app
+        .storage
+        .update_recruitment_application_transition(crate::storage::TransitionApplicationParams {
+            id: app.id,
+            guild_id: &guild_id,
+            expected_version: app.version,
+            new_status: "withdrawn",
+            new_stage: "withdrawn",
+            decided_by: Some(&session.user.id),
+            decision_reason: Some("Withdrawn by applicant"),
+        })
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let _ = state
+        .app
+        .storage
+        .record_audit(
+            Some(&guild_id),
+            Some(&session.user.id),
+            "recruitment",
+            "application_withdrawn",
+            json!({ "application_id": app.id }),
+        )
+        .await;
+
+    Ok(Json(json!({ "application": updated.to_candidate_view() })))
+}
+
+pub async fn process_role_fulfillments(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let token = &state.app.config.discord_token;
+    let has_real_token =
+        !token.is_empty() && !token.starts_with("dummy") && token != "mock" && token != "offline";
+
+    let http = if has_real_token {
+        Some(serenity::all::Http::new(token))
+    } else {
+        None
+    };
+
+    let processed = crate::recruitment::process_recruitment_role_fulfillments(
+        &state.app.storage,
+        http.as_ref(),
+    )
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(json!({ "processed": processed })))
 }
 
 #[cfg(test)]

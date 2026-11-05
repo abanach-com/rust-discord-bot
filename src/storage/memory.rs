@@ -135,6 +135,15 @@ pub struct MemoryStore {
 
     duty_states: Arc<DashMap<(String, String), ModeratorDutyState>>,
 
+    recruitment_tracks: Arc<DashMap<Uuid, crate::recruitment::RecruitmentTrack>>,
+
+    recruitment_applications: Arc<DashMap<Uuid, crate::recruitment::RecruitmentApplication>>,
+
+    recruitment_reviews: Arc<DashMap<Uuid, crate::recruitment::RecruitmentReview>>,
+
+    recruitment_role_fulfillments:
+        Arc<DashMap<Uuid, crate::recruitment::RecruitmentRoleFulfillment>>,
+
     faqs: Arc<DashMap<Uuid, FaqEntry>>,
 
     integration_connections: Arc<DashMap<Uuid, IntegrationConnection>>,
@@ -445,6 +454,16 @@ impl MemoryStore {
 
         self.duty_states
             .retain(|(g, u), _| !(g == guild_id && u == user_id));
+
+        let before_rec_apps = self.recruitment_applications.len();
+        self.recruitment_applications
+            .retain(|_, a| !(a.guild_id == guild_id && a.applicant_user_id == user_id));
+        related_erased += before_rec_apps.saturating_sub(self.recruitment_applications.len());
+
+        let before_rec_revs = self.recruitment_reviews.len();
+        self.recruitment_reviews
+            .retain(|_, r| !(r.guild_id == guild_id && r.reviewer_user_id == user_id));
+        related_erased += before_rec_revs.saturating_sub(self.recruitment_reviews.len());
 
         let retained_records = vec![
             RetainedRecordNotice {
@@ -4214,5 +4233,280 @@ impl MemoryStore {
         let key = (guild_id.to_string(), plugin_id.to_string());
 
         self.plugin_guild_installs.remove(&key).is_some()
+    }
+
+    // ==========================================
+    // Staff Recruitment Pipeline (Feature #166)
+    // ==========================================
+
+    pub fn get_recruitment_track(
+        &self,
+        guild_id: &str,
+        track_id: Uuid,
+    ) -> anyhow::Result<Option<crate::recruitment::RecruitmentTrack>> {
+        validate_snowflake("guild_id", guild_id)?;
+        Ok(self
+            .recruitment_tracks
+            .get(&track_id)
+            .filter(|t| t.guild_id == guild_id)
+            .map(|t| t.value().clone()))
+    }
+
+    pub fn get_recruitment_track_by_slug(
+        &self,
+        guild_id: &str,
+        slug: &str,
+    ) -> anyhow::Result<Option<crate::recruitment::RecruitmentTrack>> {
+        validate_snowflake("guild_id", guild_id)?;
+        Ok(self
+            .recruitment_tracks
+            .iter()
+            .find(|t| t.guild_id == guild_id && t.slug == slug)
+            .map(|t| t.value().clone()))
+    }
+
+    pub fn list_recruitment_tracks(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<crate::recruitment::RecruitmentTrack>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let mut list: Vec<_> = self
+            .recruitment_tracks
+            .iter()
+            .filter(|t| t.guild_id == guild_id)
+            .map(|t| t.value().clone())
+            .collect();
+        list.sort_by_key(|a| a.created_at);
+        Ok(list)
+    }
+
+    pub fn upsert_recruitment_track(
+        &self,
+        mut track: crate::recruitment::RecruitmentTrack,
+    ) -> anyhow::Result<crate::recruitment::RecruitmentTrack> {
+        validate_snowflake("guild_id", &track.guild_id)?;
+        crate::recruitment::validate_track_fields(
+            &track.guild_id,
+            &track.slug,
+            &track.name,
+            track.target_role_id.as_deref(),
+        )?;
+
+        if self
+            .recruitment_tracks
+            .iter()
+            .any(|t| t.guild_id == track.guild_id && t.slug == track.slug && t.id != track.id)
+        {
+            anyhow::bail!(
+                "Recruitment track slug '{}' already exists in this server",
+                track.slug
+            );
+        }
+
+        if let Some(existing) = self.recruitment_tracks.get(&track.id) {
+            if existing.guild_id != track.guild_id {
+                anyhow::bail!("Track ID belongs to another guild");
+            }
+            track.version = existing.version + 1;
+        }
+
+        track.updated_at = Utc::now();
+        self.recruitment_tracks.insert(track.id, track.clone());
+        Ok(track)
+    }
+
+    pub fn delete_recruitment_track(&self, guild_id: &str, track_id: Uuid) -> anyhow::Result<bool> {
+        validate_snowflake("guild_id", guild_id)?;
+        if let Some(existing) = self.recruitment_tracks.get(&track_id)
+            && existing.guild_id == guild_id
+        {
+            drop(existing);
+            self.recruitment_tracks.remove(&track_id);
+            let app_ids: Vec<Uuid> = self
+                .recruitment_applications
+                .iter()
+                .filter(|a| a.track_id == track_id)
+                .map(|a| a.id)
+                .collect();
+            for aid in app_ids {
+                self.recruitment_applications.remove(&aid);
+                self.recruitment_reviews
+                    .retain(|_, r| r.application_id != aid);
+                self.recruitment_role_fulfillments.remove(&aid);
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub fn get_recruitment_application(
+        &self,
+        guild_id: &str,
+        id: Uuid,
+    ) -> anyhow::Result<Option<crate::recruitment::RecruitmentApplication>> {
+        validate_snowflake("guild_id", guild_id)?;
+        Ok(self
+            .recruitment_applications
+            .get(&id)
+            .filter(|a| a.guild_id == guild_id)
+            .map(|a| a.value().clone()))
+    }
+
+    pub fn list_recruitment_applications(
+        &self,
+        guild_id: &str,
+        track_id: Option<Uuid>,
+        status: Option<&str>,
+        applicant_user_id: Option<&str>,
+    ) -> anyhow::Result<Vec<crate::recruitment::RecruitmentApplication>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let mut list: Vec<_> = self
+            .recruitment_applications
+            .iter()
+            .filter(|a| {
+                a.guild_id == guild_id
+                    && track_id.is_none_or(|tid| a.track_id == tid)
+                    && status.is_none_or(|st| a.status == st)
+                    && applicant_user_id.is_none_or(|uid| a.applicant_user_id == uid)
+            })
+            .map(|a| a.value().clone())
+            .collect();
+        list.sort_by_key(|a| std::cmp::Reverse(a.submitted_at));
+        Ok(list)
+    }
+
+    pub fn create_recruitment_application(
+        &self,
+        mut app: crate::recruitment::RecruitmentApplication,
+    ) -> anyhow::Result<crate::recruitment::RecruitmentApplication> {
+        validate_snowflake("guild_id", &app.guild_id)?;
+        validate_snowflake("applicant_user_id", &app.applicant_user_id)?;
+        let now = Utc::now();
+        app.submitted_at = now;
+        app.updated_at = now;
+        self.recruitment_applications.insert(app.id, app.clone());
+        Ok(app)
+    }
+
+    pub fn update_recruitment_application_transition(
+        &self,
+        params: crate::recruitment::TransitionApplicationParams<'_>,
+    ) -> anyhow::Result<crate::recruitment::RecruitmentApplication> {
+        validate_snowflake("guild_id", params.guild_id)?;
+        let mut entry = self
+            .recruitment_applications
+            .get_mut(&params.id)
+            .ok_or_else(|| anyhow::anyhow!("Application not found"))?;
+        if entry.guild_id != params.guild_id {
+            anyhow::bail!("Application not found in guild");
+        }
+        if entry.version != params.expected_version {
+            anyhow::bail!(
+                "Optimistic concurrency conflict: application was modified by another reviewer"
+            );
+        }
+
+        entry.status = params.new_status.to_string();
+        entry.current_stage = params.new_stage.to_string();
+        entry.version += 1;
+        entry.updated_at = Utc::now();
+        if params.new_status == "accepted"
+            || params.new_status == "rejected"
+            || params.new_status == "withdrawn"
+        {
+            entry.decided_at = Some(entry.updated_at);
+            entry.decided_by = params.decided_by.map(|s| s.to_string());
+            entry.decision_reason = params.decision_reason.map(|s| s.to_string());
+        }
+
+        Ok(entry.value().clone())
+    }
+
+    pub fn count_active_user_applications(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        track_id: Uuid,
+    ) -> anyhow::Result<u32> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+        let count = self
+            .recruitment_applications
+            .iter()
+            .filter(|a| {
+                a.guild_id == guild_id
+                    && a.applicant_user_id == user_id
+                    && a.track_id == track_id
+                    && ["draft", "submitted", "screening", "interview"].contains(&a.status.as_str())
+            })
+            .count();
+        Ok(count as u32)
+    }
+
+    pub fn list_recruitment_reviews(
+        &self,
+        application_id: Uuid,
+    ) -> anyhow::Result<Vec<crate::recruitment::RecruitmentReview>> {
+        let mut list: Vec<_> = self
+            .recruitment_reviews
+            .iter()
+            .filter(|r| r.application_id == application_id)
+            .map(|r| r.value().clone())
+            .collect();
+        list.sort_by_key(|a| a.created_at);
+        Ok(list)
+    }
+
+    pub fn upsert_recruitment_review(
+        &self,
+        mut review: crate::recruitment::RecruitmentReview,
+    ) -> anyhow::Result<crate::recruitment::RecruitmentReview> {
+        validate_snowflake("guild_id", &review.guild_id)?;
+        validate_snowflake("reviewer_user_id", &review.reviewer_user_id)?;
+        review.updated_at = Utc::now();
+        if let Some(existing) = self.recruitment_reviews.iter().find(|r| {
+            r.application_id == review.application_id
+                && r.reviewer_user_id == review.reviewer_user_id
+        }) {
+            review.id = existing.id;
+        }
+        self.recruitment_reviews.insert(review.id, review.clone());
+        Ok(review)
+    }
+
+    pub fn get_role_fulfillment(
+        &self,
+        application_id: Uuid,
+    ) -> anyhow::Result<Option<crate::recruitment::RecruitmentRoleFulfillment>> {
+        Ok(self
+            .recruitment_role_fulfillments
+            .get(&application_id)
+            .map(|f| f.value().clone()))
+    }
+
+    pub fn upsert_role_fulfillment(
+        &self,
+        mut fulfillment: crate::recruitment::RecruitmentRoleFulfillment,
+    ) -> anyhow::Result<crate::recruitment::RecruitmentRoleFulfillment> {
+        validate_snowflake("guild_id", &fulfillment.guild_id)?;
+        validate_snowflake("user_id", &fulfillment.user_id)?;
+        validate_snowflake("role_id", &fulfillment.role_id)?;
+        fulfillment.updated_at = Utc::now();
+        self.recruitment_role_fulfillments
+            .insert(fulfillment.application_id, fulfillment.clone());
+        Ok(fulfillment)
+    }
+
+    pub fn list_pending_role_fulfillments(
+        &self,
+    ) -> anyhow::Result<Vec<crate::recruitment::RecruitmentRoleFulfillment>> {
+        let now = Utc::now();
+        let list: Vec<_> = self
+            .recruitment_role_fulfillments
+            .iter()
+            .filter(|f| f.status == "pending" && f.next_attempt_at <= now)
+            .map(|f| f.value().clone())
+            .collect();
+        Ok(list)
     }
 }

@@ -1728,4 +1728,180 @@ async fn test_postgres_integration_suite() {
         .await
         .expect("get duty profile after delete");
     assert!(after_ddelete.is_none());
+
+    // Issue #166: Staff Recruitment Pipeline PostgreSQL Lifecycle
+    let rec_guild = "666555444333222111";
+    let rec_applicant = "111222333444555666";
+    let rec_reviewer1 = "777888999000111222";
+    let rec_reviewer2 = "888999000111222333";
+    let rec_role = "333444555666777888";
+
+    let track = store
+        .upsert_recruitment_track(rusty_discord_bot::storage::RecruitmentTrack {
+            id: uuid::Uuid::new_v4(),
+            guild_id: rec_guild.to_string(),
+            slug: "moderator".to_string(),
+            name: "Moderator Applications".to_string(),
+            enabled: true,
+            target_role_id: Some(rec_role.to_string()),
+            config: sqlx::types::Json(rusty_discord_bot::storage::RecruitmentTrackConfig {
+                final_approvals: 2,
+                ..Default::default()
+            }),
+            version: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        })
+        .await
+        .expect("upsert recruitment track in pg");
+    assert_eq!(track.slug, "moderator");
+
+    let app = store
+        .create_recruitment_application(rusty_discord_bot::storage::RecruitmentApplication {
+            id: uuid::Uuid::new_v4(),
+            guild_id: rec_guild.to_string(),
+            track_id: track.id,
+            applicant_user_id: rec_applicant.to_string(),
+            track_version: track.version,
+            status: "submitted".to_string(),
+            submitted_answers: sqlx::types::Json(vec![
+                rusty_discord_bot::storage::SubmittedAnswer {
+                    question_id: "q1".to_string(),
+                    answer: "My experience".to_string(),
+                },
+            ]),
+            current_stage: "submitted".to_string(),
+            version: 1,
+            submitted_at: Utc::now(),
+            updated_at: Utc::now(),
+            decided_at: None,
+            decision_reason: None,
+            decided_by: None,
+        })
+        .await
+        .expect("create recruitment app in pg");
+    assert_eq!(app.status, "submitted");
+
+    let active_apps = store
+        .count_active_user_applications(rec_guild, rec_applicant, track.id)
+        .await
+        .expect("count active apps");
+    assert_eq!(active_apps, 1);
+
+    let rev1 = store
+        .upsert_recruitment_review(rusty_discord_bot::storage::RecruitmentReview {
+            id: uuid::Uuid::new_v4(),
+            application_id: app.id,
+            guild_id: rec_guild.to_string(),
+            reviewer_user_id: rec_reviewer1.to_string(),
+            recommendation: "approve".to_string(),
+            note: Some("Looks solid".to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        })
+        .await
+        .expect("upsert review 1 in pg");
+    assert_eq!(rev1.recommendation, "approve");
+
+    let rev2 = store
+        .upsert_recruitment_review(rusty_discord_bot::storage::RecruitmentReview {
+            id: uuid::Uuid::new_v4(),
+            application_id: app.id,
+            guild_id: rec_guild.to_string(),
+            reviewer_user_id: rec_reviewer2.to_string(),
+            recommendation: "approve".to_string(),
+            note: Some("Seconded".to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        })
+        .await
+        .expect("upsert review 2 in pg");
+    assert_eq!(rev2.recommendation, "approve");
+
+    let reviews = store
+        .list_recruitment_reviews(app.id)
+        .await
+        .expect("list reviews in pg");
+    assert_eq!(reviews.len(), 2);
+
+    // Stale version optimistic concurrency test
+    let stale_trans = store
+        .update_recruitment_application_transition(
+            rusty_discord_bot::storage::TransitionApplicationParams {
+                id: app.id,
+                guild_id: rec_guild,
+                expected_version: 999,
+                new_status: "accepted",
+                new_stage: "accepted",
+                decided_by: Some(rec_reviewer1),
+                decision_reason: Some("Accepted"),
+            },
+        )
+        .await;
+    assert!(stale_trans.is_err());
+    assert!(
+        stale_trans
+            .unwrap_err()
+            .to_string()
+            .contains("Optimistic concurrency conflict")
+    );
+
+    // Successful transition
+    let accepted_app = store
+        .update_recruitment_application_transition(
+            rusty_discord_bot::storage::TransitionApplicationParams {
+                id: app.id,
+                guild_id: rec_guild,
+                expected_version: 1,
+                new_status: "accepted",
+                new_stage: "accepted",
+                decided_by: Some(rec_reviewer1),
+                decision_reason: Some("Accepted!"),
+            },
+        )
+        .await
+        .expect("transition app in pg");
+    assert_eq!(accepted_app.status, "accepted");
+    assert_eq!(accepted_app.version, 2);
+
+    // Role fulfillment outbox
+    let fulfillment = store
+        .upsert_role_fulfillment(rusty_discord_bot::storage::RecruitmentRoleFulfillment {
+            application_id: app.id,
+            guild_id: rec_guild.to_string(),
+            user_id: rec_applicant.to_string(),
+            role_id: rec_role.to_string(),
+            status: "pending".to_string(),
+            attempts: 0,
+            last_error: None,
+            next_attempt_at: Utc::now(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        })
+        .await
+        .expect("upsert role fulfillment in pg");
+    assert_eq!(fulfillment.status, "pending");
+
+    let pending_fulfillments = store
+        .list_pending_role_fulfillments()
+        .await
+        .expect("list pending fulfillments in pg");
+    assert!(
+        pending_fulfillments
+            .iter()
+            .any(|f| f.application_id == app.id)
+    );
+
+    // Cleanup track and cascade
+    let deleted_track = store
+        .delete_recruitment_track(rec_guild, track.id)
+        .await
+        .expect("delete recruitment track in pg");
+    assert!(deleted_track);
+
+    let app_after_cascade = store
+        .get_recruitment_application(rec_guild, app.id)
+        .await
+        .expect("get app after cascade");
+    assert!(app_after_cascade.is_none());
 }

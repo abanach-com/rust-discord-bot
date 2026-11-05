@@ -420,6 +420,42 @@ pub fn build_router(state: WebState) -> Router {
             post(features::reconcile_guild_duty),
         )
         .route(
+            "/api/guilds/{guild_id}/recruitment/tracks",
+            get(features::list_recruitment_tracks).post(features::upsert_recruitment_track),
+        )
+        .route(
+            "/api/guilds/{guild_id}/recruitment/tracks/{track_id}",
+            delete(features::delete_recruitment_track),
+        )
+        .route(
+            "/api/guilds/{guild_id}/recruitment/tracks/{slug}/apply",
+            post(features::apply_recruitment_track),
+        )
+        .route(
+            "/api/guilds/{guild_id}/recruitment/applications",
+            get(features::list_recruitment_applications),
+        )
+        .route(
+            "/api/guilds/{guild_id}/recruitment/applications/{application_id}",
+            get(features::get_recruitment_application),
+        )
+        .route(
+            "/api/guilds/{guild_id}/recruitment/applications/{application_id}/review",
+            post(features::review_recruitment_application),
+        )
+        .route(
+            "/api/guilds/{guild_id}/recruitment/applications/{application_id}/transition",
+            post(features::transition_recruitment_application),
+        )
+        .route(
+            "/api/guilds/{guild_id}/recruitment/applications/{application_id}/withdraw",
+            post(features::withdraw_recruitment_application),
+        )
+        .route(
+            "/api/guilds/{guild_id}/recruitment/fulfillment/process",
+            post(features::process_role_fulfillments),
+        )
+        .route(
             "/api/guilds/{guild_id}/feeds",
             get(features::list_feeds).post(features::create_feed),
         )

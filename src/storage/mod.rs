@@ -23,6 +23,12 @@ pub use crate::duty::{
     RecurringSchedule, StaffAudience,
 };
 
+pub use crate::recruitment::{
+    CandidateApplicationView, RecruitmentApplication, RecruitmentQuestion, RecruitmentReview,
+    RecruitmentRoleFulfillment, RecruitmentTrack, RecruitmentTrackConfig, StaffApplicationView,
+    SubmittedAnswer, TransitionApplicationParams,
+};
+
 pub use progression::{
     CoinTransfer, CoinTransferOutcome, DailyClaimOutcome, MemberProgress, ProgressMetric,
     ReputationGrantOutcome, XpAward, level_for_xp, total_xp_for_level,
@@ -2608,6 +2614,180 @@ impl Storage {
         match self {
             Self::Memory(store) => store.upsert_duty_state(state),
             Self::Postgres(store) => store.upsert_duty_state(state).await,
+        }
+    }
+
+    pub async fn get_recruitment_track(
+        &self,
+        guild_id: &str,
+        track_id: Uuid,
+    ) -> anyhow::Result<Option<RecruitmentTrack>> {
+        match self {
+            Self::Memory(store) => store.get_recruitment_track(guild_id, track_id),
+            Self::Postgres(store) => store.get_recruitment_track(guild_id, track_id).await,
+        }
+    }
+
+    pub async fn get_recruitment_track_by_slug(
+        &self,
+        guild_id: &str,
+        slug: &str,
+    ) -> anyhow::Result<Option<RecruitmentTrack>> {
+        match self {
+            Self::Memory(store) => store.get_recruitment_track_by_slug(guild_id, slug),
+            Self::Postgres(store) => store.get_recruitment_track_by_slug(guild_id, slug).await,
+        }
+    }
+
+    pub async fn list_recruitment_tracks(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<RecruitmentTrack>> {
+        match self {
+            Self::Memory(store) => store.list_recruitment_tracks(guild_id),
+            Self::Postgres(store) => store.list_recruitment_tracks(guild_id).await,
+        }
+    }
+
+    pub async fn upsert_recruitment_track(
+        &self,
+        track: RecruitmentTrack,
+    ) -> anyhow::Result<RecruitmentTrack> {
+        match self {
+            Self::Memory(store) => store.upsert_recruitment_track(track),
+            Self::Postgres(store) => store.upsert_recruitment_track(track).await,
+        }
+    }
+
+    pub async fn delete_recruitment_track(
+        &self,
+        guild_id: &str,
+        track_id: Uuid,
+    ) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => store.delete_recruitment_track(guild_id, track_id),
+            Self::Postgres(store) => store.delete_recruitment_track(guild_id, track_id).await,
+        }
+    }
+
+    pub async fn get_recruitment_application(
+        &self,
+        guild_id: &str,
+        id: Uuid,
+    ) -> anyhow::Result<Option<RecruitmentApplication>> {
+        match self {
+            Self::Memory(store) => store.get_recruitment_application(guild_id, id),
+            Self::Postgres(store) => store.get_recruitment_application(guild_id, id).await,
+        }
+    }
+
+    pub async fn list_recruitment_applications(
+        &self,
+        guild_id: &str,
+        track_id: Option<Uuid>,
+        status: Option<&str>,
+        applicant_user_id: Option<&str>,
+    ) -> anyhow::Result<Vec<RecruitmentApplication>> {
+        match self {
+            Self::Memory(store) => {
+                store.list_recruitment_applications(guild_id, track_id, status, applicant_user_id)
+            }
+            Self::Postgres(store) => {
+                store
+                    .list_recruitment_applications(guild_id, track_id, status, applicant_user_id)
+                    .await
+            }
+        }
+    }
+
+    pub async fn create_recruitment_application(
+        &self,
+        app: RecruitmentApplication,
+    ) -> anyhow::Result<RecruitmentApplication> {
+        match self {
+            Self::Memory(store) => store.create_recruitment_application(app),
+            Self::Postgres(store) => store.create_recruitment_application(app).await,
+        }
+    }
+
+    pub async fn update_recruitment_application_transition(
+        &self,
+        params: TransitionApplicationParams<'_>,
+    ) -> anyhow::Result<RecruitmentApplication> {
+        match self {
+            Self::Memory(store) => store.update_recruitment_application_transition(params),
+            Self::Postgres(store) => {
+                store
+                    .update_recruitment_application_transition(params)
+                    .await
+            }
+        }
+    }
+
+    pub async fn count_active_user_applications(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        track_id: Uuid,
+    ) -> anyhow::Result<u32> {
+        match self {
+            Self::Memory(store) => {
+                store.count_active_user_applications(guild_id, user_id, track_id)
+            }
+            Self::Postgres(store) => {
+                store
+                    .count_active_user_applications(guild_id, user_id, track_id)
+                    .await
+            }
+        }
+    }
+
+    pub async fn list_recruitment_reviews(
+        &self,
+        application_id: Uuid,
+    ) -> anyhow::Result<Vec<RecruitmentReview>> {
+        match self {
+            Self::Memory(store) => store.list_recruitment_reviews(application_id),
+            Self::Postgres(store) => store.list_recruitment_reviews(application_id).await,
+        }
+    }
+
+    pub async fn upsert_recruitment_review(
+        &self,
+        review: RecruitmentReview,
+    ) -> anyhow::Result<RecruitmentReview> {
+        match self {
+            Self::Memory(store) => store.upsert_recruitment_review(review),
+            Self::Postgres(store) => store.upsert_recruitment_review(review).await,
+        }
+    }
+
+    pub async fn get_role_fulfillment(
+        &self,
+        application_id: Uuid,
+    ) -> anyhow::Result<Option<RecruitmentRoleFulfillment>> {
+        match self {
+            Self::Memory(store) => store.get_role_fulfillment(application_id),
+            Self::Postgres(store) => store.get_role_fulfillment(application_id).await,
+        }
+    }
+
+    pub async fn upsert_role_fulfillment(
+        &self,
+        fulfillment: RecruitmentRoleFulfillment,
+    ) -> anyhow::Result<RecruitmentRoleFulfillment> {
+        match self {
+            Self::Memory(store) => store.upsert_role_fulfillment(fulfillment),
+            Self::Postgres(store) => store.upsert_role_fulfillment(fulfillment).await,
+        }
+    }
+
+    pub async fn list_pending_role_fulfillments(
+        &self,
+    ) -> anyhow::Result<Vec<RecruitmentRoleFulfillment>> {
+        match self {
+            Self::Memory(store) => store.list_pending_role_fulfillments(),
+            Self::Postgres(store) => store.list_pending_role_fulfillments().await,
         }
     }
 
