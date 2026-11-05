@@ -3141,6 +3141,22 @@ pub async fn upsert_companion_mapping(
         return Err(ApiError::bad_request("No mappings provided"));
     }
 
+    if items_to_save.len() > MAX_COMPANION_MAPPINGS_PER_GUILD {
+        return Err(ApiError::bad_request(format!(
+            "Too many mapping items in one request (max {MAX_COMPANION_MAPPINGS_PER_GUILD})"
+        )));
+    }
+
+    let mut seen_batch_voice = HashSet::with_capacity(items_to_save.len());
+    for item in &items_to_save {
+        if !seen_batch_voice.insert(item.voice_channel_id.as_str()) {
+            return Err(ApiError::bad_request(format!(
+                "Duplicate voice_channel_id in batch: {}",
+                item.voice_channel_id
+            )));
+        }
+    }
+
     // Step 1: Preflight validation across the ENTIRE batch before ANY database mutations
     let mut final_voice_ids: HashSet<String> = old_mappings_map.keys().cloned().collect();
 
@@ -3183,6 +3199,7 @@ pub async fn upsert_companion_mapping(
             .parse::<u64>()
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
         let expected_gid = serenity::all::GuildId::new(g_num);
+        let mut channel_cache: HashMap<u64, serenity::all::GuildChannel> = HashMap::new();
 
         for item in &items_to_save {
             let v_num = item
@@ -3194,27 +3211,42 @@ pub async fn upsert_companion_mapping(
                 .parse::<u64>()
                 .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
-            let v_chan = match http.get_channel(serenity::all::ChannelId::new(v_num)).await {
-                Ok(serenity::all::Channel::Guild(c)) => c,
-                Ok(_) => {
-                    return Err(ApiError::bad_request(
-                        "Voice channel is not a guild channel",
-                    ));
-                }
-                Err(e) => {
-                    return Err(ApiError::bad_request(format!(
-                        "Cannot resolve voice channel: {e}"
-                    )));
-                }
+            let v_chan = if let Some(cached) = channel_cache.get(&v_num) {
+                cached.clone()
+            } else {
+                let chan = match http.get_channel(serenity::all::ChannelId::new(v_num)).await {
+                    Ok(serenity::all::Channel::Guild(c)) => c,
+                    Ok(_) => {
+                        return Err(ApiError::bad_request(
+                            "Voice channel is not a guild channel",
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(ApiError::bad_request(format!(
+                            "Cannot resolve voice channel: {e}"
+                        )));
+                    }
+                };
+                channel_cache.insert(v_num, chan.clone());
+                chan
             };
-            let t_chan = match http.get_channel(serenity::all::ChannelId::new(t_num)).await {
-                Ok(serenity::all::Channel::Guild(c)) => c,
-                Ok(_) => return Err(ApiError::bad_request("Text channel is not a guild channel")),
-                Err(e) => {
-                    return Err(ApiError::bad_request(format!(
-                        "Cannot resolve text channel: {e}"
-                    )));
-                }
+
+            let t_chan = if let Some(cached) = channel_cache.get(&t_num) {
+                cached.clone()
+            } else {
+                let chan = match http.get_channel(serenity::all::ChannelId::new(t_num)).await {
+                    Ok(serenity::all::Channel::Guild(c)) => c,
+                    Ok(_) => {
+                        return Err(ApiError::bad_request("Text channel is not a guild channel"));
+                    }
+                    Err(e) => {
+                        return Err(ApiError::bad_request(format!(
+                            "Cannot resolve text channel: {e}"
+                        )));
+                    }
+                };
+                channel_cache.insert(t_num, chan.clone());
+                chan
             };
 
             if v_chan.guild_id != expected_gid {

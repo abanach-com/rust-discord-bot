@@ -2144,11 +2144,23 @@ impl MemoryStore {
         items: &[CompanionMappingItem],
     ) -> anyhow::Result<Vec<CompanionChannelMapping>> {
         validate_snowflake("guild_id", guild_id)?;
+        if items.len() > MAX_COMPANION_MAPPINGS_PER_GUILD {
+            anyhow::bail!(
+                "Companion mapping limit reached (max {MAX_COMPANION_MAPPINGS_PER_GUILD} per request)"
+            );
+        }
+        let mut seen_batch_voice = HashSet::with_capacity(items.len());
         for item in items {
             validate_snowflake("voice_channel_id", &item.voice_channel_id)?;
             validate_snowflake("text_channel_id", &item.text_channel_id)?;
             if item.voice_channel_id == item.text_channel_id {
                 anyhow::bail!("Voice channel and text companion channel cannot be the same");
+            }
+            if !seen_batch_voice.insert(&item.voice_channel_id) {
+                anyhow::bail!(
+                    "Duplicate voice_channel_id in batch: {}",
+                    item.voice_channel_id
+                );
             }
         }
 

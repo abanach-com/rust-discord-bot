@@ -6878,5 +6878,50 @@ mod tests {
             store.list_companion_mappings(guild_id).await.unwrap().len(),
             50
         );
+
+        // 6. Batch with duplicate voice_channel_id must be rejected (Issue #215)
+        let dup_items = vec![
+            CompanionMappingItem {
+                voice_channel_id: "100000000000000077".to_string(),
+                text_channel_id: "200000000000000077".to_string(),
+                allow_send_messages: true,
+                allow_read_history: true,
+            },
+            CompanionMappingItem {
+                voice_channel_id: "100000000000000077".to_string(),
+                text_channel_id: "200000000000000078".to_string(),
+                allow_send_messages: true,
+                allow_read_history: true,
+            },
+        ];
+        let res_dup = store
+            .batch_upsert_companion_mappings(guild_id, &dup_items)
+            .await;
+        assert!(res_dup.is_err());
+        assert!(
+            res_dup
+                .unwrap_err()
+                .to_string()
+                .contains("Duplicate voice_channel_id")
+        );
+
+        // 7. Batch with >50 items all having same voice_channel_id must fail on length quota
+        let mut dup_51_items = Vec::new();
+        for i in 0..51 {
+            dup_51_items.push(CompanionMappingItem {
+                voice_channel_id: "100000000000000088".to_string(),
+                text_channel_id: format!("20000000000000{:04}", i),
+                allow_send_messages: true,
+                allow_read_history: true,
+            });
+        }
+        let res_dup_51 = store
+            .batch_upsert_companion_mappings(guild_id, &dup_51_items)
+            .await;
+        assert!(res_dup_51.is_err());
+        assert_eq!(
+            store.list_companion_mappings(guild_id).await.unwrap().len(),
+            50
+        );
     }
 }

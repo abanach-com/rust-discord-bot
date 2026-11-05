@@ -1128,6 +1128,69 @@ async fn test_voice_companion_channels_api() {
     let empty_json2: serde_json::Value = empty_check2.json().await.unwrap();
     assert_eq!(empty_json2["mappings"].as_array().unwrap().len(), 0);
 
+    // 4d. Reject batch with duplicate voice_channel_id in 2-element payload (Issue #215)
+    let dup_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/voice/companion/mappings"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "mappings": [
+                {
+                    "voice_channel_id": "888000000000000010",
+                    "text_channel_id": "999000000000000010"
+                },
+                {
+                    "voice_channel_id": "888000000000000010", // duplicate voice ID
+                    "text_channel_id": "999000000000000011"
+                }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dup_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let dup_json: serde_json::Value = dup_resp.json().await.unwrap();
+    assert!(
+        dup_json["error"]
+            .as_str()
+            .unwrap()
+            .contains("Duplicate voice_channel_id")
+    );
+
+    // 4e. Reject batch with >50 items sharing 1 unique voice ID (Issue #215)
+    let mut dup_51_payload = Vec::new();
+    for i in 1..=100 {
+        dup_51_payload.push(serde_json::json!({
+            "voice_channel_id": "888000000000000020",
+            "text_channel_id": format!("99900000000000{:04}", i),
+        }));
+    }
+    let dup_51_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/voice/companion/mappings"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({ "mappings": dup_51_payload }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dup_51_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Verify still 0 records inserted
+    let empty_check3 = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/voice/companion/mappings"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    let empty_json3: serde_json::Value = empty_check3.json().await.unwrap();
+    assert_eq!(empty_json3["mappings"].as_array().unwrap().len(), 0);
+
     // 5. Valid create mapping
     let create_resp = client
         .post(format!(
