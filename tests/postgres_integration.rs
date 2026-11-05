@@ -1904,4 +1904,94 @@ async fn test_postgres_integration_suite() {
         .await
         .expect("get app after cascade");
     assert!(app_after_cascade.is_none());
+
+    // Issue #164: Help Forum Lifecycle PostgreSQL Lifecycle
+    let hf_guild = "777666555444333222";
+    let hf_forum = "888777666555444333";
+    let hf_thread = "999888777666555444";
+    let hf_owner = "111222111222111222";
+    let hf_helper = "333444333444333444";
+
+    let hf_cfg = store
+        .upsert_help_forum_config(rusty_discord_bot::storage::HelpForumConfig {
+            guild_id: hf_guild.to_string(),
+            forum_channel_id: hf_forum.to_string(),
+            enabled: true,
+            idle_close_minutes: 120,
+            owner_can_close: true,
+            helper_role_ids: sqlx::types::Json(vec![hf_helper.to_string()]),
+            lock_on_close: true,
+            archive_on_close: true,
+            require_question_tag: false,
+            welcome_message: Some("Need help? Ask here.".to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        })
+        .await
+        .expect("upsert help forum config in pg");
+    assert_eq!(hf_cfg.idle_close_minutes, 120);
+
+    let hf_session = store
+        .create_help_forum_session(rusty_discord_bot::storage::HelpForumSession {
+            guild_id: hf_guild.to_string(),
+            forum_channel_id: hf_forum.to_string(),
+            thread_id: hf_thread.to_string(),
+            owner_user_id: hf_owner.to_string(),
+            status: "open".to_string(),
+            opened_at: Utc::now(),
+            last_activity_at: Utc::now(),
+            first_helper_response_at: None,
+            closed_at: None,
+            closing_reason: None,
+            generation: 1,
+        })
+        .await
+        .expect("create help forum session in pg");
+    assert_eq!(hf_session.status, "open");
+
+    // Record activity as helper
+    let updated_act = store
+        .record_help_forum_activity(hf_guild, hf_thread, "888123456789012345", true)
+        .await
+        .expect("record helper activity in pg");
+    assert!(updated_act.is_some());
+    let act_sess = updated_act.unwrap();
+    assert_eq!(act_sess.generation, 2);
+    assert!(act_sess.first_helper_response_at.is_some());
+
+    // Close session with stale generation check
+    let stale_close = store
+        .close_help_forum_session(hf_guild, hf_thread, "solved", Some("test"), Some(1))
+        .await
+        .expect("close with stale generation in pg");
+    assert!(!stale_close);
+
+    // Close session with matching generation
+    let match_close = store
+        .close_help_forum_session(
+            hf_guild,
+            hf_thread,
+            "solved",
+            Some("solved_by_user"),
+            Some(2),
+        )
+        .await
+        .expect("close with matching generation in pg");
+    assert!(match_close);
+
+    // Verify stats
+    let hf_stats = store
+        .get_help_forum_stats(hf_guild, hf_forum)
+        .await
+        .expect("get stats in pg");
+    assert_eq!(hf_stats.opened_count, 1);
+    assert_eq!(hf_stats.solved_count, 1);
+    assert_eq!(hf_stats.answered_count, 1);
+
+    // Cleanup
+    let del_cfg = store
+        .delete_help_forum_config(hf_guild, hf_forum)
+        .await
+        .expect("delete help forum config in pg");
+    assert!(del_cfg);
 }

@@ -1,6 +1,7 @@
 pub mod config;
 pub mod discord;
 pub mod duty;
+pub mod help_forum;
 pub mod integrations;
 pub mod lua;
 pub mod metrics;

@@ -144,6 +144,10 @@ pub struct MemoryStore {
     recruitment_role_fulfillments:
         Arc<DashMap<Uuid, crate::recruitment::RecruitmentRoleFulfillment>>,
 
+    help_forum_configs: Arc<DashMap<(String, String), crate::help_forum::HelpForumConfig>>,
+
+    help_forum_sessions: Arc<DashMap<(String, String), crate::help_forum::HelpForumSession>>,
+
     faqs: Arc<DashMap<Uuid, FaqEntry>>,
 
     integration_connections: Arc<DashMap<Uuid, IntegrationConnection>>,
@@ -464,6 +468,11 @@ impl MemoryStore {
         self.recruitment_reviews
             .retain(|_, r| !(r.guild_id == guild_id && r.reviewer_user_id == user_id));
         related_erased += before_rec_revs.saturating_sub(self.recruitment_reviews.len());
+
+        let before_forum_sessions = self.help_forum_sessions.len();
+        self.help_forum_sessions
+            .retain(|(g, _), s| !(g == guild_id && s.owner_user_id == user_id));
+        related_erased += before_forum_sessions.saturating_sub(self.help_forum_sessions.len());
 
         let retained_records = vec![
             RetainedRecordNotice {
@@ -4508,5 +4517,231 @@ impl MemoryStore {
             .map(|f| f.value().clone())
             .collect();
         Ok(list)
+    }
+
+    pub fn get_help_forum_config(
+        &self,
+        guild_id: &str,
+        forum_channel_id: &str,
+    ) -> anyhow::Result<Option<crate::help_forum::HelpForumConfig>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("forum_channel_id", forum_channel_id)?;
+        Ok(self
+            .help_forum_configs
+            .get(&(guild_id.to_string(), forum_channel_id.to_string()))
+            .map(|c| c.value().clone()))
+    }
+
+    pub fn list_help_forum_configs(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<crate::help_forum::HelpForumConfig>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let mut list: Vec<_> = self
+            .help_forum_configs
+            .iter()
+            .filter(|c| c.guild_id == guild_id)
+            .map(|c| c.value().clone())
+            .collect();
+        list.sort_by_key(|a| a.created_at);
+        Ok(list)
+    }
+
+    pub fn upsert_help_forum_config(
+        &self,
+        mut config: crate::help_forum::HelpForumConfig,
+    ) -> anyhow::Result<crate::help_forum::HelpForumConfig> {
+        crate::help_forum::validate_help_forum_config(&config)?;
+        config.updated_at = Utc::now();
+        let key = (config.guild_id.clone(), config.forum_channel_id.clone());
+        self.help_forum_configs.insert(key, config.clone());
+        Ok(config)
+    }
+
+    pub fn delete_help_forum_config(
+        &self,
+        guild_id: &str,
+        forum_channel_id: &str,
+    ) -> anyhow::Result<bool> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("forum_channel_id", forum_channel_id)?;
+        let key = (guild_id.to_string(), forum_channel_id.to_string());
+        Ok(self.help_forum_configs.remove(&key).is_some())
+    }
+
+    pub fn get_help_forum_session(
+        &self,
+        guild_id: &str,
+        thread_id: &str,
+    ) -> anyhow::Result<Option<crate::help_forum::HelpForumSession>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("thread_id", thread_id)?;
+        let key = (guild_id.to_string(), thread_id.to_string());
+        Ok(self
+            .help_forum_sessions
+            .get(&key)
+            .map(|s| s.value().clone()))
+    }
+
+    pub fn list_help_forum_sessions(
+        &self,
+        guild_id: &str,
+        forum_channel_id: Option<&str>,
+        status: Option<&str>,
+    ) -> anyhow::Result<Vec<crate::help_forum::HelpForumSession>> {
+        validate_snowflake("guild_id", guild_id)?;
+        if let Some(fid) = forum_channel_id {
+            validate_snowflake("forum_channel_id", fid)?;
+        }
+        let mut list: Vec<_> = self
+            .help_forum_sessions
+            .iter()
+            .filter(|s| {
+                s.guild_id == guild_id
+                    && forum_channel_id.is_none_or(|f| s.forum_channel_id == f)
+                    && status.is_none_or(|st| s.status == st)
+            })
+            .map(|s| s.value().clone())
+            .collect();
+        list.sort_by_key(|a| std::cmp::Reverse(a.opened_at));
+        Ok(list)
+    }
+
+    pub fn create_help_forum_session(
+        &self,
+        mut session: crate::help_forum::HelpForumSession,
+    ) -> anyhow::Result<crate::help_forum::HelpForumSession> {
+        validate_snowflake("guild_id", &session.guild_id)?;
+        validate_snowflake("forum_channel_id", &session.forum_channel_id)?;
+        validate_snowflake("thread_id", &session.thread_id)?;
+        validate_snowflake("owner_user_id", &session.owner_user_id)?;
+
+        let now = Utc::now();
+        if session.opened_at == DateTime::<Utc>::UNIX_EPOCH {
+            session.opened_at = now;
+        }
+        if session.last_activity_at == DateTime::<Utc>::UNIX_EPOCH {
+            session.last_activity_at = now;
+        }
+        if session.generation == 0 {
+            session.generation = 1;
+        }
+        if session.status.is_empty() {
+            session.status = "open".to_string();
+        }
+        let key = (session.guild_id.clone(), session.thread_id.clone());
+        self.help_forum_sessions.insert(key, session.clone());
+        Ok(session)
+    }
+
+    pub fn record_help_forum_activity(
+        &self,
+        guild_id: &str,
+        thread_id: &str,
+        author_user_id: &str,
+        is_helper: bool,
+    ) -> anyhow::Result<Option<crate::help_forum::HelpForumSession>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("thread_id", thread_id)?;
+        validate_snowflake("author_user_id", author_user_id)?;
+
+        let key = (guild_id.to_string(), thread_id.to_string());
+        let mut entry = match self.help_forum_sessions.get_mut(&key) {
+            Some(e) => e,
+            None => return Ok(None),
+        };
+
+        if entry.status != "open" {
+            return Ok(Some(entry.value().clone()));
+        }
+
+        let now = Utc::now();
+        entry.generation += 1;
+        entry.last_activity_at = now;
+
+        if is_helper
+            && author_user_id != entry.owner_user_id
+            && entry.first_helper_response_at.is_none()
+        {
+            entry.first_helper_response_at = Some(now);
+        }
+
+        Ok(Some(entry.value().clone()))
+    }
+
+    pub fn close_help_forum_session(
+        &self,
+        guild_id: &str,
+        thread_id: &str,
+        new_status: &str,
+        reason: Option<&str>,
+        expected_generation: Option<i64>,
+    ) -> anyhow::Result<bool> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("thread_id", thread_id)?;
+
+        let key = (guild_id.to_string(), thread_id.to_string());
+        let mut entry = match self.help_forum_sessions.get_mut(&key) {
+            Some(e) => e,
+            None => return Ok(false),
+        };
+
+        if entry.status != "open" {
+            return Ok(false);
+        }
+
+        if expected_generation.is_some_and(|exp_gen| entry.generation != exp_gen) {
+            return Ok(false);
+        }
+
+        entry.status = new_status.to_string();
+        entry.closed_at = Some(Utc::now());
+        entry.closing_reason = reason.map(|s| s.to_string());
+        Ok(true)
+    }
+
+    pub fn mark_help_forum_owner_left(
+        &self,
+        guild_id: &str,
+        owner_user_id: &str,
+    ) -> anyhow::Result<usize> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("owner_user_id", owner_user_id)?;
+
+        let mut changed = 0;
+        let now = Utc::now();
+        for mut item in self.help_forum_sessions.iter_mut() {
+            if item.guild_id == guild_id
+                && item.owner_user_id == owner_user_id
+                && item.status == "open"
+            {
+                item.status = "owner_left".to_string();
+                item.closed_at = Some(now);
+                item.closing_reason = Some("owner_left".to_string());
+                changed += 1;
+            }
+        }
+        Ok(changed)
+    }
+
+    pub fn get_help_forum_stats(
+        &self,
+        guild_id: &str,
+        forum_channel_id: &str,
+    ) -> anyhow::Result<crate::help_forum::HelpForumStats> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("forum_channel_id", forum_channel_id)?;
+
+        let sessions: Vec<_> = self
+            .help_forum_sessions
+            .iter()
+            .filter(|s| s.guild_id == guild_id && s.forum_channel_id == forum_channel_id)
+            .map(|s| s.value().clone())
+            .collect();
+
+        Ok(crate::help_forum::calculate_stats_from_sessions(
+            forum_channel_id,
+            &sessions,
+        ))
     }
 }

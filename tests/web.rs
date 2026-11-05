@@ -2140,3 +2140,297 @@ async fn test_staff_recruitment_pipeline_full_lifecycle() {
         .unwrap();
     assert_eq!(del_track_res.status(), reqwest::StatusCode::OK);
 }
+
+#[tokio::test]
+async fn test_help_forum_lifecycle_and_api() {
+    let (state, _perms) = test_web_state().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let app = build_router(state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve axum");
+    });
+
+    let guild_id = "888000000000000001";
+    let admin_user_id = "999000000000000001";
+    let author_user_id = "111000000000000001";
+    let stranger_user_id = "222000000000000001";
+    let helper_role_id = "333000000000000001";
+    let forum_id = "444000000000000001";
+    let thread_id = "555000000000000001";
+    let csrf_token = "valid_csrf_token_help_forum";
+
+    // Setup Admin session
+    let admin_session_id = "admin_help_session";
+    state
+        .app
+        .sessions
+        .save_session(
+            admin_session_id,
+            DashboardUser {
+                id: admin_user_id.to_owned(),
+                username: "Admin".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_owned(),
+                name: "Test Guild".to_owned(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_owned(),
+            }],
+            csrf_token.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Setup Author session
+    let author_session_id = "author_help_session";
+    state
+        .app
+        .sessions
+        .save_session(
+            author_session_id,
+            DashboardUser {
+                id: author_user_id.to_owned(),
+                username: "Author".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_owned(),
+                name: "Test Guild".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_owned(),
+            }],
+            csrf_token.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Setup Stranger session
+    let stranger_session_id = "stranger_help_session";
+    state
+        .app
+        .sessions
+        .save_session(
+            stranger_session_id,
+            DashboardUser {
+                id: stranger_user_id.to_owned(),
+                username: "Stranger".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_owned(),
+                name: "Test Guild".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_owned(),
+            }],
+            csrf_token.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let admin_cookie = format!("rusty_discord_bot_session={admin_session_id}");
+    let author_cookie = format!("rusty_discord_bot_session={author_session_id}");
+    let stranger_cookie = format!("rusty_discord_bot_session={stranger_session_id}");
+
+    // 1. List help forums initially empty
+    let list_res = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/help-forums"))
+        .header(COOKIE, &admin_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_res.status(), reqwest::StatusCode::OK);
+    let list_json: serde_json::Value = list_res.json().await.unwrap();
+    assert_eq!(list_json["configs"].as_array().unwrap().len(), 0);
+
+    // 2. Admin creates Help Forum config
+    let create_res = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/help-forums"))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "forum_channel_id": forum_id,
+            "enabled": true,
+            "idle_close_minutes": 60,
+            "owner_can_close": true,
+            "helper_role_ids": [helper_role_id],
+            "lock_on_close": true,
+            "archive_on_close": true,
+            "welcome_message": "Welcome to the help forum! Please be descriptive."
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_res.status(), reqwest::StatusCode::OK);
+
+    // 3. Create active session in storage
+    let session = rusty_discord_bot::storage::HelpForumSession {
+        guild_id: guild_id.to_string(),
+        forum_channel_id: forum_id.to_string(),
+        thread_id: thread_id.to_string(),
+        owner_user_id: author_user_id.to_string(),
+        status: "open".to_string(),
+        opened_at: Utc::now() - Duration::minutes(10),
+        last_activity_at: Utc::now() - Duration::minutes(10),
+        first_helper_response_at: None,
+        closed_at: None,
+        closing_reason: None,
+        generation: 1,
+    };
+    state
+        .app
+        .storage
+        .create_help_forum_session(session)
+        .await
+        .unwrap();
+
+    // 4. Initial stats: 1 opened, 1 open_active, 1 unanswered
+    let stats_res = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/help-forums/{forum_id}/stats"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stats_res.status(), reqwest::StatusCode::OK);
+    let stats_json: serde_json::Value = stats_res.json().await.unwrap();
+    assert_eq!(stats_json["stats"]["opened_count"], 1);
+    assert_eq!(stats_json["stats"]["open_active_count"], 1);
+    assert_eq!(stats_json["stats"]["unanswered_count"], 1);
+
+    // 5. Simulate helper activity: record activity as helper
+    state
+        .app
+        .storage
+        .record_help_forum_activity(guild_id, thread_id, "888123456789012345", true)
+        .await
+        .unwrap();
+
+    // 6. Stranger tries to close the post -> 403 Forbidden
+    let stranger_close = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/help-forums/{thread_id}/close"
+        ))
+        .header(COOKIE, &stranger_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "status": "solved",
+            "reason": "Closed by stranger"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stranger_close.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 7. Author closes their own post -> 200 OK
+    let author_close = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/help-forums/{thread_id}/close"
+        ))
+        .header(COOKIE, &author_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "status": "solved",
+            "reason": "Issue solved thanks!"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(author_close.status(), reqwest::StatusCode::OK);
+
+    // 8. Stats updated: 1 opened, 0 active, 1 solved, 1 answered
+    let stats_after = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/help-forums/{forum_id}/stats"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stats_after.status(), reqwest::StatusCode::OK);
+    let stats_after_json: serde_json::Value = stats_after.json().await.unwrap();
+    assert_eq!(stats_after_json["stats"]["solved_count"], 1);
+    assert_eq!(stats_after_json["stats"]["answered_count"], 1);
+    assert_eq!(stats_after_json["stats"]["open_active_count"], 0);
+
+    // 9. Inactivity auto-close test via reconcile endpoint
+    let idle_thread_id = "666000000000000001";
+    let idle_session = rusty_discord_bot::storage::HelpForumSession {
+        guild_id: guild_id.to_string(),
+        forum_channel_id: forum_id.to_string(),
+        thread_id: idle_thread_id.to_string(),
+        owner_user_id: author_user_id.to_string(),
+        status: "open".to_string(),
+        opened_at: Utc::now() - Duration::hours(5),
+        last_activity_at: Utc::now() - Duration::hours(2), // 2 hours idle, threshold is 60 mins
+        first_helper_response_at: None,
+        closed_at: None,
+        closing_reason: None,
+        generation: 1,
+    };
+    state
+        .app
+        .storage
+        .create_help_forum_session(idle_session)
+        .await
+        .unwrap();
+
+    let rec_res = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/help-forums/reconcile-idle"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rec_res.status(), reqwest::StatusCode::OK);
+    let rec_json: serde_json::Value = rec_res.json().await.unwrap();
+    assert_eq!(rec_json["reconciled"], true);
+    assert_eq!(rec_json["closed_count"], 1);
+
+    // Verify session status is now 'inactive'
+    let closed_session = state
+        .app
+        .storage
+        .get_help_forum_session(guild_id, idle_thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(closed_session.status, "inactive");
+
+    // 10. Delete help forum config
+    let del_res = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/help-forums/{forum_id}"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del_res.status(), reqwest::StatusCode::OK);
+}

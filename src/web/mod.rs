@@ -456,6 +456,30 @@ pub fn build_router(state: WebState) -> Router {
             post(features::process_role_fulfillments),
         )
         .route(
+            "/api/guilds/{guild_id}/help-forums",
+            get(features::list_help_forums).post(features::upsert_help_forum),
+        )
+        .route(
+            "/api/guilds/{guild_id}/help-forums/{forum_channel_id}",
+            delete(features::delete_help_forum),
+        )
+        .route(
+            "/api/guilds/{guild_id}/help-forums/{forum_channel_id}/sessions",
+            get(features::list_help_forum_sessions),
+        )
+        .route(
+            "/api/guilds/{guild_id}/help-forums/{forum_channel_id}/stats",
+            get(features::get_help_forum_stats),
+        )
+        .route(
+            "/api/guilds/{guild_id}/help-forums/{thread_id}/close",
+            post(features::close_help_forum_session_endpoint),
+        )
+        .route(
+            "/api/guilds/{guild_id}/help-forums/reconcile-idle",
+            post(features::reconcile_idle_help_forums_endpoint),
+        )
+        .route(
             "/api/guilds/{guild_id}/feeds",
             get(features::list_feeds).post(features::create_feed),
         )

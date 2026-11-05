@@ -8,9 +8,9 @@ use serde_json::{Map, Value, json};
 
 use serenity::{
     all::{
-        ChannelId, CommandDataOption, CommandDataOptionValue, CommandInteraction, GuildId,
-        Interaction, Member, Message, MessageId, MessageUpdateEvent, Ready, User, UserId,
-        VoiceState,
+        ChannelId, CommandDataOption, CommandDataOptionValue, CommandInteraction, GuildChannel,
+        GuildId, Interaction, Member, Message, MessageId, MessageUpdateEvent, PartialGuildChannel,
+        Permissions, Ready, User, UserId, VoiceState,
     },
     async_trait,
     builder::{CreateAllowedMentions, CreateInteractionResponse, CreateInteractionResponseMessage},
@@ -288,6 +288,44 @@ impl EventHandler for Handler {
             Some(message.author.id),
         )
         .await;
+
+        let guild_id_str = guild_id.get().to_string();
+        let channel_id_str = message.channel_id.get().to_string();
+        let author_id_str = message.author.id.get().to_string();
+        let member_roles: Vec<String> = message
+            .member
+            .as_ref()
+            .map(|m| m.roles.iter().map(|r| r.to_string()).collect())
+            .unwrap_or_default();
+
+        let storage = self.state.storage.clone();
+        tokio::spawn(async move {
+            if let Ok(Some(session)) = storage
+                .get_help_forum_session(&guild_id_str, &channel_id_str)
+                .await
+                && session.status == "open"
+            {
+                let is_helper = if let Ok(Some(cfg)) = storage
+                    .get_help_forum_config(&guild_id_str, &session.forum_channel_id)
+                    .await
+                {
+                    cfg.helper_role_ids
+                        .0
+                        .iter()
+                        .any(|r| member_roles.iter().any(|mr| mr == r))
+                } else {
+                    false
+                };
+                let _ = storage
+                    .record_help_forum_activity(
+                        &guild_id_str,
+                        &channel_id_str,
+                        &author_id_str,
+                        is_helper,
+                    )
+                    .await;
+            }
+        });
     }
 
     async fn message_update(
@@ -707,6 +745,12 @@ impl EventHandler for Handler {
             );
         }
 
+        let _ = self
+            .state
+            .storage
+            .mark_help_forum_owner_left(&guild_str, &user_str)
+            .await;
+
         let event = LuaEventContext {
             name: "guild_member_remove".to_owned(),
 
@@ -843,6 +887,71 @@ impl EventHandler for Handler {
                 }
             }
         }
+    }
+
+    async fn thread_create(&self, ctx: Context, thread: GuildChannel) {
+        let Some(parent_id) = thread.parent_id else {
+            return;
+        };
+        let guild_id_str = thread.guild_id.get().to_string();
+        let forum_id_str = parent_id.get().to_string();
+
+        let storage = self.state.storage.clone();
+        let http = ctx.http.clone();
+        tokio::spawn(async move {
+            if let Ok(Some(cfg)) = storage
+                .get_help_forum_config(&guild_id_str, &forum_id_str)
+                .await
+                && cfg.enabled
+            {
+                let owner_id_str = thread
+                    .owner_id
+                    .map(|o| o.get().to_string())
+                    .unwrap_or_default();
+                let thread_id_str = thread.id.get().to_string();
+
+                let session = crate::help_forum::HelpForumSession {
+                    guild_id: guild_id_str,
+                    forum_channel_id: forum_id_str,
+                    thread_id: thread_id_str,
+                    owner_user_id: owner_id_str,
+                    status: "open".to_string(),
+                    opened_at: chrono::Utc::now(),
+                    last_activity_at: chrono::Utc::now(),
+                    first_helper_response_at: None,
+                    closed_at: None,
+                    closing_reason: None,
+                    generation: 1,
+                };
+                let _ = storage.create_help_forum_session(session).await;
+
+                if let Some(welcome) = &cfg.welcome_message {
+                    let _ = thread.id.say(&http, welcome).await;
+                }
+            }
+        });
+    }
+
+    async fn thread_delete(
+        &self,
+        _ctx: Context,
+        thread: PartialGuildChannel,
+        _full: Option<GuildChannel>,
+    ) {
+        let guild_id_str = thread.guild_id.get().to_string();
+        let thread_id_str = thread.id.get().to_string();
+        let storage = self.state.storage.clone();
+        tokio::spawn(async move {
+            let _ = storage
+                .close_help_forum_session(
+                    &guild_id_str,
+                    &thread_id_str,
+                    "deleted",
+                    Some("thread_deleted_by_discord"),
+                    None,
+                )
+                .await;
+        });
     }
 }
 
@@ -1001,6 +1110,10 @@ async fn execute_command_inner(
 
     if command.data.name == "duty" {
         return handle_duty_builtin_command(ctx, state, command, deferred, responded).await;
+    }
+
+    if command.data.name == "help" {
+        return handle_help_builtin_command(ctx, state, command, deferred, responded).await;
     }
 
     let Some(module_id) = state.scripts.module_for_command(&command.data.name).await else {
@@ -1677,6 +1790,150 @@ fn parse_simple_duration_minutes(val: &str) -> u64 {
     } else {
         val.parse::<u64>().unwrap_or(120)
     }
+}
+
+async fn handle_help_builtin_command(
+    ctx: &Context,
+    state: &AppState,
+    command: &CommandInteraction,
+    deferred: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    responded: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> anyhow::Result<()> {
+    let Some(guild_id) = command.guild_id else {
+        respond_or_edit(
+            ctx,
+            command,
+            deferred,
+            responded,
+            "⚠️ The `/help` command can only be used within a server.",
+        )
+        .await?;
+        return Ok(());
+    };
+
+    let guild_id_str = guild_id.to_string();
+    let thread_id_str = command.channel_id.to_string();
+
+    let session = state
+        .storage
+        .get_help_forum_session(&guild_id_str, &thread_id_str)
+        .await?;
+
+    let Some(session) = session else {
+        respond_or_edit(
+            ctx,
+            command,
+            deferred,
+            responded,
+            "⚠️ This command can only be used inside an active Help Forum post.",
+        )
+        .await?;
+        return Ok(());
+    };
+
+    if session.status != "open" {
+        respond_or_edit(
+            ctx,
+            command,
+            deferred,
+            responded,
+            &format!("ℹ️ This help post is already closed ({})", session.status),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let config = state
+        .storage
+        .get_help_forum_config(&guild_id_str, &session.forum_channel_id)
+        .await?
+        .unwrap_or_default();
+
+    let user_id_str = command.user.id.to_string();
+    let member_roles: Vec<String> = command
+        .member
+        .as_ref()
+        .map(|m| m.roles.iter().map(|r| r.to_string()).collect())
+        .unwrap_or_default();
+
+    let is_admin = command
+        .member
+        .as_ref()
+        .and_then(|m| m.permissions)
+        .map(|p| p.contains(Permissions::ADMINISTRATOR))
+        .unwrap_or(false);
+
+    if !crate::help_forum::can_close_session(
+        &session,
+        &config,
+        &user_id_str,
+        &member_roles,
+        is_admin,
+    ) {
+        respond_or_edit(
+            ctx,
+            command,
+            deferred,
+            responded,
+            "⛔ You do not have permission to close this help forum post. Only the post author or helpers may mark it solved.",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let closed = state
+        .storage
+        .close_help_forum_session(
+            &guild_id_str,
+            &thread_id_str,
+            "solved",
+            Some("marked_solved_by_user"),
+            None,
+        )
+        .await?;
+
+    if closed {
+        if !state.config.discord_token.starts_with("dummy")
+            && state.config.discord_token != "mock"
+            && state.config.discord_token != "offline"
+        {
+            let mut map = serde_json::Map::new();
+            if config.archive_on_close {
+                map.insert("archived".to_string(), serde_json::Value::Bool(true));
+            }
+            if config.lock_on_close {
+                map.insert("locked".to_string(), serde_json::Value::Bool(true));
+            }
+            let _ = ctx
+                .http
+                .edit_channel(
+                    command.channel_id,
+                    &serde_json::Value::Object(map),
+                    Some("Help forum marked as solved"),
+                )
+                .await;
+        }
+
+        respond_or_edit(
+            ctx,
+            command,
+            deferred,
+            responded,
+            "✅ This help forum post has been marked as solved! Thank you.",
+        )
+        .await?;
+    } else {
+        respond_or_edit(
+            ctx,
+            command,
+            deferred,
+            responded,
+            "⚠️ Unable to close the help post; it may have already been closed.",
+        )
+        .await?;
+    }
+
+    Ok(())
 }
 
 async fn run_event(

@@ -12,12 +12,13 @@ use super::{
     CompanionChannelLease, CompanionChannelMapping, CountingGame, CustomAutomation,
     DailyClaimOutcome, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink,
     GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway, GuildModuleSettings,
-    IntegrationConnection, IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking,
-    KickStreamSubscription, LinkedAccount, McpToolAuthorization, MemberIdentityRecord,
-    MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
-    ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
-    ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
-    ProgressionSeason, RecordCompanionLeaseParams, RecruitmentApplication, RecruitmentReview,
+    HelpForumConfig, HelpForumSession, HelpForumStats, IntegrationConnection,
+    IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking, KickStreamSubscription,
+    LinkedAccount, McpToolAuthorization, MemberIdentityRecord, MemberProgress, MemberSearchFilter,
+    MemberSearchRow, MemberSnapshot, ModerationAppeal, ModerationExecutionIntent,
+    ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState, ModuleDraftConfig,
+    PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric, ProgressionSeason,
+    RecordCompanionLeaseParams, RecruitmentApplication, RecruitmentReview,
     RecruitmentRoleFulfillment, RecruitmentTrack, RedditSubscription, ReputationGrantOutcome,
     RetainedRecordNotice, ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry,
     SteamLfgPost, StickyMessage, StoreItem, StorePurchase, TelegramBridge, TelegramMessageMapping,
@@ -465,6 +466,17 @@ impl PostgresStore {
         .map(|r| r.rows_affected())
         .unwrap_or(0);
         related_erased += deleted_rec_revs as usize;
+
+        let deleted_help_sessions = sqlx::query(
+            "DELETE FROM help_forum_sessions WHERE guild_id = $1 AND owner_user_id = $2",
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map(|r| r.rows_affected())
+        .unwrap_or(0);
+        related_erased += deleted_help_sessions as usize;
 
         tx.commit().await?;
 
@@ -7755,6 +7767,340 @@ impl PostgresStore {
         .await?;
 
         Ok(rows)
+    }
+
+    pub async fn get_help_forum_config(
+        &self,
+        guild_id: &str,
+        forum_channel_id: &str,
+    ) -> anyhow::Result<Option<HelpForumConfig>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("forum_channel_id", forum_channel_id)?;
+
+        let row = sqlx::query_as::<_, HelpForumConfig>(
+            r#"
+            SELECT guild_id, forum_channel_id, enabled, idle_close_minutes, owner_can_close,
+                   helper_role_ids, lock_on_close, archive_on_close, require_question_tag,
+                   welcome_message, created_at, updated_at
+            FROM help_forum_configs
+            WHERE guild_id = $1 AND forum_channel_id = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(forum_channel_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    pub async fn list_help_forum_configs(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<HelpForumConfig>> {
+        validate_snowflake("guild_id", guild_id)?;
+
+        let rows = sqlx::query_as::<_, HelpForumConfig>(
+            r#"
+            SELECT guild_id, forum_channel_id, enabled, idle_close_minutes, owner_can_close,
+                   helper_role_ids, lock_on_close, archive_on_close, require_question_tag,
+                   welcome_message, created_at, updated_at
+            FROM help_forum_configs
+            WHERE guild_id = $1
+            ORDER BY created_at ASC
+            "#,
+        )
+        .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn upsert_help_forum_config(
+        &self,
+        config: HelpForumConfig,
+    ) -> anyhow::Result<HelpForumConfig> {
+        crate::help_forum::validate_help_forum_config(&config)?;
+
+        let saved = sqlx::query_as::<_, HelpForumConfig>(
+            r#"
+            INSERT INTO help_forum_configs (
+                guild_id, forum_channel_id, enabled, idle_close_minutes, owner_can_close,
+                helper_role_ids, lock_on_close, archive_on_close, require_question_tag,
+                welcome_message, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+            ON CONFLICT (guild_id, forum_channel_id) DO UPDATE SET
+                enabled = EXCLUDED.enabled,
+                idle_close_minutes = EXCLUDED.idle_close_minutes,
+                owner_can_close = EXCLUDED.owner_can_close,
+                helper_role_ids = EXCLUDED.helper_role_ids,
+                lock_on_close = EXCLUDED.lock_on_close,
+                archive_on_close = EXCLUDED.archive_on_close,
+                require_question_tag = EXCLUDED.require_question_tag,
+                welcome_message = EXCLUDED.welcome_message,
+                updated_at = NOW()
+            RETURNING guild_id, forum_channel_id, enabled, idle_close_minutes, owner_can_close,
+                      helper_role_ids, lock_on_close, archive_on_close, require_question_tag,
+                      welcome_message, created_at, updated_at
+            "#,
+        )
+        .bind(&config.guild_id)
+        .bind(&config.forum_channel_id)
+        .bind(config.enabled)
+        .bind(config.idle_close_minutes)
+        .bind(config.owner_can_close)
+        .bind(&config.helper_role_ids)
+        .bind(config.lock_on_close)
+        .bind(config.archive_on_close)
+        .bind(config.require_question_tag)
+        .bind(&config.welcome_message)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(saved)
+    }
+
+    pub async fn delete_help_forum_config(
+        &self,
+        guild_id: &str,
+        forum_channel_id: &str,
+    ) -> anyhow::Result<bool> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("forum_channel_id", forum_channel_id)?;
+
+        let res = sqlx::query(
+            "DELETE FROM help_forum_configs WHERE guild_id = $1 AND forum_channel_id = $2",
+        )
+        .bind(guild_id)
+        .bind(forum_channel_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn get_help_forum_session(
+        &self,
+        guild_id: &str,
+        thread_id: &str,
+    ) -> anyhow::Result<Option<HelpForumSession>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("thread_id", thread_id)?;
+
+        let row = sqlx::query_as::<_, HelpForumSession>(
+            r#"
+            SELECT guild_id, forum_channel_id, thread_id, owner_user_id, status, opened_at,
+                   last_activity_at, first_helper_response_at, closed_at, closing_reason, generation
+            FROM help_forum_sessions
+            WHERE guild_id = $1 AND thread_id = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(thread_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    pub async fn list_help_forum_sessions(
+        &self,
+        guild_id: &str,
+        forum_channel_id: Option<&str>,
+        status: Option<&str>,
+    ) -> anyhow::Result<Vec<HelpForumSession>> {
+        validate_snowflake("guild_id", guild_id)?;
+        if let Some(fid) = forum_channel_id {
+            validate_snowflake("forum_channel_id", fid)?;
+        }
+
+        let rows = sqlx::query_as::<_, HelpForumSession>(
+            r#"
+            SELECT guild_id, forum_channel_id, thread_id, owner_user_id, status, opened_at,
+                   last_activity_at, first_helper_response_at, closed_at, closing_reason, generation
+            FROM help_forum_sessions
+            WHERE guild_id = $1
+              AND ($2::text IS NULL OR forum_channel_id = $2)
+              AND ($3::text IS NULL OR status = $3)
+            ORDER BY opened_at DESC
+            "#,
+        )
+        .bind(guild_id)
+        .bind(forum_channel_id)
+        .bind(status)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn create_help_forum_session(
+        &self,
+        session: HelpForumSession,
+    ) -> anyhow::Result<HelpForumSession> {
+        validate_snowflake("guild_id", &session.guild_id)?;
+        validate_snowflake("forum_channel_id", &session.forum_channel_id)?;
+        validate_snowflake("thread_id", &session.thread_id)?;
+        validate_snowflake("owner_user_id", &session.owner_user_id)?;
+
+        let status = if session.status.is_empty() {
+            "open"
+        } else {
+            &session.status
+        };
+        let generation = if session.generation == 0 {
+            1
+        } else {
+            session.generation
+        };
+
+        let saved = sqlx::query_as::<_, HelpForumSession>(
+            r#"
+            INSERT INTO help_forum_sessions (
+                guild_id, forum_channel_id, thread_id, owner_user_id, status, opened_at,
+                last_activity_at, first_helper_response_at, closed_at, closing_reason, generation
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            RETURNING guild_id, forum_channel_id, thread_id, owner_user_id, status, opened_at,
+                      last_activity_at, first_helper_response_at, closed_at, closing_reason, generation
+            "#,
+        )
+        .bind(&session.guild_id)
+        .bind(&session.forum_channel_id)
+        .bind(&session.thread_id)
+        .bind(&session.owner_user_id)
+        .bind(status)
+        .bind(session.opened_at)
+        .bind(session.last_activity_at)
+        .bind(session.first_helper_response_at)
+        .bind(session.closed_at)
+        .bind(&session.closing_reason)
+        .bind(generation)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(saved)
+    }
+
+    pub async fn record_help_forum_activity(
+        &self,
+        guild_id: &str,
+        thread_id: &str,
+        author_user_id: &str,
+        is_helper: bool,
+    ) -> anyhow::Result<Option<HelpForumSession>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("thread_id", thread_id)?;
+        validate_snowflake("author_user_id", author_user_id)?;
+
+        let updated = sqlx::query_as::<_, HelpForumSession>(
+            r#"
+            UPDATE help_forum_sessions
+            SET generation = generation + 1,
+                last_activity_at = NOW(),
+                first_helper_response_at = CASE
+                    WHEN $3 = true AND $4 != owner_user_id AND first_helper_response_at IS NULL THEN NOW()
+                    ELSE first_helper_response_at
+                END
+            WHERE guild_id = $1 AND thread_id = $2 AND status = 'open'
+            RETURNING guild_id, forum_channel_id, thread_id, owner_user_id, status, opened_at,
+                      last_activity_at, first_helper_response_at, closed_at, closing_reason, generation
+            "#,
+        )
+        .bind(guild_id)
+        .bind(thread_id)
+        .bind(is_helper)
+        .bind(author_user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(updated)
+    }
+
+    pub async fn close_help_forum_session(
+        &self,
+        guild_id: &str,
+        thread_id: &str,
+        new_status: &str,
+        reason: Option<&str>,
+        expected_generation: Option<i64>,
+    ) -> anyhow::Result<bool> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("thread_id", thread_id)?;
+
+        let res = sqlx::query(
+            r#"
+            UPDATE help_forum_sessions
+            SET status = $3,
+                closed_at = NOW(),
+                closing_reason = $4
+            WHERE guild_id = $1 AND thread_id = $2 AND status = 'open'
+              AND ($5::bigint IS NULL OR generation = $5)
+            "#,
+        )
+        .bind(guild_id)
+        .bind(thread_id)
+        .bind(new_status)
+        .bind(reason)
+        .bind(expected_generation)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn mark_help_forum_owner_left(
+        &self,
+        guild_id: &str,
+        owner_user_id: &str,
+    ) -> anyhow::Result<usize> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("owner_user_id", owner_user_id)?;
+
+        let res = sqlx::query(
+            r#"
+            UPDATE help_forum_sessions
+            SET status = 'owner_left',
+                closed_at = NOW(),
+                closing_reason = 'owner_left'
+            WHERE guild_id = $1 AND owner_user_id = $2 AND status = 'open'
+            "#,
+        )
+        .bind(guild_id)
+        .bind(owner_user_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(res.rows_affected() as usize)
+    }
+
+    pub async fn get_help_forum_stats(
+        &self,
+        guild_id: &str,
+        forum_channel_id: &str,
+    ) -> anyhow::Result<HelpForumStats> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("forum_channel_id", forum_channel_id)?;
+
+        let sessions = sqlx::query_as::<_, HelpForumSession>(
+            r#"
+            SELECT guild_id, forum_channel_id, thread_id, owner_user_id, status, opened_at,
+                   last_activity_at, first_helper_response_at, closed_at, closing_reason, generation
+            FROM help_forum_sessions
+            WHERE guild_id = $1 AND forum_channel_id = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(forum_channel_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(crate::help_forum::calculate_stats_from_sessions(
+            forum_channel_id,
+            &sessions,
+        ))
     }
 }
 

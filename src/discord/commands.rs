@@ -31,9 +31,9 @@ pub async fn register(ctx: &Context, state: &AppState) -> Result<usize> {
 
     if definitions
         .iter()
-        .any(|d| d.name == "policy" || d.name == "duty")
+        .any(|d| d.name == "policy" || d.name == "duty" || d.name == "help")
     {
-        anyhow::bail!("Lua script cannot define reserved host command 'policy' or 'duty'");
+        anyhow::bail!("Lua script cannot define reserved host command 'policy', 'duty', or 'help'");
     }
 
     let mut commands = definitions
@@ -43,6 +43,7 @@ pub async fn register(ctx: &Context, state: &AppState) -> Result<usize> {
 
     commands.push(build_policy_command(scope));
     commands.push(build_duty_command(scope));
+    commands.push(build_help_command(scope));
     let count = commands.len();
 
     if let Some(guild_id) = state.config.discord_dev_guild_id {
@@ -168,6 +169,24 @@ pub fn build_duty_command(scope: RegistrationScope) -> CreateCommand {
                 "Clear recurring schedule",
             )),
         );
+
+    if scope == RegistrationScope::Global {
+        command = command
+            .integration_types(vec![InstallationContext::Guild])
+            .contexts(vec![InteractionContext::Guild]);
+    }
+
+    command
+}
+
+pub fn build_help_command(scope: RegistrationScope) -> CreateCommand {
+    let mut command = CreateCommand::new("help")
+        .description("Manage help forum posts and lifecycle")
+        .add_option(CreateCommandOption::new(
+            CommandOptionType::SubCommand,
+            "solved",
+            "Mark this help forum post as resolved and close it",
+        ));
 
     if scope == RegistrationScope::Global {
         command = command
@@ -368,7 +387,10 @@ fn non_negative_integer(value: f64, name: &str) -> Result<u64> {
 mod tests {
     use serde_json::json;
 
-    use super::{RegistrationScope, build_command, build_duty_command, build_policy_command};
+    use super::{
+        RegistrationScope, build_command, build_duty_command, build_help_command,
+        build_policy_command,
+    };
     use crate::lua::LuaCommandDefinition;
 
     fn definition(value: serde_json::Value) -> LuaCommandDefinition {
@@ -521,6 +543,20 @@ mod tests {
             assert!(subnames.contains(&"off"));
             assert!(subnames.contains(&"status"));
             assert!(subnames.contains(&"schedule"));
+        }
+    }
+
+    #[test]
+    fn help_command_builds_with_subcommands() {
+        for scope in [RegistrationScope::Global, RegistrationScope::Guild] {
+            let cmd = build_help_command(scope);
+            let val = serde_json::to_value(&cmd).expect("serialize help command");
+            assert_eq!(val["name"], "help");
+            let options = val["options"].as_array().expect("options array");
+            assert_eq!(options.len(), 1);
+
+            let subnames: Vec<&str> = options.iter().filter_map(|o| o["name"].as_str()).collect();
+            assert!(subnames.contains(&"solved"));
         }
     }
 }

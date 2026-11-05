@@ -18,10 +18,11 @@ use crate::discord::events::generate_icalendar_event;
 use crate::storage::{
     CardCollection, CardTrade, CleanupPlan, CommandPolicyRule, CommunityPoll, CustomAutomation,
     DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink, Giveaway,
-    InviteTracking, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
-    ProgressionSeason, RecruitmentApplication, RecruitmentReview, RecruitmentRoleFulfillment,
-    RecruitmentTrack, RecruitmentTrackConfig, RecurringSchedule, ScheduledEvent, ServerSnapshot,
-    StickyMessage, StoreItem, SubmittedAnswer, TupperProfile, validate_snowflake,
+    HelpForumConfig, InviteTracking, ModeratorDutyProfile, ModeratorDutySettings,
+    ModeratorDutyState, ProgressionSeason, RecruitmentApplication, RecruitmentReview,
+    RecruitmentRoleFulfillment, RecruitmentTrack, RecruitmentTrackConfig, RecurringSchedule,
+    ScheduledEvent, ServerSnapshot, StickyMessage, StoreItem, SubmittedAnswer, TupperProfile,
+    validate_snowflake,
 };
 
 use super::{
@@ -5025,6 +5026,305 @@ pub async fn process_role_fulfillments(
     .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(Json(json!({ "processed": processed })))
+}
+
+// ==========================================
+// Agent 17 (#164): Help Forum Lifecycle
+// ==========================================
+
+#[derive(Debug, Deserialize)]
+pub struct UpsertHelpForumRequest {
+    pub forum_channel_id: String,
+    #[serde(default = "default_forum_true")]
+    pub enabled: bool,
+    #[serde(default = "default_idle_close_mins")]
+    pub idle_close_minutes: i32,
+    #[serde(default = "default_forum_true")]
+    pub owner_can_close: bool,
+    #[serde(default)]
+    pub helper_role_ids: Vec<String>,
+    #[serde(default = "default_forum_true")]
+    pub lock_on_close: bool,
+    #[serde(default = "default_forum_true")]
+    pub archive_on_close: bool,
+    #[serde(default)]
+    pub require_question_tag: bool,
+    pub welcome_message: Option<String>,
+}
+
+fn default_forum_true() -> bool {
+    true
+}
+
+fn default_idle_close_mins() -> i32 {
+    1440
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CloseHelpForumSessionRequest {
+    #[serde(default = "default_solved_status")]
+    pub status: String,
+    pub reason: Option<String>,
+}
+
+fn default_solved_status() -> String {
+    "solved".to_string()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListHelpForumSessionsQuery {
+    pub status: Option<String>,
+}
+
+pub async fn list_help_forums(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let configs = state
+        .app
+        .storage
+        .list_help_forum_configs(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(json!({ "configs": configs })))
+}
+
+pub async fn upsert_help_forum(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<UpsertHelpForumRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let config = HelpForumConfig {
+        guild_id: guild_id.clone(),
+        forum_channel_id: payload.forum_channel_id,
+        enabled: payload.enabled,
+        idle_close_minutes: payload.idle_close_minutes,
+        owner_can_close: payload.owner_can_close,
+        helper_role_ids: sqlx::types::Json(payload.helper_role_ids),
+        lock_on_close: payload.lock_on_close,
+        archive_on_close: payload.archive_on_close,
+        require_question_tag: payload.require_question_tag,
+        welcome_message: payload.welcome_message,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+
+    let saved = state
+        .app
+        .storage
+        .upsert_help_forum_config(config)
+        .await
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let _ = state
+        .app
+        .storage
+        .record_audit(
+            Some(&guild_id),
+            Some(&session.user.id),
+            "help_forum",
+            "config_updated",
+            json!({
+                "forum_channel_id": saved.forum_channel_id,
+                "enabled": saved.enabled,
+                "idle_close_minutes": saved.idle_close_minutes,
+            }),
+        )
+        .await;
+
+    Ok(Json(json!({ "config": saved })))
+}
+
+pub async fn delete_help_forum(
+    State(state): State<WebState>,
+    Path((guild_id, forum_channel_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    validate_snowflake("forum_channel_id", &forum_channel_id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let deleted = state
+        .app
+        .storage
+        .delete_help_forum_config(&guild_id, &forum_channel_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    if !deleted {
+        return Err(ApiError::not_found("Help forum configuration not found"));
+    }
+
+    let _ = state
+        .app
+        .storage
+        .record_audit(
+            Some(&guild_id),
+            Some(&session.user.id),
+            "help_forum",
+            "config_deleted",
+            json!({ "forum_channel_id": forum_channel_id }),
+        )
+        .await;
+
+    Ok(Json(json!({ "deleted": true })))
+}
+
+pub async fn list_help_forum_sessions(
+    State(state): State<WebState>,
+    Path((guild_id, forum_channel_id)): Path<(String, String)>,
+    Query(query): Query<ListHelpForumSessionsQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    validate_snowflake("forum_channel_id", &forum_channel_id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let sessions = state
+        .app
+        .storage
+        .list_help_forum_sessions(&guild_id, Some(&forum_channel_id), query.status.as_deref())
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(json!({ "sessions": sessions })))
+}
+
+pub async fn get_help_forum_stats(
+    State(state): State<WebState>,
+    Path((guild_id, forum_channel_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    validate_snowflake("forum_channel_id", &forum_channel_id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let stats = state
+        .app
+        .storage
+        .get_help_forum_stats(&guild_id, &forum_channel_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(json!({ "stats": stats })))
+}
+
+pub async fn close_help_forum_session_endpoint(
+    State(state): State<WebState>,
+    Path((guild_id, thread_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(payload): Json<CloseHelpForumSessionRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    validate_snowflake("thread_id", &thread_id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let help_session = state
+        .app
+        .storage
+        .get_help_forum_session(&guild_id, &thread_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Help forum session not found"))?;
+
+    let config = state
+        .app
+        .storage
+        .get_help_forum_config(&guild_id, &help_session.forum_channel_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .unwrap_or_default();
+
+    let is_admin = ensure_guild_access(&state, &session, &guild_id)
+        .await
+        .is_ok();
+    let can_close =
+        is_admin || (session.user.id == help_session.owner_user_id && config.owner_can_close);
+
+    if !can_close {
+        return Err(ApiError::forbidden(
+            "You do not have permission to close this help forum post",
+        ));
+    }
+
+    let closed = state
+        .app
+        .storage
+        .close_help_forum_session(
+            &guild_id,
+            &thread_id,
+            &payload.status,
+            payload.reason.as_deref().or(Some("closed_via_dashboard")),
+            None,
+        )
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let _ = state
+        .app
+        .storage
+        .record_audit(
+            Some(&guild_id),
+            Some(&session.user.id),
+            "help_forum",
+            "session_closed",
+            json!({
+                "thread_id": thread_id,
+                "status": payload.status,
+            }),
+        )
+        .await;
+
+    Ok(Json(json!({ "closed": closed })))
+}
+
+pub async fn reconcile_idle_help_forums_endpoint(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let token = &state.app.config.discord_token;
+    let has_real_token =
+        !token.is_empty() && !token.starts_with("dummy") && token != "mock" && token != "offline";
+
+    let http = if has_real_token {
+        Some(serenity::all::Http::new(token))
+    } else {
+        None
+    };
+
+    let count =
+        crate::help_forum::reconcile_idle_help_forums(&state.app.storage, http.as_ref(), &guild_id)
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(json!({ "reconciled": true, "closed_count": count })))
 }
 
 #[cfg(test)]

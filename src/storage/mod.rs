@@ -29,6 +29,8 @@ pub use crate::recruitment::{
     SubmittedAnswer, TransitionApplicationParams,
 };
 
+pub use crate::help_forum::{HelpForumConfig, HelpForumSession, HelpForumStats};
+
 pub use progression::{
     CoinTransfer, CoinTransferOutcome, DailyClaimOutcome, MemberProgress, ProgressMetric,
     ReputationGrantOutcome, XpAward, level_for_xp, total_xp_for_level,
@@ -2788,6 +2790,170 @@ impl Storage {
         match self {
             Self::Memory(store) => store.list_pending_role_fulfillments(),
             Self::Postgres(store) => store.list_pending_role_fulfillments().await,
+        }
+    }
+
+    pub async fn get_help_forum_config(
+        &self,
+        guild_id: &str,
+        forum_channel_id: &str,
+    ) -> anyhow::Result<Option<HelpForumConfig>> {
+        match self {
+            Self::Memory(store) => store.get_help_forum_config(guild_id, forum_channel_id),
+            Self::Postgres(store) => {
+                store
+                    .get_help_forum_config(guild_id, forum_channel_id)
+                    .await
+            }
+        }
+    }
+
+    pub async fn list_help_forum_configs(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<HelpForumConfig>> {
+        match self {
+            Self::Memory(store) => store.list_help_forum_configs(guild_id),
+            Self::Postgres(store) => store.list_help_forum_configs(guild_id).await,
+        }
+    }
+
+    pub async fn upsert_help_forum_config(
+        &self,
+        config: HelpForumConfig,
+    ) -> anyhow::Result<HelpForumConfig> {
+        match self {
+            Self::Memory(store) => store.upsert_help_forum_config(config),
+            Self::Postgres(store) => store.upsert_help_forum_config(config).await,
+        }
+    }
+
+    pub async fn delete_help_forum_config(
+        &self,
+        guild_id: &str,
+        forum_channel_id: &str,
+    ) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => store.delete_help_forum_config(guild_id, forum_channel_id),
+            Self::Postgres(store) => {
+                store
+                    .delete_help_forum_config(guild_id, forum_channel_id)
+                    .await
+            }
+        }
+    }
+
+    pub async fn get_help_forum_session(
+        &self,
+        guild_id: &str,
+        thread_id: &str,
+    ) -> anyhow::Result<Option<HelpForumSession>> {
+        match self {
+            Self::Memory(store) => store.get_help_forum_session(guild_id, thread_id),
+            Self::Postgres(store) => store.get_help_forum_session(guild_id, thread_id).await,
+        }
+    }
+
+    pub async fn list_help_forum_sessions(
+        &self,
+        guild_id: &str,
+        forum_channel_id: Option<&str>,
+        status: Option<&str>,
+    ) -> anyhow::Result<Vec<HelpForumSession>> {
+        match self {
+            Self::Memory(store) => {
+                store.list_help_forum_sessions(guild_id, forum_channel_id, status)
+            }
+            Self::Postgres(store) => {
+                store
+                    .list_help_forum_sessions(guild_id, forum_channel_id, status)
+                    .await
+            }
+        }
+    }
+
+    pub async fn create_help_forum_session(
+        &self,
+        session: HelpForumSession,
+    ) -> anyhow::Result<HelpForumSession> {
+        match self {
+            Self::Memory(store) => store.create_help_forum_session(session),
+            Self::Postgres(store) => store.create_help_forum_session(session).await,
+        }
+    }
+
+    pub async fn record_help_forum_activity(
+        &self,
+        guild_id: &str,
+        thread_id: &str,
+        author_user_id: &str,
+        is_helper: bool,
+    ) -> anyhow::Result<Option<HelpForumSession>> {
+        match self {
+            Self::Memory(store) => {
+                store.record_help_forum_activity(guild_id, thread_id, author_user_id, is_helper)
+            }
+            Self::Postgres(store) => {
+                store
+                    .record_help_forum_activity(guild_id, thread_id, author_user_id, is_helper)
+                    .await
+            }
+        }
+    }
+
+    pub async fn close_help_forum_session(
+        &self,
+        guild_id: &str,
+        thread_id: &str,
+        new_status: &str,
+        reason: Option<&str>,
+        expected_generation: Option<i64>,
+    ) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => store.close_help_forum_session(
+                guild_id,
+                thread_id,
+                new_status,
+                reason,
+                expected_generation,
+            ),
+            Self::Postgres(store) => {
+                store
+                    .close_help_forum_session(
+                        guild_id,
+                        thread_id,
+                        new_status,
+                        reason,
+                        expected_generation,
+                    )
+                    .await
+            }
+        }
+    }
+
+    pub async fn mark_help_forum_owner_left(
+        &self,
+        guild_id: &str,
+        owner_user_id: &str,
+    ) -> anyhow::Result<usize> {
+        match self {
+            Self::Memory(store) => store.mark_help_forum_owner_left(guild_id, owner_user_id),
+            Self::Postgres(store) => {
+                store
+                    .mark_help_forum_owner_left(guild_id, owner_user_id)
+                    .await
+            }
+        }
+    }
+
+    pub async fn get_help_forum_stats(
+        &self,
+        guild_id: &str,
+        forum_channel_id: &str,
+    ) -> anyhow::Result<HelpForumStats> {
+        match self {
+            Self::Memory(store) => store.get_help_forum_stats(guild_id, forum_channel_id),
+            Self::Postgres(store) => store.get_help_forum_stats(guild_id, forum_channel_id).await,
         }
     }
 

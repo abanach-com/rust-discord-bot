@@ -207,6 +207,7 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 | Priorities and service levels | Planned |
 | Ticket forms | Planned |
 | Application/recruitment forms and review pipeline | Implemented |
+| Help Forum lifecycle, solved state, and inactivity auto-archive | Implemented |
 | Internal notes | Planned |
 | User transcript export | Planned |
 | HTML/PDF transcripts | Implemented |
