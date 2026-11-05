@@ -3717,3 +3717,112 @@ async fn test_guild_events_stream_security_and_reauth_on_revoke() {
         terminated_chunk.map(|c| String::from_utf8_lossy(&c).to_string())
     );
 }
+
+#[tokio::test]
+async fn test_guild_events_stream_task_cancellation_on_client_drop() {
+    let (state, perms_cache) = test_web_state().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let guild_id = "stream_guild_drop_101";
+    let user_id = "stream_user_drop_202";
+    let session_id = "stream_session_drop_token";
+
+    let user = DashboardUser {
+        id: user_id.to_owned(),
+        username: "stream_drop_admin".to_owned(),
+        global_name: None,
+        avatar: None,
+    };
+    let guilds = vec![DashboardGuild {
+        id: guild_id.to_owned(),
+        name: "Stream Drop Guild".to_owned(),
+        icon: None,
+        owner: false,
+        permissions: "32".to_owned(), // MANAGE_GUILD
+    }];
+
+    state
+        .app
+        .sessions
+        .save_session(
+            session_id,
+            user,
+            guilds,
+            "csrf_stream_drop_token".to_owned(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .expect("save drop stream session");
+
+    perms_cache.insert(
+        (user_id.to_owned(), guild_id.to_owned()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let session_cookie = format!("rusty_discord_bot_session={session_id}");
+
+    let baseline_subscribers = state.app.guild_events.receiver_count();
+
+    // 1. Connect to SSE stream
+    let mut resp = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/events"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .expect("connect to sse");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    // Initial connected chunk
+    let first_chunk = resp
+        .chunk()
+        .await
+        .expect("receive chunk")
+        .expect("initial chunk");
+    let first_text = String::from_utf8_lossy(&first_chunk);
+    assert!(first_text.contains("connected"));
+
+    // Subscriptions count should now be baseline + 1
+    assert_eq!(
+        state.app.guild_events.receiver_count(),
+        baseline_subscribers + 1
+    );
+
+    // 2. Drop the client response WITHOUT publishing any events and WITHOUT revoking session
+    drop(resp);
+
+    // 3. The worker must observe tx.closed() and terminate promptly, returning receiver_count to baseline
+    let finished_cleanup = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if state.app.guild_events.receiver_count() == baseline_subscribers {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+        }
+    })
+    .await;
+    assert!(
+        finished_cleanup.is_ok(),
+        "Worker task failed to cancel on client drop within timeout; active receivers: {}",
+        state.app.guild_events.receiver_count()
+    );
+}

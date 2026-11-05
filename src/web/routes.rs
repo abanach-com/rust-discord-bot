@@ -864,7 +864,13 @@ pub async fn guild_events_stream(
 
         loop {
             tokio::select! {
+                _ = tx.closed() => {
+                    break;
+                }
                 _ = reauth_interval.tick() => {
+                    if tx.is_closed() {
+                        break;
+                    }
                     let Ok((_, fresh_session)) = authenticate(&worker_state, &worker_headers).await else {
                         break;
                     };
@@ -877,6 +883,9 @@ pub async fn guild_events_stream(
                         Ok(event) => {
                             if event.guild_id != worker_guild {
                                 continue;
+                            }
+                            if tx.is_closed() {
+                                break;
                             }
                             let Ok((_, fresh_session)) = authenticate(&worker_state, &worker_headers).await else {
                                 break;
@@ -893,6 +902,9 @@ pub async fn guild_events_stream(
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            if tx.is_closed() {
+                                break;
+                            }
                             let resync_event = Event::default()
                                 .event("resync")
                                 .data(json!({ "guild_id": worker_guild }).to_string());
