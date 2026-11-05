@@ -2898,6 +2898,7 @@ async fn test_asset_analytics_api_and_isolation() {
         &msg_content,
         &stickers,
         Some(&[party_emoji.to_string()]), // spin is external, party is guild-owned
+        Some(&[sticker_id.to_string()]),
     );
     assert_eq!(count, 5); // 3 party + 1 spin + 1 sticker
 
@@ -2908,6 +2909,7 @@ async fn test_asset_analytics_api_and_isolation() {
         &msg_content,
         &stickers,
         Some(&[party_emoji.to_string()]),
+        Some(&[sticker_id.to_string()]),
     );
     assert_eq!(
         dup_count, 0,
@@ -2987,6 +2989,33 @@ async fn test_asset_analytics_api_and_isolation() {
     let inv_json: serde_json::Value = inv_res.json().await.unwrap();
     let items = inv_json.as_array().unwrap();
     assert_eq!(items.len(), 3); // party, spin, cool_cat sticker
+
+    // 7. Issue #200: Test inventory pagination (limit and cursor)
+    let paged_res = client
+        .get(format!(
+            "{base_url}/api/guilds/{g1}/assets/inventory?limit=2"
+        ))
+        .header(COOKIE, &auth_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(paged_res.status(), reqwest::StatusCode::OK);
+    let paged_items = paged_res.json::<Vec<serde_json::Value>>().await.unwrap();
+    assert_eq!(paged_items.len(), 2);
+
+    let first_id = paged_items[0]["asset_id"].as_str().unwrap();
+    let cursor_res = client
+        .get(format!(
+            "{base_url}/api/guilds/{g1}/assets/inventory?cursor={first_id}&limit=1"
+        ))
+        .header(COOKIE, &auth_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cursor_res.status(), reqwest::StatusCode::OK);
+    let cursor_items = cursor_res.json::<Vec<serde_json::Value>>().await.unwrap();
+    assert_eq!(cursor_items.len(), 1);
+    assert_eq!(cursor_items[0]["asset_id"], paged_items[1]["asset_id"]);
 }
 
 #[tokio::test]

@@ -32,6 +32,7 @@ async fn main() -> Result<()> {
     let janitor_shutdown_rx = shutdown_tx.subscribe();
     let duty_shutdown_rx = shutdown_tx.subscribe();
     let help_forum_shutdown_rx = shutdown_tx.subscribe();
+    let asset_analytics_shutdown_rx = shutdown_tx.subscribe();
 
     let web_handle = tokio::spawn(rusty_discord_bot::web::serve_with_shutdown(
         state.clone(),
@@ -58,12 +59,20 @@ async fn main() -> Result<()> {
             std::time::Duration::from_secs(60),
         ),
     );
+    let asset_analytics_handle = tokio::spawn(
+        rusty_discord_bot::asset_analytics::run_asset_analytics_flush_loop(
+            state.asset_analytics.clone(),
+            asset_analytics_shutdown_rx,
+            std::time::Duration::from_secs(30),
+        ),
+    );
 
     tokio::pin!(web_handle);
     tokio::pin!(discord_handle);
     tokio::pin!(janitor_handle);
     tokio::pin!(duty_handle);
     tokio::pin!(help_forum_handle);
+    tokio::pin!(asset_analytics_handle);
 
     let result = tokio::select! {
         res = &mut web_handle => {
@@ -123,6 +132,9 @@ async fn main() -> Result<()> {
         }
         if !help_forum_handle.is_finished() {
             let _ = (&mut help_forum_handle).await;
+        }
+        if !asset_analytics_handle.is_finished() {
+            let _ = (&mut asset_analytics_handle).await;
         }
     };
 

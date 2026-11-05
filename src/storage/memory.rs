@@ -5091,7 +5091,10 @@ impl MemoryStore {
                         existing.name = item.name.clone();
                     }
                     existing.animated = item.animated;
-                    existing.is_guild_owned = item.is_guild_owned;
+                    if item.is_guild_owned.is_some() {
+                        existing.is_guild_owned = item.is_guild_owned;
+                    }
+                    existing.is_active = item.is_active;
                     if item.last_seen_at > existing.last_seen_at {
                         existing.last_seen_at = item.last_seen_at;
                     }
@@ -5134,6 +5137,35 @@ impl MemoryStore {
             &daily_rows,
             &inventory_rows,
         ))
+    }
+
+    pub fn sync_guild_inventory_active_state(
+        &self,
+        guild_id: &str,
+        kind: crate::asset_analytics::AssetKind,
+        active_ids: &[String],
+    ) -> anyhow::Result<usize> {
+        validate_snowflake("guild_id", guild_id)?;
+        let active_set: std::collections::HashSet<&str> =
+            active_ids.iter().map(|s| s.as_str()).collect();
+
+        let mut count = 0;
+        let kind_str = kind.as_str();
+        for mut entry in self.asset_inventory.iter_mut() {
+            let item = entry.value_mut();
+            if item.guild_id == guild_id
+                && item.asset_kind == kind_str
+                && item.is_guild_owned == Some(true)
+            {
+                let is_active = active_set.contains(item.asset_id.as_str());
+                if item.is_active != is_active {
+                    item.is_active = is_active;
+                    count += 1;
+                }
+            }
+        }
+
+        Ok(count)
     }
 
     pub fn list_asset_inventory(

@@ -4753,6 +4753,24 @@ impl Storage {
         }
     }
 
+    pub async fn sync_guild_inventory_active_state(
+        &self,
+        guild_id: &str,
+        kind: crate::asset_analytics::AssetKind,
+        active_ids: &[String],
+    ) -> anyhow::Result<usize> {
+        match self {
+            Self::Memory(store) => {
+                store.sync_guild_inventory_active_state(guild_id, kind, active_ids)
+            }
+            Self::Postgres(store) => {
+                store
+                    .sync_guild_inventory_active_state(guild_id, kind, active_ids)
+                    .await
+            }
+        }
+    }
+
     pub async fn prune_asset_analytics(
         &self,
         guild_id: Option<&str>,

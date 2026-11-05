@@ -173,6 +173,99 @@ impl EventHandler for Handler {
         });
     }
 
+    async fn guild_create(
+        &self,
+        _ctx: Context,
+        guild: serenity::all::Guild,
+        _is_new: Option<bool>,
+    ) {
+        let guild_id_str = guild.id.to_string();
+        let emojis: Vec<crate::asset_analytics::ParsedCustomEmoji> = guild
+            .emojis
+            .values()
+            .map(|e| crate::asset_analytics::ParsedCustomEmoji {
+                name: e.name.clone(),
+                id: e.id.to_string(),
+                animated: e.animated,
+            })
+            .collect();
+        let stickers: Vec<crate::asset_analytics::ParsedSticker> = guild
+            .stickers
+            .values()
+            .map(|s| crate::asset_analytics::ParsedSticker {
+                id: s.id.to_string(),
+                name: s.name.clone(),
+                animated: s.format_type != serenity::all::StickerFormatType::Png,
+            })
+            .collect();
+
+        self.state
+            .asset_analytics
+            .record_inventory_snapshot(&guild_id_str, &emojis, &stickers);
+    }
+
+    async fn guild_emojis_update(
+        &self,
+        _ctx: Context,
+        guild_id: GuildId,
+        current_state: std::collections::HashMap<serenity::all::EmojiId, serenity::all::Emoji>,
+    ) {
+        let guild_id_str = guild_id.to_string();
+        let emojis: Vec<crate::asset_analytics::ParsedCustomEmoji> = current_state
+            .values()
+            .map(|e| crate::asset_analytics::ParsedCustomEmoji {
+                name: e.name.clone(),
+                id: e.id.to_string(),
+                animated: e.animated,
+            })
+            .collect();
+        self.state
+            .asset_analytics
+            .record_inventory_snapshot(&guild_id_str, &emojis, &[]);
+
+        let active_ids: Vec<String> = current_state.keys().map(|id| id.to_string()).collect();
+        let _ = self
+            .state
+            .storage
+            .sync_guild_inventory_active_state(
+                &guild_id_str,
+                crate::asset_analytics::AssetKind::Emoji,
+                &active_ids,
+            )
+            .await;
+    }
+
+    async fn guild_stickers_update(
+        &self,
+        _ctx: Context,
+        guild_id: GuildId,
+        current_state: std::collections::HashMap<serenity::all::StickerId, serenity::all::Sticker>,
+    ) {
+        let guild_id_str = guild_id.to_string();
+        let stickers: Vec<crate::asset_analytics::ParsedSticker> = current_state
+            .values()
+            .map(|s| crate::asset_analytics::ParsedSticker {
+                id: s.id.to_string(),
+                name: s.name.clone(),
+                animated: s.format_type != serenity::all::StickerFormatType::Png,
+            })
+            .collect();
+        self.state
+            .asset_analytics
+            .record_inventory_snapshot(&guild_id_str, &[], &stickers);
+
+        let active_ids: Vec<String> = current_state.keys().map(|id| id.to_string()).collect();
+        let _ = self
+            .state
+            .storage
+            .sync_guild_inventory_active_state(
+                &guild_id_str,
+                crate::asset_analytics::AssetKind::Sticker,
+                &active_ids,
+            )
+            .await;
+    }
+
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         self.state
             .metrics
@@ -234,12 +327,14 @@ impl EventHandler for Handler {
             })
             .collect();
 
-        let guild_emojis = ctx.cache.guild(guild_id).map(|g| {
-            g.emojis
-                .keys()
-                .map(|id| id.to_string())
-                .collect::<Vec<String>>()
-        });
+        let (guild_emojis, guild_stickers) = match ctx.cache.guild(guild_id) {
+            Some(g) => {
+                let emojis: Vec<String> = g.emojis.keys().map(|id| id.to_string()).collect();
+                let stickers: Vec<String> = g.stickers.keys().map(|id| id.to_string()).collect();
+                (Some(emojis), Some(stickers))
+            }
+            None => (None, None),
+        };
 
         self.state.asset_analytics.record_message(
             &guild_id.to_string(),
@@ -247,6 +342,7 @@ impl EventHandler for Handler {
             &message.content,
             &stickers,
             guild_emojis.as_deref(),
+            guild_stickers.as_deref(),
         );
 
         let event = LuaEventContext {
@@ -2127,6 +2223,24 @@ async fn handle_emoji_builtin_command(
                 })
                 .unwrap_or(30);
 
+            // Issue #198: Snapshot currently registered guild emojis from cache into inventory
+            if let Some(guild) = ctx.cache.guild(guild_id) {
+                let emojis: Vec<_> = guild
+                    .emojis
+                    .values()
+                    .map(|e| crate::asset_analytics::ParsedCustomEmoji {
+                        name: e.name.clone(),
+                        id: e.id.to_string(),
+                        animated: e.animated,
+                    })
+                    .collect();
+                state
+                    .asset_analytics
+                    .record_inventory_snapshot(&guild_id_str, &emojis, &[]);
+            }
+
+            let _ = state.asset_analytics.flush().await;
+
             let summary = state
                 .storage
                 .get_asset_usage_summary(
@@ -2136,14 +2250,28 @@ async fn handle_emoji_builtin_command(
                 )
                 .await?;
 
-            let unused_filtered: Vec<_> = summary
-                .unused
-                .iter()
-                .filter(|item| item.unused_days.map(|d| d >= days).unwrap_or(true))
-                .take(10)
+            // Issue #198: filter summary.items (not summary.unused which only had period_usage == 0)
+            let mut unused_filtered: Vec<_> = summary
+                .items
+                .into_iter()
+                .filter(|item| {
+                    item.is_guild_owned.unwrap_or(false)
+                        && item.is_active
+                        && item.unused_days.map(|d| d >= days).unwrap_or(true)
+                })
                 .collect();
 
-            if unused_filtered.is_empty() {
+            // Sort inactive: never used first, then highest unused days
+            unused_filtered.sort_by(|a, b| match (a.unused_days, b.unused_days) {
+                (None, None) => a.asset_id.cmp(&b.asset_id),
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (Some(da), Some(db)) => db.cmp(&da),
+            });
+
+            let display_items: Vec<_> = unused_filtered.into_iter().take(10).collect();
+
+            if display_items.is_empty() {
                 respond_or_edit(
                     ctx,
                     command,
@@ -2156,7 +2284,7 @@ async fn handle_emoji_builtin_command(
                 .await?;
             } else {
                 let mut lines = vec![format!("💤 **Unused Emojis (Inactive for {days}+ days):**")];
-                for (idx, item) in unused_filtered.iter().enumerate() {
+                for (idx, item) in display_items.iter().enumerate() {
                     let name = item.name.as_deref().unwrap_or("unknown");
                     let days_str = item
                         .unused_days

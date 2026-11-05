@@ -5507,6 +5507,9 @@ pub async fn get_asset_usage_summary_endpoint(
 #[derive(Debug, Deserialize)]
 pub struct AssetInventoryQuery {
     pub kind: Option<String>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+    pub cursor: Option<String>,
 }
 
 pub async fn list_asset_inventory_endpoint(
@@ -5534,7 +5537,21 @@ pub async fn list_asset_inventory_endpoint(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    Ok(Json(items))
+    let limit = query.limit.unwrap_or(items.len()).min(500);
+    let offset = query.offset.unwrap_or(0);
+
+    let filtered: Vec<_> = if let Some(cursor) = &query.cursor {
+        items
+            .into_iter()
+            .skip_while(|i| &i.asset_id != cursor)
+            .skip(1)
+            .take(limit)
+            .collect()
+    } else {
+        items.into_iter().skip(offset).take(limit).collect()
+    };
+
+    Ok(Json(filtered))
 }
 
 pub async fn flush_asset_analytics_endpoint(

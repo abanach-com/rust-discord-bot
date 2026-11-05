@@ -8526,13 +8526,14 @@ impl PostgresStore {
             sqlx::query(
                 r#"
                 INSERT INTO guild_asset_inventory (
-                    guild_id, asset_kind, asset_id, name, animated, is_guild_owned, first_seen_at, last_seen_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    guild_id, asset_kind, asset_id, name, animated, is_guild_owned, is_active, first_seen_at, last_seen_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 ON CONFLICT (guild_id, asset_kind, asset_id)
                 DO UPDATE SET
                     name = COALESCE(EXCLUDED.name, guild_asset_inventory.name),
                     animated = EXCLUDED.animated,
-                    is_guild_owned = EXCLUDED.is_guild_owned,
+                    is_guild_owned = COALESCE(EXCLUDED.is_guild_owned, guild_asset_inventory.is_guild_owned),
+                    is_active = EXCLUDED.is_active,
                     last_seen_at = GREATEST(guild_asset_inventory.last_seen_at, EXCLUDED.last_seen_at)
                 "#,
             )
@@ -8542,6 +8543,7 @@ impl PostgresStore {
             .bind(&item.name)
             .bind(item.animated)
             .bind(item.is_guild_owned)
+            .bind(item.is_active)
             .bind(item.first_seen_at)
             .bind(item.last_seen_at)
             .execute(&mut *tx)
@@ -8560,23 +8562,47 @@ impl PostgresStore {
     ) -> anyhow::Result<crate::asset_analytics::AssetUsageSummary> {
         validate_snowflake("guild_id", guild_id)?;
 
+        let now = Utc::now();
+        let today = now.date_naive();
+        let seven_days_ago = today - chrono::Duration::days(6);
+        let thirty_days_ago = today - chrono::Duration::days(29);
         let kind_str = kind.map(|k| k.as_str().to_string());
 
-        let daily_rows = sqlx::query_as::<_, crate::asset_analytics::AssetUsageDaily>(
+        let aggregates = sqlx::query_as::<_, crate::asset_analytics::AssetUsageAggregate>(
             r#"
-            SELECT guild_id, usage_date, asset_kind, asset_id, usage_count, last_used_at
-            FROM guild_asset_usage_daily
-            WHERE guild_id = $1 AND ($2::TEXT IS NULL OR asset_kind = $2)
+            SELECT
+                u.asset_kind,
+                u.asset_id,
+                SUM(u.usage_count)::bigint AS usage_total,
+                COALESCE(SUM(u.usage_count) FILTER (WHERE u.usage_date >= $3), 0)::bigint AS usage_7d,
+                COALESCE(SUM(u.usage_count) FILTER (WHERE u.usage_date >= $4), 0)::bigint AS usage_30d,
+                COALESCE(SUM(u.usage_count) FILTER (WHERE u.usage_date = $5), 0)::bigint AS usage_today,
+                COALESCE(SUM(u.usage_count) FILTER (
+                    WHERE CASE
+                        WHEN $6 = 'today' THEN u.usage_date = $5
+                        WHEN $6 = '7d' THEN u.usage_date >= $3
+                        WHEN $6 = '30d' THEN u.usage_date >= $4
+                        ELSE true
+                    END
+                ), 0)::bigint AS period_usage,
+                MAX(u.last_used_at) AS last_used_at
+            FROM guild_asset_usage_daily u
+            WHERE u.guild_id = $1 AND ($2::TEXT IS NULL OR u.asset_kind = $2)
+            GROUP BY u.asset_kind, u.asset_id
             "#,
         )
         .bind(guild_id)
         .bind(kind_str.as_deref())
+        .bind(seven_days_ago)
+        .bind(thirty_days_ago)
+        .bind(today)
+        .bind(period)
         .fetch_all(&self.pool)
         .await?;
 
         let inventory_rows = sqlx::query_as::<_, crate::asset_analytics::AssetInventoryItem>(
             r#"
-            SELECT guild_id, asset_kind, asset_id, name, animated, is_guild_owned, first_seen_at, last_seen_at
+            SELECT guild_id, asset_kind, asset_id, name, animated, is_guild_owned, is_active, first_seen_at, last_seen_at
             FROM guild_asset_inventory
             WHERE guild_id = $1 AND ($2::TEXT IS NULL OR asset_kind = $2)
             "#,
@@ -8586,13 +8612,39 @@ impl PostgresStore {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(crate::asset_analytics::calculate_asset_summary(
+        Ok(crate::asset_analytics::build_asset_summary_from_aggregates(
             guild_id,
             kind,
             period,
-            &daily_rows,
+            &aggregates,
             &inventory_rows,
+            now,
         ))
+    }
+
+    pub async fn sync_guild_inventory_active_state(
+        &self,
+        guild_id: &str,
+        kind: crate::asset_analytics::AssetKind,
+        active_ids: &[String],
+    ) -> anyhow::Result<usize> {
+        validate_snowflake("guild_id", guild_id)?;
+        let kind_str = kind.as_str();
+
+        let res = sqlx::query(
+            r#"
+            UPDATE guild_asset_inventory
+            SET is_active = CASE WHEN asset_id = ANY($3) THEN true ELSE false END
+            WHERE guild_id = $1 AND asset_kind = $2 AND is_guild_owned = true
+            "#,
+        )
+        .bind(guild_id)
+        .bind(kind_str)
+        .bind(active_ids)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(res.rows_affected() as usize)
     }
 
     pub async fn list_asset_inventory(

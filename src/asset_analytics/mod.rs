@@ -77,9 +77,15 @@ pub struct AssetInventoryItem {
     pub asset_id: String,
     pub name: Option<String>,
     pub animated: bool,
-    pub is_guild_owned: bool,
+    pub is_guild_owned: Option<bool>,
+    #[serde(default = "default_true")]
+    pub is_active: bool,
     pub first_seen_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Aggregated usage statistics and metadata for a single asset.
@@ -89,7 +95,9 @@ pub struct AssetUsageStat {
     pub asset_kind: AssetKind,
     pub name: Option<String>,
     pub animated: bool,
-    pub is_guild_owned: bool,
+    pub is_guild_owned: Option<bool>,
+    #[serde(default = "default_true")]
+    pub is_active: bool,
     pub usage_today: i64,
     pub usage_7d: i64,
     pub usage_30d: i64,
@@ -98,6 +106,19 @@ pub struct AssetUsageStat {
     pub first_seen_at: Option<DateTime<Utc>>,
     pub last_used_at: Option<DateTime<Utc>>,
     pub unused_days: Option<i64>,
+}
+
+/// Aggregated usage query result mapped from SQL group-by query.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct AssetUsageAggregate {
+    pub asset_kind: String,
+    pub asset_id: String,
+    pub usage_total: i64,
+    pub usage_7d: i64,
+    pub usage_30d: i64,
+    pub usage_today: i64,
+    pub period_usage: i64,
+    pub last_used_at: Option<DateTime<Utc>>,
 }
 
 /// Summary report returned to the dashboard and API.
@@ -128,7 +149,8 @@ pub struct AssetUsageKey {
 struct InMemInventory {
     name: Option<String>,
     animated: bool,
-    is_guild_owned: bool,
+    is_guild_owned: Option<bool>,
+    is_active: bool,
     first_seen_at: DateTime<Utc>,
     last_seen_at: DateTime<Utc>,
 }
@@ -273,6 +295,7 @@ pub struct AssetAnalyticsBatcher {
     last_seen: DashMap<AssetUsageKey, DateTime<Utc>>,
     inventory: DashMap<(String, AssetKind, String), InMemInventory>,
     dedupe: Mutex<BoundedMessageDedupe>,
+    flush_lock: tokio::sync::Mutex<()>,
 }
 
 impl AssetAnalyticsBatcher {
@@ -283,6 +306,7 @@ impl AssetAnalyticsBatcher {
             last_seen: DashMap::new(),
             inventory: DashMap::new(),
             dedupe: Mutex::new(BoundedMessageDedupe::new(10_000)),
+            flush_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -295,6 +319,7 @@ impl AssetAnalyticsBatcher {
         content: &str,
         stickers: &[ParsedSticker],
         guild_emojis: Option<&[String]>,
+        guild_stickers: Option<&[String]>,
     ) -> usize {
         if validate_snowflake("guild_id", guild_id).is_err() {
             return 0;
@@ -318,10 +343,9 @@ impl AssetAnalyticsBatcher {
         // 2. Parse and record custom emojis
         let emojis = parse_custom_emojis(content);
         for emoji in emojis {
-            let is_guild_owned = match guild_emojis {
-                Some(owned_list) => owned_list.iter().any(|id| id == &emoji.id),
-                None => true,
-            };
+            // Issue #199: Some(true) = owned, Some(false) = external, None = unconfirmed cache miss
+            let is_guild_owned =
+                guild_emojis.map(|owned_list| owned_list.iter().any(|id| id == &emoji.id));
 
             let key = AssetUsageKey {
                 guild_id: guild_id.to_string(),
@@ -339,12 +363,16 @@ impl AssetAnalyticsBatcher {
                     inv.last_seen_at = now;
                     inv.animated = emoji.animated;
                     inv.name = Some(emoji.name.clone());
-                    inv.is_guild_owned = is_guild_owned;
+                    if is_guild_owned.is_some() {
+                        inv.is_guild_owned = is_guild_owned;
+                    }
+                    inv.is_active = true;
                 })
                 .or_insert_with(|| InMemInventory {
                     name: Some(emoji.name),
                     animated: emoji.animated,
                     is_guild_owned,
+                    is_active: true,
                     first_seen_at: now,
                     last_seen_at: now,
                 });
@@ -354,6 +382,10 @@ impl AssetAnalyticsBatcher {
 
         // 3. Record stickers
         for sticker in stickers {
+            // Issue #199: Some(true) = owned, Some(false) = external, None = unconfirmed cache miss
+            let is_guild_owned =
+                guild_stickers.map(|owned_list| owned_list.iter().any(|id| id == &sticker.id));
+
             let key = AssetUsageKey {
                 guild_id: guild_id.to_string(),
                 day: today,
@@ -370,11 +402,16 @@ impl AssetAnalyticsBatcher {
                     inv.last_seen_at = now;
                     inv.animated = sticker.animated;
                     inv.name = Some(sticker.name.clone());
+                    if is_guild_owned.is_some() {
+                        inv.is_guild_owned = is_guild_owned;
+                    }
+                    inv.is_active = true;
                 })
                 .or_insert_with(|| InMemInventory {
                     name: Some(sticker.name.clone()),
                     animated: sticker.animated,
-                    is_guild_owned: true,
+                    is_guild_owned,
+                    is_active: true,
                     first_seen_at: now,
                     last_seen_at: now,
                 });
@@ -383,6 +420,65 @@ impl AssetAnalyticsBatcher {
         }
 
         total_recorded
+    }
+
+    /// Records snapshot of currently configured guild emojis and stickers (Issue #198).
+    pub fn record_inventory_snapshot(
+        &self,
+        guild_id: &str,
+        emojis: &[ParsedCustomEmoji],
+        stickers: &[ParsedSticker],
+    ) {
+        if validate_snowflake("guild_id", guild_id).is_err() {
+            return;
+        }
+        let now = Utc::now();
+
+        for emoji in emojis {
+            if validate_snowflake("asset_id", &emoji.id).is_err() {
+                continue;
+            }
+            self.inventory
+                .entry((guild_id.to_string(), AssetKind::Emoji, emoji.id.clone()))
+                .and_modify(|inv| {
+                    inv.last_seen_at = now;
+                    inv.name = Some(emoji.name.clone());
+                    inv.animated = emoji.animated;
+                    inv.is_guild_owned = Some(true);
+                    inv.is_active = true;
+                })
+                .or_insert_with(|| InMemInventory {
+                    name: Some(emoji.name.clone()),
+                    animated: emoji.animated,
+                    is_guild_owned: Some(true),
+                    is_active: true,
+                    first_seen_at: now,
+                    last_seen_at: now,
+                });
+        }
+
+        for sticker in stickers {
+            if validate_snowflake("asset_id", &sticker.id).is_err() {
+                continue;
+            }
+            self.inventory
+                .entry((guild_id.to_string(), AssetKind::Sticker, sticker.id.clone()))
+                .and_modify(|inv| {
+                    inv.last_seen_at = now;
+                    inv.name = Some(sticker.name.clone());
+                    inv.animated = sticker.animated;
+                    inv.is_guild_owned = Some(true);
+                    inv.is_active = true;
+                })
+                .or_insert_with(|| InMemInventory {
+                    name: Some(sticker.name.clone()),
+                    animated: sticker.animated,
+                    is_guild_owned: Some(true),
+                    is_active: true,
+                    first_seen_at: now,
+                    last_seen_at: now,
+                });
+        }
     }
 
     /// Directly record raw asset usage (e.g. for testing or explicit recording).
@@ -394,7 +490,7 @@ impl AssetAnalyticsBatcher {
         asset_id: &str,
         name: Option<&str>,
         animated: bool,
-        is_guild_owned: bool,
+        is_guild_owned: Option<bool>,
         count: u64,
         timestamp: DateTime<Utc>,
     ) {
@@ -433,12 +529,16 @@ impl AssetAnalyticsBatcher {
                     inv.name = Some(n.to_string());
                 }
                 inv.animated = animated;
-                inv.is_guild_owned = is_guild_owned;
+                if is_guild_owned.is_some() {
+                    inv.is_guild_owned = is_guild_owned;
+                }
+                inv.is_active = true;
             })
             .or_insert_with(|| InMemInventory {
                 name: name.map(|s| s.to_string()),
                 animated,
                 is_guild_owned,
+                is_active: true,
                 first_seen_at: timestamp,
                 last_seen_at: timestamp,
             });
@@ -450,6 +550,8 @@ impl AssetAnalyticsBatcher {
     /// In case of storage failure, the snapshot items are merged back into
     /// the in-memory maps so no analytics counts are lost.
     pub async fn flush(&self) -> anyhow::Result<usize> {
+        let _guard = self.flush_lock.lock().await;
+
         // 1. Drain counts snapshot
         let count_keys: Vec<AssetUsageKey> =
             self.counts.iter().map(|kv| kv.key().clone()).collect();
@@ -501,6 +603,7 @@ impl AssetAnalyticsBatcher {
                 name: inv.name.clone(),
                 animated: inv.animated,
                 is_guild_owned: inv.is_guild_owned,
+                is_active: inv.is_active,
                 first_seen_at: inv.first_seen_at,
                 last_seen_at: inv.last_seen_at,
             })
@@ -538,6 +641,10 @@ impl AssetAnalyticsBatcher {
                             if inv.first_seen_at < existing.first_seen_at {
                                 existing.first_seen_at = inv.first_seen_at;
                             }
+                            if inv.is_guild_owned.is_some() {
+                                existing.is_guild_owned = inv.is_guild_owned;
+                            }
+                            existing.is_active = inv.is_active;
                         })
                         .or_insert(inv);
                 }
@@ -556,27 +663,46 @@ impl AssetAnalyticsBatcher {
     }
 }
 
-/// Helper to aggregate raw daily rows and inventory into a full `AssetUsageSummary`.
-pub fn calculate_asset_summary(
+/// Periodic flush worker running with interval and handling graceful shutdown (Issue #197).
+pub async fn run_asset_analytics_flush_loop(
+    batcher: std::sync::Arc<AssetAnalyticsBatcher>,
+    mut shutdown: tokio::sync::broadcast::Receiver<()>,
+    every: std::time::Duration,
+) {
+    let mut interval = tokio::time::interval(every);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval.tick().await;
+
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                if let Err(error) = batcher.flush().await {
+                    tracing::warn!(?error, "asset analytics periodic flush failed");
+                }
+            }
+            _ = shutdown.recv() => {
+                tracing::info!("asset analytics flush loop received shutdown signal, performing final flush");
+                if let Err(error) = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    batcher.flush(),
+                ).await {
+                    tracing::warn!(?error, "asset analytics final flush timed out or failed");
+                }
+                break;
+            }
+        }
+    }
+}
+
+/// Helper to assemble a full `AssetUsageSummary` from asset usage aggregates and inventory items.
+pub fn build_asset_summary_from_aggregates(
     guild_id: &str,
     target_kind: Option<AssetKind>,
     period: &str,
-    daily_rows: &[AssetUsageDaily],
+    aggregates: &[AssetUsageAggregate],
     inventory_rows: &[AssetInventoryItem],
+    now: DateTime<Utc>,
 ) -> AssetUsageSummary {
-    let now = Utc::now();
-    let today = now.date_naive();
-    let seven_days_ago = today - chrono::Duration::days(7);
-    let thirty_days_ago = today - chrono::Duration::days(30);
-
-    let period_cutoff: Option<NaiveDate> = match period {
-        "today" => Some(today),
-        "7d" => Some(seven_days_ago),
-        "30d" => Some(thirty_days_ago),
-        _ => None,
-    };
-
-    // Index inventory by (kind, id)
     let mut inv_map = std::collections::HashMap::new();
     for inv in inventory_rows {
         if inv.guild_id == guild_id
@@ -587,8 +713,130 @@ pub fn calculate_asset_summary(
         }
     }
 
-    // Aggregate daily rows by (kind, id)
-    struct Agg {
+    let mut agg_map = std::collections::HashMap::new();
+    for agg in aggregates {
+        if let Ok(kind) = agg.asset_kind.parse::<AssetKind>()
+            && (target_kind.is_none() || target_kind == Some(kind))
+        {
+            agg_map.insert((kind, agg.asset_id.clone()), agg.clone());
+        }
+    }
+
+    let mut all_keys: HashSet<(AssetKind, String)> = HashSet::new();
+    for k in inv_map.keys() {
+        all_keys.insert(k.clone());
+    }
+    for k in agg_map.keys() {
+        all_keys.insert(k.clone());
+    }
+
+    let mut items = Vec::new();
+    let mut total_usages = 0;
+    let mut unique_assets_used = 0;
+
+    for (kind, id) in all_keys {
+        let inv = inv_map.get(&(kind, id.clone()));
+        let agg = agg_map.get(&(kind, id.clone()));
+
+        let usage_today = agg.map(|a| a.usage_today).unwrap_or(0);
+        let usage_7d = agg.map(|a| a.usage_7d).unwrap_or(0);
+        let usage_30d = agg.map(|a| a.usage_30d).unwrap_or(0);
+        let usage_total = agg.map(|a| a.usage_total).unwrap_or(0);
+        let period_usage = agg.map(|a| a.period_usage).unwrap_or(0);
+        let last_used_at = agg.and_then(|a| a.last_used_at);
+
+        total_usages += period_usage;
+        if period_usage > 0 {
+            unique_assets_used += 1;
+        }
+
+        let unused_days = last_used_at.map(|lu| (now - lu).num_days().max(0));
+
+        let stat = AssetUsageStat {
+            asset_id: id,
+            asset_kind: kind,
+            name: inv.and_then(|i| i.name.clone()),
+            animated: inv.map(|i| i.animated).unwrap_or(false),
+            is_guild_owned: inv.and_then(|i| i.is_guild_owned),
+            is_active: inv.map(|i| i.is_active).unwrap_or(true),
+            usage_today,
+            usage_7d,
+            usage_30d,
+            usage_total,
+            period_usage,
+            first_seen_at: inv.map(|i| i.first_seen_at),
+            last_used_at,
+            unused_days,
+        };
+        items.push(stat);
+    }
+
+    // Stable sort for items: highest total usage first, then asset_kind, then asset_id (Issue #200)
+    items.sort_by(|a, b| {
+        b.usage_total
+            .cmp(&a.usage_total)
+            .then_with(|| a.asset_kind.as_str().cmp(b.asset_kind.as_str()))
+            .then_with(|| a.asset_id.cmp(&b.asset_id))
+    });
+
+    // Top: sorted by period_usage desc
+    let mut top = items.clone();
+    top.retain(|i| i.period_usage > 0);
+    top.sort_by_key(|a| std::cmp::Reverse(a.period_usage));
+
+    // Bottom: used at least once in period, sorted by period_usage asc
+    let mut bottom = top.clone();
+    bottom.sort_by_key(|a| a.period_usage);
+
+    // Unused: period_usage == 0
+    let mut unused = items.clone();
+    unused.retain(|i| i.period_usage == 0);
+    unused.sort_by(|a, b| match (a.unused_days, b.unused_days) {
+        (Some(da), Some(db)) => db.cmp(&da),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.asset_id.cmp(&b.asset_id),
+    });
+
+    AssetUsageSummary {
+        guild_id: guild_id.to_string(),
+        asset_kind: target_kind,
+        period: period.to_string(),
+        total_usages,
+        unique_assets_used,
+        top,
+        bottom,
+        unused,
+        items,
+    }
+}
+
+/// Aggregates raw daily rows and inventory into a full `AssetUsageSummary` at a given reference time.
+///
+/// Date Boundaries (Issue #196):
+/// - "today": UTC today.
+/// - "7d": UTC today and 6 previous days (exactly 7 calendar days inclusive).
+/// - "30d": UTC today and 29 previous days (exactly 30 calendar days inclusive).
+pub fn calculate_asset_summary_at(
+    guild_id: &str,
+    target_kind: Option<AssetKind>,
+    period: &str,
+    daily_rows: &[AssetUsageDaily],
+    inventory_rows: &[AssetInventoryItem],
+    now: DateTime<Utc>,
+) -> AssetUsageSummary {
+    let today = now.date_naive();
+    let seven_days_ago = today - chrono::Duration::days(6);
+    let thirty_days_ago = today - chrono::Duration::days(29);
+
+    let period_cutoff: Option<NaiveDate> = match period {
+        "today" => Some(today),
+        "7d" => Some(seven_days_ago),
+        "30d" => Some(thirty_days_ago),
+        _ => None,
+    };
+
+    struct InMemAgg {
         today: i64,
         seven_days: i64,
         thirty_days: i64,
@@ -613,7 +861,7 @@ pub fn calculate_asset_summary(
 
         let entry = agg_map
             .entry((kind, row.asset_id.clone()))
-            .or_insert_with(|| Agg {
+            .or_insert_with(|| InMemAgg {
                 today: 0,
                 seven_days: 0,
                 thirty_days: 0,
@@ -647,86 +895,46 @@ pub fn calculate_asset_summary(
         }
     }
 
-    // Combine all known assets from both daily rows and inventory
-    let mut all_keys: HashSet<(AssetKind, String)> = HashSet::new();
-    for k in inv_map.keys() {
-        all_keys.insert(k.clone());
-    }
-    for k in agg_map.keys() {
-        all_keys.insert(k.clone());
-    }
-
-    let mut items = Vec::new();
-    let mut total_usages = 0;
-    let mut unique_assets_used = 0;
-
-    for (kind, id) in all_keys {
-        let inv = inv_map.get(&(kind, id.clone()));
-        let agg = agg_map.get(&(kind, id.clone()));
-
-        let usage_today = agg.map(|a| a.today).unwrap_or(0);
-        let usage_7d = agg.map(|a| a.seven_days).unwrap_or(0);
-        let usage_30d = agg.map(|a| a.thirty_days).unwrap_or(0);
-        let usage_total = agg.map(|a| a.total).unwrap_or(0);
-        let period_usage = agg.map(|a| a.period).unwrap_or(0);
-        let last_used_at = agg.map(|a| a.last_used_at);
-
-        total_usages += period_usage;
-        if period_usage > 0 {
-            unique_assets_used += 1;
-        }
-
-        let unused_days = last_used_at.map(|lu| (now - lu).num_days().max(0));
-
-        let stat = AssetUsageStat {
+    let aggregates: Vec<AssetUsageAggregate> = agg_map
+        .into_iter()
+        .map(|((kind, id), agg)| AssetUsageAggregate {
+            asset_kind: kind.as_str().to_string(),
             asset_id: id,
-            asset_kind: kind,
-            name: inv.and_then(|i| i.name.clone()),
-            animated: inv.map(|i| i.animated).unwrap_or(false),
-            is_guild_owned: inv.map(|i| i.is_guild_owned).unwrap_or(true),
-            usage_today,
-            usage_7d,
-            usage_30d,
-            usage_total,
-            period_usage,
-            first_seen_at: inv.map(|i| i.first_seen_at),
-            last_used_at,
-            unused_days,
-        };
-        items.push(stat);
-    }
+            usage_total: agg.total,
+            usage_7d: agg.seven_days,
+            usage_30d: agg.thirty_days,
+            usage_today: agg.today,
+            period_usage: agg.period,
+            last_used_at: Some(agg.last_used_at),
+        })
+        .collect();
 
-    // Sort items:
-    // Top: sorted by period_usage desc
-    let mut top = items.clone();
-    top.retain(|i| i.period_usage > 0);
-    top.sort_by_key(|a| std::cmp::Reverse(a.period_usage));
+    build_asset_summary_from_aggregates(
+        guild_id,
+        target_kind,
+        period,
+        &aggregates,
+        inventory_rows,
+        now,
+    )
+}
 
-    // Bottom: used at least once in period, sorted by period_usage asc
-    let mut bottom = top.clone();
-    bottom.sort_by_key(|a| a.period_usage);
-
-    // Unused: period_usage == 0
-    let mut unused = items.clone();
-    unused.retain(|i| i.period_usage == 0);
-    unused.sort_by(|a, b| match (a.unused_days, b.unused_days) {
-        (Some(da), Some(db)) => db.cmp(&da),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => a.asset_id.cmp(&b.asset_id),
-    });
-
-    AssetUsageSummary {
-        guild_id: guild_id.to_string(),
-        asset_kind: target_kind,
-        period: period.to_string(),
-        total_usages,
-        unique_assets_used,
-        top,
-        bottom,
-        unused,
-        items,
-    }
+/// Helper to aggregate raw daily rows and inventory into a full `AssetUsageSummary` at `Utc::now()`.
+pub fn calculate_asset_summary(
+    guild_id: &str,
+    target_kind: Option<AssetKind>,
+    period: &str,
+    daily_rows: &[AssetUsageDaily],
+    inventory_rows: &[AssetInventoryItem],
+) -> AssetUsageSummary {
+    calculate_asset_summary_at(
+        guild_id,
+        target_kind,
+        period,
+        daily_rows,
+        inventory_rows,
+        Utc::now(),
+    )
 }
 
 #[cfg(test)]
@@ -810,7 +1018,7 @@ mod tests {
             emoji_id,
             Some("pepe"),
             false,
-            true,
+            Some(true),
             5,
             now,
         );
@@ -844,7 +1052,7 @@ mod tests {
             emoji_id,
             Some("pepe"),
             false,
-            true,
+            Some(true),
             3,
             now,
         );
@@ -878,7 +1086,7 @@ mod tests {
             shared_id,
             Some("fire_emoji"),
             false,
-            true,
+            Some(true),
             10,
             now,
         );
@@ -888,7 +1096,7 @@ mod tests {
             shared_id,
             Some("fire_sticker"),
             true,
-            true,
+            Some(true),
             4,
             now,
         );
@@ -935,7 +1143,7 @@ mod tests {
             emoji_id,
             Some("nitro_cat"),
             false,
-            false, // external
+            Some(false), // external
             7,
             now,
         );
@@ -947,7 +1155,7 @@ mod tests {
             emoji_id,
             Some("nitro_cat"),
             false,
-            true, // owned
+            Some(true), // owned
             15,
             now,
         );
@@ -959,14 +1167,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(g1_summary.total_usages, 7);
-        assert!(!g1_summary.items[0].is_guild_owned);
+        assert_eq!(g1_summary.items[0].is_guild_owned, Some(false));
 
         let g2_summary = storage
             .get_asset_usage_summary(guild_2, Some(AssetKind::Emoji), "all")
             .await
             .unwrap();
         assert_eq!(g2_summary.total_usages, 15);
-        assert!(g2_summary.items[0].is_guild_owned);
+        assert_eq!(g2_summary.items[0].is_guild_owned, Some(true));
     }
 
     #[tokio::test]
@@ -1034,5 +1242,337 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(g2.total_usages, 12);
+    }
+
+    #[test]
+    fn test_date_boundaries_exact_7d_and_30d() {
+        let fixed_now: DateTime<Utc> = "2026-11-05T12:00:00Z".parse().unwrap();
+        let guild_id = "100000000000000001";
+        let asset_id = "200000000000000002";
+
+        let d_today = NaiveDate::from_ymd_opt(2026, 11, 5).unwrap();
+        let d_6_ago = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap(); // today - 6 (inclusive for 7d)
+        let d_7_ago = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap(); // today - 7 (MUST be excluded from 7d)
+        let d_29_ago = NaiveDate::from_ymd_opt(2026, 10, 7).unwrap(); // today - 29 (inclusive for 30d)
+        let d_30_ago = NaiveDate::from_ymd_opt(2026, 10, 6).unwrap(); // today - 30 (MUST be excluded from 30d)
+
+        let daily_rows = vec![
+            AssetUsageDaily {
+                guild_id: guild_id.to_string(),
+                usage_date: d_today,
+                asset_kind: "emoji".to_string(),
+                asset_id: asset_id.to_string(),
+                usage_count: 1,
+                last_used_at: fixed_now,
+            },
+            AssetUsageDaily {
+                guild_id: guild_id.to_string(),
+                usage_date: d_6_ago,
+                asset_kind: "emoji".to_string(),
+                asset_id: asset_id.to_string(),
+                usage_count: 3,
+                last_used_at: fixed_now,
+            },
+            AssetUsageDaily {
+                guild_id: guild_id.to_string(),
+                usage_date: d_7_ago,
+                asset_kind: "emoji".to_string(),
+                asset_id: asset_id.to_string(),
+                usage_count: 10,
+                last_used_at: fixed_now,
+            },
+            AssetUsageDaily {
+                guild_id: guild_id.to_string(),
+                usage_date: d_29_ago,
+                asset_kind: "emoji".to_string(),
+                asset_id: asset_id.to_string(),
+                usage_count: 100,
+                last_used_at: fixed_now,
+            },
+            AssetUsageDaily {
+                guild_id: guild_id.to_string(),
+                usage_date: d_30_ago,
+                asset_kind: "emoji".to_string(),
+                asset_id: asset_id.to_string(),
+                usage_count: 1000,
+                last_used_at: fixed_now,
+            },
+        ];
+
+        let inv_rows = vec![AssetInventoryItem {
+            guild_id: guild_id.to_string(),
+            asset_kind: "emoji".to_string(),
+            asset_id: asset_id.to_string(),
+            name: Some("test_emoji".to_string()),
+            animated: false,
+            is_guild_owned: Some(true),
+            is_active: true,
+            first_seen_at: fixed_now,
+            last_seen_at: fixed_now,
+        }];
+
+        // 1. Period = today: only d_today (1 usage)
+        let s_today = calculate_asset_summary_at(
+            guild_id,
+            Some(AssetKind::Emoji),
+            "today",
+            &daily_rows,
+            &inv_rows,
+            fixed_now,
+        );
+        assert_eq!(s_today.total_usages, 1);
+        assert_eq!(s_today.items[0].usage_today, 1);
+
+        // 2. Period = 7d: exactly 7 days (today + 6 prior): 1 + 3 = 4 usages!
+        // 10 usages from 7 days ago (2026-10-29) MUST be excluded!
+        let s_7d = calculate_asset_summary_at(
+            guild_id,
+            Some(AssetKind::Emoji),
+            "7d",
+            &daily_rows,
+            &inv_rows,
+            fixed_now,
+        );
+        assert_eq!(s_7d.total_usages, 4);
+        assert_eq!(s_7d.items[0].usage_7d, 4);
+        assert_eq!(s_7d.items[0].period_usage, 4);
+
+        // 3. Period = 30d: exactly 30 days (today + 29 prior): 1 + 3 + 10 + 100 = 114 usages!
+        // 1000 usages from 30 days ago (2026-10-06) MUST be excluded!
+        let s_30d = calculate_asset_summary_at(
+            guild_id,
+            Some(AssetKind::Emoji),
+            "30d",
+            &daily_rows,
+            &inv_rows,
+            fixed_now,
+        );
+        assert_eq!(s_30d.total_usages, 114);
+        assert_eq!(s_30d.items[0].usage_30d, 114);
+        assert_eq!(s_30d.items[0].period_usage, 114);
+
+        // 4. Period = all: 1 + 3 + 10 + 100 + 1000 = 1114 usages
+        let s_all = calculate_asset_summary_at(
+            guild_id,
+            Some(AssetKind::Emoji),
+            "all",
+            &daily_rows,
+            &inv_rows,
+            fixed_now,
+        );
+        assert_eq!(s_all.total_usages, 1114);
+        assert_eq!(s_all.items[0].usage_total, 1114);
+    }
+
+    #[tokio::test]
+    async fn test_external_stickers_and_cache_miss_ownership() {
+        let store = crate::storage::MemoryStore::default();
+        let storage = crate::storage::Storage::Memory(store);
+        let batcher = AssetAnalyticsBatcher::new(storage.clone());
+
+        let guild_id = "100000000000000001";
+        let owned_sticker = ParsedSticker {
+            id: "200000000000000001".to_string(),
+            name: "local_sticker".to_string(),
+            animated: false,
+        };
+        let external_sticker = ParsedSticker {
+            id: "200000000000000002".to_string(),
+            name: "nitro_sticker".to_string(),
+            animated: true,
+        };
+
+        // 1. Message with known guild stickers list:
+        // owned_sticker is in cache -> Some(true), external_sticker not in cache -> Some(false)
+        let known_stickers = vec!["200000000000000001".to_string()];
+        batcher.record_message(
+            guild_id,
+            "300000000000000001",
+            "hello",
+            &[owned_sticker, external_sticker],
+            None,
+            Some(&known_stickers),
+        );
+
+        batcher.flush().await.unwrap();
+
+        let summary = storage
+            .get_asset_usage_summary(guild_id, Some(AssetKind::Sticker), "all")
+            .await
+            .unwrap();
+
+        let s_owned = summary
+            .items
+            .iter()
+            .find(|i| i.asset_id == "200000000000000001")
+            .unwrap();
+        assert_eq!(s_owned.is_guild_owned, Some(true));
+
+        let s_ext = summary
+            .items
+            .iter()
+            .find(|i| i.asset_id == "200000000000000002")
+            .unwrap();
+        assert_eq!(s_ext.is_guild_owned, Some(false));
+
+        // 2. Cache miss scenario: both guild_emojis and guild_stickers are None
+        // Ownership must be None (unknown), NOT true!
+        let unknown_emoji_content = "<:mystery:400000000000000001>";
+        batcher.record_message(
+            guild_id,
+            "300000000000000002",
+            unknown_emoji_content,
+            &[],
+            None,
+            None,
+        );
+
+        batcher.flush().await.unwrap();
+
+        let emoji_summary = storage
+            .get_asset_usage_summary(guild_id, Some(AssetKind::Emoji), "all")
+            .await
+            .unwrap();
+
+        let s_unknown = emoji_summary
+            .items
+            .iter()
+            .find(|i| i.asset_id == "400000000000000001")
+            .unwrap();
+        assert_eq!(
+            s_unknown.is_guild_owned, None,
+            "Cache miss emoji must have is_guild_owned = None, not false or true"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unused_emojis_filter_and_guild_sync() {
+        let store = crate::storage::MemoryStore::default();
+        let storage = crate::storage::Storage::Memory(store);
+        let batcher = AssetAnalyticsBatcher::new(storage.clone());
+
+        let guild_id = "100000000000000001";
+        let now = Utc::now();
+        let past_45d = now - chrono::Duration::days(45);
+
+        // 1. Sync inventory snapshot from guild (3 emojis)
+        let emojis = vec![
+            ParsedCustomEmoji {
+                name: "active_used_recently".to_string(),
+                id: "100000000000000001".to_string(),
+                animated: false,
+            },
+            ParsedCustomEmoji {
+                name: "active_used_long_ago".to_string(),
+                id: "100000000000000002".to_string(),
+                animated: false,
+            },
+            ParsedCustomEmoji {
+                name: "never_ever_used".to_string(),
+                id: "100000000000000003".to_string(),
+                animated: false,
+            },
+        ];
+
+        batcher.record_inventory_snapshot(guild_id, &emojis, &[]);
+
+        // 2. Record usage for #1 today, and #2 45 days ago; #3 has 0 usages
+        batcher.record_asset_usage(
+            guild_id,
+            AssetKind::Emoji,
+            "100000000000000001",
+            Some("active_used_recently"),
+            false,
+            Some(true),
+            5,
+            now,
+        );
+        batcher.record_asset_usage(
+            guild_id,
+            AssetKind::Emoji,
+            "100000000000000002",
+            Some("active_used_long_ago"),
+            false,
+            Some(true),
+            2,
+            past_45d,
+        );
+
+        batcher.flush().await.unwrap();
+
+        let summary = storage
+            .get_asset_usage_summary(guild_id, Some(AssetKind::Emoji), "all")
+            .await
+            .unwrap();
+
+        // Filter inactive for 30+ days
+        let mut unused: Vec<_> = summary
+            .items
+            .into_iter()
+            .filter(|item| {
+                item.is_guild_owned.unwrap_or(false)
+                    && item.is_active
+                    && item.unused_days.map(|d| d >= 30).unwrap_or(true)
+            })
+            .collect();
+
+        unused.sort_by(|a, b| match (a.unused_days, b.unused_days) {
+            (None, None) => a.asset_id.cmp(&b.asset_id),
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (Some(da), Some(db)) => db.cmp(&da),
+        });
+
+        assert_eq!(unused.len(), 2);
+        // Never used emoji comes first
+        assert_eq!(unused[0].asset_id, "100000000000000003");
+        assert_eq!(unused[0].unused_days, None);
+        // 45 days inactive emoji comes second
+        assert_eq!(unused[1].asset_id, "100000000000000002");
+        assert!(unused[1].unused_days.unwrap() >= 45);
+    }
+
+    #[tokio::test]
+    async fn test_flush_worker_and_graceful_shutdown() {
+        let store = crate::storage::MemoryStore::default();
+        let storage = crate::storage::Storage::Memory(store);
+        let batcher = std::sync::Arc::new(AssetAnalyticsBatcher::new(storage.clone()));
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
+        let batcher_clone = batcher.clone();
+
+        // Run worker loop with 1 hour tick (so it won't tick during test, only final flush on shutdown)
+        let worker_handle = tokio::spawn(run_asset_analytics_flush_loop(
+            batcher_clone,
+            shutdown_rx,
+            std::time::Duration::from_secs(3600),
+        ));
+
+        let guild_id = "100000000000000001";
+        let asset_id = "500000000000000005";
+        batcher.record_asset_usage(
+            guild_id,
+            AssetKind::Emoji,
+            asset_id,
+            Some("shutdown_emoji"),
+            false,
+            Some(true),
+            99,
+            Utc::now(),
+        );
+        assert_eq!(batcher.pending_counts_len(), 1);
+
+        // Send shutdown
+        let _ = shutdown_tx.send(());
+        let join_res = tokio::time::timeout(std::time::Duration::from_secs(2), worker_handle).await;
+        assert!(join_res.is_ok(), "Worker must shut down cleanly");
+
+        // Verify final flush succeeded: batcher is drained and storage has data
+        assert_eq!(batcher.pending_counts_len(), 0);
+        let summary = storage
+            .get_asset_usage_summary(guild_id, Some(AssetKind::Emoji), "all")
+            .await
+            .unwrap();
+        assert_eq!(summary.total_usages, 99);
     }
 }
