@@ -480,6 +480,18 @@ pub fn build_router(state: WebState) -> Router {
             post(features::reconcile_idle_help_forums_endpoint),
         )
         .route(
+            "/api/guilds/{guild_id}/assets/usage",
+            get(features::get_asset_usage_summary_endpoint),
+        )
+        .route(
+            "/api/guilds/{guild_id}/assets/inventory",
+            get(features::list_asset_inventory_endpoint),
+        )
+        .route(
+            "/api/guilds/{guild_id}/assets/flush",
+            post(features::flush_asset_analytics_endpoint),
+        )
+        .route(
             "/api/guilds/{guild_id}/feeds",
             get(features::list_feeds).post(features::create_feed),
         )

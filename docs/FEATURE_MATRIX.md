@@ -349,6 +349,7 @@ Music integrations must comply with source-platform terms, copyright rules and D
 | JSON configuration editor | Implemented |
 | Responsive first-party UI | Implemented |
 | Module configuration timestamps | Implemented |
+| Emoji & Sticker usage analytics | Implemented |
 | Command analytics | Planned |
 | Member growth | Planned |
 | Retention/cohort analytics | Implemented |
@@ -366,6 +367,17 @@ Music integrations must comply with source-platform terms, copyright rules and D
 | Multi-user dashboard roles | Planned |
 | Organization/multi-guild view | Planned |
 | Mobile-optimized administration | Foundation |
+
+### 11.1 Emoji & Sticker Analytics (Issue #162)
+- **Batch Processing**: Usage counts and inventory metadata are buffered in memory via concurrent `DashMap` buckets and flushed atomically to PostgreSQL or volatile storage.
+- **Privacy by Design**: Telemetry strictly stores only guild ID, date, asset kind, asset ID, usage count, and timestamp. **NEVER** stores `user_id` or `message.content`.
+- **Deduplication Policy**: Approximate analytics using a bounded FIFO/LRU queue of recent `message_id` entries to prevent double-counting during gateway reconnects.
+- **Failure Recovery**: If a storage error occurs during flush, batch snapshots are safely merged back into the in-memory buffer without data loss.
+- **REST Endpoints & Slash Commands**:
+  - `GET /api/guilds/{guild_id}/assets/usage?kind=emoji&period=30d`
+  - `GET /api/guilds/{guild_id}/assets/inventory`
+  - `POST /api/guilds/{guild_id}/assets/flush`
+  - `/emoji stats [period]`, `/emoji unused [days]`, `/sticker stats [period]`
 
 ## 12. AI-assisted features
 

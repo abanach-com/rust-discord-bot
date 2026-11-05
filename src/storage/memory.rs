@@ -201,6 +201,18 @@ pub struct MemoryStore {
     marketplace_packages: Arc<DashMap<String, PluginMarketplacePackage>>,
 
     plugin_guild_installs: Arc<DashMap<(String, String), PluginGuildInstallation>>,
+
+    asset_usage_daily: Arc<
+        DashMap<
+            (String, chrono::NaiveDate, String, String),
+            crate::asset_analytics::AssetUsageDaily,
+        >,
+    >,
+
+    asset_inventory:
+        Arc<DashMap<(String, String, String), crate::asset_analytics::AssetInventoryItem>>,
+
+    asset_analytics_failure_injected: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MemoryStore {
@@ -258,6 +270,11 @@ impl MemoryStore {
     pub fn is_progression_failure_injected(&self) -> bool {
         self.progression_failure_injected
             .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn inject_asset_analytics_failure(&self, fail: bool) {
+        self.asset_analytics_failure_injected
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn record_audit(
@@ -5013,5 +5030,138 @@ impl MemoryStore {
             forum_channel_id,
             &sessions,
         ))
+    }
+
+    pub fn record_asset_usage_batch(
+        &self,
+        daily_items: &[crate::asset_analytics::AssetUsageDaily],
+        inventory_items: &[crate::asset_analytics::AssetInventoryItem],
+    ) -> anyhow::Result<usize> {
+        if self
+            .asset_analytics_failure_injected
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            anyhow::bail!("Injected database error during asset analytics batch flush");
+        }
+
+        let mut count = 0;
+        for item in daily_items {
+            validate_snowflake("guild_id", &item.guild_id)?;
+            validate_snowflake("asset_id", &item.asset_id)?;
+            let key = (
+                item.guild_id.clone(),
+                item.usage_date,
+                item.asset_kind.clone(),
+                item.asset_id.clone(),
+            );
+            self.asset_usage_daily
+                .entry(key)
+                .and_modify(|existing| {
+                    existing.usage_count += item.usage_count;
+                    if item.last_used_at > existing.last_used_at {
+                        existing.last_used_at = item.last_used_at;
+                    }
+                })
+                .or_insert_with(|| item.clone());
+            count += 1;
+        }
+
+        for item in inventory_items {
+            validate_snowflake("guild_id", &item.guild_id)?;
+            validate_snowflake("asset_id", &item.asset_id)?;
+            let key = (
+                item.guild_id.clone(),
+                item.asset_kind.clone(),
+                item.asset_id.clone(),
+            );
+            self.asset_inventory
+                .entry(key)
+                .and_modify(|existing| {
+                    if item.name.is_some() {
+                        existing.name = item.name.clone();
+                    }
+                    existing.animated = item.animated;
+                    existing.is_guild_owned = item.is_guild_owned;
+                    if item.last_seen_at > existing.last_seen_at {
+                        existing.last_seen_at = item.last_seen_at;
+                    }
+                    if item.first_seen_at < existing.first_seen_at {
+                        existing.first_seen_at = item.first_seen_at;
+                    }
+                })
+                .or_insert_with(|| item.clone());
+        }
+
+        Ok(count)
+    }
+
+    pub fn get_asset_usage_summary(
+        &self,
+        guild_id: &str,
+        kind: Option<crate::asset_analytics::AssetKind>,
+        period: &str,
+    ) -> anyhow::Result<crate::asset_analytics::AssetUsageSummary> {
+        validate_snowflake("guild_id", guild_id)?;
+
+        let daily_rows: Vec<crate::asset_analytics::AssetUsageDaily> = self
+            .asset_usage_daily
+            .iter()
+            .filter(|entry| entry.guild_id == guild_id)
+            .map(|entry| entry.value().clone())
+            .collect();
+
+        let inventory_rows: Vec<crate::asset_analytics::AssetInventoryItem> = self
+            .asset_inventory
+            .iter()
+            .filter(|entry| entry.guild_id == guild_id)
+            .map(|entry| entry.value().clone())
+            .collect();
+
+        Ok(crate::asset_analytics::calculate_asset_summary(
+            guild_id,
+            kind,
+            period,
+            &daily_rows,
+            &inventory_rows,
+        ))
+    }
+
+    pub fn list_asset_inventory(
+        &self,
+        guild_id: &str,
+        kind: Option<crate::asset_analytics::AssetKind>,
+    ) -> anyhow::Result<Vec<crate::asset_analytics::AssetUsageStat>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let summary = self.get_asset_usage_summary(guild_id, kind, "all")?;
+        Ok(summary.items)
+    }
+
+    pub fn prune_asset_analytics(
+        &self,
+        guild_id: Option<&str>,
+        older_than_days: u32,
+    ) -> anyhow::Result<usize> {
+        if let Some(gid) = guild_id {
+            validate_snowflake("guild_id", gid)?;
+        }
+
+        let cutoff =
+            chrono::Utc::now().date_naive() - chrono::Duration::days(older_than_days as i64);
+        let mut pruned = 0;
+
+        self.asset_usage_daily.retain(|(gid, date, _, _), _| {
+            let matches_guild = match guild_id {
+                Some(target) => gid == target,
+                None => true,
+            };
+            if matches_guild && *date < cutoff {
+                pruned += 1;
+                false
+            } else {
+                true
+            }
+        });
+
+        Ok(pruned)
     }
 }

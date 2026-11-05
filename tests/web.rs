@@ -2804,3 +2804,187 @@ async fn test_recruitment_security_and_concurrency_fixes() {
     assert_eq!(g2_task.status, "pending");
     assert_eq!(g2_task.attempts, 0);
 }
+
+#[tokio::test]
+async fn test_asset_analytics_api_and_isolation() {
+    let (state, _perms) = test_web_state().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let app = build_router(state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve axum");
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+
+    let g1 = "100000000000000001";
+    let g2 = "200000000000000002";
+    let user_id = "300000000000000003";
+
+    let session_token = "asset_analytics_session_token";
+    let csrf_token = "asset_csrf_token";
+
+    state
+        .app
+        .sessions
+        .save_session(
+            session_token,
+            DashboardUser {
+                id: user_id.to_owned(),
+                username: "AssetAdmin".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: g1.to_owned(),
+                name: "Guild 1".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "8".to_owned(),
+            }],
+            csrf_token.to_owned(),
+            Utc::now() + Duration::hours(24),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let auth_cookie = format!("rusty_discord_bot_session={session_token}");
+
+    // 1. Unauthenticated request -> 401
+    let unauth_res = client
+        .get(format!("{base_url}/api/guilds/{g1}/assets/usage"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth_res.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // 2. Access to G2 (not member) -> 403 Forbidden
+    let forbid_res = client
+        .get(format!("{base_url}/api/guilds/{g2}/assets/usage"))
+        .header(COOKIE, &auth_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forbid_res.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 3. Record assets in batcher for G1
+    let party_emoji = "111222333444555666";
+    let spin_emoji = "222333444555666777";
+    let sticker_id = "333444555666777888";
+
+    // Message 1: 3x party emoji + 1x spin animated emoji
+    let msg_content = format!(
+        "<:party:{party_emoji}> wow <:party:{party_emoji}> awesome <:party:{party_emoji}> <a:spin:{spin_emoji}>"
+    );
+    let stickers = vec![rusty_discord_bot::asset_analytics::ParsedSticker {
+        id: sticker_id.to_string(),
+        name: "cool_cat".to_string(),
+        animated: true,
+    }];
+
+    // Record through batcher
+    let count = state.app.asset_analytics.record_message(
+        g1,
+        "555000111222333444",
+        &msg_content,
+        &stickers,
+        Some(&[party_emoji.to_string()]), // spin is external, party is guild-owned
+    );
+    assert_eq!(count, 5); // 3 party + 1 spin + 1 sticker
+
+    // Duplicate message from gateway reconnect must be ignored by dedupe
+    let dup_count = state.app.asset_analytics.record_message(
+        g1,
+        "555000111222333444",
+        &msg_content,
+        &stickers,
+        Some(&[party_emoji.to_string()]),
+    );
+    assert_eq!(
+        dup_count, 0,
+        "Duplicate message_id must be ignored by bounded LRU"
+    );
+
+    // 4. Flush batch via REST API
+    let flush_res = client
+        .post(format!("{base_url}/api/guilds/{g1}/assets/flush"))
+        .header(COOKIE, &auth_cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(flush_res.status(), reqwest::StatusCode::OK);
+    let flush_json: serde_json::Value = flush_res.json().await.unwrap();
+    assert_eq!(flush_json["flushed"], true);
+    assert_eq!(flush_json["items_flushed"], 3); // 3 daily rows (party, spin, sticker)
+
+    // 5. Query usage for emojis
+    let usage_res = client
+        .get(format!(
+            "{base_url}/api/guilds/{g1}/assets/usage?kind=emoji&period=30d"
+        ))
+        .header(COOKIE, &auth_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(usage_res.status(), reqwest::StatusCode::OK);
+    let usage_json: serde_json::Value = usage_res.json().await.unwrap();
+
+    assert_eq!(usage_json["guild_id"], g1);
+    assert_eq!(usage_json["total_usages"], 4); // 3 party + 1 spin
+    assert_eq!(usage_json["unique_assets_used"], 2);
+
+    let top = usage_json["top"].as_array().unwrap();
+    assert_eq!(top.len(), 2);
+    assert_eq!(top[0]["asset_id"], party_emoji);
+    assert_eq!(top[0]["period_usage"], 3);
+    assert_eq!(top[0]["is_guild_owned"], true);
+    assert_eq!(top[0]["name"], "party");
+    assert_eq!(top[0]["animated"], false);
+
+    assert_eq!(top[1]["asset_id"], spin_emoji);
+    assert_eq!(top[1]["period_usage"], 1);
+    assert_eq!(top[1]["is_guild_owned"], false);
+    assert_eq!(top[1]["name"], "spin");
+    assert_eq!(top[1]["animated"], true);
+
+    // Privacy verification: no user_id or message content anywhere in payload
+    let raw_response = serde_json::to_string(&usage_json).unwrap();
+    assert!(
+        !raw_response.contains("555000111222333444"),
+        "Message ID must not be leaked"
+    );
+    assert!(
+        !raw_response.contains("AssetAdmin"),
+        "User name must not be stored in analytics"
+    );
+    assert!(
+        !raw_response.contains(user_id),
+        "User ID must not be stored in analytics"
+    );
+    assert!(
+        !raw_response.contains("wow"),
+        "Message content must not be stored in analytics"
+    );
+
+    // 6. Query inventory
+    let inv_res = client
+        .get(format!("{base_url}/api/guilds/{g1}/assets/inventory"))
+        .header(COOKIE, &auth_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(inv_res.status(), reqwest::StatusCode::OK);
+    let inv_json: serde_json::Value = inv_res.json().await.unwrap();
+    let items = inv_json.as_array().unwrap();
+    assert_eq!(items.len(), 3); // party, spin, cool_cat sticker
+}

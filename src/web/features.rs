@@ -5419,6 +5419,94 @@ pub async fn reconcile_idle_help_forums_endpoint(
     Ok(Json(json!({ "reconciled": true, "closed_count": count })))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct AssetUsageQuery {
+    pub kind: Option<String>,
+    pub period: Option<String>,
+}
+
+pub async fn get_asset_usage_summary_endpoint(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    Query(query): Query<AssetUsageQuery>,
+    headers: HeaderMap,
+) -> Result<Json<crate::asset_analytics::AssetUsageSummary>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let kind = match query.kind.as_deref() {
+        Some(k) => Some(
+            k.parse::<crate::asset_analytics::AssetKind>()
+                .map_err(|e| ApiError::bad_request(e.to_string()))?,
+        ),
+        None => None,
+    };
+
+    let period = query.period.as_deref().unwrap_or("30d");
+
+    let summary = state
+        .app
+        .storage
+        .get_asset_usage_summary(&guild_id, kind, period)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(summary))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AssetInventoryQuery {
+    pub kind: Option<String>,
+}
+
+pub async fn list_asset_inventory_endpoint(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    Query(query): Query<AssetInventoryQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::asset_analytics::AssetUsageStat>>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let kind = match query.kind.as_deref() {
+        Some(k) => Some(
+            k.parse::<crate::asset_analytics::AssetKind>()
+                .map_err(|e| ApiError::bad_request(e.to_string()))?,
+        ),
+        None => None,
+    };
+
+    let items = state
+        .app
+        .storage
+        .list_asset_inventory(&guild_id, kind)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(items))
+}
+
+pub async fn flush_asset_analytics_endpoint(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let count = state
+        .app
+        .asset_analytics
+        .flush()
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(json!({ "flushed": true, "items_flushed": count })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

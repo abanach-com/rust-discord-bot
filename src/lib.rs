@@ -1,3 +1,4 @@
+pub mod asset_analytics;
 pub mod config;
 pub mod discord;
 pub mod duty;

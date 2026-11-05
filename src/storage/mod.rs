@@ -31,6 +31,10 @@ pub use crate::recruitment::{
 
 pub use crate::help_forum::{HelpForumConfig, HelpForumSession, HelpForumStats};
 
+pub use crate::asset_analytics::{
+    AssetInventoryItem, AssetKind, AssetUsageDaily, AssetUsageStat, AssetUsageSummary,
+};
+
 pub use progression::{
     CoinTransfer, CoinTransferOutcome, DailyClaimOutcome, MemberProgress, ProgressMetric,
     ReputationGrantOutcome, XpAward, level_for_xp, total_xp_for_level,
@@ -4701,6 +4705,55 @@ impl Storage {
             Self::Memory(store) => Ok(store.uninstall_plugin_package(guild_id, plugin_id)),
 
             Self::Postgres(store) => store.uninstall_plugin_package(guild_id, plugin_id).await,
+        }
+    }
+
+    pub async fn record_asset_usage_batch(
+        &self,
+        daily_items: &[crate::asset_analytics::AssetUsageDaily],
+        inventory_items: &[crate::asset_analytics::AssetInventoryItem],
+    ) -> anyhow::Result<usize> {
+        match self {
+            Self::Memory(store) => store.record_asset_usage_batch(daily_items, inventory_items),
+            Self::Postgres(store) => {
+                store
+                    .record_asset_usage_batch(daily_items, inventory_items)
+                    .await
+            }
+        }
+    }
+
+    pub async fn get_asset_usage_summary(
+        &self,
+        guild_id: &str,
+        kind: Option<crate::asset_analytics::AssetKind>,
+        period: &str,
+    ) -> anyhow::Result<crate::asset_analytics::AssetUsageSummary> {
+        match self {
+            Self::Memory(store) => store.get_asset_usage_summary(guild_id, kind, period),
+            Self::Postgres(store) => store.get_asset_usage_summary(guild_id, kind, period).await,
+        }
+    }
+
+    pub async fn list_asset_inventory(
+        &self,
+        guild_id: &str,
+        kind: Option<crate::asset_analytics::AssetKind>,
+    ) -> anyhow::Result<Vec<crate::asset_analytics::AssetUsageStat>> {
+        match self {
+            Self::Memory(store) => store.list_asset_inventory(guild_id, kind),
+            Self::Postgres(store) => store.list_asset_inventory(guild_id, kind).await,
+        }
+    }
+
+    pub async fn prune_asset_analytics(
+        &self,
+        guild_id: Option<&str>,
+        older_than_days: u32,
+    ) -> anyhow::Result<usize> {
+        match self {
+            Self::Memory(store) => store.prune_asset_analytics(guild_id, older_than_days),
+            Self::Postgres(store) => store.prune_asset_analytics(guild_id, older_than_days).await,
         }
     }
 }

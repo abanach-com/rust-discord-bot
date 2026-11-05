@@ -29,11 +29,16 @@ pub async fn register(ctx: &Context, state: &AppState) -> Result<usize> {
         RegistrationScope::Global
     };
 
-    if definitions
-        .iter()
-        .any(|d| d.name == "policy" || d.name == "duty" || d.name == "help")
-    {
-        anyhow::bail!("Lua script cannot define reserved host command 'policy', 'duty', or 'help'");
+    if definitions.iter().any(|d| {
+        d.name == "policy"
+            || d.name == "duty"
+            || d.name == "help"
+            || d.name == "emoji"
+            || d.name == "sticker"
+    }) {
+        anyhow::bail!(
+            "Lua script cannot define reserved host command 'policy', 'duty', 'help', 'emoji', or 'sticker'"
+        );
     }
 
     let mut commands = definitions
@@ -44,6 +49,8 @@ pub async fn register(ctx: &Context, state: &AppState) -> Result<usize> {
     commands.push(build_policy_command(scope));
     commands.push(build_duty_command(scope));
     commands.push(build_help_command(scope));
+    commands.push(build_emoji_command(scope));
+    commands.push(build_sticker_command(scope));
     let count = commands.len();
 
     if let Some(guild_id) = state.config.discord_dev_guild_id {
@@ -187,6 +194,80 @@ pub fn build_help_command(scope: RegistrationScope) -> CreateCommand {
             "solved",
             "Mark this help forum post as resolved and close it",
         ));
+
+    if scope == RegistrationScope::Global {
+        command = command
+            .integration_types(vec![InstallationContext::Guild])
+            .contexts(vec![InteractionContext::Guild]);
+    }
+
+    command
+}
+
+pub fn build_emoji_command(scope: RegistrationScope) -> CreateCommand {
+    let mut command = CreateCommand::new("emoji")
+        .description("View emoji usage analytics")
+        .add_option(
+            CreateCommandOption::new(
+                CommandOptionType::SubCommand,
+                "stats",
+                "View emoji usage statistics",
+            )
+            .add_sub_option(
+                CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "period",
+                    "Time window for usage statistics",
+                )
+                .add_string_choice("Today", "today")
+                .add_string_choice("Past 7 Days", "7d")
+                .add_string_choice("Past 30 Days", "30d")
+                .add_string_choice("All Time", "all"),
+            ),
+        )
+        .add_option(
+            CreateCommandOption::new(
+                CommandOptionType::SubCommand,
+                "unused",
+                "List unused emojis",
+            )
+            .add_sub_option(CreateCommandOption::new(
+                CommandOptionType::Integer,
+                "days",
+                "Minimum inactive days (default 30)",
+            )),
+        );
+
+    if scope == RegistrationScope::Global {
+        command = command
+            .integration_types(vec![InstallationContext::Guild])
+            .contexts(vec![InteractionContext::Guild]);
+    }
+
+    command
+}
+
+pub fn build_sticker_command(scope: RegistrationScope) -> CreateCommand {
+    let mut command = CreateCommand::new("sticker")
+        .description("View sticker usage analytics")
+        .add_option(
+            CreateCommandOption::new(
+                CommandOptionType::SubCommand,
+                "stats",
+                "View sticker usage statistics",
+            )
+            .add_sub_option(
+                CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "period",
+                    "Time window for usage statistics",
+                )
+                .add_string_choice("Today", "today")
+                .add_string_choice("Past 7 Days", "7d")
+                .add_string_choice("Past 30 Days", "30d")
+                .add_string_choice("All Time", "all"),
+            ),
+        );
 
     if scope == RegistrationScope::Global {
         command = command

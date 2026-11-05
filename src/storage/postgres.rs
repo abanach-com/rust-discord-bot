@@ -8471,6 +8471,151 @@ impl PostgresStore {
             &sessions,
         ))
     }
+
+    pub async fn record_asset_usage_batch(
+        &self,
+        daily_items: &[crate::asset_analytics::AssetUsageDaily],
+        inventory_items: &[crate::asset_analytics::AssetInventoryItem],
+    ) -> anyhow::Result<usize> {
+        let mut tx = self.pool.begin().await?;
+
+        for item in daily_items {
+            validate_snowflake("guild_id", &item.guild_id)?;
+            validate_snowflake("asset_id", &item.asset_id)?;
+
+            sqlx::query(
+                r#"
+                INSERT INTO guild_asset_usage_daily (
+                    guild_id, usage_date, asset_kind, asset_id, usage_count, last_used_at
+                ) VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (guild_id, usage_date, asset_kind, asset_id)
+                DO UPDATE SET
+                    usage_count = guild_asset_usage_daily.usage_count + EXCLUDED.usage_count,
+                    last_used_at = GREATEST(guild_asset_usage_daily.last_used_at, EXCLUDED.last_used_at)
+                "#,
+            )
+            .bind(&item.guild_id)
+            .bind(item.usage_date)
+            .bind(&item.asset_kind)
+            .bind(&item.asset_id)
+            .bind(item.usage_count)
+            .bind(item.last_used_at)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        for item in inventory_items {
+            validate_snowflake("guild_id", &item.guild_id)?;
+            validate_snowflake("asset_id", &item.asset_id)?;
+
+            sqlx::query(
+                r#"
+                INSERT INTO guild_asset_inventory (
+                    guild_id, asset_kind, asset_id, name, animated, is_guild_owned, first_seen_at, last_seen_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                ON CONFLICT (guild_id, asset_kind, asset_id)
+                DO UPDATE SET
+                    name = COALESCE(EXCLUDED.name, guild_asset_inventory.name),
+                    animated = EXCLUDED.animated,
+                    is_guild_owned = EXCLUDED.is_guild_owned,
+                    last_seen_at = GREATEST(guild_asset_inventory.last_seen_at, EXCLUDED.last_seen_at)
+                "#,
+            )
+            .bind(&item.guild_id)
+            .bind(&item.asset_kind)
+            .bind(&item.asset_id)
+            .bind(&item.name)
+            .bind(item.animated)
+            .bind(item.is_guild_owned)
+            .bind(item.first_seen_at)
+            .bind(item.last_seen_at)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(daily_items.len())
+    }
+
+    pub async fn get_asset_usage_summary(
+        &self,
+        guild_id: &str,
+        kind: Option<crate::asset_analytics::AssetKind>,
+        period: &str,
+    ) -> anyhow::Result<crate::asset_analytics::AssetUsageSummary> {
+        validate_snowflake("guild_id", guild_id)?;
+
+        let kind_str = kind.map(|k| k.as_str().to_string());
+
+        let daily_rows = sqlx::query_as::<_, crate::asset_analytics::AssetUsageDaily>(
+            r#"
+            SELECT guild_id, usage_date, asset_kind, asset_id, usage_count, last_used_at
+            FROM guild_asset_usage_daily
+            WHERE guild_id = $1 AND ($2::TEXT IS NULL OR asset_kind = $2)
+            "#,
+        )
+        .bind(guild_id)
+        .bind(kind_str.as_deref())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let inventory_rows = sqlx::query_as::<_, crate::asset_analytics::AssetInventoryItem>(
+            r#"
+            SELECT guild_id, asset_kind, asset_id, name, animated, is_guild_owned, first_seen_at, last_seen_at
+            FROM guild_asset_inventory
+            WHERE guild_id = $1 AND ($2::TEXT IS NULL OR asset_kind = $2)
+            "#,
+        )
+        .bind(guild_id)
+        .bind(kind_str.as_deref())
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(crate::asset_analytics::calculate_asset_summary(
+            guild_id,
+            kind,
+            period,
+            &daily_rows,
+            &inventory_rows,
+        ))
+    }
+
+    pub async fn list_asset_inventory(
+        &self,
+        guild_id: &str,
+        kind: Option<crate::asset_analytics::AssetKind>,
+    ) -> anyhow::Result<Vec<crate::asset_analytics::AssetUsageStat>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let summary = self.get_asset_usage_summary(guild_id, kind, "all").await?;
+        Ok(summary.items)
+    }
+
+    pub async fn prune_asset_analytics(
+        &self,
+        guild_id: Option<&str>,
+        older_than_days: u32,
+    ) -> anyhow::Result<usize> {
+        if let Some(gid) = guild_id {
+            validate_snowflake("guild_id", gid)?;
+        }
+
+        let cutoff =
+            chrono::Utc::now().date_naive() - chrono::Duration::days(older_than_days as i64);
+
+        let result = sqlx::query(
+            r#"
+            DELETE FROM guild_asset_usage_daily
+            WHERE ($1::TEXT IS NULL OR guild_id = $1)
+              AND usage_date < $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(cutoff)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() as usize)
+    }
 }
 
 async fn ensure_profile_on_pool(

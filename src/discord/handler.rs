@@ -224,6 +224,31 @@ impl EventHandler for Handler {
             return;
         };
 
+        let stickers: Vec<crate::asset_analytics::ParsedSticker> = message
+            .sticker_items
+            .iter()
+            .map(|item| crate::asset_analytics::ParsedSticker {
+                id: item.id.to_string(),
+                name: item.name.clone(),
+                animated: item.format_type != serenity::all::StickerFormatType::Png,
+            })
+            .collect();
+
+        let guild_emojis = ctx.cache.guild(guild_id).map(|g| {
+            g.emojis
+                .keys()
+                .map(|id| id.to_string())
+                .collect::<Vec<String>>()
+        });
+
+        self.state.asset_analytics.record_message(
+            &guild_id.to_string(),
+            &message.id.to_string(),
+            &message.content,
+            &stickers,
+            guild_emojis.as_deref(),
+        );
+
         let event = LuaEventContext {
             name: "message_create".to_owned(),
 
@@ -1116,6 +1141,14 @@ async fn execute_command_inner(
         return handle_help_builtin_command(ctx, state, command, deferred, responded).await;
     }
 
+    if command.data.name == "emoji" {
+        return handle_emoji_builtin_command(ctx, state, command, deferred, responded).await;
+    }
+
+    if command.data.name == "sticker" {
+        return handle_sticker_builtin_command(ctx, state, command, deferred, responded).await;
+    }
+
     let Some(module_id) = state.scripts.module_for_command(&command.data.name).await else {
         respond_or_edit(
             ctx,
@@ -1936,6 +1969,223 @@ async fn handle_help_builtin_command(
         .await?;
     }
 
+    Ok(())
+}
+
+async fn handle_emoji_builtin_command(
+    ctx: &Context,
+    state: &AppState,
+    command: &CommandInteraction,
+    deferred: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    responded: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> anyhow::Result<()> {
+    let Some(guild_id) = command.guild_id else {
+        respond_or_edit(
+            ctx,
+            command,
+            deferred,
+            responded,
+            "⚠️ The `/emoji` command can only be used within a server.",
+        )
+        .await?;
+        return Ok(());
+    };
+
+    let _ = state.asset_analytics.flush().await;
+    let guild_id_str = guild_id.to_string();
+
+    let option = command.data.options.first();
+    let subcommand = option.map(|o| o.name.as_str()).unwrap_or("stats");
+
+    match subcommand {
+        "stats" => {
+            let period = option
+                .and_then(|o| match &o.value {
+                    serenity::all::CommandDataOptionValue::SubCommand(sub_opts) => sub_opts
+                        .iter()
+                        .find(|so| so.name == "period")
+                        .and_then(|so| match &so.value {
+                            serenity::all::CommandDataOptionValue::String(val) => {
+                                Some(val.as_str())
+                            }
+                            _ => None,
+                        }),
+                    _ => None,
+                })
+                .unwrap_or("30d");
+
+            let summary = state
+                .storage
+                .get_asset_usage_summary(
+                    &guild_id_str,
+                    Some(crate::asset_analytics::AssetKind::Emoji),
+                    period,
+                )
+                .await?;
+
+            let mut lines = vec![format!(
+                "📊 **Emoji Analytics (Period: {})**\n• Total usages: **{}**\n• Unique emojis used: **{}**",
+                summary.period, summary.total_usages, summary.unique_assets_used
+            )];
+
+            if !summary.top.is_empty() {
+                lines.push("\n**Top Used Emojis:**".to_string());
+                for (idx, item) in summary.top.iter().take(5).enumerate() {
+                    let name = item.name.as_deref().unwrap_or("unknown");
+                    let tag = if item.animated {
+                        format!("<a:{}:{}>", name, item.asset_id)
+                    } else {
+                        format!("<:{}:{}>", name, item.asset_id)
+                    };
+                    lines.push(format!(
+                        "{}. {} `{}` — **{}** usages",
+                        idx + 1,
+                        tag,
+                        name,
+                        item.period_usage
+                    ));
+                }
+            } else {
+                lines.push("\n*No emoji usages recorded in this period.*".to_string());
+            }
+
+            respond_or_edit(ctx, command, deferred, responded, &lines.join("\n")).await?;
+        }
+        "unused" => {
+            let days: i64 = option
+                .and_then(|o| match &o.value {
+                    serenity::all::CommandDataOptionValue::SubCommand(sub_opts) => sub_opts
+                        .iter()
+                        .find(|so| so.name == "days")
+                        .and_then(|so| match &so.value {
+                            serenity::all::CommandDataOptionValue::Integer(val) => Some(*val),
+                            _ => None,
+                        }),
+                    _ => None,
+                })
+                .unwrap_or(30);
+
+            let summary = state
+                .storage
+                .get_asset_usage_summary(
+                    &guild_id_str,
+                    Some(crate::asset_analytics::AssetKind::Emoji),
+                    "all",
+                )
+                .await?;
+
+            let unused_filtered: Vec<_> = summary
+                .unused
+                .iter()
+                .filter(|item| item.unused_days.map(|d| d >= days).unwrap_or(true))
+                .take(10)
+                .collect();
+
+            if unused_filtered.is_empty() {
+                respond_or_edit(
+                    ctx,
+                    command,
+                    deferred,
+                    responded,
+                    &format!(
+                        "✨ All registered emojis have been used within the last {days} days!"
+                    ),
+                )
+                .await?;
+            } else {
+                let mut lines = vec![format!("💤 **Unused Emojis (Inactive for {days}+ days):**")];
+                for (idx, item) in unused_filtered.iter().enumerate() {
+                    let name = item.name.as_deref().unwrap_or("unknown");
+                    let days_str = item
+                        .unused_days
+                        .map(|d| format!("{d} days"))
+                        .unwrap_or_else(|| "never used".to_string());
+                    lines.push(format!(
+                        "{}. `{}` (ID: {}) — *{}*",
+                        idx + 1,
+                        name,
+                        item.asset_id,
+                        days_str
+                    ));
+                }
+                respond_or_edit(ctx, command, deferred, responded, &lines.join("\n")).await?;
+            }
+        }
+        _ => {
+            respond_or_edit(ctx, command, deferred, responded, "Unknown subcommand").await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_sticker_builtin_command(
+    ctx: &Context,
+    state: &AppState,
+    command: &CommandInteraction,
+    deferred: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    responded: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> anyhow::Result<()> {
+    let Some(guild_id) = command.guild_id else {
+        respond_or_edit(
+            ctx,
+            command,
+            deferred,
+            responded,
+            "⚠️ The `/sticker` command can only be used within a server.",
+        )
+        .await?;
+        return Ok(());
+    };
+
+    let _ = state.asset_analytics.flush().await;
+    let guild_id_str = guild_id.to_string();
+
+    let option = command.data.options.first();
+    let period = option
+        .and_then(|o| match &o.value {
+            serenity::all::CommandDataOptionValue::SubCommand(sub_opts) => sub_opts
+                .iter()
+                .find(|so| so.name == "period")
+                .and_then(|so| match &so.value {
+                    serenity::all::CommandDataOptionValue::String(val) => Some(val.as_str()),
+                    _ => None,
+                }),
+            _ => None,
+        })
+        .unwrap_or("30d");
+
+    let summary = state
+        .storage
+        .get_asset_usage_summary(
+            &guild_id_str,
+            Some(crate::asset_analytics::AssetKind::Sticker),
+            period,
+        )
+        .await?;
+
+    let mut lines = vec![format!(
+        "🏷️ **Sticker Analytics (Period: {})**\n• Total usages: **{}**\n• Unique stickers used: **{}**",
+        summary.period, summary.total_usages, summary.unique_assets_used
+    )];
+
+    if !summary.top.is_empty() {
+        lines.push("\n**Top Used Stickers:**".to_string());
+        for (idx, item) in summary.top.iter().take(5).enumerate() {
+            let name = item.name.as_deref().unwrap_or("unknown");
+            lines.push(format!(
+                "{}. `{}` (ID: {}) — **{}** usages",
+                idx + 1,
+                name,
+                item.asset_id,
+                item.period_usage
+            ));
+        }
+    } else {
+        lines.push("\n*No sticker usages recorded in this period.*".to_string());
+    }
+
+    respond_or_edit(ctx, command, deferred, responded, &lines.join("\n")).await?;
     Ok(())
 }
 

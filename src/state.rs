@@ -34,6 +34,7 @@ pub struct AppState {
     pub rate_limiter: Arc<crate::rate_limit::RateLimiter>,
     pub policy_engine: Arc<crate::policy::CommandPolicyEngine>,
     pub guild_events: tokio::sync::broadcast::Sender<GuildRealtimeEvent>,
+    pub asset_analytics: Arc<crate::asset_analytics::AssetAnalyticsBatcher>,
     pub is_gateway_ready: Arc<std::sync::atomic::AtomicBool>,
     pub is_shutting_down: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -116,6 +117,9 @@ impl AppState {
         let rate_limiter = Arc::new(crate::rate_limit::RateLimiter::new());
         let policy_engine = Arc::new(crate::policy::CommandPolicyEngine::new());
         let (guild_events, _) = tokio::sync::broadcast::channel(512);
+        let asset_analytics = Arc::new(crate::asset_analytics::AssetAnalyticsBatcher::new(
+            storage.clone(),
+        ));
         let is_gateway_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let is_shutting_down = Arc::new(std::sync::atomic::AtomicBool::new(false));
         Ok(Self {
@@ -132,6 +136,7 @@ impl AppState {
             rate_limiter,
             policy_engine,
             guild_events,
+            asset_analytics,
             is_gateway_ready,
             is_shutting_down,
         })
