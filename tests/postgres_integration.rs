@@ -501,4 +501,131 @@ async fn test_postgres_integration_suite() {
     let first = &season.standings_json[0];
     assert_eq!(first["user_id"], "season_user_1");
     assert_eq!(first["xp"], 2500);
+
+    // 7. Issue #153: Test get_or_create_ai_budget does not mutate or update existing budget on repeated reads
+    let ai_guild_1 = format!("pg_ai_guild_1_{}", Uuid::new_v4().simple());
+    let ai_guild_2 = format!("pg_ai_guild_2_{}", Uuid::new_v4().simple());
+
+    // 7.1. First read creates default budget with expected values
+    let budget_1 = store
+        .get_or_create_ai_budget(&ai_guild_1)
+        .await
+        .expect("initial get_or_create_ai_budget should succeed");
+    assert_eq!(budget_1.guild_id, ai_guild_1);
+    assert_eq!(budget_1.monthly_token_limit, 1_000_000);
+    assert_eq!(budget_1.used_tokens, 0);
+    assert_eq!(budget_1.monthly_usd_limit, 10.0);
+    assert_eq!(budget_1.used_usd, 0.0);
+    assert!(!budget_1.is_halted);
+
+    // Retrieve initial xmin system column to verify row versioning
+    let xmin_initial: i64 =
+        sqlx::query_scalar("SELECT xmin::text::bigint FROM ai_guild_budgets WHERE guild_id = $1")
+            .bind(&ai_guild_1)
+            .fetch_one(store.pool())
+            .await
+            .expect("fetch initial xmin");
+
+    // 7.2. Repeated reads (10 consecutive calls) must NOT perform UPDATE or bump xmin
+    for _ in 0..10 {
+        let repeated_budget = store
+            .get_or_create_ai_budget(&ai_guild_1)
+            .await
+            .expect("repeated get_or_create_ai_budget should succeed");
+        assert_eq!(repeated_budget.used_tokens, 0);
+        assert_eq!(repeated_budget.used_usd, 0.0);
+        assert_eq!(repeated_budget.reset_at, budget_1.reset_at);
+    }
+
+    let xmin_after_reads: i64 =
+        sqlx::query_scalar("SELECT xmin::text::bigint FROM ai_guild_budgets WHERE guild_id = $1")
+            .bind(&ai_guild_1)
+            .fetch_one(store.pool())
+            .await
+            .expect("fetch xmin after reads");
+
+    assert_eq!(
+        xmin_initial, xmin_after_reads,
+        "Repeated get_or_create_ai_budget calls must NOT mutate row version (xmin unchanged)"
+    );
+
+    // 7.3. Record AI usage updates usage and bumps xmin
+    let updated_usage = store
+        .record_ai_usage(&ai_guild_1, 5000, 0.12)
+        .await
+        .expect("record_ai_usage should succeed");
+    assert_eq!(updated_usage.used_tokens, 5000);
+    assert_eq!(updated_usage.used_usd, 0.12);
+
+    let xmin_after_usage: i64 =
+        sqlx::query_scalar("SELECT xmin::text::bigint FROM ai_guild_budgets WHERE guild_id = $1")
+            .bind(&ai_guild_1)
+            .fetch_one(store.pool())
+            .await
+            .expect("fetch xmin after usage");
+
+    assert_ne!(
+        xmin_initial, xmin_after_usage,
+        "record_ai_usage must update the row (new xmin)"
+    );
+
+    // 7.4. Read after usage returns updated usage without resetting or mutating row
+    let read_after_usage = store
+        .get_or_create_ai_budget(&ai_guild_1)
+        .await
+        .expect("get_or_create_ai_budget after usage");
+    assert_eq!(read_after_usage.used_tokens, 5000);
+    assert_eq!(read_after_usage.used_usd, 0.12);
+
+    let xmin_after_read_post_usage: i64 =
+        sqlx::query_scalar("SELECT xmin::text::bigint FROM ai_guild_budgets WHERE guild_id = $1")
+            .bind(&ai_guild_1)
+            .fetch_one(store.pool())
+            .await
+            .expect("fetch xmin after read post usage");
+
+    assert_eq!(
+        xmin_after_usage, xmin_after_read_post_usage,
+        "Reading budget after usage must NOT mutate row version (xmin unchanged)"
+    );
+
+    // 7.5. Concurrent initial reads (20 parallel requests for a new guild)
+    let concurrent_guild = format!("pg_ai_guild_concurrent_{}", Uuid::new_v4().simple());
+    let mut handles = Vec::new();
+    for _ in 0..20 {
+        let store_clone = store.clone();
+        let g_id = concurrent_guild.clone();
+        handles.push(tokio::spawn(async move {
+            store_clone.get_or_create_ai_budget(&g_id).await
+        }));
+    }
+
+    for handle in handles {
+        let res = handle
+            .await
+            .expect("join handle")
+            .expect("concurrent get_or_create_ai_budget");
+        assert_eq!(res.guild_id, concurrent_guild);
+        assert_eq!(res.used_tokens, 0);
+    }
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM ai_guild_budgets WHERE guild_id = $1")
+            .bind(&concurrent_guild)
+            .fetch_one(store.pool())
+            .await
+            .expect("count concurrent guild rows");
+    assert_eq!(
+        count, 1,
+        "Exactly one row should exist for concurrent initialization"
+    );
+
+    // 7.6. Guild isolation (guild 2 is independent of guild 1)
+    let budget_2 = store
+        .get_or_create_ai_budget(&ai_guild_2)
+        .await
+        .expect("guild 2 get_or_create_ai_budget");
+    assert_eq!(budget_2.guild_id, ai_guild_2);
+    assert_eq!(budget_2.used_tokens, 0);
+    assert_eq!(budget_2.used_usd, 0.0);
 }

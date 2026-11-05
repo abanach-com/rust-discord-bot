@@ -3672,4 +3672,64 @@ mod tests {
             .await;
         assert!(reaccept.is_err());
     }
+
+    #[tokio::test]
+    async fn test_ai_guild_budget_lifecycle_and_idempotent_reads() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_1 = "guild_ai_1";
+        let guild_2 = "guild_ai_2";
+
+        // 1. Initial read creates default budget
+        let budget_1 = store
+            .get_or_create_ai_budget(guild_1)
+            .await
+            .expect("initial get_or_create_ai_budget");
+        assert_eq!(budget_1.guild_id, guild_1);
+        assert_eq!(budget_1.monthly_token_limit, 1_000_000);
+        assert_eq!(budget_1.used_tokens, 0);
+        assert_eq!(budget_1.monthly_usd_limit, 10.0);
+        assert_eq!(budget_1.used_usd, 0.0);
+        assert!(!budget_1.is_halted);
+
+        // 2. Repeated read returns identical values without mutation
+        for _ in 0..10 {
+            let repeated = store
+                .get_or_create_ai_budget(guild_1)
+                .await
+                .expect("repeated get_or_create_ai_budget");
+            assert_eq!(repeated.used_tokens, 0);
+            assert_eq!(repeated.used_usd, 0.0);
+            assert_eq!(repeated.reset_at, budget_1.reset_at);
+        }
+
+        // 3. Record AI usage
+        let recorded = store
+            .record_ai_usage(guild_1, 2500, 0.08)
+            .await
+            .expect("record_ai_usage");
+        assert_eq!(recorded.used_tokens, 2500);
+        assert_eq!(recorded.used_usd, 0.08);
+
+        // 4. Repeated read after usage preserves recorded usage without resetting
+        let after_usage = store
+            .get_or_create_ai_budget(guild_1)
+            .await
+            .expect("get_or_create_ai_budget after usage");
+        assert_eq!(after_usage.used_tokens, 2500);
+        assert_eq!(after_usage.used_usd, 0.08);
+        assert_eq!(after_usage.reset_at, budget_1.reset_at);
+
+        // 5. Guild isolation
+        let budget_2 = store
+            .get_or_create_ai_budget(guild_2)
+            .await
+            .expect("guild 2 budget");
+        assert_eq!(budget_2.guild_id, guild_2);
+        assert_eq!(budget_2.used_tokens, 0);
+        assert_eq!(budget_2.used_usd, 0.0);
+
+        // 6. Negative values are rejected
+        assert!(store.record_ai_usage(guild_1, -10, 0.0).await.is_err());
+        assert!(store.record_ai_usage(guild_1, 10, -0.5).await.is_err());
+    }
 }

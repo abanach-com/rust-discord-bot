@@ -110,6 +110,11 @@ impl PostgresStore {
         Ok(Self { pool })
     }
 
+    #[must_use]
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
     pub async fn get_module_settings(
         &self,
 
@@ -5416,28 +5421,44 @@ impl PostgresStore {
     }
 
     // Agent 17 & 18 (#106): AI + MCP
-
+    // Issue #153: Read existing budget without no-op UPDATE mutation or locking.
+    // Fast path: SELECT existing budget without write locks or MVCC dead tuples.
+    // Initialization path: INSERT ... ON CONFLICT DO NOTHING for race-free first access.
     pub async fn get_or_create_ai_budget(&self, guild_id: &str) -> anyhow::Result<AiGuildBudget> {
-        let row = sqlx::query_as::<_, AiGuildBudget>(
-
+        if let Some(row) = sqlx::query_as::<_, AiGuildBudget>(
             r#"
-
-            INSERT INTO ai_guild_budgets (guild_id, monthly_token_limit, used_tokens, monthly_usd_limit, used_usd, is_halted, reset_at)
-
-            VALUES ($1, 1000000, 0, 10.0, 0.0, false, NOW() + INTERVAL '30 days')
-
-            ON CONFLICT (guild_id) DO UPDATE SET guild_id = EXCLUDED.guild_id
-
-            RETURNING *
-
-            "#
-
+            SELECT guild_id, monthly_token_limit, used_tokens, monthly_usd_limit, used_usd, is_halted, reset_at
+            FROM ai_guild_budgets
+            WHERE guild_id = $1
+            "#,
         )
-
         .bind(guild_id)
+        .fetch_optional(&self.pool)
+        .await?
+        {
+            return Ok(row);
+        }
 
+        sqlx::query(
+            r#"
+            INSERT INTO ai_guild_budgets (guild_id, monthly_token_limit, used_tokens, monthly_usd_limit, used_usd, is_halted, reset_at)
+            VALUES ($1, 1000000, 0, 10.0, 0.0, false, NOW() + INTERVAL '30 days')
+            ON CONFLICT (guild_id) DO NOTHING
+            "#,
+        )
+        .bind(guild_id)
+        .execute(&self.pool)
+        .await?;
+
+        let row = sqlx::query_as::<_, AiGuildBudget>(
+            r#"
+            SELECT guild_id, monthly_token_limit, used_tokens, monthly_usd_limit, used_usd, is_halted, reset_at
+            FROM ai_guild_budgets
+            WHERE guild_id = $1
+            "#,
+        )
+        .bind(guild_id)
         .fetch_one(&self.pool)
-
         .await?;
 
         Ok(row)
