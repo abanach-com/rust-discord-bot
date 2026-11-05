@@ -19,7 +19,7 @@ The implementation is in [engine.rs](../../src/lua/engine.rs), [model.rs](../../
 
 The configuration filename is the installer entry's `config` value, with `config.json` as the fallback. If `install.xml` does not exist, the legacy loader recursively discovers `.lua` files and sorts them. This fallback can discover both a package and a historical standalone copy, producing duplicate module or command names. Use an installer for a predictable deployment.
 
-The installer ID and returned manifest ID are not cross-checked for equality. Give them the same value. The manifest ID becomes the runtime identity used for configuration, command ownership and restricted host services. Installer `author` and `folder` fill absent manifest metadata; other installer metadata is not a substitute for the Lua manifest.
+The installer ID and returned manifest ID are strictly verified for equality (`installer_entry.id == manifest.id`). Any mismatch or duplicate `<module id>` in `install.xml` immediately rejects loading without altering the active registry. All package paths (`folder`, `entry`, `config`) must be relative without parent directory traversal (`..`), and are confined within the module package directory; symlinks or traversal components that escape the package root are rejected at load time. The manifest ID becomes the runtime identity used for configuration, command ownership and restricted host services. Installer `author` and `folder` fill absent manifest metadata; other installer metadata is not a substitute for the Lua manifest.
 
 ## Load-time work
 

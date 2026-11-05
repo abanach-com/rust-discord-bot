@@ -1,4 +1,7 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Component, Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -33,6 +36,20 @@ pub struct InstallManifest {
     pub bot_name: Option<String>,
     pub min_engine_version: Option<String>,
     pub modules: Vec<InstallModuleEntry>,
+}
+
+fn validate_relative_path(path: &Path, field: &str) -> Result<(), InstallXmlError> {
+    if path.as_os_str().is_empty()
+        || !path
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+    {
+        return Err(InstallXmlError::InvalidModule(format!(
+            "<module> {field} must be a relative path without parent traversal or absolute roots, got '{}'",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 impl InstallManifest {
@@ -74,6 +91,7 @@ impl InstallManifest {
 
         let modules_node = root.find_child("modules").unwrap_or(&root);
         let mut modules = Vec::new();
+        let mut seen_ids = HashSet::new();
 
         for child in &modules_node.children {
             if child.tag != "module" && child.tag != "plugin" && child.tag != "feature" {
@@ -93,6 +111,13 @@ impl InstallManifest {
                 return Err(InstallXmlError::InvalidModule(
                     "<module> id cannot be empty".to_string(),
                 ));
+            }
+
+            if !seen_ids.insert(id.clone()) {
+                return Err(InstallXmlError::InvalidModule(format!(
+                    "duplicate module id '{}' in manifest",
+                    id
+                )));
             }
 
             let enabled = child
@@ -131,17 +156,31 @@ impl InstallManifest {
                 .or_else(|| child.attributes.get("folder").cloned())
                 .unwrap_or_else(|| id.clone());
 
+            let folder_path = PathBuf::from(folder_str);
+            validate_relative_path(&folder_path, "folder")?;
+
             let entry_str = child
                 .find_child("entry")
                 .map(|c| c.text.trim().to_string())
                 .or_else(|| child.attributes.get("entry").cloned())
                 .unwrap_or_else(|| "module.lua".to_string());
 
+            let entry_path = PathBuf::from(entry_str);
+            validate_relative_path(&entry_path, "entry")?;
+
             let config_str = child
                 .find_child("config")
                 .map(|c| c.text.trim().to_string())
                 .or_else(|| child.attributes.get("config").cloned())
                 .unwrap_or_else(|| "config.json".to_string());
+
+            let config_path = if config_str.is_empty() {
+                None
+            } else {
+                let p = PathBuf::from(config_str);
+                validate_relative_path(&p, "config")?;
+                Some(p)
+            };
 
             let author = child
                 .find_child("author")
@@ -159,13 +198,9 @@ impl InstallManifest {
                 version: mod_version,
                 name,
                 description,
-                folder: PathBuf::from(folder_str),
-                entry: PathBuf::from(entry_str),
-                config: if config_str.is_empty() {
-                    None
-                } else {
-                    Some(PathBuf::from(config_str))
-                },
+                folder: folder_path,
+                entry: entry_path,
+                config: config_path,
                 author,
                 category,
             });
@@ -579,6 +614,45 @@ mod tests {
     fn rejects_missing_id() {
         let xml = r#"<installer><modules><module enabled="true" /></modules></installer>"#;
         assert!(InstallManifest::parse(xml).is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_module_id() {
+        let xml = r#"
+        <installer version="1.0.0">
+            <modules>
+                <module id="demo" enabled="true" />
+                <module id="demo" enabled="false" />
+            </modules>
+        </installer>
+        "#;
+        let res = InstallManifest::parse(xml);
+        assert!(
+            matches!(res, Err(InstallXmlError::InvalidModule(msg)) if msg.contains("duplicate module id 'demo'"))
+        );
+    }
+
+    #[test]
+    fn rejects_path_traversal_in_folder_entry_config() {
+        let bad_folder = r#"<installer><modules><module id="m1"><folder>../escape</folder></module></modules></installer>"#;
+        assert!(
+            matches!(InstallManifest::parse(bad_folder), Err(InstallXmlError::InvalidModule(msg)) if msg.contains("folder"))
+        );
+
+        let bad_entry = r#"<installer><modules><module id="m2"><folder>pkg</folder><entry>../../evil.lua</entry></module></modules></installer>"#;
+        assert!(
+            matches!(InstallManifest::parse(bad_entry), Err(InstallXmlError::InvalidModule(msg)) if msg.contains("entry"))
+        );
+
+        let bad_config = r#"<installer><modules><module id="m3"><folder>pkg</folder><config>../../private/secret.json</config></module></modules></installer>"#;
+        assert!(
+            matches!(InstallManifest::parse(bad_config), Err(InstallXmlError::InvalidModule(msg)) if msg.contains("config"))
+        );
+
+        let absolute_config = r#"<installer><modules><module id="m4"><folder>pkg</folder><config>/etc/passwd</config></module></modules></installer>"#;
+        assert!(
+            matches!(InstallManifest::parse(absolute_config), Err(InstallXmlError::InvalidModule(msg)) if msg.contains("config"))
+        );
     }
 
     #[test]

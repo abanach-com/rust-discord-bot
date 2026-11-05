@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicI64, Ordering},
@@ -415,6 +415,44 @@ impl LuaEngine {
     }
 }
 
+fn ensure_confined_path(base_dir: &Path, relative: &Path) -> Result<PathBuf, LuaEngineError> {
+    if !relative
+        .components()
+        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+    {
+        return Err(LuaEngineError::InvalidModule {
+            script: relative.display().to_string(),
+            message: "only relative paths without parent traversal are allowed".to_string(),
+        });
+    }
+
+    let candidate = base_dir.join(relative);
+    if candidate.exists() {
+        let canonical_base = base_dir
+            .canonicalize()
+            .map_err(|source| LuaEngineError::Io {
+                path: base_dir.to_path_buf(),
+                source,
+            })?;
+        let canonical_candidate =
+            candidate
+                .canonicalize()
+                .map_err(|source| LuaEngineError::Io {
+                    path: candidate.clone(),
+                    source,
+                })?;
+        if !canonical_candidate.starts_with(&canonical_base) {
+            return Err(LuaEngineError::InvalidModule {
+                script: candidate.display().to_string(),
+                message: "path escapes the allowed directory".to_string(),
+            });
+        }
+        Ok(canonical_candidate)
+    } else {
+        Ok(candidate)
+    }
+}
+
 fn build_registry(scripts_dir: &Path, limits: LuaLimits) -> Result<Registry, LuaEngineError> {
     let install_xml_path = scripts_dir.join("install.xml");
     let installer_manifest = if install_xml_path.is_file() {
@@ -450,20 +488,83 @@ fn build_registry(scripts_dir: &Path, limits: LuaLimits) -> Result<Registry, Lua
                     continue;
                 }
 
+                if !module_entry
+                    .folder
+                    .components()
+                    .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+                {
+                    return Err(LuaEngineError::InvalidModule {
+                        script: module_entry.folder.display().to_string(),
+                        message: "only relative folder paths without parent traversal are allowed"
+                            .to_string(),
+                    });
+                }
+                if !module_entry
+                    .entry
+                    .components()
+                    .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+                {
+                    return Err(LuaEngineError::InvalidModule {
+                        script: module_entry.entry.display().to_string(),
+                        message: "only relative entry paths without parent traversal are allowed"
+                            .to_string(),
+                    });
+                }
+                if let Some(ref cfg_rel) = module_entry.config
+                    && !cfg_rel
+                        .components()
+                        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+                {
+                    return Err(LuaEngineError::InvalidModule {
+                        script: cfg_rel.display().to_string(),
+                        message: "only relative config paths without parent traversal are allowed"
+                            .to_string(),
+                    });
+                }
+
                 let folder_dir = scripts_dir.join(&module_entry.folder);
+                if folder_dir.exists() {
+                    let canonical_scripts =
+                        scripts_dir
+                            .canonicalize()
+                            .map_err(|source| LuaEngineError::Io {
+                                path: scripts_dir.to_path_buf(),
+                                source,
+                            })?;
+                    let canonical_folder =
+                        folder_dir
+                            .canonicalize()
+                            .map_err(|source| LuaEngineError::Io {
+                                path: folder_dir.clone(),
+                                source,
+                            })?;
+                    if !canonical_folder.starts_with(&canonical_scripts) {
+                        return Err(LuaEngineError::InvalidModule {
+                            script: folder_dir.display().to_string(),
+                            message: "module folder escapes the scripts directory".to_string(),
+                        });
+                    }
+                }
+
                 let primary = folder_dir.join(&module_entry.entry);
                 let fallback_module = folder_dir.join("module.lua");
                 let fallback_named = folder_dir.join(format!("{}.lua", module_entry.id));
                 let flat_fallback = scripts_dir.join(format!("{}.lua", module_entry.id));
 
                 let path = if primary.is_file() {
-                    primary
+                    ensure_confined_path(&folder_dir, &module_entry.entry)?
                 } else if fallback_module.is_file() {
-                    fallback_module
+                    ensure_confined_path(&folder_dir, Path::new("module.lua"))?
                 } else if fallback_named.is_file() {
-                    fallback_named
+                    ensure_confined_path(
+                        &folder_dir,
+                        Path::new(&format!("{}.lua", module_entry.id)),
+                    )?
                 } else if flat_fallback.is_file() {
-                    flat_fallback
+                    ensure_confined_path(
+                        scripts_dir,
+                        Path::new(&format!("{}.lua", module_entry.id)),
+                    )?
                 } else {
                     return Err(LuaEngineError::InvalidModule {
                         script: primary.display().to_string(),
@@ -471,21 +572,23 @@ fn build_registry(scripts_dir: &Path, limits: LuaLimits) -> Result<Registry, Lua
                     });
                 };
 
-                let config_file = module_entry
+                let config_rel = module_entry
                     .config
-                    .as_ref()
-                    .map(|c| folder_dir.join(c))
-                    .unwrap_or_else(|| folder_dir.join("config.json"));
+                    .as_deref()
+                    .unwrap_or_else(|| Path::new("config.json"));
 
-                let default_config = if config_file.is_file() {
-                    let text =
-                        fs::read_to_string(&config_file).map_err(|source| LuaEngineError::Io {
-                            path: config_file.clone(),
+                let config_candidate = folder_dir.join(config_rel);
+                let default_config = if config_candidate.is_file() {
+                    let canonical_config = ensure_confined_path(&folder_dir, config_rel)?;
+                    let text = fs::read_to_string(&canonical_config).map_err(|source| {
+                        LuaEngineError::Io {
+                            path: canonical_config.clone(),
                             source,
-                        })?;
+                        }
+                    })?;
                     serde_json::from_str(&text).map_err(|err| {
                         LuaEngineError::InvalidConfigSchema {
-                            script: config_file.display().to_string(),
+                            script: canonical_config.display().to_string(),
                             message: format!("invalid JSON syntax: {err}"),
                         }
                     })?
@@ -505,14 +608,18 @@ fn build_registry(scripts_dir: &Path, limits: LuaLimits) -> Result<Registry, Lua
                 let config_path = p.parent().map(|dir| dir.join("config.json"));
                 let default_config = if let Some(cfg) = config_path {
                     if cfg.is_file() {
-                        let text =
-                            fs::read_to_string(&cfg).map_err(|source| LuaEngineError::Io {
-                                path: cfg.clone(),
+                        let parent_dir = p.parent().unwrap_or(scripts_dir);
+                        let canonical_config =
+                            ensure_confined_path(parent_dir, Path::new("config.json"))?;
+                        let text = fs::read_to_string(&canonical_config).map_err(|source| {
+                            LuaEngineError::Io {
+                                path: canonical_config.clone(),
                                 source,
-                            })?;
+                            }
+                        })?;
                         serde_json::from_str(&text).map_err(|err| {
                             LuaEngineError::InvalidConfigSchema {
-                                script: cfg.display().to_string(),
+                                script: canonical_config.display().to_string(),
                                 message: format!("invalid JSON syntax: {err}"),
                             }
                         })?
@@ -537,6 +644,15 @@ fn build_registry(scripts_dir: &Path, limits: LuaLimits) -> Result<Registry, Lua
         validate_manifest(&manifest, &display_name)?;
 
         if let Some(ref entry) = installer_entry {
+            if entry.id != manifest.id {
+                return Err(LuaEngineError::InvalidModule {
+                    script: display_name.clone(),
+                    message: format!(
+                        "install.xml module id '{}' differs from Lua manifest id '{}'",
+                        entry.id, manifest.id
+                    ),
+                });
+            }
             if manifest.author.is_none() {
                 manifest.author = entry.author.clone();
             }

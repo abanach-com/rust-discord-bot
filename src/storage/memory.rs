@@ -166,13 +166,13 @@ pub struct MemoryStore {
 
     steam_lfg_posts: Arc<DashMap<Uuid, SteamLfgPost>>,
 
-    github_devops_mappings: Arc<DashMap<Uuid, GitHubDevopsMapping>>,
+    github_devops_mappings: Arc<DashMap<(String, String, i32), GitHubDevopsMapping>>,
 
-    twitch_subs: Arc<DashMap<Uuid, TwitchStreamSubscription>>,
+    twitch_subs: Arc<DashMap<(String, String), TwitchStreamSubscription>>,
 
-    kick_subs: Arc<DashMap<Uuid, KickStreamSubscription>>,
+    kick_subs: Arc<DashMap<(String, String), KickStreamSubscription>>,
 
-    youtube_subs: Arc<DashMap<Uuid, YouTubeChannelSubscription>>,
+    youtube_subs: Arc<DashMap<(String, String), YouTubeChannelSubscription>>,
 
     telegram_bridges: Arc<DashMap<Uuid, TelegramBridge>>,
 
@@ -3911,10 +3911,24 @@ impl MemoryStore {
 
         mapping: GitHubDevopsMapping,
     ) -> GitHubDevopsMapping {
-        self.github_devops_mappings
-            .insert(mapping.id, mapping.clone());
-
-        mapping
+        let key = (
+            mapping.guild_id.clone(),
+            mapping.repo_full_name.to_ascii_lowercase(),
+            mapping.issue_or_pr_number,
+        );
+        match self.github_devops_mappings.entry(key) {
+            dashmap::mapref::entry::Entry::Occupied(mut occ) => {
+                let existing = occ.get_mut();
+                existing.thread_channel_id = mapping.thread_channel_id;
+                existing.discord_thread_id = mapping.discord_thread_id;
+                existing.last_status = mapping.last_status;
+                existing.clone()
+            }
+            dashmap::mapref::entry::Entry::Vacant(vac) => {
+                vac.insert(mapping.clone());
+                mapping
+            }
+        }
     }
 
     pub fn get_github_devops_mapping(
@@ -3926,13 +3940,9 @@ impl MemoryStore {
 
         number: i32,
     ) -> Option<GitHubDevopsMapping> {
+        let key = (guild_id.to_string(), repo.to_ascii_lowercase(), number);
         self.github_devops_mappings
-            .iter()
-            .find(|e| {
-                e.guild_id == guild_id
-                    && e.repo_full_name.eq_ignore_ascii_case(repo)
-                    && e.issue_or_pr_number == number
-            })
+            .get(&key)
             .map(|e| e.value().clone())
     }
 
@@ -3943,9 +3953,27 @@ impl MemoryStore {
 
         sub: TwitchStreamSubscription,
     ) -> TwitchStreamSubscription {
-        self.twitch_subs.insert(sub.id, sub.clone());
-
-        sub
+        let key = (
+            sub.guild_id.clone(),
+            sub.streamer_login.to_ascii_lowercase(),
+        );
+        match self.twitch_subs.entry(key) {
+            dashmap::mapref::entry::Entry::Occupied(mut occ) => {
+                let existing = occ.get_mut();
+                existing.streamer_id = sub.streamer_id;
+                existing.discord_channel_id = sub.discord_channel_id;
+                existing.live_role_id = sub.live_role_id;
+                existing.last_message_id = sub.last_message_id;
+                existing.is_live = sub.is_live;
+                existing.last_title = sub.last_title;
+                existing.last_game = sub.last_game;
+                existing.clone()
+            }
+            dashmap::mapref::entry::Entry::Vacant(vac) => {
+                vac.insert(sub.clone());
+                sub
+            }
+        }
     }
 
     pub fn get_twitch_subscription(
@@ -3955,18 +3983,29 @@ impl MemoryStore {
 
         streamer: &str,
     ) -> Option<TwitchStreamSubscription> {
-        self.twitch_subs
-            .iter()
-            .find(|e| e.guild_id == guild_id && e.streamer_login.eq_ignore_ascii_case(streamer))
-            .map(|e| e.value().clone())
+        let key = (guild_id.to_string(), streamer.to_ascii_lowercase());
+        self.twitch_subs.get(&key).map(|e| e.value().clone())
     }
 
     // Agent 08 (#97): Kick Integration
 
     pub fn upsert_kick_subscription(&self, sub: KickStreamSubscription) -> KickStreamSubscription {
-        self.kick_subs.insert(sub.id, sub.clone());
-
-        sub
+        let key = (sub.guild_id.clone(), sub.slug.to_ascii_lowercase());
+        match self.kick_subs.entry(key) {
+            dashmap::mapref::entry::Entry::Occupied(mut occ) => {
+                let existing = occ.get_mut();
+                existing.channel_id = sub.channel_id;
+                existing.discord_channel_id = sub.discord_channel_id;
+                existing.live_role_id = sub.live_role_id;
+                existing.last_message_id = sub.last_message_id;
+                existing.is_live = sub.is_live;
+                existing.clone()
+            }
+            dashmap::mapref::entry::Entry::Vacant(vac) => {
+                vac.insert(sub.clone());
+                sub
+            }
+        }
     }
 
     pub fn get_kick_subscription(
@@ -3976,10 +4015,8 @@ impl MemoryStore {
 
         slug: &str,
     ) -> Option<KickStreamSubscription> {
-        self.kick_subs
-            .iter()
-            .find(|e| e.guild_id == guild_id && e.slug.eq_ignore_ascii_case(slug))
-            .map(|e| e.value().clone())
+        let key = (guild_id.to_string(), slug.to_ascii_lowercase());
+        self.kick_subs.get(&key).map(|e| e.value().clone())
     }
 
     // Agent 09 (#98): YouTube Extended
@@ -3989,9 +4026,20 @@ impl MemoryStore {
 
         sub: YouTubeChannelSubscription,
     ) -> YouTubeChannelSubscription {
-        self.youtube_subs.insert(sub.id, sub.clone());
-
-        sub
+        let key = (sub.guild_id.clone(), sub.channel_id.clone());
+        match self.youtube_subs.entry(key) {
+            dashmap::mapref::entry::Entry::Occupied(mut occ) => {
+                let existing = occ.get_mut();
+                existing.channel_title = sub.channel_title;
+                existing.discord_channel_id = sub.discord_channel_id;
+                existing.last_video_id = sub.last_video_id;
+                existing.clone()
+            }
+            dashmap::mapref::entry::Entry::Vacant(vac) => {
+                vac.insert(sub.clone());
+                sub
+            }
+        }
     }
 
     pub fn get_youtube_subscription(
@@ -4001,10 +4049,8 @@ impl MemoryStore {
 
         channel_id: &str,
     ) -> Option<YouTubeChannelSubscription> {
-        self.youtube_subs
-            .iter()
-            .find(|e| e.guild_id == guild_id && e.channel_id == channel_id)
-            .map(|e| e.value().clone())
+        let key = (guild_id.to_string(), channel_id.to_string());
+        self.youtube_subs.get(&key).map(|e| e.value().clone())
     }
 
     // Agent 10 (#99): Telegram Bridge

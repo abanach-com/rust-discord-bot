@@ -6588,4 +6588,177 @@ mod tests {
                 .is_none()
         );
     }
+
+    #[tokio::test]
+    async fn test_memorystore_upsert_parity_github_twitch_kick_youtube() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_id = "100000000000000001";
+
+        // 1. GitHub DevOps mapping UPSERT parity
+        let id1 = Uuid::new_v4();
+        let created_at1 = Utc::now() - chrono::Duration::hours(2);
+        let mapping1 = GitHubDevopsMapping {
+            id: id1,
+            guild_id: guild_id.to_string(),
+            repo_full_name: "MyOrg/MyRepo".to_string(),
+            thread_channel_id: "chan_1".to_string(),
+            issue_or_pr_number: 42,
+            discord_thread_id: "thread_A".to_string(),
+            last_status: "opened".to_string(),
+            created_at: created_at1,
+        };
+        let res1 = store.upsert_github_devops_mapping(mapping1).await.unwrap();
+        assert_eq!(res1.id, id1);
+        assert_eq!(res1.discord_thread_id, "thread_A");
+
+        let id2 = Uuid::new_v4();
+        let mapping2 = GitHubDevopsMapping {
+            id: id2,
+            guild_id: guild_id.to_string(),
+            repo_full_name: "myorg/myrepo".to_string(), // case insensitive match
+            thread_channel_id: "chan_2".to_string(),
+            issue_or_pr_number: 42,
+            discord_thread_id: "thread_B".to_string(),
+            last_status: "closed".to_string(),
+            created_at: Utc::now(),
+        };
+        let res2 = store.upsert_github_devops_mapping(mapping2).await.unwrap();
+        // ID and created_at must be preserved from first insert
+        assert_eq!(res2.id, id1);
+        assert_eq!(res2.created_at, created_at1);
+        assert_eq!(res2.discord_thread_id, "thread_B");
+        assert_eq!(res2.last_status, "closed");
+
+        let fetched_github = store
+            .get_github_devops_mapping(guild_id, "MYORG/MYREPO", 42)
+            .await
+            .unwrap()
+            .expect("should find updated mapping");
+        assert_eq!(fetched_github.id, id1);
+        assert_eq!(fetched_github.discord_thread_id, "thread_B");
+
+        // 2. Twitch Subscription UPSERT parity
+        let twitch_id1 = Uuid::new_v4();
+        let twitch_created1 = Utc::now() - chrono::Duration::hours(1);
+        let twitch1 = TwitchStreamSubscription {
+            id: twitch_id1,
+            guild_id: guild_id.to_string(),
+            streamer_login: "GamerPro".to_string(),
+            streamer_id: "twitch_101".to_string(),
+            discord_channel_id: "chan_twitch".to_string(),
+            live_role_id: None,
+            last_message_id: None,
+            is_live: false,
+            last_title: None,
+            last_game: None,
+            created_at: twitch_created1,
+        };
+        let t_res1 = store.upsert_twitch_subscription(twitch1).await.unwrap();
+        assert_eq!(t_res1.id, twitch_id1);
+
+        let twitch2 = TwitchStreamSubscription {
+            id: Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            streamer_login: "gamerpro".to_string(),
+            streamer_id: "twitch_101".to_string(),
+            discord_channel_id: "chan_twitch_2".to_string(),
+            live_role_id: Some("role_live".to_string()),
+            last_message_id: Some("msg_999".to_string()),
+            is_live: true,
+            last_title: Some("Streaming Rust Bot".to_string()),
+            last_game: Some("Rust".to_string()),
+            created_at: Utc::now(),
+        };
+        let t_res2 = store.upsert_twitch_subscription(twitch2).await.unwrap();
+        assert_eq!(t_res2.id, twitch_id1);
+        assert_eq!(t_res2.created_at, twitch_created1);
+        assert!(t_res2.is_live);
+        assert_eq!(t_res2.last_title.as_deref(), Some("Streaming Rust Bot"));
+
+        let fetched_twitch = store
+            .get_twitch_subscription(guild_id, "GAMERPRO")
+            .await
+            .unwrap()
+            .expect("should find twitch sub");
+        assert_eq!(fetched_twitch.id, twitch_id1);
+        assert!(fetched_twitch.is_live);
+
+        // 3. Kick Subscription UPSERT parity
+        let kick_id1 = Uuid::new_v4();
+        let kick_created1 = Utc::now() - chrono::Duration::hours(1);
+        let kick1 = KickStreamSubscription {
+            id: kick_id1,
+            guild_id: guild_id.to_string(),
+            slug: "FastPlayer".to_string(),
+            channel_id: "kick_chan_1".to_string(),
+            discord_channel_id: "disc_chan_1".to_string(),
+            live_role_id: None,
+            last_message_id: None,
+            is_live: false,
+            created_at: kick_created1,
+        };
+        let k_res1 = store.upsert_kick_subscription(kick1).await.unwrap();
+        assert_eq!(k_res1.id, kick_id1);
+
+        let kick2 = KickStreamSubscription {
+            id: Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            slug: "fastplayer".to_string(),
+            channel_id: "kick_chan_1".to_string(),
+            discord_channel_id: "disc_chan_2".to_string(),
+            live_role_id: Some("role_kick".to_string()),
+            last_message_id: Some("msg_kick_1".to_string()),
+            is_live: true,
+            created_at: Utc::now(),
+        };
+        let k_res2 = store.upsert_kick_subscription(kick2).await.unwrap();
+        assert_eq!(k_res2.id, kick_id1);
+        assert_eq!(k_res2.created_at, kick_created1);
+        assert!(k_res2.is_live);
+
+        let fetched_kick = store
+            .get_kick_subscription(guild_id, "FASTPLAYER")
+            .await
+            .unwrap()
+            .expect("should find kick sub");
+        assert_eq!(fetched_kick.id, kick_id1);
+        assert!(fetched_kick.is_live);
+
+        // 4. YouTube Subscription UPSERT parity
+        let yt_id1 = Uuid::new_v4();
+        let yt_created1 = Utc::now() - chrono::Duration::hours(1);
+        let yt1 = YouTubeChannelSubscription {
+            id: yt_id1,
+            guild_id: guild_id.to_string(),
+            channel_id: "UC_CHANNEL_123".to_string(),
+            channel_title: "Tech Channel".to_string(),
+            discord_channel_id: "disc_yt_1".to_string(),
+            last_video_id: None,
+            created_at: yt_created1,
+        };
+        let yt_res1 = store.upsert_youtube_subscription(yt1).await.unwrap();
+        assert_eq!(yt_res1.id, yt_id1);
+
+        let yt2 = YouTubeChannelSubscription {
+            id: Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            channel_id: "UC_CHANNEL_123".to_string(),
+            channel_title: "Tech Channel Updated".to_string(),
+            discord_channel_id: "disc_yt_2".to_string(),
+            last_video_id: Some("vid_abc".to_string()),
+            created_at: Utc::now(),
+        };
+        let yt_res2 = store.upsert_youtube_subscription(yt2).await.unwrap();
+        assert_eq!(yt_res2.id, yt_id1);
+        assert_eq!(yt_res2.created_at, yt_created1);
+        assert_eq!(yt_res2.last_video_id.as_deref(), Some("vid_abc"));
+
+        let fetched_yt = store
+            .get_youtube_subscription(guild_id, "UC_CHANNEL_123")
+            .await
+            .unwrap()
+            .expect("should find youtube sub");
+        assert_eq!(fetched_yt.id, yt_id1);
+        assert_eq!(fetched_yt.channel_title, "Tech Channel Updated");
+    }
 }

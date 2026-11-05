@@ -451,6 +451,20 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
 - **Unified Offline Mode & Live Member Verification (#205)**: Centralized `Config::offline_mode` and `is_offline_mode()` across Gateway and web dashboard. Prevents `OFFLINE_MODE=false` or empty values from bypassing live Discord membership verification in store and web routes, failing closed with 403 on Discord 404/403.
 - **Steam LFG Self-Service Access (#206)**: Relaxed permission checks on `/steam/lfg` endpoints from `MANAGE_GUILD` to `ensure_guild_member_access`, allowing regular community members to view, create, and join teams while maintaining CSRF validation, tenant isolation, and author attribution.
 
+## 15. Storage Parity & Lua Installer Sandboxing (Issues #207, #208, #209)
+
+- **MemoryStore & PostgreSQL UPSERT Semantics Parity (#207)**:
+  - Keyed `github_devops_mappings` by business identity tuple `(guild_id, repo_full_name.to_ascii_lowercase(), issue_or_pr_number)` instead of raw UUID in `MemoryStore`, matching PostgreSQL's `UNIQUE` constraint and `ON CONFLICT DO UPDATE`.
+  - Applied equivalent business tuple keying to `twitch_subs` (`(guild_id, streamer_login.to_ascii_lowercase())`), `kick_subs` (`(guild_id, slug.to_ascii_lowercase())`), and `youtube_subs` (`(guild_id, channel_id)`).
+  - Preserved original record `id` and `created_at` timestamps on conflict updates while updating mutable target fields (`thread_channel_id`, `discord_thread_id`, `last_status`, `live_role_id`, `last_message_id`, `is_live`, etc.), ensuring identical data retention contracts across both storage engines.
+- **Lua Installer Manifest Identity Parity & Duplicate Rejection (#208)**:
+  - `InstallManifest::parse` strictly enforces unique `<module id>` entries in `install.xml` with fail-closed rejection upon duplicates.
+  - `LuaEngine::load` and `build_registry` strictly cross-validate installer entry IDs against Lua manifest identities (`installer_entry.id == manifest.id`). Prevents unauthorized or spoofed packages from declaring privileged capability IDs (`tickets`, `scheduler`, `progression`) under arbitrary package labels.
+- **Lua Package Confinement & Path Traversal Prevention (#209)**:
+  - `InstallManifest::parse` validates that `folder`, `entry`, and `config` relative paths contain only normal or current-dir components (`Component::Normal(_) | Component::CurDir`), explicitly forbidding parent directory traversal (`..`) and absolute roots.
+  - `ensure_confined_path` in `LuaEngine` canonicalizes paths on disk and enforces that resolved files and directories remain strictly within their parent package boundary (`starts_with(&canonical_base)`).
+  - Symlinks attempting to escape package directories to read arbitrary system or secret JSON configuration files are rejected at load time, safeguarding runtime configuration and preventing sandbox escapes.
+
 ## Delivery order
 
 ### Phase 0 — foundation
