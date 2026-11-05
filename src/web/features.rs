@@ -1316,7 +1316,9 @@ pub async fn search_members(
         .await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
-    let next_cursor = members.last().map(|m| m.user_id.clone());
+    let next_cursor = members
+        .last()
+        .map(|m| crate::storage::encode_member_search_cursor(m.joined_at, &m.user_id));
 
     Ok(Json(json!({
         "members": members,

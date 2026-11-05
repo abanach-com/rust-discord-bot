@@ -22,7 +22,7 @@ use super::{
     StorePurchase, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError,
     TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
     VkSubscription, WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription,
-    level_for_xp, snowflake_created_at, validate_snowflake,
+    level_for_xp, parse_member_search_cursor, snowflake_created_at, validate_snowflake,
 };
 
 pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
@@ -2721,6 +2721,29 @@ impl PostgresStore {
 
         let limit = filter.limit.unwrap_or(25).clamp(1, 100) as i64;
 
+        // Keyset cursor extraction with legacy user_id fallback
+        let (cursor_joined_at, cursor_user_id) = if let Some(ref cur) = filter.cursor {
+            if let Some((parsed_joined, parsed_user)) = parse_member_search_cursor(cur) {
+                if parsed_joined.is_none() && cur.chars().all(|c| c.is_ascii_digit()) {
+                    let row_opt: Option<(Option<DateTime<Utc>>,)> = sqlx::query_as(
+                        "SELECT joined_at FROM member_snapshots WHERE guild_id = $1 AND user_id = $2",
+                    )
+                    .bind(guild_id)
+                    .bind(&parsed_user)
+                    .fetch_optional(&self.pool)
+                    .await?;
+                    let resolved_joined = row_opt.and_then(|r| r.0);
+                    (resolved_joined, Some(parsed_user))
+                } else {
+                    (parsed_joined, Some(parsed_user))
+                }
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+
         #[derive(sqlx::FromRow)]
         struct RawSearchRow {
             user_id: String,
@@ -2768,44 +2791,52 @@ impl PostgresStore {
                 GROUP BY user_id
             ) mih ON ms.user_id = mih.user_id
             WHERE ms.guild_id = $1
-              AND ($2::timestamptz IS NULL OR ms.joined_at >= $2)
-              AND ($3::timestamptz IS NULL OR ms.joined_at <= $3)
-              AND ($4::timestamptz IS NULL OR ms.account_created_at >= $4)
-              AND ($5::timestamptz IS NULL OR ms.account_created_at <= $5)
-              AND ($6::bigint IS NULL OR COALESCE(mc.case_count, 0) >= $6)
-              AND ($7::timestamptz IS NULL OR mih.last_change >= $7)
+              AND ($2::text[] IS NULL OR cardinality($2::text[]) = 0 OR ms.role_ids ?& $2::text[])
+              AND ($3::text[] IS NULL OR cardinality($3::text[]) = 0 OR NOT (ms.role_ids ?| $3::text[]))
+              AND ($4::timestamptz IS NULL OR ms.joined_at >= $4)
+              AND ($5::timestamptz IS NULL OR ms.joined_at <= $5)
+              AND ($6::timestamptz IS NULL OR ms.account_created_at >= $6)
+              AND ($7::timestamptz IS NULL OR ms.account_created_at <= $7)
+              AND ($8::bigint IS NULL OR COALESCE(mc.case_count, 0) >= $8)
+              AND ($9::timestamptz IS NULL OR mih.last_change >= $9)
+              AND (
+                $10::text IS NULL
+                OR (
+                    $11::timestamptz IS NOT NULL AND (
+                        ms.joined_at < $11
+                        OR (ms.joined_at = $11 AND ms.user_id > $10)
+                        OR ms.joined_at IS NULL
+                    )
+                )
+                OR (
+                    $11::timestamptz IS NULL AND (
+                        ms.joined_at IS NULL
+                        AND ms.user_id > $10
+                    )
+                )
+              )
             ORDER BY ms.joined_at DESC NULLS LAST, ms.user_id ASC
+            LIMIT $12
             "#,
         )
         .bind(guild_id)
+        .bind(&filter.role_ids)
+        .bind(&filter.exclude_role_ids)
         .bind(filter.joined_after)
         .bind(filter.joined_before)
         .bind(filter.account_created_after)
         .bind(filter.account_created_before)
         .bind(filter.min_case_count)
         .bind(filter.identity_changed_after)
+        .bind(cursor_user_id.as_deref())
+        .bind(cursor_joined_at)
+        .bind(limit)
         .fetch_all(&self.pool)
         .await?;
 
-        let mut matched = Vec::new();
+        let mut matched = Vec::with_capacity(rows.len());
         for r in rows {
             let member_roles: Vec<String> = serde_json::from_value(r.role_ids).unwrap_or_default();
-
-            if !filter.role_ids.is_empty()
-                && !filter.role_ids.iter().all(|req| member_roles.contains(req))
-            {
-                continue;
-            }
-
-            if !filter.exclude_role_ids.is_empty()
-                && filter
-                    .exclude_role_ids
-                    .iter()
-                    .any(|exc| member_roles.contains(exc))
-            {
-                continue;
-            }
-
             matched.push(MemberSearchRow {
                 user_id: r.user_id,
                 username: r.username,
@@ -2822,13 +2853,6 @@ impl PostgresStore {
             });
         }
 
-        if let Some(ref cur) = filter.cursor
-            && let Some(idx) = matched.iter().position(|r| &r.user_id == cur)
-        {
-            matched = matched.into_iter().skip(idx + 1).collect();
-        }
-
-        matched.truncate(limit as usize);
         Ok(matched)
     }
 

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use chrono::{DateTime, Duration, Utc};
@@ -24,7 +25,8 @@ use super::{
     StorePurchase, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError,
     TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
     VkSubscription, WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription,
-    level_for_xp, snowflake_created_at, validate_snowflake,
+    is_member_after_cursor, level_for_xp, parse_member_search_cursor, snowflake_created_at,
+    validate_snowflake,
 };
 
 type ModuleKey = (String, String);
@@ -1804,11 +1806,54 @@ impl MemoryStore {
         let limit = filter.limit.unwrap_or(25).clamp(1, 100) as usize;
         let now = Utc::now();
 
+        // Keyset cursor extraction with legacy user_id fallback
+        let (cursor_joined_at, cursor_user_id) = if let Some(ref cur) = filter.cursor {
+            if let Some((parsed_joined, parsed_user)) = parse_member_search_cursor(cur) {
+                if parsed_joined.is_none() && cur.chars().all(|c| c.is_ascii_digit()) {
+                    let key = (guild_id.to_string(), parsed_user.clone());
+                    let resolved_joined = self.member_snapshots.get(&key).and_then(|s| s.joined_at);
+                    (resolved_joined, Some(parsed_user))
+                } else {
+                    (parsed_joined, Some(parsed_user))
+                }
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+
+        // Pre-aggregate active history for this guild in a single O(H) pass
+        let mut history_stats: HashMap<String, (i64, Option<DateTime<Utc>>)> = HashMap::new();
+        for r in self.identity_history.iter() {
+            if r.guild_id == guild_id && r.expires_at > now {
+                let entry = history_stats.entry(r.user_id.clone()).or_insert((0, None));
+                entry.0 += 1;
+                let max_observed = match entry.1 {
+                    Some(prev) => prev.max(r.observed_at),
+                    None => r.observed_at,
+                };
+                entry.1 = Some(max_observed);
+            }
+        }
+
         let mut matched = Vec::new();
 
         for entry in self.member_snapshots.iter() {
             let snap = entry.value();
             if snap.guild_id != guild_id {
+                continue;
+            }
+
+            // Keyset seek filter: skip anything before or at the cursor
+            if let Some(ref cur_user) = cursor_user_id
+                && !is_member_after_cursor(
+                    snap.joined_at,
+                    &snap.user_id,
+                    cursor_joined_at,
+                    cur_user,
+                )
+            {
                 continue;
             }
 
@@ -1868,21 +1913,16 @@ impl MemoryStore {
                 continue;
             }
 
-            let recent_name_changes = self
-                .identity_history
-                .iter()
-                .filter(|r| {
-                    r.guild_id == guild_id
-                        && r.user_id == snap.user_id
-                        && r.expires_at > now
-                        && filter
-                            .identity_changed_after
-                            .is_none_or(|after| r.observed_at >= after)
-                })
-                .count() as i64;
+            let (recent_name_changes, last_change) = history_stats
+                .get(&snap.user_id)
+                .map(|(cnt, last)| (*cnt, *last))
+                .unwrap_or((0, None));
 
-            if filter.identity_changed_after.is_some() && recent_name_changes == 0 {
-                continue;
+            if let Some(after) = filter.identity_changed_after {
+                match last_change {
+                    Some(lc) if lc >= after => {}
+                    _ => continue,
+                }
             }
 
             let prog_key = (guild_id.to_string(), snap.user_id.clone());
@@ -1913,12 +1953,6 @@ impl MemoryStore {
                 .cmp(&a.joined_at)
                 .then_with(|| a.user_id.cmp(&b.user_id))
         });
-
-        if let Some(ref cur) = filter.cursor
-            && let Some(idx) = matched.iter().position(|r| &r.user_id == cur)
-        {
-            matched = matched.into_iter().skip(idx + 1).collect();
-        }
 
         matched.truncate(limit);
         Ok(matched)

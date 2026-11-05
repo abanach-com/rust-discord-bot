@@ -460,6 +460,59 @@ pub struct MemberSearchRow {
     pub recent_name_changes: i64,
 }
 
+/// Encodes a pagination cursor as "{timestamp_millis}_{user_id}" or "null_{user_id}".
+pub fn encode_member_search_cursor(joined_at: Option<DateTime<Utc>>, user_id: &str) -> String {
+    match joined_at {
+        Some(dt) => format!("{}_{}", dt.timestamp_millis(), user_id),
+        None => format!("null_{}", user_id),
+    }
+}
+
+/// Parses a pagination cursor into (joined_at, user_id).
+/// Supports both composite keyset ("{millis}_{user_id}" or "null_{user_id}") and legacy plain user_id.
+pub fn parse_member_search_cursor(cursor: &str) -> Option<(Option<DateTime<Utc>>, String)> {
+    let trimmed = cursor.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some((left, right)) = trimmed.split_once('_') {
+        let user_id = right.trim().to_string();
+        if user_id.is_empty() || !user_id.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        if left.eq_ignore_ascii_case("null") || left.eq_ignore_ascii_case("none") {
+            return Some((None, user_id));
+        }
+        if let Ok(ms) = left.parse::<i64>() {
+            return DateTime::from_timestamp_millis(ms).map(|dt| (Some(dt), user_id));
+        }
+    }
+
+    if trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return Some((None, trimmed.to_string()));
+    }
+
+    None
+}
+
+/// Returns true if (row_joined_at, row_user_id) comes strictly after (cursor_joined_at, cursor_user_id)
+/// according to ORDER BY joined_at DESC NULLS LAST, user_id ASC.
+pub fn is_member_after_cursor(
+    row_joined_at: Option<DateTime<Utc>>,
+    row_user_id: &str,
+    cursor_joined_at: Option<DateTime<Utc>>,
+    cursor_user_id: &str,
+) -> bool {
+    match cursor_joined_at {
+        Some(cur_dt) => match row_joined_at {
+            Some(row_dt) => row_dt < cur_dt || (row_dt == cur_dt && row_user_id > cursor_user_id),
+            None => true,
+        },
+        None => row_joined_at.is_none() && row_user_id > cursor_user_id,
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CleanupFilter {
     pub author_id: Option<String>,
@@ -4717,6 +4770,124 @@ mod tests {
         assert_eq!(res_joined[0].user_id, user_a);
 
         assert!(res_all.iter().all(|r| r.user_id != user_c));
+    }
+
+    #[tokio::test]
+    async fn test_member_search_keyset_pagination_and_performance() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_id = "111000000000000001";
+        let now = Utc::now();
+
+        // 1. Insert 5 users with varied joined_at (including duplicate timestamps, null, and large snowflakes > 2^53)
+        // Snowflake > 2^53: 18_446_744_073_709_551_615 is max u64, e.g. "900719925474099991" > 2^53 (9007199254740992)
+        let t1 = now - chrono::Duration::hours(1);
+        let t2 = now - chrono::Duration::hours(2);
+
+        let users = vec![
+            ("100", "user_100", Some(t1)),
+            ("200", "user_200", Some(t1)),
+            ("900719925474099991", "user_large", Some(t2)),
+            ("150", "user_null_1", None),
+            ("250", "user_null_2", None),
+        ];
+
+        for (uid, uname, joined) in &users {
+            store
+                .upsert_member_snapshot(UpsertMemberSnapshotParams {
+                    guild_id,
+                    user_id: uid,
+                    username: uname,
+                    global_name: None,
+                    nickname: None,
+                    role_ids: &[],
+                    joined_at: *joined,
+                })
+                .await
+                .unwrap();
+        }
+
+        // Expected total order:
+        // 1. "100" (t1)
+        // 2. "200" (t1)
+        // 3. "900719925474099991" (t2)
+        // 4. "150" (None)
+        // 5. "250" (None)
+
+        // Page 1: limit 2
+        let page1 = store
+            .search_members(
+                guild_id,
+                &MemberSearchFilter {
+                    limit: Some(2),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page1[0].user_id, "100");
+        assert_eq!(page1[1].user_id, "200");
+
+        let cur1 = encode_member_search_cursor(page1[1].joined_at, &page1[1].user_id);
+
+        // Page 2: limit 2 with cursor from page 1
+        let page2 = store
+            .search_members(
+                guild_id,
+                &MemberSearchFilter {
+                    limit: Some(2),
+                    cursor: Some(cur1),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page2.len(), 2);
+        assert_eq!(page2[0].user_id, "900719925474099991");
+        assert_eq!(page2[1].user_id, "150");
+
+        // Test cursor deletion resilience:
+        // Delete user "900719925474099991" from the database
+        let cur2 = encode_member_search_cursor(page2[0].joined_at, &page2[0].user_id);
+        let removed = store
+            .remove_member_snapshot(guild_id, "900719925474099991")
+            .await
+            .unwrap();
+        assert!(removed);
+
+        // Page with deleted cursor still seeks correctly without restarting from page 1
+        let page_after_del = store
+            .search_members(
+                guild_id,
+                &MemberSearchFilter {
+                    limit: Some(2),
+                    cursor: Some(cur2),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page_after_del.len(), 2);
+        assert_eq!(page_after_del[0].user_id, "150");
+        assert_eq!(page_after_del[1].user_id, "250");
+
+        // Page with cursor from NULL joined_at ("150")
+        let cur_null =
+            encode_member_search_cursor(page_after_del[0].joined_at, &page_after_del[0].user_id);
+        assert!(cur_null.starts_with("null_"));
+        let page_last = store
+            .search_members(
+                guild_id,
+                &MemberSearchFilter {
+                    limit: Some(2),
+                    cursor: Some(cur_null),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page_last.len(), 1);
+        assert_eq!(page_last[0].user_id, "250");
     }
 
     #[tokio::test]

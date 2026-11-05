@@ -1086,6 +1086,115 @@ async fn test_postgres_integration_suite() {
     assert_eq!(results[0].username, "bob_builder");
     assert_eq!(results[0].moderation_case_count, 0);
 
+    // 21c. Test Keyset Pagination and SQL LIMIT in PostgreSQL (#169)
+    let pg_user_1 = "900719925474099991";
+    let pg_user_2 = "900719925474099992";
+    let pg_user_3 = "900719925474099993";
+    let pg_now = Utc::now();
+    let pg_t1 = pg_now - chrono::Duration::hours(1);
+    let pg_t2 = pg_now - chrono::Duration::hours(2);
+
+    store
+        .upsert_member_snapshot(rusty_discord_bot::storage::UpsertMemberSnapshotParams {
+            guild_id: intel_guild_id,
+            user_id: pg_user_1,
+            username: "pg_u1",
+            global_name: None,
+            nickname: None,
+            role_ids: &["keyset_role".to_string()],
+            joined_at: Some(pg_t1),
+        })
+        .await
+        .unwrap();
+
+    store
+        .upsert_member_snapshot(rusty_discord_bot::storage::UpsertMemberSnapshotParams {
+            guild_id: intel_guild_id,
+            user_id: pg_user_2,
+            username: "pg_u2",
+            global_name: None,
+            nickname: None,
+            role_ids: &["keyset_role".to_string()],
+            joined_at: Some(pg_t2),
+        })
+        .await
+        .unwrap();
+
+    store
+        .upsert_member_snapshot(rusty_discord_bot::storage::UpsertMemberSnapshotParams {
+            guild_id: intel_guild_id,
+            user_id: pg_user_3,
+            username: "pg_u3",
+            global_name: None,
+            nickname: None,
+            role_ids: &["keyset_role".to_string()],
+            joined_at: None,
+        })
+        .await
+        .unwrap();
+
+    // Query with limit=1: must return only pg_user_1
+    let pg_page1 = store
+        .search_members(
+            intel_guild_id,
+            &MemberSearchFilter {
+                role_ids: vec!["keyset_role".to_string()],
+                limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(pg_page1.len(), 1);
+    assert_eq!(pg_page1[0].user_id, pg_user_1);
+
+    let cur1 = rusty_discord_bot::storage::encode_member_search_cursor(
+        pg_page1[0].joined_at,
+        &pg_page1[0].user_id,
+    );
+
+    // Query page 2 with cursor: must return pg_user_2
+    let pg_page2 = store
+        .search_members(
+            intel_guild_id,
+            &MemberSearchFilter {
+                role_ids: vec!["keyset_role".to_string()],
+                limit: Some(1),
+                cursor: Some(cur1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(pg_page2.len(), 1);
+    assert_eq!(pg_page2[0].user_id, pg_user_2);
+
+    // Delete pg_user_2 and verify cursor resilience
+    let cur2 = rusty_discord_bot::storage::encode_member_search_cursor(
+        pg_page2[0].joined_at,
+        &pg_page2[0].user_id,
+    );
+    store
+        .remove_member_snapshot(intel_guild_id, pg_user_2)
+        .await
+        .unwrap();
+
+    // Page 3 query using deleted user cursor continues to pg_user_3 without restarting
+    let pg_page3 = store
+        .search_members(
+            intel_guild_id,
+            &MemberSearchFilter {
+                role_ids: vec!["keyset_role".to_string()],
+                limit: Some(1),
+                cursor: Some(cur2),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(pg_page3.len(), 1);
+    assert_eq!(pg_page3[0].user_id, pg_user_3);
+
     // 22. Test Cleanup Plans in PostgreSQL
     let cleanup_actor_1 = "444000000000000001";
     let cleanup_actor_2 = "444000000000000002";
