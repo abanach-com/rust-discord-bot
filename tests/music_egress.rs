@@ -92,6 +92,9 @@ async fn test_music_resolver_network_egress_and_ssrf_boundary() {
         lua_memory_limit_bytes: 4 * 1024 * 1024,
         lua_instruction_limit: 200_000,
         lua_hook_granularity: 100,
+        lua_max_parallel: 32,
+        lua_max_per_guild: 8,
+        lua_command_timeout_ms: 3000,
         music_allowed_hosts: [
             "youtube.com".to_string(),
             "127.0.0.1".to_string(),

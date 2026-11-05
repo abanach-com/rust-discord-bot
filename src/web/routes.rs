@@ -238,7 +238,11 @@ pub async fn prometheus_metrics(State(state): State<WebState>) -> impl IntoRespo
         .count_active_sessions()
         .await
         .unwrap_or(0);
-    let body = state.app.metrics.render_prometheus(active_sessions);
+    let active_lua = state.app.scripts.active_executions();
+    let body = state
+        .app
+        .metrics
+        .render_prometheus(active_sessions, active_lua);
     (
         [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
         body,

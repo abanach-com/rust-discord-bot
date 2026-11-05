@@ -901,10 +901,23 @@ async fn execute_command_inner(
         .lua_commands_total
         .fetch_add(1, Ordering::Relaxed);
 
-    let actions = state
+    let actions = match state
         .scripts
         .execute_command(&module_id, &command.data.name, execution_context)
-        .await?;
+        .await
+    {
+        Ok(actions) => actions,
+        Err(err) if err.is_busy() => {
+            state
+                .metrics
+                .lua_commands_overloaded_total
+                .fetch_add(1, Ordering::Relaxed);
+            let msg = crate::translations::t(&command.locale, "system.bot_busy");
+            respond_or_edit(ctx, command, deferred, responded, &msg).await?;
+            return Ok(());
+        }
+        Err(err) => return Err(err.into()),
+    };
 
     let is_deferred = deferred.load(Ordering::SeqCst);
 
@@ -974,6 +987,19 @@ async fn run_event(
                 {
                     tracing::warn!(module_id, event_name, ?error, "event action failed");
                 }
+            }
+
+            Err(error) if error.is_busy() => {
+                state
+                    .metrics
+                    .lua_events_overloaded_total
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    module_id,
+                    event_name,
+                    guild_id = ?guild_id.map(|g| g.get()),
+                    "Lua event shed due to concurrency/capacity saturation"
+                );
             }
 
             Err(error) => {

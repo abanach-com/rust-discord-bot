@@ -48,10 +48,15 @@ These are host environment settings, not fields that a Lua manifest can override
 | `LUA_MEMORY_LIMIT_BYTES` | 8,388,608 bytes (8 MiB) | `usize`, at least 262,144 bytes |
 | `LUA_INSTRUCTION_LIMIT` | 500,000 | Positive `i64` |
 | `LUA_HOOK_GRANULARITY` | 1,000 | Positive `u32`; instructions between hook checks |
+| `LUA_MAX_PARALLEL` | 32 | Positive `usize`; global pool concurrency limit |
+| `LUA_MAX_PER_GUILD` | 8 | Positive `usize`, `<= LUA_MAX_PARALLEL`; per-guild concurrency limit |
+| `LUA_COMMAND_TIMEOUT_MS` | 3,000 ms | Positive `u64`; command admission timeout before returning busy |
 | Returned action count | 25 | Fixed engine maximum, after deserialization |
 
-Defaults and accepted configuration are in [config.rs](../../src/config.rs#L76-L106);
-[state construction](../../src/state.rs#L43-L48) passes them into the engine.
+Defaults and accepted configuration are in [config.rs](../../src/config.rs);
+[state construction](../../src/state.rs) passes them into the engine.
+Admission control limits both global and per-guild concurrent VM executions before task scheduling,
+preventing cross-guild starvation and unbounded worker thread pool saturation.
 The global instruction hook subtracts the configured granularity on each check and raises
 `Lua instruction limit exceeded` when the budget is exhausted. Enforcement happens at hook intervals,
 not at an exact wall-clock deadline. Configuration does not require granularity to be below the budget.

@@ -12,6 +12,7 @@
     "module_not_loaded": "The module for this command is not loaded.",
     "module_disabled": "This module has been disabled in the administration panel.",
     "rate_limited": "Rate limit exceeded for command `/{command}`. Try again in {seconds} s.",
+    "bot_busy": "The bot is currently experiencing heavy load. Please try again in a moment.",
     "command_executed": "Command executed successfully.",
     "command_accepted": "Command has been accepted.",
     "guild_only": "This action can only be performed on a server.",

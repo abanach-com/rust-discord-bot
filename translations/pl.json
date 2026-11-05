@@ -12,6 +12,7 @@
     "module_not_loaded": "Moduł tej komendy nie jest załadowany.",
     "module_disabled": "Ten moduł został wyłączony w panelu administracyjnym.",
     "rate_limited": "Osiągnięto limit wywołań komendy `/{command}`. Spróbuj ponownie za {seconds} s.",
+    "bot_busy": "Bot jest obecnie mocno obciążony. Spróbuj ponownie za chwilę.",
     "command_executed": "Polecenie zostało wykonane.",
     "command_accepted": "Polecenie zostało przyjęte.",
     "guild_only": "Ta akcja może zostać wykonana wyłącznie na serwerze.",

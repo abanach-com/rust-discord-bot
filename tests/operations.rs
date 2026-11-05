@@ -19,6 +19,9 @@ fn test_config(bind: SocketAddr) -> Config {
         lua_memory_limit_bytes: 4 * 1024 * 1024,
         lua_instruction_limit: 200_000,
         lua_hook_granularity: 100,
+        lua_max_parallel: 32,
+        lua_max_per_guild: 8,
+        lua_command_timeout_ms: 3000,
         music_allowed_hosts: HashSet::new(),
         trusted_proxies: ["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()]
             .into_iter()

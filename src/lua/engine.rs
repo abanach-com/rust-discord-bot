@@ -13,7 +13,7 @@ use mlua::{
     VmState,
 };
 use thiserror::Error;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 
 use super::{
     install_xml::{InstallManifest, InstallModuleEntry},
@@ -39,6 +39,11 @@ pub struct LuaEngine {
     scripts_dir: Arc<PathBuf>,
     limits: LuaLimits,
     registry: Arc<RwLock<Registry>>,
+    execution_slots: Arc<Semaphore>,
+    guild_slots: Arc<dashmap::DashMap<String, Arc<Semaphore>>>,
+    max_parallel: usize,
+    max_per_guild: usize,
+    command_timeout: std::time::Duration,
 }
 
 #[derive(Default)]
@@ -94,8 +99,19 @@ pub enum LuaEngineError {
     UnknownCommand { module_id: String, command: String },
     #[error("module {module_id} does not subscribe to event {event}")]
     UnknownEvent { module_id: String, event: String },
+    #[error("Lua execution capacity reached: engine is busy")]
+    Busy,
+    #[error("Lua execution timed out waiting for available capacity")]
+    Timeout,
     #[error("Lua execution task failed: {0}")]
     TaskJoin(#[from] tokio::task::JoinError),
+}
+
+impl LuaEngineError {
+    #[must_use]
+    pub fn is_busy(&self) -> bool {
+        matches!(self, Self::Busy | Self::Timeout)
+    }
 }
 
 impl LuaEngine {
@@ -103,11 +119,76 @@ impl LuaEngine {
         let scripts_dir = scripts_dir.as_ref().to_path_buf();
         let registry = build_registry(&scripts_dir, limits)?;
 
+        let max_parallel = 32;
+        let max_per_guild = 8;
+        let command_timeout = std::time::Duration::from_millis(3000);
+
         Ok(Self {
             scripts_dir: Arc::new(scripts_dir),
             limits,
             registry: Arc::new(RwLock::new(registry)),
+            execution_slots: Arc::new(Semaphore::new(max_parallel)),
+            guild_slots: Arc::new(dashmap::DashMap::new()),
+            max_parallel,
+            max_per_guild,
+            command_timeout,
         })
+    }
+
+    #[must_use]
+    pub fn with_concurrency_limits(
+        mut self,
+        max_parallel: usize,
+        max_per_guild: usize,
+        command_timeout_ms: u64,
+    ) -> Self {
+        let max_parallel = max_parallel.max(1);
+        let max_per_guild = max_per_guild.max(1).min(max_parallel);
+        let command_timeout = std::time::Duration::from_millis(command_timeout_ms.max(1));
+
+        self.max_parallel = max_parallel;
+        self.max_per_guild = max_per_guild;
+        self.command_timeout = command_timeout;
+        self.execution_slots = Arc::new(Semaphore::new(max_parallel));
+        self.guild_slots = Arc::new(dashmap::DashMap::new());
+        self
+    }
+
+    #[must_use]
+    pub fn active_executions(&self) -> usize {
+        self.max_parallel
+            .saturating_sub(self.execution_slots.available_permits())
+    }
+
+    #[must_use]
+    pub fn max_parallel(&self) -> usize {
+        self.max_parallel
+    }
+
+    #[must_use]
+    pub fn max_per_guild(&self) -> usize {
+        self.max_per_guild
+    }
+
+    #[must_use]
+    pub fn execution_slots(&self) -> Arc<Semaphore> {
+        self.execution_slots.clone()
+    }
+
+    pub fn get_guild_semaphore(&self, guild_id: &str) -> Arc<Semaphore> {
+        if let Some(sem) = self.guild_slots.get(guild_id) {
+            return sem.clone();
+        }
+
+        if self.guild_slots.len() > 500 {
+            self.guild_slots
+                .retain(|_, sem| sem.available_permits() < self.max_per_guild);
+        }
+
+        self.guild_slots
+            .entry(guild_id.to_owned())
+            .or_insert_with(|| Arc::new(Semaphore::new(self.max_per_guild)))
+            .clone()
     }
 
     pub async fn reload(&self) -> Result<usize, LuaEngineError> {
@@ -246,10 +327,34 @@ impl LuaEngine {
             });
         }
 
+        let guild_permit = if let Some(ref gid) = context.guild_id {
+            let sem = self.get_guild_semaphore(gid);
+            match tokio::time::timeout(self.command_timeout, sem.acquire_owned()).await {
+                Ok(Ok(permit)) => Some(permit),
+                Ok(Err(_)) => return Err(LuaEngineError::Busy),
+                Err(_) => return Err(LuaEngineError::Timeout),
+            }
+        } else {
+            None
+        };
+
+        let global_permit = match tokio::time::timeout(
+            self.command_timeout,
+            self.execution_slots.clone().acquire_owned(),
+        )
+        .await
+        {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_)) => return Err(LuaEngineError::Busy),
+            Err(_) => return Err(LuaEngineError::Timeout),
+        };
+
         let limits = self.limits;
         let command = command.to_owned();
         let module_id = module_id.to_owned();
         tokio::task::spawn_blocking(move || {
+            let _global_permit = global_permit;
+            let _guild_permit = guild_permit;
             execute_handler(
                 &module,
                 limits,
@@ -283,10 +388,27 @@ impl LuaEngine {
             });
         }
 
+        let guild_permit = if let Some(ref gid) = context.guild_id {
+            let sem = self.get_guild_semaphore(gid);
+            match sem.try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(_) => return Err(LuaEngineError::Busy),
+            }
+        } else {
+            None
+        };
+
+        let global_permit = match self.execution_slots.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => return Err(LuaEngineError::Busy),
+        };
+
         let limits = self.limits;
         let event = event.to_owned();
         let module_id = module_id.to_owned();
         tokio::task::spawn_blocking(move || {
+            let _global_permit = global_permit;
+            let _guild_permit = guild_permit;
             execute_handler(&module, limits, "on_event", (&event, &context), &module_id)
         })
         .await?

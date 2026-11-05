@@ -14,6 +14,8 @@ pub struct Metrics {
     pub dashboard_requests_total: AtomicU64,
     pub rate_limit_throttled_total: AtomicU64,
     pub message_updates_unknown_author_total: AtomicU64,
+    pub lua_events_overloaded_total: AtomicU64,
+    pub lua_commands_overloaded_total: AtomicU64,
 }
 
 impl Default for Metrics {
@@ -30,6 +32,8 @@ impl Default for Metrics {
             dashboard_requests_total: AtomicU64::new(0),
             rate_limit_throttled_total: AtomicU64::new(0),
             message_updates_unknown_author_total: AtomicU64::new(0),
+            lua_events_overloaded_total: AtomicU64::new(0),
+            lua_commands_overloaded_total: AtomicU64::new(0),
         }
     }
 }
@@ -44,7 +48,11 @@ impl Metrics {
         (Utc::now() - self.process_start_time).num_seconds().max(0)
     }
 
-    pub fn render_prometheus(&self, active_sessions: usize) -> String {
+    pub fn render_prometheus(
+        &self,
+        active_sessions: usize,
+        active_lua_executions: usize,
+    ) -> String {
         format!(
             "# HELP rusty_discord_bot_uptime_seconds Process uptime in seconds\n\
              # TYPE rusty_discord_bot_uptime_seconds gauge\n\
@@ -89,7 +97,19 @@ impl Metrics {
              # HELP rusty_discord_bot_message_updates_unknown_author_total Total number of message_update events skipped due to missing/unknown author\n\
              # TYPE rusty_discord_bot_message_updates_unknown_author_total counter\n\
              rusty_discord_bot_message_updates_unknown_author_total {10}\n\
-             zuckerbot_message_updates_unknown_author_total {10}\n",
+             zuckerbot_message_updates_unknown_author_total {10}\n\
+             # HELP rusty_discord_bot_lua_active_executions Current number of concurrently running Lua VM tasks\n\
+             # TYPE rusty_discord_bot_lua_active_executions gauge\n\
+             rusty_discord_bot_lua_active_executions {11}\n\
+             zuckerbot_lua_active_executions {11}\n\
+             # HELP rusty_discord_bot_lua_events_overloaded_total Total number of Lua events dropped due to capacity exhaustion\n\
+             # TYPE rusty_discord_bot_lua_events_overloaded_total counter\n\
+             rusty_discord_bot_lua_events_overloaded_total {12}\n\
+             zuckerbot_lua_events_overloaded_total {12}\n\
+             # HELP rusty_discord_bot_lua_commands_overloaded_total Total number of Lua commands rejected due to capacity exhaustion\n\
+             # TYPE rusty_discord_bot_lua_commands_overloaded_total counter\n\
+             rusty_discord_bot_lua_commands_overloaded_total {13}\n\
+             zuckerbot_lua_commands_overloaded_total {13}\n",
             self.uptime_seconds(),
             self.discord_events_total.load(Ordering::Relaxed),
             self.lua_commands_total.load(Ordering::Relaxed),
@@ -102,6 +122,9 @@ impl Metrics {
             active_sessions,
             self.message_updates_unknown_author_total
                 .load(Ordering::Relaxed),
+            active_lua_executions,
+            self.lua_events_overloaded_total.load(Ordering::Relaxed),
+            self.lua_commands_overloaded_total.load(Ordering::Relaxed),
         )
     }
 }
@@ -118,11 +141,20 @@ mod tests {
         metrics
             .message_updates_unknown_author_total
             .store(4, Ordering::Relaxed);
+        metrics
+            .lua_events_overloaded_total
+            .store(2, Ordering::Relaxed);
+        metrics
+            .lua_commands_overloaded_total
+            .store(1, Ordering::Relaxed);
 
-        let rendered = metrics.render_prometheus(3);
+        let rendered = metrics.render_prometheus(3, 2);
         assert!(rendered.contains("zuckerbot_discord_events_total 15"));
         assert!(rendered.contains("zuckerbot_lua_commands_total 7"));
         assert!(rendered.contains("zuckerbot_message_updates_unknown_author_total 4"));
+        assert!(rendered.contains("zuckerbot_lua_active_executions 2"));
+        assert!(rendered.contains("zuckerbot_lua_events_overloaded_total 2"));
+        assert!(rendered.contains("zuckerbot_lua_commands_overloaded_total 1"));
         assert!(rendered.contains("zuckerbot_active_sessions 3"));
         assert!(rendered.contains("zuckerbot_uptime_seconds"));
     }

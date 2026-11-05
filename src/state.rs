@@ -45,7 +45,11 @@ impl AppState {
             instruction_limit: config.lua_instruction_limit,
             hook_granularity: config.lua_hook_granularity,
         };
-        let scripts = LuaEngine::load(&config.scripts_dir, limits)?;
+        let scripts = LuaEngine::load(&config.scripts_dir, limits)?.with_concurrency_limits(
+            config.lua_max_parallel,
+            config.lua_max_per_guild,
+            config.lua_command_timeout_ms,
+        );
         let (storage, scheduler, tickets, moderation_cases, sessions) = if let Some(url) =
             config.database_url.as_deref()
         {

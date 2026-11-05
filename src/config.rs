@@ -19,6 +19,9 @@ pub struct Config {
     pub lua_memory_limit_bytes: usize,
     pub lua_instruction_limit: i64,
     pub lua_hook_granularity: u32,
+    pub lua_max_parallel: usize,
+    pub lua_max_per_guild: usize,
+    pub lua_command_timeout_ms: u64,
     pub music_allowed_hosts: HashSet<String>,
     pub trusted_proxies: HashSet<std::net::IpAddr>,
 }
@@ -76,6 +79,9 @@ impl Config {
             lua_memory_limit_bytes: env_parse("LUA_MEMORY_LIMIT_BYTES", 8 * 1024 * 1024_usize)?,
             lua_instruction_limit: env_parse("LUA_INSTRUCTION_LIMIT", 500_000_i64)?,
             lua_hook_granularity: env_parse("LUA_HOOK_GRANULARITY", 1_000_u32)?,
+            lua_max_parallel: env_parse("LUA_MAX_PARALLEL", 32_usize)?,
+            lua_max_per_guild: env_parse("LUA_MAX_PER_GUILD", 8_usize)?,
+            lua_command_timeout_ms: env_parse("LUA_COMMAND_TIMEOUT_MS", 3_000_u64)?,
             music_allowed_hosts,
             trusted_proxies: env::var("TRUSTED_PROXIES")
                 .unwrap_or_else(|_| "127.0.0.1,::1".to_owned())
@@ -104,6 +110,18 @@ impl Config {
         }
         if self.lua_hook_granularity == 0 {
             return Err(anyhow!("LUA_HOOK_GRANULARITY must be greater than zero"));
+        }
+        if self.lua_max_parallel == 0 {
+            return Err(anyhow!("LUA_MAX_PARALLEL must be greater than zero"));
+        }
+        if self.lua_max_per_guild == 0 {
+            return Err(anyhow!("LUA_MAX_PER_GUILD must be greater than zero"));
+        }
+        if self.lua_max_per_guild > self.lua_max_parallel {
+            return Err(anyhow!("LUA_MAX_PER_GUILD cannot exceed LUA_MAX_PARALLEL"));
+        }
+        if self.lua_command_timeout_ms == 0 {
+            return Err(anyhow!("LUA_COMMAND_TIMEOUT_MS must be greater than zero"));
         }
         if self.music_allowed_hosts.is_empty() {
             return Err(anyhow!("MUSIC_ALLOWED_HOSTS cannot be empty"));

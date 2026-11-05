@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use rusty_discord_bot::lua::{LuaAction, LuaEngine, LuaExecutionContext, LuaLimits};
+use rusty_discord_bot::lua::{
+    LuaAction, LuaEngine, LuaEngineError, LuaEventContext, LuaExecutionContext, LuaLimits,
+};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -167,4 +169,166 @@ fn duplicate_commands_are_rejected() {
         result.is_err(),
         "duplicate slash commands must fail startup"
     );
+}
+
+fn event_context(guild_id: Option<&str>) -> LuaEventContext {
+    LuaEventContext {
+        name: "message_create".to_owned(),
+        guild_id: guild_id.map(|s| s.to_owned()),
+        channel_id: Some("100000000000000002".to_owned()),
+        actor_id: Some("100000000000000003".to_owned()),
+        data: json!({
+            "message_id": "100000000000000004",
+            "content": "hello world",
+            "author": {
+                "id": "100000000000000003",
+                "name": "Tester",
+                "global_name": null,
+            },
+            "mentions": [],
+            "mention_roles": [],
+            "mention_everyone": false,
+            "attachments": [],
+        }),
+        config: json!({}),
+    }
+}
+
+#[tokio::test]
+async fn test_lua_engine_global_admission_control_and_metrics() {
+    let scripts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts");
+    let engine = LuaEngine::load(scripts, limits())
+        .expect("scripts load")
+        .with_concurrency_limits(2, 2, 50);
+
+    assert_eq!(engine.max_parallel(), 2);
+    assert_eq!(engine.max_per_guild(), 2);
+    assert_eq!(engine.active_executions(), 0);
+
+    // Acquire all 2 global permits manually to simulate saturation
+    let p1 = engine
+        .execution_slots()
+        .try_acquire_owned()
+        .expect("acquire slot 1");
+    let p2 = engine
+        .execution_slots()
+        .try_acquire_owned()
+        .expect("acquire slot 2");
+
+    assert_eq!(engine.active_executions(), 2);
+
+    // Event execution must be rejected immediately with Busy (fail-closed load shedding)
+    let event_err = engine
+        .execute_event(
+            "automod",
+            "message_create",
+            event_context(Some("100000000000000001")),
+        )
+        .await;
+    assert!(
+        matches!(event_err, Err(LuaEngineError::Busy)),
+        "Saturated global capacity must immediately reject event with Busy"
+    );
+
+    // Slash command execution must wait up to timeout and then return Timeout/Busy
+    let cmd_err = engine.execute_command("core", "ping", context()).await;
+    assert!(
+        matches!(cmd_err, Err(LuaEngineError::Timeout)),
+        "Saturated global capacity must timeout slash command acquisition"
+    );
+
+    // Release permits
+    drop(p1);
+    drop(p2);
+    assert_eq!(engine.active_executions(), 0);
+
+    // Now executions must succeed again
+    let res = engine.execute_command("core", "ping", context()).await;
+    assert!(
+        res.is_ok(),
+        "Command should succeed once capacity is restored"
+    );
+}
+
+#[tokio::test]
+async fn test_lua_engine_per_guild_isolation_prevents_starvation() {
+    let scripts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts");
+    let engine = LuaEngine::load(scripts, limits())
+        .expect("scripts load")
+        .with_concurrency_limits(4, 2, 50); // 4 global slots, but only 2 per guild
+
+    let guild_g = "guild_g";
+    let guild_h = "guild_h";
+
+    // Guild G exhausts its per-guild quota (2 permits)
+    let g_sem = engine.get_guild_semaphore(guild_g);
+    let p1 = g_sem.clone().try_acquire_owned().expect("acquire g slot 1");
+    let p2 = g_sem.try_acquire_owned().expect("acquire g slot 2");
+
+    // Guild G event must be rejected because its guild quota is exhausted
+    let res_g = engine
+        .execute_event("automod", "message_create", event_context(Some(guild_g)))
+        .await;
+    assert!(
+        matches!(res_g, Err(LuaEngineError::Busy)),
+        "Guild G must be rejected when its per-guild quota is exhausted"
+    );
+
+    // But Guild H still has available quota and global capacity is not exhausted (2 of 4 slots free)
+    let res_h = engine
+        .execute_event("automod", "message_create", event_context(Some(guild_h)))
+        .await;
+    assert!(
+        res_h.is_ok(),
+        "Guild H must NOT be starved when Guild G exhausts its quota"
+    );
+
+    // Release Guild G permits
+    drop(p1);
+    drop(p2);
+
+    let res_g_after = engine
+        .execute_event("automod", "message_create", event_context(Some(guild_g)))
+        .await;
+    assert!(
+        res_g_after.is_ok(),
+        "Guild G must succeed once its quota frees up"
+    );
+}
+
+#[tokio::test]
+async fn test_lua_engine_cancellation_and_error_does_not_leak_permits() {
+    let scripts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts");
+    let engine = LuaEngine::load(scripts, limits())
+        .expect("scripts load")
+        .with_concurrency_limits(2, 2, 50);
+
+    assert_eq!(engine.active_executions(), 0);
+
+    // Call unknown command (error before spawn)
+    let _ = engine
+        .execute_command("core", "non_existent_command", context())
+        .await;
+    assert_eq!(engine.active_executions(), 0);
+
+    // Cancelled future while waiting
+    let p1 = engine.execution_slots().try_acquire_owned().unwrap();
+    let p2 = engine.execution_slots().try_acquire_owned().unwrap();
+
+    let engine_clone = engine.clone();
+    let handle = tokio::spawn(async move {
+        engine_clone
+            .execute_command("core", "ping", context())
+            .await
+    });
+
+    // Abort task while waiting
+    handle.abort();
+    let _ = handle.await;
+
+    drop(p1);
+    drop(p2);
+
+    assert_eq!(engine.active_executions(), 0);
+    assert_eq!(engine.execution_slots().available_permits(), 2);
 }

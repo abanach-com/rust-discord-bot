@@ -12,6 +12,7 @@
     "module_not_loaded": "Das Modul für diesen Befehl ist nicht geladen.",
     "module_disabled": "Dieses Modul wurde im Administrationsbereich deaktiviert.",
     "rate_limited": "Ratenbegrenzung für Befehl `/{command}` überschritten. Bitte in {seconds} s erneut versuchen.",
+    "bot_busy": "Der Bot ist derzeit stark ausgelastet. Bitte versuchen Sie es gleich noch einmal.",
     "command_executed": "Befehl erfolgreich ausgeführt.",
     "command_accepted": "Befehl wurde angenommen.",
     "guild_only": "Diese Aktion kann nur auf einem Server ausgeführt werden.",

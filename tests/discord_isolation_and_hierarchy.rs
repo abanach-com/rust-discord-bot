@@ -705,6 +705,12 @@ async fn create_test_state() -> AppState {
 
         lua_hook_granularity: 100,
 
+        lua_max_parallel: 32,
+
+        lua_max_per_guild: 8,
+
+        lua_command_timeout_ms: 3000,
+
         music_allowed_hosts: std::collections::HashSet::new(),
 
         trusted_proxies: ["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()]
