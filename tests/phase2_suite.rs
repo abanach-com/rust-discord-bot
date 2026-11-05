@@ -878,3 +878,234 @@ async fn test_phase2_community_operations_and_media_suite() {
         .unwrap();
     assert_eq!(gh_resp.status(), reqwest::StatusCode::OK);
 }
+
+#[tokio::test]
+async fn test_guild_store_member_access_and_purchase_isolation() {
+    let (state, _) = test_web_state().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let guild_id = "777000000000000010";
+
+    // 1. Setup Admin session (can_manage = true)
+    let admin_session_id = "sess_admin_store";
+    let admin_csrf = "csrf_admin_store";
+    state
+        .app
+        .sessions
+        .save_session(
+            admin_session_id,
+            DashboardUser {
+                id: "100000000000000010".to_owned(),
+                username: "admin_user".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_owned(),
+                name: "Store Test Guild".to_owned(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_owned(),
+            }],
+            admin_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // 2. Admin creates a store item
+    let admin_cookie = format!("rusty_discord_bot_session={admin_session_id}");
+    let create_item_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/store/items"))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "name": "Badge Role",
+            "description": "Store item for members",
+            "price": 150,
+            "role_id": "999000000000000010",
+            "stock": 5
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_item_resp.status(), reqwest::StatusCode::OK);
+    let item_json: serde_json::Value = create_item_resp.json().await.unwrap();
+    let item_id = item_json["id"].as_str().unwrap();
+
+    // 3. Setup Regular Member session (permissions = 0, owner = false)
+    let member_user_id = "200000000000000010";
+    let member_session_id = "sess_member_store";
+    let member_csrf = "csrf_member_store";
+    state
+        .app
+        .sessions
+        .save_session(
+            member_session_id,
+            DashboardUser {
+                id: member_user_id.to_owned(),
+                username: "regular_member".to_owned(),
+                global_name: Some("Regular".to_owned()),
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_owned(),
+                name: "Store Test Guild".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_owned(), // No manage guild or admin
+            }],
+            member_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Give member 500 coins in storage
+    state
+        .app
+        .storage
+        .adjust_member_progress(guild_id, member_user_id, 0, 500, 0)
+        .await
+        .unwrap();
+
+    let member_cookie = format!("rusty_discord_bot_session={member_session_id}");
+
+    // 4. Setup Non-Member session (not in guild_id at all)
+    let non_member_session_id = "sess_non_member";
+    let non_member_csrf = "csrf_non_member";
+    state
+        .app
+        .sessions
+        .save_session(
+            non_member_session_id,
+            DashboardUser {
+                id: "300000000000000010".to_owned(),
+                username: "stranger".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: "888000000000000099".to_owned(), // Different guild
+                name: "Other Guild".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_owned(),
+            }],
+            non_member_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+    let non_member_cookie = format!("rusty_discord_bot_session={non_member_session_id}");
+
+    // Test A: Unauthenticated requests -> 401
+    let unauth_list = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/store/items"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth_list.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let unauth_buy = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/store/purchase"))
+        .json(&serde_json::json!({"item_id": item_id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth_buy.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // Test B: Non-member requests -> 403 Forbidden
+    let non_member_list = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/store/items"))
+        .header(COOKIE, &non_member_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(non_member_list.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let non_member_buy = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/store/purchase"))
+        .header(COOKIE, &non_member_cookie)
+        .header("x-csrf-token", non_member_csrf)
+        .json(&serde_json::json!({"item_id": item_id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(non_member_buy.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Test C: Regular Member CAN view store items (#163)
+    let member_list = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/store/items"))
+        .header(COOKIE, &member_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(member_list.status(), reqwest::StatusCode::OK);
+    let items_array: Vec<serde_json::Value> = member_list.json().await.unwrap();
+    assert_eq!(items_array.len(), 1);
+    assert_eq!(items_array[0]["id"], item_id);
+    assert_eq!(items_array[0]["price"], 150);
+
+    // Test D: Regular Member CANNOT create store items -> 403 Forbidden
+    let member_create = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/store/items"))
+        .header(COOKIE, &member_cookie)
+        .header("x-csrf-token", member_csrf)
+        .json(&serde_json::json!({
+            "name": "Member Hack",
+            "description": "Should fail",
+            "price": 10,
+            "stock": 1
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(member_create.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Test E: Regular Member CAN purchase item (#163)
+    let member_buy = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/store/purchase"))
+        .header(COOKIE, &member_cookie)
+        .header("x-csrf-token", member_csrf)
+        .json(&serde_json::json!({"item_id": item_id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(member_buy.status(), reqwest::StatusCode::OK);
+    let buy_json: serde_json::Value = member_buy.json().await.unwrap();
+    assert_eq!(buy_json["success"], true);
+    assert_eq!(buy_json["remaining_coins"], 350); // 500 - 150 = 350
+
+    // Test F: Regular Member CAN view their own purchases
+    let member_purchases = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/store/purchases"))
+        .header(COOKIE, &member_cookie)
+        .header("x-csrf-token", member_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(member_purchases.status(), reqwest::StatusCode::OK);
+    let member_purch_json: serde_json::Value = member_purchases.json().await.unwrap();
+    let purch_list = member_purch_json["purchases"].as_array().unwrap();
+    assert_eq!(purch_list.len(), 1);
+    assert_eq!(purch_list[0]["role_id"], "999000000000000010");
+}

@@ -263,10 +263,7 @@ pub async fn callback(
         .map_err(ApiError::upstream)?
         .json::<Vec<DashboardGuild>>()
         .await
-        .map_err(ApiError::upstream)?
-        .into_iter()
-        .filter(can_manage)
-        .collect::<Vec<_>>();
+        .map_err(ApiError::upstream)?;
 
     let session_id = Uuid::new_v4().to_string();
     let csrf_token = Uuid::new_v4().to_string();
@@ -404,6 +401,75 @@ pub async fn ensure_guild_access(
         Err(ApiError::forbidden(
             "Permissions to manage this server have been revoked.",
         ))
+    }
+}
+
+pub async fn ensure_guild_member_access(
+    state: &WebState,
+    session: &Session,
+    guild_id: &str,
+) -> Result<(), ApiError> {
+    crate::storage::validate_snowflake("guild_id", guild_id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    crate::storage::validate_snowflake("user_id", &session.user.id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    // 1. If user is in session guilds and has manage rights (or manage rights already cached), they are definitely a member
+    let cache_key = (session.user.id.clone(), guild_id.to_owned());
+    let now = Utc::now();
+    if let Some(entry) = state.permissions_cache.get(&cache_key)
+        && now - entry.checked_at < Duration::seconds(GUILD_PERMISSIONS_CACHE_TTL_SECONDS)
+        && entry.can_manage
+    {
+        return Ok(());
+    }
+
+    // 2. Fast rejection if guild is not in session.guilds
+    if !session.guilds.iter().any(|g| g.id == guild_id) {
+        return Err(ApiError::forbidden("You are not a member of this server."));
+    }
+
+    // 3. In mock or test mode, session.guilds presence is sufficient
+    if state.app.config.discord_token.starts_with("dummy")
+        || state.app.config.discord_token.starts_with("mock")
+        || state.app.config.discord_token == "offline"
+        || std::env::var("OFFLINE_MODE").is_ok()
+    {
+        return Ok(());
+    }
+
+    // 4. In live mode with Discord API: verify membership via Bot token
+    let base_url = std::env::var("DISCORD_API_BASE_URL")
+        .unwrap_or_else(|_| "https://discord.com/api/v10".to_string());
+    let member_url = format!("{base_url}/guilds/{guild_id}/members/{}", session.user.id);
+    let response = state
+        .app
+        .http_client
+        .get(&member_url)
+        .header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bot {}", state.app.config.discord_token),
+        )
+        .send()
+        .await
+        .map_err(ApiError::upstream)?;
+
+    match response.status() {
+        StatusCode::OK => Ok(()),
+        StatusCode::NOT_FOUND | StatusCode::FORBIDDEN => {
+            Err(ApiError::forbidden("You are not a member of this server."))
+        }
+        status => {
+            tracing::warn!(
+                %status,
+                guild_id,
+                user_id = %session.user.id,
+                "Discord API returned error when checking guild membership; failing closed"
+            );
+            Err(ApiError::forbidden(
+                "Guild membership could not be verified at this time.",
+            ))
+        }
     }
 }
 

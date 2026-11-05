@@ -23,7 +23,7 @@ use crate::storage::{
 
 use super::{
     WebState,
-    auth::{authenticate, ensure_guild_access, verify_csrf},
+    auth::{authenticate, ensure_guild_access, ensure_guild_member_access, verify_csrf},
     routes::ApiError,
 };
 
@@ -1079,7 +1079,7 @@ pub async fn list_store_items(
 ) -> Result<Json<Vec<StoreItem>>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
 
-    ensure_guild_access(&state, &session, &guild_id).await?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
 
     let items = state
         .app
@@ -1155,7 +1155,7 @@ pub async fn purchase_store_item(
 
     verify_csrf(&headers, &session)?;
 
-    ensure_guild_access(&state, &session, &guild_id).await?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
 
     let (item, purchase, remaining_balance) = state
         .app
@@ -1229,12 +1229,20 @@ pub async fn list_store_purchases(
 
     verify_csrf(&headers, &session)?;
 
-    ensure_guild_access(&state, &session, &guild_id).await?;
+    let target_user_id = if ensure_guild_access(&state, &session, &guild_id)
+        .await
+        .is_ok()
+    {
+        query.user_id
+    } else {
+        ensure_guild_member_access(&state, &session, &guild_id).await?;
+        Some(session.user.id.clone())
+    };
 
     let purchases = state
         .app
         .storage
-        .list_store_purchases(&guild_id, query.user_id.as_deref())
+        .list_store_purchases(&guild_id, target_user_id.as_deref())
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
