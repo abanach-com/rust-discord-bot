@@ -20,9 +20,8 @@ use crate::storage::{
     DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink, Giveaway,
     HelpForumConfig, InviteTracking, ModeratorDutyProfile, ModeratorDutySettings,
     ModeratorDutyState, ProgressionSeason, RecruitmentApplication, RecruitmentReview,
-    RecruitmentRoleFulfillment, RecruitmentTrack, RecruitmentTrackConfig, RecurringSchedule,
-    ScheduledEvent, ServerSnapshot, StickyMessage, StoreItem, SubmittedAnswer, TupperProfile,
-    validate_snowflake,
+    RecruitmentTrack, RecruitmentTrackConfig, RecurringSchedule, ScheduledEvent, ServerSnapshot,
+    StickyMessage, StoreItem, SubmittedAnswer, TupperProfile, validate_snowflake,
 };
 
 use super::{
@@ -4668,19 +4667,6 @@ pub async fn apply_recruitment_track(
         ));
     }
 
-    let active_count = state
-        .app
-        .storage
-        .count_active_user_applications(&guild_id, &session.user.id, track.id)
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-
-    if active_count >= track.config.max_active_per_user {
-        return Err(ApiError::bad_request(
-            "You have reached the maximum number of active applications for this track",
-        ));
-    }
-
     if track.config.cooldown_days > 0 {
         let rejected_apps = state
             .app
@@ -4725,12 +4711,20 @@ pub async fn apply_recruitment_track(
         decided_by: None,
     };
 
-    let saved = state
+    let saved = match state
         .app
         .storage
-        .create_recruitment_application(app)
+        .create_recruitment_application_checked(app, track.config.max_active_per_user)
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+    {
+        Ok(res) => res,
+        Err(e) if e.to_string().contains("Active applications limit") => {
+            return Err(ApiError::bad_request(
+                "You have reached the maximum number of active applications for this track",
+            ));
+        }
+        Err(e) => return Err(ApiError::internal(e.to_string())),
+    };
 
     let _ = state
         .app
@@ -4875,46 +4869,69 @@ pub async fn transition_recruitment_application(
         }
     }
 
-    let updated = match state
-        .app
-        .storage
-        .update_recruitment_application_transition(crate::storage::TransitionApplicationParams {
-            id: app.id,
-            guild_id: &guild_id,
-            expected_version: payload.expected_version,
-            new_status: &payload.new_status,
-            new_stage: &payload.new_stage,
-            decided_by: Some(&session.user.id),
-            decision_reason: payload.decision_reason.as_deref(),
-        })
-        .await
-    {
-        Ok(res) => res,
-        Err(e) if e.to_string().contains("Optimistic concurrency conflict") => {
-            return Err(ApiError::conflict(e.to_string()));
-        }
-        Err(e) => return Err(ApiError::internal(e.to_string())),
-    };
-
-    let mut fulfillment = None;
-    if payload.new_status == "accepted"
-        && track.config.auto_role_on_accept
-        && let Some(role_id) = &track.target_role_id
-    {
-        let item = RecruitmentRoleFulfillment {
-            application_id: app.id,
-            guild_id: guild_id.clone(),
-            user_id: app.applicant_user_id.clone(),
-            role_id: role_id.clone(),
-            status: "pending".to_string(),
-            attempts: 0,
-            last_error: None,
-            next_attempt_at: Utc::now(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+    let (updated, fulfillment) = if payload.new_status == "accepted" {
+        let target_role_id = if track.config.auto_role_on_accept {
+            track.target_role_id.as_deref()
+        } else {
+            None
         };
-        fulfillment = state.app.storage.upsert_role_fulfillment(item).await.ok();
-    }
+
+        match state
+            .app
+            .storage
+            .accept_recruitment_application_with_role_enqueue(
+                crate::storage::TransitionApplicationParams {
+                    id: app.id,
+                    guild_id: &guild_id,
+                    expected_version: payload.expected_version,
+                    new_status: &payload.new_status,
+                    new_stage: &payload.new_stage,
+                    decided_by: Some(&session.user.id),
+                    decision_reason: payload.decision_reason.as_deref(),
+                },
+                target_role_id,
+            )
+            .await
+        {
+            Ok(res) => res,
+            Err(e) if e.to_string().contains("Optimistic concurrency conflict") => {
+                return Err(ApiError::conflict(e.to_string()));
+            }
+            Err(e) => return Err(ApiError::internal(e.to_string())),
+        }
+    } else {
+        let updated = match state
+            .app
+            .storage
+            .update_recruitment_application_transition(
+                crate::storage::TransitionApplicationParams {
+                    id: app.id,
+                    guild_id: &guild_id,
+                    expected_version: payload.expected_version,
+                    new_status: &payload.new_status,
+                    new_stage: &payload.new_stage,
+                    decided_by: Some(&session.user.id),
+                    decision_reason: payload.decision_reason.as_deref(),
+                },
+            )
+            .await
+        {
+            Ok(res) => res,
+            Err(e) if e.to_string().contains("Optimistic concurrency conflict") => {
+                return Err(ApiError::conflict(e.to_string()));
+            }
+            Err(e) => return Err(ApiError::internal(e.to_string())),
+        };
+
+        // Issue #183: Wycofanie akceptacji / odrzucenie unieważnia oczekujące zadania role fulfillment
+        let _ = state
+            .app
+            .storage
+            .cancel_pending_role_fulfillments_for_application(app.id)
+            .await;
+
+        (updated, None)
+    };
 
     let _ = state
         .app
@@ -4983,6 +5000,13 @@ pub async fn withdraw_recruitment_application(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
+    // Issue #183: Wycofanie unieważnia ewentualne zadania fulfillment
+    let _ = state
+        .app
+        .storage
+        .cancel_pending_role_fulfillments_for_application(app.id)
+        .await;
+
     let _ = state
         .app
         .storage
@@ -5018,14 +5042,23 @@ pub async fn process_role_fulfillments(
         None
     };
 
+    // Issue #184: Tenant isolation - scoped to guild_id
+    // Issue #185: When http is None, does not mark tasks completed
     let processed = crate::recruitment::process_recruitment_role_fulfillments(
         &state.app.storage,
         http.as_ref(),
+        Some(&guild_id),
     )
     .await
     .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    Ok(Json(json!({ "processed": processed })))
+    let status = if http.is_some() {
+        "executed"
+    } else {
+        "offline_no_discord_client"
+    };
+
+    Ok(Json(json!({ "processed": processed, "status": status })))
 }
 
 // ==========================================

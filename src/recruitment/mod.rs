@@ -293,58 +293,98 @@ pub fn validate_track_fields(
 pub async fn process_recruitment_role_fulfillments(
     storage: &crate::storage::Storage,
     http: Option<&serenity::http::Http>,
+    guild_id: Option<&str>,
 ) -> anyhow::Result<usize> {
-    let pending = storage.list_pending_role_fulfillments().await?;
+    if let Some(gid) = guild_id {
+        crate::storage::validate_snowflake("guild_id", gid)?;
+    }
+
+    let client = match http {
+        Some(c) => c,
+        None => {
+            // Issue #185: Bez live Discord HTTP clienta zadania pozostają pending!
+            // Zwracamy 0, nie oznaczamy jako completed.
+            return Ok(0);
+        }
+    };
+
+    let pending = storage.list_pending_role_fulfillments(guild_id).await?;
     let mut processed = 0;
     for mut item in pending {
+        // Issue #184: Dodatkowa ochrona per-guild
+        if let Some(target_gid) = guild_id
+            && item.guild_id != target_gid
+        {
+            continue;
+        }
+
+        // Issue #183: Weryfikacja aktualnego stanu aplikacji przed wywołaniem Discord API
+        let app_opt = storage
+            .get_recruitment_application(&item.guild_id, item.application_id)
+            .await?;
+        match app_opt {
+            Some(app) if app.status == "accepted" => {
+                // Aplikacja jest nadal zaakceptowana - przechodzimy do nadania roli
+            }
+            Some(app) => {
+                // Aplikacja zmieniła status (np. została odrzucona/wycofana)
+                item.status = "cancelled".to_string();
+                item.last_error = Some(format!("Application status changed to '{}'", app.status));
+                item.updated_at = Utc::now();
+                storage.upsert_role_fulfillment(item).await?;
+                continue;
+            }
+            None => {
+                // Aplikacja została usunięta
+                item.status = "cancelled".to_string();
+                item.last_error = Some("Application no longer exists".to_string());
+                item.updated_at = Utc::now();
+                storage.upsert_role_fulfillment(item).await?;
+                continue;
+            }
+        }
+
         processed += 1;
         item.attempts += 1;
         item.updated_at = Utc::now();
 
-        if let Some(client) = http {
-            let g_res = item
-                .guild_id
-                .parse::<u64>()
-                .map(serenity::all::GuildId::new);
-            let u_res = item.user_id.parse::<u64>().map(serenity::all::UserId::new);
-            let r_res = item.role_id.parse::<u64>().map(serenity::all::RoleId::new);
+        let g_res = item
+            .guild_id
+            .parse::<u64>()
+            .map(serenity::all::GuildId::new);
+        let u_res = item.user_id.parse::<u64>().map(serenity::all::UserId::new);
+        let r_res = item.role_id.parse::<u64>().map(serenity::all::RoleId::new);
 
-            match (g_res, u_res, r_res) {
-                (Ok(g), Ok(u), Ok(r)) => {
-                    match client
-                        .add_member_role(g, u, r, Some("Staff recruitment accepted"))
-                        .await
-                    {
-                        Ok(_) => {
-                            item.status = "completed".to_string();
-                            item.last_error = None;
-                        }
-                        Err(e) => {
-                            let err_msg = e.to_string();
-                            item.last_error = Some(err_msg);
-                            if item.attempts >= 5 {
-                                item.status = "failed".to_string();
-                            } else {
-                                let backoff_secs = 2u64.pow(item.attempts.min(6) as u32) * 5;
-                                item.next_attempt_at =
-                                    Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
-                            }
+        match (g_res, u_res, r_res) {
+            (Ok(g), Ok(u), Ok(r)) => {
+                match client
+                    .add_member_role(g, u, r, Some("Staff recruitment accepted"))
+                    .await
+                {
+                    Ok(_) => {
+                        item.status = "completed".to_string();
+                        item.last_error = None;
+                    }
+                    Err(e) => {
+                        let err_msg = e.to_string();
+                        item.last_error = Some(err_msg);
+                        if item.attempts >= 5 {
+                            item.status = "failed".to_string();
+                        } else {
+                            let backoff_secs = 2u64.pow(item.attempts.min(6) as u32) * 5;
+                            item.next_attempt_at =
+                                Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
                         }
                     }
                 }
-                _ => {
-                    item.status = "failed".to_string();
-                    item.last_error =
-                        Some("Invalid snowflake ID in fulfillment record".to_string());
-                }
             }
-        } else {
-            // Dry run / offline mode
-            item.status = "completed".to_string();
-            item.last_error = None;
+            _ => {
+                item.status = "failed".to_string();
+                item.last_error = Some("Invalid snowflake ID in fulfillment record".to_string());
+            }
         }
 
-        let _ = storage.upsert_role_fulfillment(item).await;
+        storage.upsert_role_fulfillment(item).await?;
     }
     Ok(processed)
 }

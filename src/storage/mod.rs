@@ -2712,6 +2712,21 @@ impl Storage {
         }
     }
 
+    pub async fn create_recruitment_application_checked(
+        &self,
+        app: RecruitmentApplication,
+        max_active: u32,
+    ) -> anyhow::Result<RecruitmentApplication> {
+        match self {
+            Self::Memory(store) => store.create_recruitment_application_checked(app, max_active),
+            Self::Postgres(store) => {
+                store
+                    .create_recruitment_application_checked(app, max_active)
+                    .await
+            }
+        }
+    }
+
     pub async fn update_recruitment_application_transition(
         &self,
         params: TransitionApplicationParams<'_>,
@@ -2721,6 +2736,39 @@ impl Storage {
             Self::Postgres(store) => {
                 store
                     .update_recruitment_application_transition(params)
+                    .await
+            }
+        }
+    }
+
+    pub async fn accept_recruitment_application_with_role_enqueue(
+        &self,
+        params: TransitionApplicationParams<'_>,
+        target_role_id: Option<&str>,
+    ) -> anyhow::Result<(RecruitmentApplication, Option<RecruitmentRoleFulfillment>)> {
+        match self {
+            Self::Memory(store) => {
+                store.accept_recruitment_application_with_role_enqueue(params, target_role_id)
+            }
+            Self::Postgres(store) => {
+                store
+                    .accept_recruitment_application_with_role_enqueue(params, target_role_id)
+                    .await
+            }
+        }
+    }
+
+    pub async fn cancel_pending_role_fulfillments_for_application(
+        &self,
+        application_id: Uuid,
+    ) -> anyhow::Result<usize> {
+        match self {
+            Self::Memory(store) => {
+                store.cancel_pending_role_fulfillments_for_application(application_id)
+            }
+            Self::Postgres(store) => {
+                store
+                    .cancel_pending_role_fulfillments_for_application(application_id)
                     .await
             }
         }
@@ -2786,10 +2834,11 @@ impl Storage {
 
     pub async fn list_pending_role_fulfillments(
         &self,
+        guild_id: Option<&str>,
     ) -> anyhow::Result<Vec<RecruitmentRoleFulfillment>> {
         match self {
-            Self::Memory(store) => store.list_pending_role_fulfillments(),
-            Self::Postgres(store) => store.list_pending_role_fulfillments().await,
+            Self::Memory(store) => store.list_pending_role_fulfillments(guild_id),
+            Self::Postgres(store) => store.list_pending_role_fulfillments(guild_id).await,
         }
     }
 

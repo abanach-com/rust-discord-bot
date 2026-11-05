@@ -7567,6 +7567,76 @@ impl PostgresStore {
         Ok(created)
     }
 
+    pub async fn create_recruitment_application_checked(
+        &self,
+        app: RecruitmentApplication,
+        max_active: u32,
+    ) -> anyhow::Result<RecruitmentApplication> {
+        validate_snowflake("guild_id", &app.guild_id)?;
+        validate_snowflake("applicant_user_id", &app.applicant_user_id)?;
+
+        let mut tx = self.pool.begin().await?;
+
+        let lock_key = format!(
+            "{}:{}:{}",
+            app.guild_id, app.track_id, app.applicant_user_id
+        );
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(&lock_key)
+            .execute(&mut *tx)
+            .await?;
+
+        let count: (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(*) FROM recruitment_applications
+            WHERE guild_id = $1 AND applicant_user_id = $2 AND track_id = $3
+              AND status IN ('draft', 'submitted', 'screening', 'interview')
+            "#,
+        )
+        .bind(&app.guild_id)
+        .bind(&app.applicant_user_id)
+        .bind(app.track_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        if count.0 >= max_active as i64 {
+            anyhow::bail!(
+                "Active applications limit ({}) exceeded for user",
+                max_active
+            );
+        }
+
+        let created = sqlx::query_as::<_, RecruitmentApplication>(
+            r#"
+            INSERT INTO recruitment_applications (
+                id, guild_id, track_id, applicant_user_id, track_version, status,
+                submitted_answers, current_stage, version, submitted_at, updated_at,
+                decided_at, decision_reason, decided_by
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, NOW(), NOW(), $9, $10, $11)
+            RETURNING id, guild_id, track_id, applicant_user_id, track_version, status,
+                      submitted_answers, current_stage, version, submitted_at, updated_at,
+                      decided_at, decision_reason, decided_by
+            "#,
+        )
+        .bind(app.id)
+        .bind(&app.guild_id)
+        .bind(app.track_id)
+        .bind(&app.applicant_user_id)
+        .bind(app.track_version)
+        .bind(&app.status)
+        .bind(&app.submitted_answers)
+        .bind(&app.current_stage)
+        .bind(app.decided_at)
+        .bind(&app.decision_reason)
+        .bind(&app.decided_by)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(created)
+    }
+
     pub async fn update_recruitment_application_transition(
         &self,
         params: TransitionApplicationParams<'_>,
@@ -7618,6 +7688,114 @@ impl PostgresStore {
         } else {
             anyhow::bail!("Application not found");
         }
+    }
+
+    pub async fn accept_recruitment_application_with_role_enqueue(
+        &self,
+        params: TransitionApplicationParams<'_>,
+        target_role_id: Option<&str>,
+    ) -> anyhow::Result<(RecruitmentApplication, Option<RecruitmentRoleFulfillment>)> {
+        validate_snowflake("guild_id", params.guild_id)?;
+        if let Some(rid) = target_role_id {
+            validate_snowflake("target_role_id", rid)?;
+        }
+
+        let mut tx = self.pool.begin().await?;
+
+        let updated = sqlx::query_as::<_, RecruitmentApplication>(
+            r#"
+            UPDATE recruitment_applications
+            SET status = 'accepted',
+                current_stage = $1,
+                version = recruitment_applications.version + 1,
+                updated_at = NOW(),
+                decided_at = NOW(),
+                decided_by = $2,
+                decision_reason = $3
+            WHERE id = $4 AND guild_id = $5 AND version = $6
+            RETURNING id, guild_id, track_id, applicant_user_id, track_version, status,
+                      submitted_answers, current_stage, version, submitted_at, updated_at,
+                      decided_at, decision_reason, decided_by
+            "#,
+        )
+        .bind(params.new_stage)
+        .bind(params.decided_by)
+        .bind(params.decision_reason)
+        .bind(params.id)
+        .bind(params.guild_id)
+        .bind(params.expected_version)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let app = match updated {
+            Some(a) => a,
+            None => {
+                let existing = sqlx::query_scalar::<_, i64>(
+                    "SELECT version FROM recruitment_applications WHERE id = $1 AND guild_id = $2",
+                )
+                .bind(params.id)
+                .bind(params.guild_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+
+                if existing.is_some() {
+                    anyhow::bail!(
+                        "Optimistic concurrency conflict: application was modified by another reviewer"
+                    );
+                } else {
+                    anyhow::bail!("Application not found");
+                }
+            }
+        };
+
+        let mut fulfillment = None;
+        if let Some(role_id) = target_role_id {
+            let saved_fulfillment = sqlx::query_as::<_, RecruitmentRoleFulfillment>(
+                r#"
+                INSERT INTO recruitment_role_fulfillment (
+                    application_id, guild_id, user_id, role_id, status, attempts, last_error, next_attempt_at, created_at, updated_at
+                )
+                VALUES ($1, $2, $3, $4, 'pending', 0, NULL, NOW(), NOW(), NOW())
+                ON CONFLICT (application_id) DO UPDATE SET
+                    status = 'pending',
+                    role_id = EXCLUDED.role_id,
+                    attempts = 0,
+                    last_error = NULL,
+                    next_attempt_at = NOW(),
+                    updated_at = NOW()
+                RETURNING application_id, guild_id, user_id, role_id, status, attempts, last_error, next_attempt_at, created_at, updated_at
+                "#,
+            )
+            .bind(app.id)
+            .bind(&app.guild_id)
+            .bind(&app.applicant_user_id)
+            .bind(role_id)
+            .fetch_one(&mut *tx)
+            .await?;
+
+            fulfillment = Some(saved_fulfillment);
+        }
+
+        tx.commit().await?;
+        Ok((app, fulfillment))
+    }
+
+    pub async fn cancel_pending_role_fulfillments_for_application(
+        &self,
+        application_id: Uuid,
+    ) -> anyhow::Result<usize> {
+        let res = sqlx::query(
+            r#"
+            UPDATE recruitment_role_fulfillment
+            SET status = 'cancelled', updated_at = NOW()
+            WHERE application_id = $1 AND status = 'pending'
+            "#,
+        )
+        .bind(application_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(res.rows_affected() as usize)
     }
 
     pub async fn count_active_user_applications(
@@ -7754,15 +7932,23 @@ impl PostgresStore {
 
     pub async fn list_pending_role_fulfillments(
         &self,
+        guild_id: Option<&str>,
     ) -> anyhow::Result<Vec<RecruitmentRoleFulfillment>> {
+        if let Some(gid) = guild_id {
+            validate_snowflake("guild_id", gid)?;
+        }
+
         let rows = sqlx::query_as::<_, RecruitmentRoleFulfillment>(
             r#"
             SELECT application_id, guild_id, user_id, role_id, status, attempts, last_error, next_attempt_at, created_at, updated_at
             FROM recruitment_role_fulfillment
-            WHERE status = 'pending' AND next_attempt_at <= NOW()
+            WHERE ($1::TEXT IS NULL OR guild_id = $1)
+              AND status = 'pending'
+              AND next_attempt_at <= NOW()
             ORDER BY next_attempt_at ASC
             "#,
         )
+        .bind(guild_id)
         .fetch_all(&self.pool)
         .await?;
 

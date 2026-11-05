@@ -144,6 +144,8 @@ pub struct MemoryStore {
     recruitment_role_fulfillments:
         Arc<DashMap<Uuid, crate::recruitment::RecruitmentRoleFulfillment>>,
 
+    recruitment_lock: Arc<Mutex<()>>,
+
     help_forum_configs: Arc<DashMap<(String, String), crate::help_forum::HelpForumConfig>>,
 
     help_forum_sessions: Arc<DashMap<(String, String), crate::help_forum::HelpForumSession>>,
@@ -4397,6 +4399,44 @@ impl MemoryStore {
         Ok(app)
     }
 
+    pub fn create_recruitment_application_checked(
+        &self,
+        mut app: crate::recruitment::RecruitmentApplication,
+        max_active: u32,
+    ) -> anyhow::Result<crate::recruitment::RecruitmentApplication> {
+        validate_snowflake("guild_id", &app.guild_id)?;
+        validate_snowflake("applicant_user_id", &app.applicant_user_id)?;
+
+        let _guard = self
+            .recruitment_lock
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Recruitment lock error: {e}"))?;
+
+        let active_count = self
+            .recruitment_applications
+            .iter()
+            .filter(|a| {
+                a.guild_id == app.guild_id
+                    && a.applicant_user_id == app.applicant_user_id
+                    && a.track_id == app.track_id
+                    && ["draft", "submitted", "screening", "interview"].contains(&a.status.as_str())
+            })
+            .count() as u32;
+
+        if active_count >= max_active {
+            anyhow::bail!(
+                "Active applications limit ({}) exceeded for user",
+                max_active
+            );
+        }
+
+        let now = Utc::now();
+        app.submitted_at = now;
+        app.updated_at = now;
+        self.recruitment_applications.insert(app.id, app.clone());
+        Ok(app)
+    }
+
     pub fn update_recruitment_application_transition(
         &self,
         params: crate::recruitment::TransitionApplicationParams<'_>,
@@ -4429,6 +4469,83 @@ impl MemoryStore {
         }
 
         Ok(entry.value().clone())
+    }
+
+    pub fn accept_recruitment_application_with_role_enqueue(
+        &self,
+        params: crate::recruitment::TransitionApplicationParams<'_>,
+        target_role_id: Option<&str>,
+    ) -> anyhow::Result<(
+        crate::recruitment::RecruitmentApplication,
+        Option<crate::recruitment::RecruitmentRoleFulfillment>,
+    )> {
+        validate_snowflake("guild_id", params.guild_id)?;
+        if let Some(rid) = target_role_id {
+            validate_snowflake("target_role_id", rid)?;
+        }
+
+        let _guard = self
+            .recruitment_lock
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Recruitment lock error: {e}"))?;
+
+        let mut entry = self
+            .recruitment_applications
+            .get_mut(&params.id)
+            .ok_or_else(|| anyhow::anyhow!("Application not found"))?;
+        if entry.guild_id != params.guild_id {
+            anyhow::bail!("Application not found in guild");
+        }
+        if entry.version != params.expected_version {
+            anyhow::bail!(
+                "Optimistic concurrency conflict: application was modified by another reviewer"
+            );
+        }
+
+        entry.status = "accepted".to_string();
+        entry.current_stage = params.new_stage.to_string();
+        entry.version += 1;
+        entry.updated_at = Utc::now();
+        entry.decided_at = Some(entry.updated_at);
+        entry.decided_by = params.decided_by.map(|s| s.to_string());
+        entry.decision_reason = params.decision_reason.map(|s| s.to_string());
+        let updated_app = entry.value().clone();
+
+        let mut fulfillment = None;
+        if let Some(role_id) = target_role_id {
+            let f = crate::recruitment::RecruitmentRoleFulfillment {
+                application_id: updated_app.id,
+                guild_id: updated_app.guild_id.clone(),
+                user_id: updated_app.applicant_user_id.clone(),
+                role_id: role_id.to_string(),
+                status: "pending".to_string(),
+                attempts: 0,
+                last_error: None,
+                next_attempt_at: Utc::now(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            };
+            self.recruitment_role_fulfillments
+                .insert(f.application_id, f.clone());
+            fulfillment = Some(f);
+        }
+
+        Ok((updated_app, fulfillment))
+    }
+
+    pub fn cancel_pending_role_fulfillments_for_application(
+        &self,
+        application_id: Uuid,
+    ) -> anyhow::Result<usize> {
+        let mut cancelled = 0;
+        if let Some(mut entry) = self.recruitment_role_fulfillments.get_mut(&application_id)
+            && entry.status == "pending"
+        {
+            entry.status = "cancelled".to_string();
+            entry.updated_at = Utc::now();
+            cancelled = 1;
+        }
+        Ok(cancelled)
     }
 
     pub fn count_active_user_applications(
@@ -4508,12 +4625,20 @@ impl MemoryStore {
 
     pub fn list_pending_role_fulfillments(
         &self,
+        guild_id: Option<&str>,
     ) -> anyhow::Result<Vec<crate::recruitment::RecruitmentRoleFulfillment>> {
+        if let Some(gid) = guild_id {
+            validate_snowflake("guild_id", gid)?;
+        }
         let now = Utc::now();
         let list: Vec<_> = self
             .recruitment_role_fulfillments
             .iter()
-            .filter(|f| f.status == "pending" && f.next_attempt_at <= now)
+            .filter(|f| {
+                f.status == "pending"
+                    && f.next_attempt_at <= now
+                    && guild_id.is_none_or(|gid| f.guild_id == gid)
+            })
             .map(|f| f.value().clone())
             .collect();
         Ok(list)

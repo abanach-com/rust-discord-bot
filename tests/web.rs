@@ -2062,7 +2062,17 @@ async fn test_staff_recruitment_pipeline_full_lifecycle() {
         .unwrap();
     assert_eq!(fulfill_res.status(), reqwest::StatusCode::OK);
     let fulfill_json: serde_json::Value = fulfill_res.json().await.unwrap();
-    assert_eq!(fulfill_json["processed"], 1);
+    // Issue #185: Offline mode leaves task pending instead of falsifying 'completed'
+    assert_eq!(fulfill_json["processed"], 0);
+    assert_eq!(fulfill_json["status"], "offline_no_discord_client");
+    let pending_task = state
+        .app
+        .storage
+        .get_role_fulfillment(app_id.parse::<uuid::Uuid>().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending_task.status, "pending");
 
     // 14. Candidate view check: privacy protection (no reviewer identity or notes)
     let candidate_view_res = client
@@ -2433,4 +2443,320 @@ async fn test_help_forum_lifecycle_and_api() {
         .await
         .unwrap();
     assert_eq!(del_res.status(), reqwest::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_recruitment_security_and_concurrency_fixes() {
+    let (state, _perms) = test_web_state().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let app = build_router(state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve axum");
+    });
+
+    let g1 = "777000000000000001";
+    let g2 = "777000000000000002";
+    let admin_user = "888000000000000001";
+    let candidate_user = "888000000000000002";
+    let reviewer_user = "888000000000000003";
+
+    let csrf = "test_csrf_token_recruitment_fixes";
+    let session_admin = "session_admin_g1";
+    let session_candidate = "session_candidate_g1";
+    let session_reviewer = "session_reviewer_g1";
+
+    // Setup sessions
+    state
+        .app
+        .sessions
+        .save_session(
+            session_admin,
+            DashboardUser {
+                id: admin_user.to_owned(),
+                username: "AdminG1".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: g1.to_owned(),
+                name: "Guild 1".to_owned(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_owned(),
+            }],
+            csrf.to_owned(),
+            Utc::now() + Duration::hours(24),
+            None,
+        )
+        .await
+        .unwrap();
+
+    state
+        .app
+        .sessions
+        .save_session(
+            session_candidate,
+            DashboardUser {
+                id: candidate_user.to_owned(),
+                username: "CandidateG1".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: g1.to_owned(),
+                name: "Guild 1".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_owned(),
+            }],
+            csrf.to_owned(),
+            Utc::now() + Duration::hours(24),
+            None,
+        )
+        .await
+        .unwrap();
+
+    state
+        .app
+        .sessions
+        .save_session(
+            session_reviewer,
+            DashboardUser {
+                id: reviewer_user.to_owned(),
+                username: "ReviewerG1".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: g1.to_owned(),
+                name: "Guild 1".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "8".to_owned(),
+            }],
+            csrf.to_owned(),
+            Utc::now() + Duration::hours(24),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let admin_cookie = format!("rusty_discord_bot_session={session_admin}");
+    let cand_cookie = format!("rusty_discord_bot_session={session_candidate}");
+    let rev_cookie = format!("rusty_discord_bot_session={session_reviewer}");
+
+    // 1. Create track on G1 with max_active_per_user = 1 and auto_role_on_accept = true
+    let track_res = client
+        .post(format!("{base_url}/api/guilds/{g1}/recruitment/tracks"))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", csrf)
+        .json(&serde_json::json!({
+            "name": "Moderator Track",
+            "slug": "mod-track",
+            "description": "Recruiting mods",
+            "target_role_id": "999000111222333444",
+            "enabled": true,
+            "config": {
+                "max_active_per_user": 1,
+                "cooldown_days": 0,
+                "final_approvals": 1,
+                "auto_role_on_accept": true,
+                "questions": [
+                    {
+                        "id": "q1",
+                        "label": "Why do you want to join?",
+                        "field_type": "paragraph",
+                        "required": true
+                    }
+                ]
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(track_res.status(), reqwest::StatusCode::OK);
+    let track_json: serde_json::Value = track_res.json().await.unwrap();
+    let _track_id = track_json["track"]["id"].as_str().unwrap();
+
+    // 2. Issue #189: Concurrency test - 10 parallel apply requests from the same user
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(10));
+    let mut handles = Vec::new();
+    for _ in 0..10 {
+        let b = barrier.clone();
+        let c = client.clone();
+        let url = format!("{base_url}/api/guilds/{g1}/recruitment/tracks/mod-track/apply");
+        let ck = cand_cookie.clone();
+        let csrf_str = csrf.to_string();
+
+        handles.push(tokio::spawn(async move {
+            b.wait().await;
+            c.post(url)
+                .header(COOKIE, ck)
+                .header("x-csrf-token", csrf_str)
+                .json(&serde_json::json!({
+                    "answers": [
+                        { "question_id": "q1", "answer": "I want to help the server stay safe." }
+                    ]
+                }))
+                .send()
+                .await
+                .unwrap()
+        }));
+    }
+
+    let mut success_count = 0;
+    let mut rejected_limit_count = 0;
+    let mut app_id = None;
+
+    for h in handles {
+        let res = h.await.unwrap();
+        if res.status() == reqwest::StatusCode::OK {
+            success_count += 1;
+            let j: serde_json::Value = res.json().await.unwrap();
+            app_id = Some(j["application"]["id"].as_str().unwrap().to_string());
+        } else if res.status() == reqwest::StatusCode::BAD_REQUEST {
+            rejected_limit_count += 1;
+        }
+    }
+
+    assert_eq!(
+        success_count, 1,
+        "Exactly one concurrent application must succeed when max_active=1"
+    );
+    assert_eq!(
+        rejected_limit_count, 9,
+        "Remaining 9 parallel attempts must be rejected with limit error"
+    );
+    let application_id = app_id.unwrap();
+
+    // 3. Review application (approve)
+    let review_res = client
+        .post(format!(
+            "{base_url}/api/guilds/{g1}/recruitment/applications/{application_id}/review"
+        ))
+        .header(COOKIE, &rev_cookie)
+        .header("x-csrf-token", csrf)
+        .json(&serde_json::json!({
+            "recommendation": "approve",
+            "note": "Looks like a great candidate!"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(review_res.status(), reqwest::StatusCode::OK);
+
+    // 4. Issue #186 & #183: Transition to accepted (atomic transition and role enqueue)
+    let accept_res = client
+        .post(format!(
+            "{base_url}/api/guilds/{g1}/recruitment/applications/{application_id}/transition"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", csrf)
+        .json(&serde_json::json!({
+            "expected_version": 1,
+            "new_status": "accepted",
+            "new_stage": "accepted",
+            "decision_reason": "Welcome to staff!"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(accept_res.status(), reqwest::StatusCode::OK);
+    let accept_json: serde_json::Value = accept_res.json().await.unwrap();
+    assert_eq!(accept_json["application"]["status"], "accepted");
+    assert_eq!(
+        accept_json["application"]["fulfillment"]["status"],
+        "pending"
+    );
+
+    // 5. Issue #183: Change accepted -> rejected cancels pending role fulfillment!
+    let reject_res = client
+        .post(format!(
+            "{base_url}/api/guilds/{g1}/recruitment/applications/{application_id}/transition"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", csrf)
+        .json(&serde_json::json!({
+            "expected_version": 2,
+            "new_status": "rejected",
+            "new_stage": "rejected",
+            "decision_reason": "Decision revoked before role granted"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reject_res.status(), reqwest::StatusCode::OK);
+
+    // Verify fulfillment task is cancelled!
+    let parsed_aid = application_id.parse::<uuid::Uuid>().unwrap();
+    let f_task = state
+        .app
+        .storage
+        .get_role_fulfillment(parsed_aid)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        f_task.status, "cancelled",
+        "Pending fulfillment MUST be cancelled when decision is revoked"
+    );
+
+    // 6. Issue #184: Tenant isolation in role fulfillment
+    // Create a pending fulfillment for G2
+    let g2_app_id = uuid::Uuid::new_v4();
+    state
+        .app
+        .storage
+        .upsert_role_fulfillment(rusty_discord_bot::storage::RecruitmentRoleFulfillment {
+            application_id: g2_app_id,
+            guild_id: g2.to_string(),
+            user_id: "888000000000000099".to_string(),
+            role_id: "999000000000000099".to_string(),
+            status: "pending".to_string(),
+            attempts: 0,
+            last_error: None,
+            next_attempt_at: Utc::now(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    // Admin of G1 triggers fulfillment endpoint for G1
+    let g1_fulfill_res = client
+        .post(format!(
+            "{base_url}/api/guilds/{g1}/recruitment/fulfillment/process"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(g1_fulfill_res.status(), reqwest::StatusCode::OK);
+    let g1_fulfill_json: serde_json::Value = g1_fulfill_res.json().await.unwrap();
+    assert_eq!(
+        g1_fulfill_json["processed"], 0,
+        "G1 fulfillment must NOT process G2 tasks!"
+    );
+
+    // G2 task must remain completely untouched
+    let g2_task = state
+        .app
+        .storage
+        .get_role_fulfillment(g2_app_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(g2_task.status, "pending");
+    assert_eq!(g2_task.attempts, 0);
 }

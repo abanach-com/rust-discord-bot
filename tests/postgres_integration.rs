@@ -1883,7 +1883,7 @@ async fn test_postgres_integration_suite() {
     assert_eq!(fulfillment.status, "pending");
 
     let pending_fulfillments = store
-        .list_pending_role_fulfillments()
+        .list_pending_role_fulfillments(Some(rec_guild))
         .await
         .expect("list pending fulfillments in pg");
     assert!(
