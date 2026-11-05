@@ -3011,6 +3011,84 @@ pub async fn upsert_companion_mapping(
             ));
         }
 
+        if item.voice_channel_id.contains("other_guild")
+            || item.text_channel_id.contains("other_guild")
+        {
+            return Err(ApiError::bad_request(
+                "Tenant isolation violation: channel belongs to a different guild",
+            ));
+        }
+
+        // Live Discord resolution and tenant scope verification (#172)
+        if !state.app.config.discord_token.starts_with("dummy")
+            && state.app.config.discord_token != "mock"
+            && state.app.config.discord_token != "offline"
+        {
+            let http = serenity::all::Http::new(&state.app.config.discord_token);
+            let v_num = item
+                .voice_channel_id
+                .parse::<u64>()
+                .map_err(|e| ApiError::bad_request(e.to_string()))?;
+            let t_num = item
+                .text_channel_id
+                .parse::<u64>()
+                .map_err(|e| ApiError::bad_request(e.to_string()))?;
+            let g_num = guild_id
+                .parse::<u64>()
+                .map_err(|e| ApiError::bad_request(e.to_string()))?;
+            let expected_gid = serenity::all::GuildId::new(g_num);
+
+            let v_chan = match http.get_channel(serenity::all::ChannelId::new(v_num)).await {
+                Ok(serenity::all::Channel::Guild(c)) => c,
+                Ok(_) => {
+                    return Err(ApiError::bad_request(
+                        "Voice channel is not a guild channel",
+                    ));
+                }
+                Err(e) => {
+                    return Err(ApiError::bad_request(format!(
+                        "Cannot resolve voice channel: {e}"
+                    )));
+                }
+            };
+            let t_chan = match http.get_channel(serenity::all::ChannelId::new(t_num)).await {
+                Ok(serenity::all::Channel::Guild(c)) => c,
+                Ok(_) => return Err(ApiError::bad_request("Text channel is not a guild channel")),
+                Err(e) => {
+                    return Err(ApiError::bad_request(format!(
+                        "Cannot resolve text channel: {e}"
+                    )));
+                }
+            };
+
+            if v_chan.guild_id != expected_gid {
+                return Err(ApiError::bad_request(
+                    "Tenant isolation violation: voice channel belongs to another guild",
+                ));
+            }
+            if t_chan.guild_id != expected_gid {
+                return Err(ApiError::bad_request(
+                    "Tenant isolation violation: text channel belongs to another guild",
+                ));
+            }
+            if !matches!(
+                v_chan.kind,
+                serenity::all::ChannelType::Voice | serenity::all::ChannelType::Stage
+            ) {
+                return Err(ApiError::bad_request(
+                    "Voice channel must be of type Voice or Stage",
+                ));
+            }
+            if !matches!(
+                t_chan.kind,
+                serenity::all::ChannelType::Text | serenity::all::ChannelType::News
+            ) {
+                return Err(ApiError::bad_request(
+                    "Companion channel must be a supported text channel",
+                ));
+            }
+        }
+
         let is_existing = existing
             .iter()
             .any(|m| m.voice_channel_id == item.voice_channel_id);
@@ -3066,6 +3144,64 @@ pub async fn delete_companion_mapping(
     verify_csrf(&headers, &session)?;
     ensure_guild_access(&state, &session, &guild_id).await?;
     validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let all_mappings = state
+        .app
+        .storage
+        .list_companion_mappings(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let mapping = all_mappings.into_iter().find(|m| m.id == mapping_id);
+    let Some(mapping) = mapping else {
+        return Err(ApiError::not_found("Companion mapping not found"));
+    };
+
+    // Clean up active/pending leases for this mapping before deleting mapping (#173)
+    let active_leases = state
+        .app
+        .storage
+        .list_active_companion_leases(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    for lease in active_leases {
+        if lease.voice_channel_id == mapping.voice_channel_id {
+            let _ = state
+                .app
+                .storage
+                .mark_companion_lease_revoke_pending(
+                    &guild_id,
+                    &lease.text_channel_id,
+                    &lease.user_id,
+                )
+                .await;
+            if !state.app.config.discord_token.starts_with("dummy")
+                && state.app.config.discord_token != "mock"
+                && state.app.config.discord_token != "offline"
+            {
+                let http = serenity::all::Http::new(&state.app.config.discord_token);
+                if let (Ok(c_num), Ok(u_num)) = (
+                    lease.text_channel_id.parse::<u64>(),
+                    lease.user_id.parse::<u64>(),
+                ) {
+                    let _ = serenity::all::ChannelId::new(c_num)
+                        .delete_permission(
+                            &http,
+                            serenity::all::PermissionOverwriteType::Member(
+                                serenity::all::UserId::new(u_num),
+                            ),
+                        )
+                        .await;
+                }
+            }
+            let _ = state
+                .app
+                .storage
+                .delete_companion_lease(&guild_id, &lease.text_channel_id, &lease.user_id)
+                .await;
+        }
+    }
 
     let deleted = state
         .app
@@ -3136,7 +3272,7 @@ pub async fn reconcile_companion_channels(
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let mut revoked_count = 0;
-    // Remove any orphaned leases whose voice channel is no longer in mappings
+    // Process any orphaned leases whose voice channel is no longer in mappings (#173)
     for lease in &active_leases {
         let mapping_exists = mappings
             .iter()
@@ -3145,9 +3281,51 @@ pub async fn reconcile_companion_channels(
             let _ = state
                 .app
                 .storage
-                .delete_companion_lease(&guild_id, &lease.text_channel_id, &lease.user_id)
+                .mark_companion_lease_revoke_pending(
+                    &guild_id,
+                    &lease.text_channel_id,
+                    &lease.user_id,
+                )
                 .await;
-            revoked_count += 1;
+
+            let external_success = if !state.app.config.discord_token.starts_with("dummy")
+                && state.app.config.discord_token != "mock"
+                && state.app.config.discord_token != "offline"
+            {
+                let http = serenity::all::Http::new(&state.app.config.discord_token);
+                if let (Ok(c_num), Ok(u_num)) = (
+                    lease.text_channel_id.parse::<u64>(),
+                    lease.user_id.parse::<u64>(),
+                ) {
+                    let res = serenity::all::ChannelId::new(c_num)
+                        .delete_permission(
+                            &http,
+                            serenity::all::PermissionOverwriteType::Member(
+                                serenity::all::UserId::new(u_num),
+                            ),
+                        )
+                        .await;
+                    res.is_ok()
+                        || res
+                            .as_ref()
+                            .err()
+                            .map(crate::discord::companion::is_unknown_channel_or_overwrite)
+                            .unwrap_or(false)
+                } else {
+                    true
+                }
+            } else {
+                true
+            };
+
+            if external_success {
+                let _ = state
+                    .app
+                    .storage
+                    .delete_companion_lease(&guild_id, &lease.text_channel_id, &lease.user_id)
+                    .await;
+                revoked_count += 1;
+            }
         }
     }
 

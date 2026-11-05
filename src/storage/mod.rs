@@ -467,6 +467,12 @@ pub struct CompanionChannelMapping {
     pub allow_send_messages: bool,
     pub allow_read_history: bool,
     pub created_at: DateTime<Utc>,
+    #[serde(default = "default_true_field")]
+    pub enabled: bool,
+}
+
+fn default_true_field() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -477,6 +483,32 @@ pub struct CompanionChannelLease {
     pub user_id: String,
     pub granted_at: DateTime<Utc>,
     pub generation: Uuid,
+    #[serde(default = "default_lease_status")]
+    pub status: String,
+    #[serde(default)]
+    pub revoke_attempts: i32,
+    pub next_attempt_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub allow_bits: i64,
+    #[serde(default)]
+    pub deny_bits: i64,
+}
+
+fn default_lease_status() -> String {
+    "active".to_string()
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RecordCompanionLeaseParams<'a> {
+    pub guild_id: &'a str,
+    pub voice_channel_id: &'a str,
+    pub text_channel_id: &'a str,
+    pub user_id: &'a str,
+    pub generation: Uuid,
+    pub allow_bits: i64,
+    pub deny_bits: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -2465,29 +2497,46 @@ impl Storage {
 
     pub async fn record_companion_lease(
         &self,
-        guild_id: &str,
-        voice_channel_id: &str,
-        text_channel_id: &str,
-        user_id: &str,
-        generation: Uuid,
+        params: RecordCompanionLeaseParams<'_>,
     ) -> anyhow::Result<CompanionChannelLease> {
         match self {
-            Self::Memory(store) => store.record_companion_lease(
-                guild_id,
-                voice_channel_id,
-                text_channel_id,
-                user_id,
-                generation,
-            ),
+            Self::Memory(store) => store.record_companion_lease(params),
+            Self::Postgres(store) => store.record_companion_lease(params).await,
+        }
+    }
+
+    pub async fn mark_companion_lease_revoke_pending(
+        &self,
+        guild_id: &str,
+        text_channel_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Option<CompanionChannelLease>> {
+        match self {
+            Self::Memory(store) => {
+                store.mark_companion_lease_revoke_pending(guild_id, text_channel_id, user_id)
+            }
             Self::Postgres(store) => {
                 store
-                    .record_companion_lease(
-                        guild_id,
-                        voice_channel_id,
-                        text_channel_id,
-                        user_id,
-                        generation,
-                    )
+                    .mark_companion_lease_revoke_pending(guild_id, text_channel_id, user_id)
+                    .await
+            }
+        }
+    }
+
+    pub async fn record_companion_lease_failure(
+        &self,
+        guild_id: &str,
+        text_channel_id: &str,
+        user_id: &str,
+        error: &str,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Memory(store) => {
+                store.record_companion_lease_failure(guild_id, text_channel_id, user_id, error)
+            }
+            Self::Postgres(store) => {
+                store
+                    .record_companion_lease_failure(guild_id, text_channel_id, user_id, error)
                     .await
             }
         }
@@ -2532,6 +2581,16 @@ impl Storage {
         match self {
             Self::Memory(store) => store.list_active_companion_leases(guild_id),
             Self::Postgres(store) => store.list_active_companion_leases(guild_id).await,
+        }
+    }
+
+    pub async fn list_pending_revoke_companion_leases(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<CompanionChannelLease>> {
+        match self {
+            Self::Memory(store) => store.list_pending_revoke_companion_leases(guild_id),
+            Self::Postgres(store) => store.list_pending_revoke_companion_leases(guild_id).await,
         }
     }
 
@@ -4946,11 +5005,49 @@ mod tests {
         assert!(no_lease.is_none());
 
         let lease = store
-            .record_companion_lease(guild_id, voice_id, updated_text, user_id, generation)
+            .record_companion_lease(RecordCompanionLeaseParams {
+                guild_id,
+                voice_channel_id: voice_id,
+                text_channel_id: updated_text,
+                user_id,
+                generation,
+                allow_bits: 1024,
+                deny_bits: 0,
+            })
             .await
             .unwrap();
         assert_eq!(lease.guild_id, guild_id);
         assert_eq!(lease.generation, generation);
+        assert_eq!(lease.status, "active");
+        assert_eq!(lease.allow_bits, 1024);
+
+        // Test outbox lifecycle: mark revoke_pending
+        let pending = store
+            .mark_companion_lease_revoke_pending(guild_id, updated_text, user_id)
+            .await
+            .unwrap()
+            .expect("lease should exist");
+        assert_eq!(pending.status, "revoke_pending");
+
+        // Failure records retry
+        store
+            .record_companion_lease_failure(
+                guild_id,
+                updated_text,
+                user_id,
+                "Discord 500 Internal Error",
+            )
+            .await
+            .unwrap();
+
+        let failed_lease = store
+            .get_companion_lease(guild_id, updated_text, user_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed_lease.revoke_attempts, 1);
+        assert!(failed_lease.last_error.unwrap().contains("Discord 500"));
+        assert!(failed_lease.next_attempt_at.is_some());
 
         let fetched_lease = store
             .get_companion_lease(guild_id, updated_text, user_id)
@@ -4960,7 +5057,13 @@ mod tests {
         assert_eq!(fetched_lease.generation, generation);
 
         let active_leases = store.list_active_companion_leases(guild_id).await.unwrap();
-        assert_eq!(active_leases.len(), 1);
+        assert_eq!(active_leases.len(), 0);
+
+        let pending_leases = store
+            .list_pending_revoke_companion_leases(guild_id)
+            .await
+            .unwrap();
+        assert_eq!(pending_leases.len(), 1);
 
         // 6. Delete lease
         let deleted_lease = store
@@ -5002,7 +5105,15 @@ mod tests {
             .await
             .unwrap();
         let _l1 = store
-            .record_companion_lease(guild_1, voice_1, text_1, user_1, Uuid::new_v4())
+            .record_companion_lease(RecordCompanionLeaseParams {
+                guild_id: guild_1,
+                voice_channel_id: voice_1,
+                text_channel_id: text_1,
+                user_id: user_1,
+                generation: Uuid::new_v4(),
+                allow_bits: 1024,
+                deny_bits: 0,
+            })
             .await
             .unwrap();
 

@@ -1102,16 +1102,50 @@ async fn test_postgres_integration_suite() {
 
     // 12.3. Record lease
     let lease = store
-        .record_companion_lease(
-            companion_guild_id,
-            companion_voice_id,
-            companion_text_id,
-            companion_user_id,
-            companion_gen,
-        )
+        .record_companion_lease(rusty_discord_bot::storage::RecordCompanionLeaseParams {
+            guild_id: companion_guild_id,
+            voice_channel_id: companion_voice_id,
+            text_channel_id: companion_text_id,
+            user_id: companion_user_id,
+            generation: companion_gen,
+            allow_bits: 1024,
+            deny_bits: 0,
+        })
         .await
         .expect("record companion lease in postgres");
     assert_eq!(lease.generation, companion_gen);
+    assert_eq!(lease.status, "active");
+    assert_eq!(lease.allow_bits, 1024);
+
+    // 12.3b. Outbox lifecycle: mark revoke_pending and record failure
+    let pending = store
+        .mark_companion_lease_revoke_pending(
+            companion_guild_id,
+            companion_text_id,
+            companion_user_id,
+        )
+        .await
+        .expect("mark revoke pending")
+        .expect("lease exists");
+    assert_eq!(pending.status, "revoke_pending");
+
+    store
+        .record_companion_lease_failure(
+            companion_guild_id,
+            companion_text_id,
+            companion_user_id,
+            "Discord Rate Limited 429",
+        )
+        .await
+        .expect("record lease failure");
+
+    let failed_lease = store
+        .get_companion_lease(companion_guild_id, companion_text_id, companion_user_id)
+        .await
+        .expect("get lease")
+        .expect("lease exists");
+    assert_eq!(failed_lease.revoke_attempts, 1);
+    assert!(failed_lease.last_error.unwrap().contains("Rate Limited"));
 
     // 12.4. Get lease
     let fetched_lease = store
@@ -1121,12 +1155,18 @@ async fn test_postgres_integration_suite() {
         .expect("lease must exist");
     assert_eq!(fetched_lease.voice_channel_id, companion_voice_id);
 
-    // 12.5. List active leases
+    // 12.5. List active leases vs pending revoke leases
     let leases = store
         .list_active_companion_leases(companion_guild_id)
         .await
         .expect("list active companion leases");
-    assert_eq!(leases.len(), 1);
+    assert_eq!(leases.len(), 0);
+
+    let pending_leases = store
+        .list_pending_revoke_companion_leases(companion_guild_id)
+        .await
+        .expect("list pending revoke leases");
+    assert_eq!(pending_leases.len(), 1);
 
     // 12.6. User erasure clears leases
     let erasure = store

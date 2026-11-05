@@ -18,13 +18,13 @@ use super::{
     KickStreamSubscription, LinkedAccount, McpToolAuthorization, MemberIdentityRecord,
     MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
     ModerationExecutionIntent, ModuleDraftConfig, PluginGuildInstallation,
-    PluginMarketplacePackage, ProgressMetric, ProgressionSeason, RedditSubscription,
-    ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent, ServerSnapshot,
-    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
-    TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError, TupperProfile,
-    TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport, VkSubscription,
-    WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
-    snowflake_created_at, validate_snowflake,
+    PluginMarketplacePackage, ProgressMetric, ProgressionSeason, RecordCompanionLeaseParams,
+    RedditSubscription, ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent,
+    ServerSnapshot, SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem,
+    StorePurchase, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError,
+    TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
+    VkSubscription, WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription,
+    level_for_xp, snowflake_created_at, validate_snowflake,
 };
 
 type ModuleKey = (String, String);
@@ -2025,6 +2025,7 @@ impl MemoryStore {
             allow_send_messages,
             allow_read_history,
             created_at: Utc::now(),
+            enabled: true,
         };
         self.companion_mappings.insert(mapping.id, mapping.clone());
         Ok(mapping)
@@ -2063,32 +2064,81 @@ impl MemoryStore {
 
     pub fn record_companion_lease(
         &self,
+        params: RecordCompanionLeaseParams<'_>,
+    ) -> anyhow::Result<CompanionChannelLease> {
+        validate_snowflake("guild_id", params.guild_id)?;
+        validate_snowflake("voice_channel_id", params.voice_channel_id)?;
+        validate_snowflake("text_channel_id", params.text_channel_id)?;
+        validate_snowflake("user_id", params.user_id)?;
+
+        let lease = CompanionChannelLease {
+            guild_id: params.guild_id.to_string(),
+            voice_channel_id: params.voice_channel_id.to_string(),
+            text_channel_id: params.text_channel_id.to_string(),
+            user_id: params.user_id.to_string(),
+            granted_at: Utc::now(),
+            generation: params.generation,
+            status: "active".to_string(),
+            revoke_attempts: 0,
+            next_attempt_at: None,
+            last_error: None,
+            revoked_at: None,
+            allow_bits: params.allow_bits,
+            deny_bits: params.deny_bits,
+        };
+        let key = (
+            params.guild_id.to_string(),
+            params.text_channel_id.to_string(),
+            params.user_id.to_string(),
+        );
+        self.companion_leases.insert(key, lease.clone());
+        Ok(lease)
+    }
+
+    pub fn mark_companion_lease_revoke_pending(
+        &self,
         guild_id: &str,
-        voice_channel_id: &str,
         text_channel_id: &str,
         user_id: &str,
-        generation: Uuid,
-    ) -> anyhow::Result<CompanionChannelLease> {
+    ) -> anyhow::Result<Option<CompanionChannelLease>> {
         validate_snowflake("guild_id", guild_id)?;
-        validate_snowflake("voice_channel_id", voice_channel_id)?;
         validate_snowflake("text_channel_id", text_channel_id)?;
         validate_snowflake("user_id", user_id)?;
 
-        let lease = CompanionChannelLease {
-            guild_id: guild_id.to_string(),
-            voice_channel_id: voice_channel_id.to_string(),
-            text_channel_id: text_channel_id.to_string(),
-            user_id: user_id.to_string(),
-            granted_at: Utc::now(),
-            generation,
-        };
         let key = (
             guild_id.to_string(),
             text_channel_id.to_string(),
             user_id.to_string(),
         );
-        self.companion_leases.insert(key, lease.clone());
-        Ok(lease)
+        if let Some(mut lease) = self.companion_leases.get_mut(&key) {
+            lease.status = "revoke_pending".to_string();
+            return Ok(Some(lease.clone()));
+        }
+        Ok(None)
+    }
+
+    pub fn record_companion_lease_failure(
+        &self,
+        guild_id: &str,
+        text_channel_id: &str,
+        user_id: &str,
+        error: &str,
+    ) -> anyhow::Result<()> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("text_channel_id", text_channel_id)?;
+        validate_snowflake("user_id", user_id)?;
+
+        let key = (
+            guild_id.to_string(),
+            text_channel_id.to_string(),
+            user_id.to_string(),
+        );
+        if let Some(mut lease) = self.companion_leases.get_mut(&key) {
+            lease.revoke_attempts += 1;
+            lease.last_error = Some(error.to_string());
+            lease.next_attempt_at = Some(Utc::now() + Duration::seconds(30));
+        }
+        Ok(())
     }
 
     pub fn get_companion_lease(
@@ -2135,7 +2185,21 @@ impl MemoryStore {
         let list: Vec<_> = self
             .companion_leases
             .iter()
-            .filter(|l| l.guild_id == guild_id)
+            .filter(|l| l.guild_id == guild_id && l.status == "active")
+            .map(|l| l.clone())
+            .collect();
+        Ok(list)
+    }
+
+    pub fn list_pending_revoke_companion_leases(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<CompanionChannelLease>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let list: Vec<_> = self
+            .companion_leases
+            .iter()
+            .filter(|l| l.guild_id == guild_id && l.status == "revoke_pending")
             .map(|l| l.clone())
             .collect();
         Ok(list)

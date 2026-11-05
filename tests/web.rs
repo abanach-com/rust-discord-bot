@@ -1026,6 +1026,22 @@ async fn test_voice_companion_channels_api() {
         .unwrap();
     assert_eq!(same_ch.status(), reqwest::StatusCode::BAD_REQUEST);
 
+    // 3b. Reject cross-guild channels (#172)
+    let cross_guild = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/voice/companion/mappings"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "voice_channel_id": "888000000000000001",
+            "text_channel_id": "888000000000000002_other_guild"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cross_guild.status(), reqwest::StatusCode::BAD_REQUEST);
+
     // 4. Reject invalid snowflake
     let bad_snow = client
         .post(format!(

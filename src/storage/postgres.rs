@@ -16,13 +16,13 @@ use super::{
     KickStreamSubscription, LinkedAccount, McpToolAuthorization, MemberIdentityRecord,
     MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
     ModerationExecutionIntent, ModuleDraftConfig, PluginGuildInstallation,
-    PluginMarketplacePackage, ProgressMetric, ProgressionSeason, RedditSubscription,
-    ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent, ServerSnapshot,
-    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
-    TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError, TupperProfile,
-    TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport, VkSubscription,
-    WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
-    snowflake_created_at, validate_snowflake,
+    PluginMarketplacePackage, ProgressMetric, ProgressionSeason, RecordCompanionLeaseParams,
+    RedditSubscription, ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent,
+    ServerSnapshot, SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem,
+    StorePurchase, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError,
+    TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
+    VkSubscription, WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription,
+    level_for_xp, snowflake_created_at, validate_snowflake,
 };
 
 pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
@@ -3006,42 +3006,109 @@ impl PostgresStore {
 
     pub async fn record_companion_lease(
         &self,
-        guild_id: &str,
-        voice_channel_id: &str,
-        text_channel_id: &str,
-        user_id: &str,
-        generation: Uuid,
+        params: RecordCompanionLeaseParams<'_>,
     ) -> anyhow::Result<CompanionChannelLease> {
-        validate_snowflake("guild_id", guild_id)?;
-        validate_snowflake("voice_channel_id", voice_channel_id)?;
-        validate_snowflake("text_channel_id", text_channel_id)?;
-        validate_snowflake("user_id", user_id)?;
+        validate_snowflake("guild_id", params.guild_id)?;
+        validate_snowflake("voice_channel_id", params.voice_channel_id)?;
+        validate_snowflake("text_channel_id", params.text_channel_id)?;
+        validate_snowflake("user_id", params.user_id)?;
 
         let now = Utc::now();
         let lease = sqlx::query_as::<_, CompanionChannelLease>(
             r#"
             INSERT INTO companion_channel_leases (
-                guild_id, voice_channel_id, text_channel_id, user_id, granted_at, generation
+                guild_id, voice_channel_id, text_channel_id, user_id, granted_at, generation,
+                status, revoke_attempts, next_attempt_at, last_error, revoked_at, allow_bits, deny_bits
             )
-            VALUES ($1, $2, $3, $4, $5, $6)
+            VALUES ($1, $2, $3, $4, $5, $6, 'active', 0, NULL, NULL, NULL, $7, $8)
             ON CONFLICT (guild_id, text_channel_id, user_id)
             DO UPDATE SET
                 voice_channel_id = EXCLUDED.voice_channel_id,
                 granted_at = EXCLUDED.granted_at,
-                generation = EXCLUDED.generation
-            RETURNING guild_id, voice_channel_id, text_channel_id, user_id, granted_at, generation
+                generation = EXCLUDED.generation,
+                status = 'active',
+                revoke_attempts = 0,
+                next_attempt_at = NULL,
+                last_error = NULL,
+                revoked_at = NULL,
+                allow_bits = EXCLUDED.allow_bits,
+                deny_bits = EXCLUDED.deny_bits
+            RETURNING guild_id, voice_channel_id, text_channel_id, user_id, granted_at, generation,
+                      status, revoke_attempts, next_attempt_at, last_error, revoked_at, allow_bits, deny_bits
             "#,
         )
-        .bind(guild_id)
-        .bind(voice_channel_id)
-        .bind(text_channel_id)
-        .bind(user_id)
+        .bind(params.guild_id)
+        .bind(params.voice_channel_id)
+        .bind(params.text_channel_id)
+        .bind(params.user_id)
         .bind(now)
-        .bind(generation)
+        .bind(params.generation)
+        .bind(params.allow_bits)
+        .bind(params.deny_bits)
         .fetch_one(&self.pool)
         .await?;
 
         Ok(lease)
+    }
+
+    pub async fn mark_companion_lease_revoke_pending(
+        &self,
+        guild_id: &str,
+        text_channel_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Option<CompanionChannelLease>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("text_channel_id", text_channel_id)?;
+        validate_snowflake("user_id", user_id)?;
+
+        let lease = sqlx::query_as::<_, CompanionChannelLease>(
+            r#"
+            UPDATE companion_channel_leases
+            SET status = 'revoke_pending'
+            WHERE guild_id = $1 AND text_channel_id = $2 AND user_id = $3
+            RETURNING guild_id, voice_channel_id, text_channel_id, user_id, granted_at, generation,
+                      status, revoke_attempts, next_attempt_at, last_error, revoked_at, allow_bits, deny_bits
+            "#,
+        )
+        .bind(guild_id)
+        .bind(text_channel_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(lease)
+    }
+
+    pub async fn record_companion_lease_failure(
+        &self,
+        guild_id: &str,
+        text_channel_id: &str,
+        user_id: &str,
+        error: &str,
+    ) -> anyhow::Result<()> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("text_channel_id", text_channel_id)?;
+        validate_snowflake("user_id", user_id)?;
+
+        let next_retry = Utc::now() + Duration::seconds(30);
+        sqlx::query(
+            r#"
+            UPDATE companion_channel_leases
+            SET revoke_attempts = revoke_attempts + 1,
+                last_error = $4,
+                next_attempt_at = $5
+            WHERE guild_id = $1 AND text_channel_id = $2 AND user_id = $3
+            "#,
+        )
+        .bind(guild_id)
+        .bind(text_channel_id)
+        .bind(user_id)
+        .bind(error)
+        .bind(next_retry)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
     }
 
     pub async fn get_companion_lease(
@@ -3056,7 +3123,8 @@ impl PostgresStore {
 
         let lease = sqlx::query_as::<_, CompanionChannelLease>(
             r#"
-            SELECT guild_id, voice_channel_id, text_channel_id, user_id, granted_at, generation
+            SELECT guild_id, voice_channel_id, text_channel_id, user_id, granted_at, generation,
+                   status, revoke_attempts, next_attempt_at, last_error, revoked_at, allow_bits, deny_bits
             FROM companion_channel_leases
             WHERE guild_id = $1 AND text_channel_id = $2 AND user_id = $3
             "#,
@@ -3084,7 +3152,8 @@ impl PostgresStore {
             r#"
             DELETE FROM companion_channel_leases
             WHERE guild_id = $1 AND text_channel_id = $2 AND user_id = $3
-            RETURNING guild_id, voice_channel_id, text_channel_id, user_id, granted_at, generation
+            RETURNING guild_id, voice_channel_id, text_channel_id, user_id, granted_at, generation,
+                      status, revoke_attempts, next_attempt_at, last_error, revoked_at, allow_bits, deny_bits
             "#,
         )
         .bind(guild_id)
@@ -3103,9 +3172,30 @@ impl PostgresStore {
         validate_snowflake("guild_id", guild_id)?;
         let leases = sqlx::query_as::<_, CompanionChannelLease>(
             r#"
-            SELECT guild_id, voice_channel_id, text_channel_id, user_id, granted_at, generation
+            SELECT guild_id, voice_channel_id, text_channel_id, user_id, granted_at, generation,
+                   status, revoke_attempts, next_attempt_at, last_error, revoked_at, allow_bits, deny_bits
             FROM companion_channel_leases
-            WHERE guild_id = $1
+            WHERE guild_id = $1 AND status = 'active'
+            ORDER BY granted_at ASC
+            "#,
+        )
+        .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(leases)
+    }
+
+    pub async fn list_pending_revoke_companion_leases(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<CompanionChannelLease>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let leases = sqlx::query_as::<_, CompanionChannelLease>(
+            r#"
+            SELECT guild_id, voice_channel_id, text_channel_id, user_id, granted_at, generation,
+                   status, revoke_attempts, next_attempt_at, last_error, revoked_at, allow_bits, deny_bits
+            FROM companion_channel_leases
+            WHERE guild_id = $1 AND status = 'revoke_pending'
             ORDER BY granted_at ASC
             "#,
         )
