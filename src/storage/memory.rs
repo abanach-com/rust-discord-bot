@@ -18,15 +18,15 @@ use super::{
     IntegrationConnection, IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking,
     KickStreamSubscription, LinkedAccount, McpToolAuthorization, MemberIdentityRecord,
     MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
-    ModerationExecutionIntent, ModuleDraftConfig, PluginGuildInstallation,
-    PluginMarketplacePackage, ProgressMetric, ProgressionSeason, RecordCompanionLeaseParams,
-    RedditSubscription, ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent,
-    ServerSnapshot, SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem,
-    StorePurchase, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError,
-    TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
-    VkSubscription, WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription,
-    is_member_after_cursor, level_for_xp, parse_member_search_cursor, snowflake_created_at,
-    validate_snowflake,
+    ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
+    ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
+    ProgressionSeason, RecordCompanionLeaseParams, RedditSubscription, ReputationGrantOutcome,
+    RetainedRecordNotice, ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry,
+    SteamLfgPost, StickyMessage, StoreItem, StorePurchase, TelegramBridge, TelegramMessageMapping,
+    TimedRoleGrant, Tournament, TupperError, TupperProfile, TwitchStreamSubscription,
+    UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WorkflowDefinition,
+    WorkflowRunExecution, XpAward, YouTubeChannelSubscription, is_member_after_cursor,
+    level_for_xp, parse_member_search_cursor, snowflake_created_at, validate_snowflake,
 };
 
 type ModuleKey = (String, String);
@@ -128,6 +128,12 @@ pub struct MemoryStore {
     policy_rules: Arc<DashMap<Uuid, CommandPolicyRule>>,
 
     policy_revisions: Arc<DashMap<String, i64>>,
+
+    duty_settings: Arc<DashMap<String, ModeratorDutySettings>>,
+
+    duty_profiles: Arc<DashMap<(String, String), ModeratorDutyProfile>>,
+
+    duty_states: Arc<DashMap<(String, String), ModeratorDutyState>>,
 
     faqs: Arc<DashMap<Uuid, FaqEntry>>,
 
@@ -431,6 +437,14 @@ impl MemoryStore {
                 && r.subject_id.as_deref() == Some(user_id))
         });
         related_erased += before_policy.saturating_sub(self.policy_rules.len());
+
+        let before_duty = self.duty_profiles.len();
+        self.duty_profiles
+            .retain(|(g, u), _| !(g == guild_id && u == user_id));
+        related_erased += before_duty.saturating_sub(self.duty_profiles.len());
+
+        self.duty_states
+            .retain(|(g, u), _| !(g == guild_id && u == user_id));
 
         let retained_records = vec![
             RetainedRecordNotice {
@@ -2354,6 +2368,126 @@ impl MemoryStore {
             .or_insert(1);
         *entry += 1;
         Ok(*entry)
+    }
+
+    pub fn get_duty_settings(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Option<ModeratorDutySettings>> {
+        validate_snowflake("guild_id", guild_id)?;
+        Ok(self.duty_settings.get(guild_id).map(|r| r.value().clone()))
+    }
+
+    pub fn upsert_duty_settings(
+        &self,
+        mut settings: ModeratorDutySettings,
+    ) -> anyhow::Result<ModeratorDutySettings> {
+        validate_snowflake("guild_id", &settings.guild_id)?;
+        if let Some(ref r_id) = settings.staff_role_id {
+            validate_snowflake("staff_role_id", r_id)?;
+        }
+        if let Some(ref r_id) = settings.on_call_role_id {
+            validate_snowflake("on_call_role_id", r_id)?;
+        }
+        if let Some(ref c_id) = settings.fallback_channel_id {
+            validate_snowflake("fallback_channel_id", c_id)?;
+        }
+        settings.updated_at = Utc::now();
+        self.duty_settings
+            .insert(settings.guild_id.clone(), settings.clone());
+        Ok(settings)
+    }
+
+    pub fn get_duty_profile(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Option<ModeratorDutyProfile>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+        Ok(self
+            .duty_profiles
+            .get(&(guild_id.to_string(), user_id.to_string()))
+            .map(|r| r.value().clone()))
+    }
+
+    pub fn list_duty_profiles(&self, guild_id: &str) -> anyhow::Result<Vec<ModeratorDutyProfile>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let mut list: Vec<_> = self
+            .duty_profiles
+            .iter()
+            .filter(|r| r.key().0 == guild_id)
+            .map(|r| r.value().clone())
+            .collect();
+        list.sort_by(|a, b| a.user_id.cmp(&b.user_id));
+        Ok(list)
+    }
+
+    pub fn upsert_duty_profile(
+        &self,
+        mut profile: ModeratorDutyProfile,
+    ) -> anyhow::Result<ModeratorDutyProfile> {
+        validate_snowflake("guild_id", &profile.guild_id)?;
+        validate_snowflake("user_id", &profile.user_id)?;
+        profile.version += 1;
+        profile.updated_at = Utc::now();
+        self.duty_profiles.insert(
+            (profile.guild_id.clone(), profile.user_id.clone()),
+            profile.clone(),
+        );
+        Ok(profile)
+    }
+
+    pub fn delete_duty_profile(&self, guild_id: &str, user_id: &str) -> anyhow::Result<bool> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+        let deleted = self
+            .duty_profiles
+            .remove(&(guild_id.to_string(), user_id.to_string()))
+            .is_some();
+        self.duty_states
+            .remove(&(guild_id.to_string(), user_id.to_string()));
+        Ok(deleted)
+    }
+
+    pub fn get_duty_state(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Option<ModeratorDutyState>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+        Ok(self
+            .duty_states
+            .get(&(guild_id.to_string(), user_id.to_string()))
+            .map(|r| r.value().clone()))
+    }
+
+    pub fn list_duty_states(&self, guild_id: &str) -> anyhow::Result<Vec<ModeratorDutyState>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let mut list: Vec<_> = self
+            .duty_states
+            .iter()
+            .filter(|r| r.key().0 == guild_id)
+            .map(|r| r.value().clone())
+            .collect();
+        list.sort_by(|a, b| a.user_id.cmp(&b.user_id));
+        Ok(list)
+    }
+
+    pub fn upsert_duty_state(
+        &self,
+        mut state: ModeratorDutyState,
+    ) -> anyhow::Result<ModeratorDutyState> {
+        validate_snowflake("guild_id", &state.guild_id)?;
+        validate_snowflake("user_id", &state.user_id)?;
+        state.state_generation += 1;
+        state.last_reconciled_at = Some(Utc::now());
+        self.duty_states.insert(
+            (state.guild_id.clone(), state.user_id.clone()),
+            state.clone(),
+        );
+        Ok(state)
     }
 
     pub fn archive_progression_season(&self, guild_id: &str, name: &str) -> ProgressionSeason {

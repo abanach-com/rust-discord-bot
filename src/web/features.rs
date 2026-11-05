@@ -18,8 +18,9 @@ use crate::discord::events::generate_icalendar_event;
 use crate::storage::{
     CardCollection, CardTrade, CleanupPlan, CommandPolicyRule, CommunityPoll, CustomAutomation,
     DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink, Giveaway,
-    InviteTracking, ProgressionSeason, ScheduledEvent, ServerSnapshot, StickyMessage, StoreItem,
-    TupperProfile, validate_snowflake,
+    InviteTracking, ModeratorDutyProfile, ModeratorDutySettings, ProgressionSeason,
+    RecurringSchedule, ScheduledEvent, ServerSnapshot, StickyMessage, StoreItem, TupperProfile,
+    validate_snowflake,
 };
 
 use super::{
@@ -3903,6 +3904,407 @@ pub async fn import_policies(
         "imported": true,
         "count": imported.len(),
         "revision": new_revision,
+    })))
+}
+
+// ==========================================
+// Issue #168: Moderator Duty / On-Call System
+// ==========================================
+
+#[derive(Debug, Deserialize)]
+pub struct UpsertDutySettingsRequest {
+    pub staff_role_id: Option<String>,
+    pub on_call_role_id: Option<String>,
+    pub max_override_duration_mins: Option<i32>,
+    pub fallback_channel_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpsertDutyProfileRequest {
+    pub timezone: String,
+    pub recurring_schedule: RecurringSchedule,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DutyOverrideRequest {
+    pub user_id: Option<String>,
+    pub action: String,
+    pub duration_mins: Option<i64>,
+}
+
+pub async fn get_duty_settings(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let settings = state
+        .app
+        .storage
+        .get_duty_settings(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .unwrap_or_else(|| ModeratorDutySettings {
+            guild_id: guild_id.clone(),
+            staff_role_id: None,
+            on_call_role_id: None,
+            max_override_duration_mins: 1440,
+            fallback_channel_id: None,
+            updated_at: Utc::now(),
+        });
+
+    Ok(Json(json!({ "settings": settings })))
+}
+
+pub async fn upsert_duty_settings(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<UpsertDutySettingsRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    if let Some(ref r_id) = payload.staff_role_id {
+        validate_snowflake("staff_role_id", r_id)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    }
+    if let Some(ref r_id) = payload.on_call_role_id {
+        validate_snowflake("on_call_role_id", r_id)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    }
+    if let Some(ref c_id) = payload.fallback_channel_id {
+        validate_snowflake("fallback_channel_id", c_id)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    }
+
+    let settings = ModeratorDutySettings {
+        guild_id: guild_id.clone(),
+        staff_role_id: payload.staff_role_id,
+        on_call_role_id: payload.on_call_role_id,
+        max_override_duration_mins: payload.max_override_duration_mins.unwrap_or(1440).max(1),
+        fallback_channel_id: payload.fallback_channel_id,
+        updated_at: Utc::now(),
+    };
+
+    let saved = state
+        .app
+        .storage
+        .upsert_duty_settings(settings)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let _ = state
+        .app
+        .storage
+        .record_audit(
+            Some(&guild_id),
+            Some(&session.user.id),
+            "moderator_duty",
+            "settings_updated",
+            json!({
+                "staff_role_id": saved.staff_role_id,
+                "on_call_role_id": saved.on_call_role_id,
+                "max_override_duration_mins": saved.max_override_duration_mins,
+            }),
+        )
+        .await;
+
+    Ok(Json(json!({ "settings": saved })))
+}
+
+pub async fn list_duty_profiles(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let profiles = state
+        .app
+        .storage
+        .list_duty_profiles(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let states = state
+        .app
+        .storage
+        .list_duty_states(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(json!({
+        "profiles": profiles,
+        "states": states,
+    })))
+}
+
+pub async fn get_duty_profile(
+    State(state): State<WebState>,
+    Path((guild_id, user_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    validate_snowflake("user_id", &user_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let profile = state
+        .app
+        .storage
+        .get_duty_profile(&guild_id, &user_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let duty_state = state
+        .app
+        .storage
+        .get_duty_state(&guild_id, &user_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(json!({
+        "profile": profile,
+        "state": duty_state,
+    })))
+}
+
+pub async fn upsert_duty_profile(
+    State(state): State<WebState>,
+    Path((guild_id, user_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(payload): Json<UpsertDutyProfileRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    validate_snowflake("user_id", &user_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let _ = payload.timezone.parse::<chrono_tz::Tz>().map_err(|_| {
+        ApiError::bad_request(format!("Invalid IANA timezone: {}", payload.timezone))
+    })?;
+
+    let existing = state
+        .app
+        .storage
+        .get_duty_profile(&guild_id, &user_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let mut profile = existing.unwrap_or_else(|| {
+        ModeratorDutyProfile::new(
+            guild_id.clone(),
+            user_id.clone(),
+            payload.timezone.clone(),
+            payload.recurring_schedule.clone(),
+        )
+        .unwrap()
+    });
+
+    profile.timezone = payload.timezone;
+    profile.recurring_schedule = sqlx::types::Json(payload.recurring_schedule);
+    profile.updated_at = Utc::now();
+
+    let saved = state
+        .app
+        .storage
+        .upsert_duty_profile(profile)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let _ = state
+        .app
+        .storage
+        .record_audit(
+            Some(&guild_id),
+            Some(&session.user.id),
+            "moderator_duty",
+            "profile_updated",
+            json!({
+                "target_user_id": user_id,
+                "timezone": saved.timezone,
+            }),
+        )
+        .await;
+
+    Ok(Json(json!({ "profile": saved })))
+}
+
+pub async fn delete_duty_profile(
+    State(state): State<WebState>,
+    Path((guild_id, user_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    validate_snowflake("user_id", &user_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let deleted = state
+        .app
+        .storage
+        .delete_duty_profile(&guild_id, &user_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    if deleted {
+        let _ = state
+            .app
+            .storage
+            .record_audit(
+                Some(&guild_id),
+                Some(&session.user.id),
+                "moderator_duty",
+                "profile_deleted",
+                json!({ "target_user_id": user_id }),
+            )
+            .await;
+    }
+
+    Ok(Json(json!({ "deleted": deleted })))
+}
+
+pub async fn set_duty_override(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<DutyOverrideRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let target_user_id = payload.user_id.unwrap_or_else(|| session.user.id.clone());
+    validate_snowflake("user_id", &target_user_id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let mut profile = state
+        .app
+        .storage
+        .get_duty_profile(&guild_id, &target_user_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .unwrap_or_else(|| {
+            ModeratorDutyProfile::new(
+                guild_id.clone(),
+                target_user_id.clone(),
+                "UTC".to_string(),
+                RecurringSchedule::default(),
+            )
+            .unwrap()
+        });
+
+    let action = payload.action.to_lowercase();
+    match action.as_str() {
+        "on" => {
+            profile.manual_override = None;
+            profile.override_expires_at = None;
+        }
+        "off" => {
+            let duration_mins = payload.duration_mins.unwrap_or(120).max(1);
+            let expires_at = Utc::now() + chrono::Duration::minutes(duration_mins);
+            profile.manual_override = Some("force_off".to_string());
+            profile.override_expires_at = Some(expires_at);
+        }
+        _ => return Err(ApiError::bad_request("Action must be 'on' or 'off'")),
+    }
+
+    let saved = state
+        .app
+        .storage
+        .upsert_duty_profile(profile)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let _ = state
+        .app
+        .storage
+        .record_audit(
+            Some(&guild_id),
+            Some(&session.user.id),
+            "moderator_duty",
+            "override_set",
+            json!({
+                "target_user_id": target_user_id,
+                "action": action,
+                "override_expires_at": saved.override_expires_at,
+            }),
+        )
+        .await;
+
+    Ok(Json(json!({ "profile": saved })))
+}
+
+pub async fn reconcile_guild_duty(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let settings = state
+        .app
+        .storage
+        .get_duty_settings(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .unwrap_or_else(|| ModeratorDutySettings {
+            guild_id: guild_id.clone(),
+            staff_role_id: None,
+            on_call_role_id: None,
+            max_override_duration_mins: 1440,
+            fallback_channel_id: None,
+            updated_at: Utc::now(),
+        });
+
+    let profiles = state
+        .app
+        .storage
+        .list_duty_profiles(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let mut outcomes = Vec::new();
+    let is_live_discord = !state.app.config.discord_token.starts_with("dummy")
+        && state.app.config.discord_token != "mock"
+        && state.app.config.discord_token != "offline";
+
+    for profile in profiles {
+        let outcome = crate::duty::reconcile_member_duty_state(crate::duty::ReconcileDutyParams {
+            storage: &state.app.storage,
+            guild_id: &guild_id,
+            user_id: &profile.user_id,
+            settings: &settings,
+            profile: &profile,
+            member_roles: &[],
+            bot_highest_role_pos: None,
+            on_call_role_pos: None,
+            is_live_discord,
+            http: None,
+        })
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+        outcomes.push(outcome);
+    }
+
+    Ok(Json(json!({
+        "reconciled": true,
+        "count": outcomes.len(),
+        "outcomes": outcomes,
     })))
 }
 

@@ -15,14 +15,15 @@ use super::{
     IntegrationConnection, IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking,
     KickStreamSubscription, LinkedAccount, McpToolAuthorization, MemberIdentityRecord,
     MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
-    ModerationExecutionIntent, ModuleDraftConfig, PluginGuildInstallation,
-    PluginMarketplacePackage, ProgressMetric, ProgressionSeason, RecordCompanionLeaseParams,
-    RedditSubscription, ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent,
-    ServerSnapshot, SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem,
-    StorePurchase, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError,
-    TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
-    VkSubscription, WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription,
-    level_for_xp, parse_member_search_cursor, snowflake_created_at, validate_snowflake,
+    ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
+    ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
+    ProgressionSeason, RecordCompanionLeaseParams, RedditSubscription, ReputationGrantOutcome,
+    RetainedRecordNotice, ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry,
+    SteamLfgPost, StickyMessage, StoreItem, StorePurchase, TelegramBridge, TelegramMessageMapping,
+    TimedRoleGrant, Tournament, TupperError, TupperProfile, TwitchStreamSubscription,
+    UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WorkflowDefinition,
+    WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
+    parse_member_search_cursor, snowflake_created_at, validate_snowflake,
 };
 
 pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
@@ -424,6 +425,23 @@ impl PostgresStore {
         .map(|r| r.rows_affected())
         .unwrap_or(0);
         related_erased += deleted_policy as usize;
+
+        let deleted_duty =
+            sqlx::query("DELETE FROM moderator_duty_profiles WHERE guild_id = $1 AND user_id = $2")
+                .bind(guild_id)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await
+                .map(|r| r.rows_affected())
+                .unwrap_or(0);
+        related_erased += deleted_duty as usize;
+
+        let _ =
+            sqlx::query("DELETE FROM moderator_duty_state WHERE guild_id = $1 AND user_id = $2")
+                .bind(guild_id)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await;
 
         tx.commit().await?;
 
@@ -6907,6 +6925,244 @@ impl PostgresStore {
         .await?;
 
         Ok(row.0)
+    }
+
+    pub async fn get_duty_settings(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Option<ModeratorDutySettings>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let row = sqlx::query_as::<_, ModeratorDutySettings>(
+            r#"
+            SELECT guild_id, staff_role_id, on_call_role_id, max_override_duration_mins, fallback_channel_id, updated_at
+            FROM moderator_duty_settings
+            WHERE guild_id = $1
+            "#,
+        )
+        .bind(guild_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    pub async fn upsert_duty_settings(
+        &self,
+        settings: ModeratorDutySettings,
+    ) -> anyhow::Result<ModeratorDutySettings> {
+        validate_snowflake("guild_id", &settings.guild_id)?;
+        if let Some(ref r_id) = settings.staff_role_id {
+            validate_snowflake("staff_role_id", r_id)?;
+        }
+        if let Some(ref r_id) = settings.on_call_role_id {
+            validate_snowflake("on_call_role_id", r_id)?;
+        }
+        if let Some(ref c_id) = settings.fallback_channel_id {
+            validate_snowflake("fallback_channel_id", c_id)?;
+        }
+
+        let saved = sqlx::query_as::<_, ModeratorDutySettings>(
+            r#"
+            INSERT INTO moderator_duty_settings (
+                guild_id, staff_role_id, on_call_role_id, max_override_duration_mins, fallback_channel_id, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, NOW())
+            ON CONFLICT (guild_id)
+            DO UPDATE SET
+                staff_role_id = EXCLUDED.staff_role_id,
+                on_call_role_id = EXCLUDED.on_call_role_id,
+                max_override_duration_mins = EXCLUDED.max_override_duration_mins,
+                fallback_channel_id = EXCLUDED.fallback_channel_id,
+                updated_at = NOW()
+            RETURNING guild_id, staff_role_id, on_call_role_id, max_override_duration_mins, fallback_channel_id, updated_at
+            "#,
+        )
+        .bind(&settings.guild_id)
+        .bind(&settings.staff_role_id)
+        .bind(&settings.on_call_role_id)
+        .bind(settings.max_override_duration_mins)
+        .bind(&settings.fallback_channel_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(saved)
+    }
+
+    pub async fn get_duty_profile(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Option<ModeratorDutyProfile>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+        let row = sqlx::query_as::<_, ModeratorDutyProfile>(
+            r#"
+            SELECT guild_id, user_id, timezone, recurring_schedule, manual_override, override_expires_at, version, updated_at
+            FROM moderator_duty_profiles
+            WHERE guild_id = $1 AND user_id = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    pub async fn list_duty_profiles(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<ModeratorDutyProfile>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let rows = sqlx::query_as::<_, ModeratorDutyProfile>(
+            r#"
+            SELECT guild_id, user_id, timezone, recurring_schedule, manual_override, override_expires_at, version, updated_at
+            FROM moderator_duty_profiles
+            WHERE guild_id = $1
+            ORDER BY user_id ASC
+            "#,
+        )
+        .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn upsert_duty_profile(
+        &self,
+        profile: ModeratorDutyProfile,
+    ) -> anyhow::Result<ModeratorDutyProfile> {
+        validate_snowflake("guild_id", &profile.guild_id)?;
+        validate_snowflake("user_id", &profile.user_id)?;
+
+        let saved = sqlx::query_as::<_, ModeratorDutyProfile>(
+            r#"
+            INSERT INTO moderator_duty_profiles (
+                guild_id, user_id, timezone, recurring_schedule, manual_override, override_expires_at, version, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+            ON CONFLICT (guild_id, user_id)
+            DO UPDATE SET
+                timezone = EXCLUDED.timezone,
+                recurring_schedule = EXCLUDED.recurring_schedule,
+                manual_override = EXCLUDED.manual_override,
+                override_expires_at = EXCLUDED.override_expires_at,
+                version = moderator_duty_profiles.version + 1,
+                updated_at = NOW()
+            RETURNING guild_id, user_id, timezone, recurring_schedule, manual_override, override_expires_at, version, updated_at
+            "#,
+        )
+        .bind(&profile.guild_id)
+        .bind(&profile.user_id)
+        .bind(&profile.timezone)
+        .bind(&profile.recurring_schedule)
+        .bind(&profile.manual_override)
+        .bind(profile.override_expires_at)
+        .bind(profile.version)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(saved)
+    }
+
+    pub async fn delete_duty_profile(&self, guild_id: &str, user_id: &str) -> anyhow::Result<bool> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+
+        let mut tx = self.pool.begin().await?;
+        let res =
+            sqlx::query("DELETE FROM moderator_duty_profiles WHERE guild_id = $1 AND user_id = $2")
+                .bind(guild_id)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await?;
+
+        let _ =
+            sqlx::query("DELETE FROM moderator_duty_state WHERE guild_id = $1 AND user_id = $2")
+                .bind(guild_id)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await?;
+
+        tx.commit().await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn get_duty_state(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Option<ModeratorDutyState>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+        let row = sqlx::query_as::<_, ModeratorDutyState>(
+            r#"
+            SELECT guild_id, user_id, expected_on_call, state_generation, last_reconciled_at, last_error
+            FROM moderator_duty_state
+            WHERE guild_id = $1 AND user_id = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    pub async fn list_duty_states(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<ModeratorDutyState>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let rows = sqlx::query_as::<_, ModeratorDutyState>(
+            r#"
+            SELECT guild_id, user_id, expected_on_call, state_generation, last_reconciled_at, last_error
+            FROM moderator_duty_state
+            WHERE guild_id = $1
+            ORDER BY user_id ASC
+            "#,
+        )
+        .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn upsert_duty_state(
+        &self,
+        state: ModeratorDutyState,
+    ) -> anyhow::Result<ModeratorDutyState> {
+        validate_snowflake("guild_id", &state.guild_id)?;
+        validate_snowflake("user_id", &state.user_id)?;
+
+        let saved = sqlx::query_as::<_, ModeratorDutyState>(
+            r#"
+            INSERT INTO moderator_duty_state (
+                guild_id, user_id, expected_on_call, state_generation, last_reconciled_at, last_error
+            )
+            VALUES ($1, $2, $3, $4, NOW(), $5)
+            ON CONFLICT (guild_id, user_id)
+            DO UPDATE SET
+                expected_on_call = EXCLUDED.expected_on_call,
+                state_generation = moderator_duty_state.state_generation + 1,
+                last_reconciled_at = NOW(),
+                last_error = EXCLUDED.last_error
+            RETURNING guild_id, user_id, expected_on_call, state_generation, last_reconciled_at, last_error
+            "#,
+        )
+        .bind(&state.guild_id)
+        .bind(&state.user_id)
+        .bind(state.expected_on_call)
+        .bind(state.state_generation)
+        .bind(&state.last_error)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(saved)
     }
 }
 

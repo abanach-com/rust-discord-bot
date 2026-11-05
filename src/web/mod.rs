@@ -398,6 +398,28 @@ pub fn build_router(state: WebState) -> Router {
             post(features::import_policies),
         )
         .route(
+            "/api/guilds/{guild_id}/duty/settings",
+            get(features::get_duty_settings).post(features::upsert_duty_settings),
+        )
+        .route(
+            "/api/guilds/{guild_id}/duty/profiles",
+            get(features::list_duty_profiles),
+        )
+        .route(
+            "/api/guilds/{guild_id}/duty/profiles/{user_id}",
+            get(features::get_duty_profile)
+                .post(features::upsert_duty_profile)
+                .delete(features::delete_duty_profile),
+        )
+        .route(
+            "/api/guilds/{guild_id}/duty/override",
+            post(features::set_duty_override),
+        )
+        .route(
+            "/api/guilds/{guild_id}/duty/reconcile",
+            post(features::reconcile_guild_duty),
+        )
+        .route(
             "/api/guilds/{guild_id}/feeds",
             get(features::list_feeds).post(features::create_feed),
         )

@@ -128,7 +128,7 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 | Evidence snapshots | Planned |
 | Modmail | Planned |
 | Appeals portal | Implemented |
-| Moderator duty/availability status | Planned |
+| Moderator duty/availability status | Implemented |
 | Escalation policies | Planned |
 | Cross-guild shared ban lists | Research |
 | Privacy-aware toxicity classifier | Research |

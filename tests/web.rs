@@ -1380,3 +1380,196 @@ async fn test_command_policies_api() {
     let list_json3: serde_json::Value = list_resp3.json().await.unwrap();
     assert_eq!(list_json3["rules"].as_array().unwrap().len(), 0);
 }
+
+#[tokio::test]
+async fn test_moderator_duty_api() {
+    let (state, _perms) = test_web_state().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let app = build_router(state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve axum");
+    });
+
+    let admin_user_id = "555000000000000001";
+    let guild_id = "777000000000000001";
+    let user_id = "666000000000000001";
+    let csrf_token = "valid_csrf_token_duty";
+    let admin_session_id = "test_duty_admin_session";
+
+    state
+        .app
+        .sessions
+        .save_session(
+            admin_session_id,
+            DashboardUser {
+                id: admin_user_id.to_owned(),
+                username: "Admin".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_owned(),
+                name: "Test Guild".to_owned(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_owned(),
+            }],
+            csrf_token.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let session_cookie = format!("rusty_discord_bot_session={admin_session_id}");
+
+    // 1. Unauthenticated request rejected
+    let unauth = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/duty/settings"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // 2. Fetch default settings
+    let get_set = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/duty/settings"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_set.status(), reqwest::StatusCode::OK);
+
+    // 3. Upsert settings without CSRF rejected
+    let no_csrf = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/duty/settings"))
+        .header(COOKIE, &session_cookie)
+        .json(&serde_json::json!({
+            "staff_role_id": "888000000000000001",
+            "on_call_role_id": "888000000000000002"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 4. Upsert settings with CSRF succeeds
+    let set_ok = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/duty/settings"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "staff_role_id": "888000000000000001",
+            "on_call_role_id": "888000000000000002",
+            "max_override_duration_mins": 720
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(set_ok.status(), reqwest::StatusCode::OK);
+
+    // 5. List profiles initially empty
+    let list_p1 = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/duty/profiles"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_p1.status(), reqwest::StatusCode::OK);
+    let list_p1_json: serde_json::Value = list_p1.json().await.unwrap();
+    assert_eq!(list_p1_json["profiles"].as_array().unwrap().len(), 0);
+
+    // 6. Upsert profile
+    let upsert_p = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/duty/profiles/{user_id}"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "timezone": "Europe/Berlin",
+            "recurring_schedule": {
+                "monday": [{"start": "18:00", "end": "22:00"}]
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upsert_p.status(), reqwest::StatusCode::OK);
+
+    // 7. Get specific profile
+    let get_p = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/duty/profiles/{user_id}"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_p.status(), reqwest::StatusCode::OK);
+    let get_p_json: serde_json::Value = get_p.json().await.unwrap();
+    assert_eq!(get_p_json["profile"]["timezone"], "Europe/Berlin");
+
+    // 8. Override off
+    let off_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/duty/override"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "user_id": user_id,
+            "action": "off",
+            "duration_mins": 120
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(off_resp.status(), reqwest::StatusCode::OK);
+    let off_json: serde_json::Value = off_resp.json().await.unwrap();
+    assert_eq!(off_json["profile"]["manual_override"], "force_off");
+
+    // 9. Reconcile guild duty
+    let rec_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/duty/reconcile"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rec_resp.status(), reqwest::StatusCode::OK);
+    let rec_json: serde_json::Value = rec_resp.json().await.unwrap();
+    assert_eq!(rec_json["reconciled"], true);
+    assert_eq!(rec_json["count"], 1);
+
+    // 10. Delete profile
+    let del_resp = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/duty/profiles/{user_id}"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del_resp.status(), reqwest::StatusCode::OK);
+
+    // 11. List is empty again
+    let list_p2 = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/duty/profiles"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_p2.status(), reqwest::StatusCode::OK);
+    let list_p2_json: serde_json::Value = list_p2.json().await.unwrap();
+    assert_eq!(list_p2_json["profiles"].as_array().unwrap().len(), 0);
+}

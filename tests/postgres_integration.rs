@@ -1560,4 +1560,72 @@ async fn test_postgres_integration_suite() {
         .await
         .expect("list rules after reset");
     assert!(after_reset.is_empty());
+
+    // Issue #168: Moderator Duty PostgreSQL Lifecycle
+    let duty_guild = "888777666555444333";
+    let duty_user = "222333444555666777";
+    let staff_role = "111000111000111000";
+    let on_call_role = "222000222000222000";
+
+    let duty_settings = rusty_discord_bot::storage::ModeratorDutySettings {
+        guild_id: duty_guild.to_string(),
+        staff_role_id: Some(staff_role.to_string()),
+        on_call_role_id: Some(on_call_role.to_string()),
+        max_override_duration_mins: 720,
+        fallback_channel_id: None,
+        updated_at: Utc::now(),
+    };
+
+    let saved_dsettings = store
+        .upsert_duty_settings(duty_settings)
+        .await
+        .expect("upsert duty settings");
+    assert_eq!(saved_dsettings.max_override_duration_mins, 720);
+
+    let duty_profile = rusty_discord_bot::storage::ModeratorDutyProfile::new(
+        duty_guild.to_string(),
+        duty_user.to_string(),
+        "Europe/Berlin".to_string(),
+        rusty_discord_bot::storage::RecurringSchedule::default(),
+    )
+    .expect("construct duty profile");
+
+    let saved_dprofile = store
+        .upsert_duty_profile(duty_profile)
+        .await
+        .expect("upsert duty profile");
+    assert_eq!(saved_dprofile.timezone, "Europe/Berlin");
+
+    let duty_state = rusty_discord_bot::storage::ModeratorDutyState {
+        guild_id: duty_guild.to_string(),
+        user_id: duty_user.to_string(),
+        expected_on_call: true,
+        state_generation: 0,
+        last_reconciled_at: Some(Utc::now()),
+        last_error: None,
+    };
+
+    let saved_dstate = store
+        .upsert_duty_state(duty_state)
+        .await
+        .expect("upsert duty state");
+    assert!(saved_dstate.expected_on_call);
+
+    let fetched_dstate = store
+        .get_duty_state(duty_guild, duty_user)
+        .await
+        .expect("get duty state");
+    assert!(fetched_dstate.unwrap().expected_on_call);
+
+    let deleted_dprof = store
+        .delete_duty_profile(duty_guild, duty_user)
+        .await
+        .expect("delete duty profile");
+    assert!(deleted_dprof);
+
+    let after_ddelete = store
+        .get_duty_profile(duty_guild, duty_user)
+        .await
+        .expect("get duty profile after delete");
+    assert!(after_ddelete.is_none());
 }

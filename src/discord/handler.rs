@@ -961,6 +961,10 @@ async fn execute_command_inner(
         return handle_policy_builtin_command(ctx, state, command, deferred, responded).await;
     }
 
+    if command.data.name == "duty" {
+        return handle_duty_builtin_command(ctx, state, command, deferred, responded).await;
+    }
+
     let Some(module_id) = state.scripts.module_for_command(&command.data.name).await else {
         respond_or_edit(
             ctx,
@@ -1365,6 +1369,241 @@ async fn handle_policy_builtin_command(
     )
     .await?;
     Ok(())
+}
+
+async fn handle_duty_builtin_command(
+    ctx: &Context,
+    state: &AppState,
+    command: &CommandInteraction,
+    deferred: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    responded: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> anyhow::Result<()> {
+    let Some(guild_id) = command.guild_id else {
+        respond_or_edit(
+            ctx,
+            command,
+            deferred,
+            responded,
+            "Duty commands can only be used in a server.",
+        )
+        .await?;
+        return Ok(());
+    };
+
+    let guild_id_str = guild_id.get().to_string();
+    let user_id_str = command.user.id.get().to_string();
+
+    let settings = state
+        .storage
+        .get_duty_settings(&guild_id_str)
+        .await?
+        .unwrap_or_else(|| crate::duty::ModeratorDutySettings {
+            guild_id: guild_id_str.clone(),
+            staff_role_id: None,
+            on_call_role_id: None,
+            max_override_duration_mins: 1440,
+            fallback_channel_id: None,
+            updated_at: chrono::Utc::now(),
+        });
+
+    let member_roles: Vec<String> = command
+        .member
+        .as_ref()
+        .map(|m| m.roles.iter().map(|r| r.get().to_string()).collect())
+        .unwrap_or_default();
+
+    if let Some(ref staff_role) = settings.staff_role_id
+        && !member_roles.contains(staff_role)
+    {
+        respond_or_edit(
+            ctx,
+            command,
+            deferred,
+            responded,
+            "🔒 Only staff members with the designated staff role can manage duty availability.",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let mut profile = state
+        .storage
+        .get_duty_profile(&guild_id_str, &user_id_str)
+        .await?
+        .unwrap_or_else(|| {
+            crate::duty::ModeratorDutyProfile::new(
+                guild_id_str.clone(),
+                user_id_str.clone(),
+                "UTC".to_string(),
+                crate::duty::RecurringSchedule::default(),
+            )
+            .unwrap()
+        });
+
+    let options = options_to_json(&command.data.options);
+
+    if options.get("on").is_some() {
+        profile.manual_override = None;
+        profile.override_expires_at = None;
+        let saved = state.storage.upsert_duty_profile(profile).await?;
+
+        let outcome = crate::duty::reconcile_member_duty_state(crate::duty::ReconcileDutyParams {
+            storage: &state.storage,
+            guild_id: &guild_id_str,
+            user_id: &user_id_str,
+            settings: &settings,
+            profile: &saved,
+            member_roles: &member_roles,
+            bot_highest_role_pos: None,
+            on_call_role_pos: None,
+            is_live_discord: !state.config.discord_token.starts_with("dummy")
+                && state.config.discord_token != "mock"
+                && state.config.discord_token != "offline",
+            http: Some(&ctx.http),
+        })
+        .await?;
+
+        let status_msg = if outcome.expected_on_call {
+            "🟢 You are now **ON DUTY** (manual override cleared). On-call role is active."
+        } else {
+            "⚪ Manual override cleared. You are currently outside your scheduled duty hours."
+        };
+        respond_or_edit(ctx, command, deferred, responded, status_msg).await?;
+        return Ok(());
+    }
+
+    if let Some(off_opts) = options.get("off") {
+        let duration_str = off_opts
+            .get("duration")
+            .and_then(|v| v.as_str())
+            .unwrap_or("2h");
+
+        let duration_mins = parse_simple_duration_minutes(duration_str)
+            .min(settings.max_override_duration_mins as u64)
+            .max(1);
+
+        let expires_at = chrono::Utc::now() + chrono::Duration::minutes(duration_mins as i64);
+        profile.manual_override = Some("force_off".to_string());
+        profile.override_expires_at = Some(expires_at);
+        let saved = state.storage.upsert_duty_profile(profile).await?;
+
+        let _ = crate::duty::reconcile_member_duty_state(crate::duty::ReconcileDutyParams {
+            storage: &state.storage,
+            guild_id: &guild_id_str,
+            user_id: &user_id_str,
+            settings: &settings,
+            profile: &saved,
+            member_roles: &member_roles,
+            bot_highest_role_pos: None,
+            on_call_role_pos: None,
+            is_live_discord: !state.config.discord_token.starts_with("dummy")
+                && state.config.discord_token != "mock"
+                && state.config.discord_token != "offline",
+            http: Some(&ctx.http),
+        })
+        .await?;
+
+        let msg = format!(
+            "🔴 You are now **OFF DUTY** (pings-off) for {duration_mins} minutes (until <t:{}:t>).",
+            expires_at.timestamp()
+        );
+        respond_or_edit(ctx, command, deferred, responded, &msg).await?;
+        return Ok(());
+    }
+
+    if options.get("status").is_some() {
+        let is_staff = match settings.staff_role_id {
+            Some(ref sr) => member_roles.contains(sr),
+            None => true,
+        };
+        let is_on_call = crate::duty::compute_is_on_call(&profile, chrono::Utc::now(), is_staff);
+
+        let override_info = match (&profile.manual_override, profile.override_expires_at) {
+            (Some(o), Some(exp)) => format!("{o} (until <t:{}:R>)", exp.timestamp()),
+            (Some(o), None) => o.clone(),
+            _ => "None (following schedule)".to_string(),
+        };
+
+        let msg = format!(
+            "👮 **Moderator Duty Status for <@{user_id_str}>**:\n\
+             - **On-Call Status**: {}\n\
+             - **Active Override**: {}\n\
+             - **Timezone**: `{}`\n\
+             - **Staff Role**: {}\n\
+             - **On-Call Role**: {}",
+            if is_on_call {
+                "🟢 ACTIVE (Pingable)"
+            } else {
+                "⚪ INACTIVE"
+            },
+            override_info,
+            profile.timezone,
+            settings
+                .staff_role_id
+                .as_deref()
+                .unwrap_or("Not configured"),
+            settings
+                .on_call_role_id
+                .as_deref()
+                .unwrap_or("Not configured")
+        );
+        respond_or_edit(ctx, command, deferred, responded, &msg).await?;
+        return Ok(());
+    }
+
+    if let Some(sched_opts) = options.get("schedule")
+        && sched_opts.get("clear").is_some()
+    {
+        profile.recurring_schedule = sqlx::types::Json(crate::duty::RecurringSchedule::default());
+        let saved = state.storage.upsert_duty_profile(profile).await?;
+        let _ = crate::duty::reconcile_member_duty_state(crate::duty::ReconcileDutyParams {
+            storage: &state.storage,
+            guild_id: &guild_id_str,
+            user_id: &user_id_str,
+            settings: &settings,
+            profile: &saved,
+            member_roles: &member_roles,
+            bot_highest_role_pos: None,
+            on_call_role_pos: None,
+            is_live_discord: !state.config.discord_token.starts_with("dummy")
+                && state.config.discord_token != "mock"
+                && state.config.discord_token != "offline",
+            http: Some(&ctx.http),
+        })
+        .await?;
+        respond_or_edit(
+            ctx,
+            command,
+            deferred,
+            responded,
+            "🗑️ Your recurring duty schedule has been cleared.",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    respond_or_edit(
+        ctx,
+        command,
+        deferred,
+        responded,
+        "Usage: `/duty on`, `/duty off duration:2h`, `/duty status`, or `/duty schedule clear`",
+    )
+    .await?;
+    Ok(())
+}
+
+fn parse_simple_duration_minutes(val: &str) -> u64 {
+    let val = val.trim().to_lowercase();
+    if let Some(h) = val.strip_suffix('h') {
+        h.parse::<u64>().map(|v| v * 60).unwrap_or(120)
+    } else if let Some(m) = val.strip_suffix('m') {
+        m.parse::<u64>().unwrap_or(60)
+    } else if let Some(d) = val.strip_suffix('d') {
+        d.parse::<u64>().map(|v| v * 1440).unwrap_or(1440)
+    } else {
+        val.parse::<u64>().unwrap_or(120)
+    }
 }
 
 async fn run_event(

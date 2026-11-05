@@ -18,6 +18,11 @@ pub use postgres::{PostgresStore, run_safe_migrations};
 
 pub use crate::policy::CommandPolicyRule;
 
+pub use crate::duty::{
+    DutyTimeRange, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
+    RecurringSchedule, StaffAudience,
+};
+
 pub use progression::{
     CoinTransfer, CoinTransferOutcome, DailyClaimOutcome, MemberProgress, ProgressMetric,
     ReputationGrantOutcome, XpAward, level_for_xp, total_xp_for_level,
@@ -2491,6 +2496,95 @@ impl Storage {
         match self {
             Self::Memory(store) => store.bump_policy_revision(guild_id),
             Self::Postgres(store) => store.bump_policy_revision(guild_id).await,
+        }
+    }
+
+    pub async fn get_duty_settings(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Option<ModeratorDutySettings>> {
+        match self {
+            Self::Memory(store) => store.get_duty_settings(guild_id),
+            Self::Postgres(store) => store.get_duty_settings(guild_id).await,
+        }
+    }
+
+    pub async fn upsert_duty_settings(
+        &self,
+        settings: ModeratorDutySettings,
+    ) -> anyhow::Result<ModeratorDutySettings> {
+        match self {
+            Self::Memory(store) => store.upsert_duty_settings(settings),
+            Self::Postgres(store) => store.upsert_duty_settings(settings).await,
+        }
+    }
+
+    pub async fn get_duty_profile(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Option<ModeratorDutyProfile>> {
+        match self {
+            Self::Memory(store) => store.get_duty_profile(guild_id, user_id),
+            Self::Postgres(store) => store.get_duty_profile(guild_id, user_id).await,
+        }
+    }
+
+    pub async fn list_duty_profiles(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<ModeratorDutyProfile>> {
+        match self {
+            Self::Memory(store) => store.list_duty_profiles(guild_id),
+            Self::Postgres(store) => store.list_duty_profiles(guild_id).await,
+        }
+    }
+
+    pub async fn upsert_duty_profile(
+        &self,
+        profile: ModeratorDutyProfile,
+    ) -> anyhow::Result<ModeratorDutyProfile> {
+        match self {
+            Self::Memory(store) => store.upsert_duty_profile(profile),
+            Self::Postgres(store) => store.upsert_duty_profile(profile).await,
+        }
+    }
+
+    pub async fn delete_duty_profile(&self, guild_id: &str, user_id: &str) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => store.delete_duty_profile(guild_id, user_id),
+            Self::Postgres(store) => store.delete_duty_profile(guild_id, user_id).await,
+        }
+    }
+
+    pub async fn get_duty_state(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Option<ModeratorDutyState>> {
+        match self {
+            Self::Memory(store) => store.get_duty_state(guild_id, user_id),
+            Self::Postgres(store) => store.get_duty_state(guild_id, user_id).await,
+        }
+    }
+
+    pub async fn list_duty_states(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<ModeratorDutyState>> {
+        match self {
+            Self::Memory(store) => store.list_duty_states(guild_id),
+            Self::Postgres(store) => store.list_duty_states(guild_id).await,
+        }
+    }
+
+    pub async fn upsert_duty_state(
+        &self,
+        state: ModeratorDutyState,
+    ) -> anyhow::Result<ModeratorDutyState> {
+        match self {
+            Self::Memory(store) => store.upsert_duty_state(state),
+            Self::Postgres(store) => store.upsert_duty_state(state).await,
         }
     }
 
@@ -5697,5 +5791,84 @@ mod tests {
         assert_eq!(reset_count, 1);
         let rules_after_reset = store.list_policy_rules(guild_1).await.unwrap();
         assert!(rules_after_reset.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_moderator_duty_storage_lifecycle_and_isolation() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_1 = "100000000000000001";
+        let guild_2 = "200000000000000002";
+        let user_id = "300000000000000003";
+
+        // Initial settings is None
+        assert!(store.get_duty_settings(guild_1).await.unwrap().is_none());
+
+        // Upsert settings
+        let settings = ModeratorDutySettings {
+            guild_id: guild_1.to_string(),
+            staff_role_id: Some("400000000000000001".to_string()),
+            on_call_role_id: Some("500000000000000001".to_string()),
+            max_override_duration_mins: 720,
+            fallback_channel_id: Some("600000000000000001".to_string()),
+            updated_at: Utc::now(),
+        };
+        let saved_settings = store.upsert_duty_settings(settings).await.unwrap();
+        assert_eq!(saved_settings.max_override_duration_mins, 720);
+
+        // Settings in G2 remains None (isolation)
+        assert!(store.get_duty_settings(guild_2).await.unwrap().is_none());
+
+        // Upsert profile
+        let profile = ModeratorDutyProfile::new(
+            guild_1.to_string(),
+            user_id.to_string(),
+            "Europe/Berlin".to_string(),
+            RecurringSchedule::default(),
+        )
+        .unwrap();
+        let saved_profile = store.upsert_duty_profile(profile).await.unwrap();
+        assert_eq!(saved_profile.version, 1);
+
+        // Fetch profile
+        let fetched = store
+            .get_duty_profile(guild_1, user_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fetched.timezone, "Europe/Berlin");
+
+        // G2 has 0 profiles
+        assert!(store.list_duty_profiles(guild_2).await.unwrap().is_empty());
+
+        // Upsert state
+        let state = ModeratorDutyState {
+            guild_id: guild_1.to_string(),
+            user_id: user_id.to_string(),
+            expected_on_call: true,
+            state_generation: 0,
+            last_reconciled_at: Some(Utc::now()),
+            last_error: None,
+        };
+        let saved_state = store.upsert_duty_state(state).await.unwrap();
+        assert_eq!(saved_state.state_generation, 1);
+        assert!(saved_state.expected_on_call);
+
+        // Delete profile
+        let deleted = store.delete_duty_profile(guild_1, user_id).await.unwrap();
+        assert!(deleted);
+        assert!(
+            store
+                .get_duty_profile(guild_1, user_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .get_duty_state(guild_1, user_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }
