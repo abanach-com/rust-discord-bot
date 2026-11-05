@@ -1,6 +1,8 @@
 mod commands;
 pub mod companion;
 pub mod components;
+pub mod delete_queue;
+pub use delete_queue::{DeleteCoordinator, DeleteOutcome, DeleteRequest};
 pub mod events;
 pub mod executor;
 pub mod handler;

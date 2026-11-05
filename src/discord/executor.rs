@@ -694,8 +694,12 @@ async fn execute_action(
             )
             .await?;
 
-            channel_id
-                .delete_message(&ctx.http, MessageId::new(parse_snowflake(message_id)?))
+            let guild_id = origin.guild_id.unwrap_or(GuildId::new(1));
+            let message_id = MessageId::new(parse_snowflake(message_id)?);
+
+            state
+                .delete_coordinator
+                .delete_message(ctx.http.clone(), guild_id, channel_id, message_id)
                 .await?;
 
             Ok(None)
@@ -945,11 +949,11 @@ async fn execute_action(
                 .map(|message| message.id)
                 .collect::<Vec<_>>();
 
-            if message_ids.len() == 1 {
-                channel_id.delete_message(&ctx.http, message_ids[0]).await?;
-            } else if !message_ids.is_empty() {
-                channel_id.delete_messages(&ctx.http, message_ids).await?;
-            }
+            let guild_id = origin.guild_id.unwrap_or(GuildId::new(1));
+            let outcome = state
+                .delete_coordinator
+                .delete_messages(ctx.http.clone(), guild_id, channel_id, message_ids)
+                .await?;
 
             audit_action(
                 state,
@@ -962,7 +966,7 @@ async fn execute_action(
 
                     "requested_amount": amount,
 
-                    "deleted_amount": messages.len(),
+                    "deleted_amount": outcome.deleted,
 
                 }),
             )

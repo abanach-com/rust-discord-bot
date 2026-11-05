@@ -1053,6 +1053,10 @@ pub async fn join_giveaway(
         return Err(ApiError::not_found("Giveaway was not found in this guild."));
     }
 
+    if ga.ended || Utc::now() >= ga.expires_at {
+        return Ok(Json(json!({"joined": false})));
+    }
+
     let joined = state
         .app
         .storage

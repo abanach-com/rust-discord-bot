@@ -1446,7 +1446,7 @@ impl MemoryStore {
             None => return false,
         };
 
-        if ga.ended {
+        if ga.ended || chrono::Utc::now() >= ga.expires_at {
             return false;
         }
 

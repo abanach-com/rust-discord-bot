@@ -482,13 +482,23 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - In legacy discovery mode (when `install.xml` is absent), symlinks are strictly forbidden via `DirEntry::file_type().is_symlink()`, preventing unintended loading of arbitrary external code or configuration leakage.
   - Hardened recursive discovery with a maximum depth limit of 16 (`MAX_DISCOVERY_DEPTH = 16`), maximum script count limit of 512 (`MAX_DISCOVERY_FILES = 512`), canonical root containment checks (`canonical_current.starts_with(canonical_root)`), and cycle detection via visited canonical directories.
   - Symlinked or directory loop references (`loop -> .`) fail closed with controlled load errors without recursion hangs, and preserve the active Lua registry upon reload.
-- **Giveaway Community Member Access & Admin Boundaries (#213)**:
+- **Giveaway Community Member Access, Deadline Enforcement & Admin Boundaries (#213, #217)**:
   - `GET /api/guilds/{guild_id}/giveaways/{giveaway_id}` and `POST .../join` employ `ensure_guild_member_access`, allowing regular community members without `MANAGE_GUILD` privileges to view active giveaways and enter drawings with CSRF validation.
+  - Enforced strict deadline validation (#217): both REST handler and storage persistence layers (`MemoryStore` and PostgreSQL `SELECT ... FOR UPDATE`) reject joins when `Utc::now() >= ga.expires_at`, preventing participant additions to expired giveaways prior to rerolls.
   - Administrative operations (`POST /giveaways` and `POST .../reroll`) remain strictly protected by `ensure_guild_access`, requiring server management permissions.
 - **SSE Guild Realtime Events Stream Re-Authentication & Disconnect Cleanup (#214, #216)**:
   - `GET /api/guilds/{guild_id}/events` utilizes an asynchronous dispatch pipeline with dual periodic re-authentication (15-second interval) and pre-event verification against storage and `permissions_cache`.
   - Stale, expired, or deleted user sessions, as well as revoked guild management permissions (`can_manage: false`), immediately terminate active Server-Sent Events (SSE) connections, preventing administrative and moderation event leakage to unauthorized parties. Handled broadcast channel lagging with explicit client resync events.
   - Mitigated orphaned background task leaks upon idle SSE disconnects (#216): worker task listens for `tx.closed()` in `tokio::select!`, immediately terminating background loops, timers, and broadcast receiver subscriptions when a client drops the connection without requiring new events.
+
+## 18. Moderation Delete Coordinator & Queue Architecture (Issue #218)
+
+- **Per-Channel Shared Moderation Delete Queue & Backpressure (#218)**:
+  - Introduced host-managed `DeleteCoordinator` in `src/discord/delete_queue.rs` coordinating moderation deletions across `LuaAction::DeleteMessage`, `LuaAction::Purge`, and cleanup routines.
+  - Implemented per-channel asynchronous workers with configurable micro-batching windows (100ms) and automatic deduplication of concurrent/in-flight message IDs across multiple AutoMod rules or moderation commands.
+  - Enforced bounded backpressure (`channel_queue_capacity`, `try_send`) and per-guild channel concurrency limits (`max_channels_per_guild`), preventing queue bloat and memory leaks during high-volume bursts.
+  - Automatic partition into Discord Bulk Delete batches (2–100 messages < 14 days old) and single deletes for older messages. Explicitly categorizes `Unknown Message` (10008) errors as `already_gone` while propagating permissions (403) and rate limits (429) without masking.
+  - Idle worker cleanup automatically deallocates channels after inactivity periods without lingering background tasks.
 
 ## Delivery order
 

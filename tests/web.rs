@@ -3578,6 +3578,44 @@ async fn test_giveaways_member_access_and_admin_boundary() {
         .await
         .expect("other guild giveaway");
     assert_eq!(other_guild_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 7. Joining an expired giveaway (expires_at in the past, ended=false) must return joined: false (Issue #217)
+    let expired_ga = state
+        .app
+        .storage
+        .create_giveaway(
+            guild_id,
+            "channel_123",
+            "Expired Nitro",
+            1,
+            Utc::now() - Duration::minutes(5),
+        )
+        .await
+        .expect("create expired giveaway");
+
+    let join_expired_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}/join",
+            expired_ga.id
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", "csrf_member_123")
+        .send()
+        .await
+        .expect("join expired giveaway");
+    assert_eq!(join_expired_resp.status(), reqwest::StatusCode::OK);
+    let join_expired_json: serde_json::Value = join_expired_resp.json().await.unwrap();
+    assert_eq!(join_expired_json["joined"], false);
+
+    // Verify participant wasn't added in storage
+    let ga_after = state
+        .app
+        .storage
+        .get_giveaway(expired_ga.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ga_after.participants_json.as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]

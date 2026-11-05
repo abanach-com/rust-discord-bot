@@ -2151,7 +2151,7 @@ impl PostgresStore {
         .await?;
 
         let mut ga = match ga {
-            Some(g) if !g.ended => g,
+            Some(g) if !g.ended && chrono::Utc::now() < g.expires_at => g,
 
             _ => return Ok(false),
         };
