@@ -4799,3 +4799,375 @@ async fn test_recruitment_cooldown_checks_latest_rejection_decision() {
         .unwrap();
     assert_eq!(apply_ok_resp.status(), reqwest::StatusCode::OK);
 }
+
+#[tokio::test]
+async fn test_asset_analytics_manual_flush_csrf_and_guild_isolation() {
+    let (state, _) = test_web_state().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+
+    let g1 = "666000000000000001";
+    let g2 = "666000000000000002";
+    let admin_g1 = "666000000000000003";
+
+    let session_token = "sess_asset_flush_isolation";
+    let csrf_token = "csrf_asset_flush_isolation";
+
+    state
+        .app
+        .sessions
+        .save_session(
+            session_token,
+            DashboardUser {
+                id: admin_g1.to_owned(),
+                username: "AdminG1".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: g1.to_owned(),
+                name: "Guild 1".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "32".to_owned(), // MANAGE_GUILD
+            }],
+            csrf_token.to_owned(),
+            Utc::now() + Duration::hours(24),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let auth_cookie = format!("rusty_discord_bot_session={session_token}");
+
+    // Buffer items for G1 and G2
+    let emoji_g1 = "111000111000111000";
+    let emoji_g2 = "222000222000222000";
+
+    state.app.asset_analytics.record_message(
+        g1,
+        "999000000000000001",
+        &format!("<:emoji1:{emoji_g1}> hello"),
+        &[],
+        Some(&[emoji_g1.to_string()]),
+        None,
+    );
+
+    state.app.asset_analytics.record_message(
+        g2,
+        "999000000000000002",
+        &format!("<:emoji2:{emoji_g2}> world"),
+        &[],
+        Some(&[emoji_g2.to_string()]),
+        None,
+    );
+
+    assert_eq!(state.app.asset_analytics.pending_counts_len(), 2);
+
+    // 1. Flush G1 WITHOUT CSRF token -> 403 Forbidden and no state changes
+    let unauth_flush = client
+        .post(format!("{base_url}/api/guilds/{g1}/assets/flush"))
+        .header(COOKIE, &auth_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth_flush.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_eq!(
+        state.app.asset_analytics.pending_counts_len(),
+        2,
+        "No items should be flushed on CSRF error"
+    );
+
+    // 2. Flush G1 WITH invalid CSRF token -> 403 Forbidden
+    let bad_csrf_flush = client
+        .post(format!("{base_url}/api/guilds/{g1}/assets/flush"))
+        .header(COOKIE, &auth_cookie)
+        .header("x-csrf-token", "invalid_csrf_token_xyz")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_csrf_flush.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_eq!(state.app.asset_analytics.pending_counts_len(), 2);
+
+    // 3. Flush G1 WITH valid CSRF token -> 200 OK, flushes only G1 items
+    let flush_res = client
+        .post(format!("{base_url}/api/guilds/{g1}/assets/flush"))
+        .header(COOKIE, &auth_cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(flush_res.status(), reqwest::StatusCode::OK);
+    let flush_json: serde_json::Value = flush_res.json().await.unwrap();
+    assert_eq!(flush_json["flushed"], true);
+    assert_eq!(flush_json["items_flushed"], 1);
+
+    // Verify G1 item is no longer pending, but G2 is STILL pending
+    assert_eq!(state.app.asset_analytics.pending_counts_len(), 1);
+
+    // 4. Verify G1 data is recorded in storage, while G2 has no storage usage yet
+    let g1_usage = state
+        .app
+        .storage
+        .get_asset_usage_summary(
+            g1,
+            Some(rusty_discord_bot::asset_analytics::AssetKind::Emoji),
+            "7d",
+        )
+        .await
+        .unwrap();
+    assert_eq!(g1_usage.total_usages, 1);
+
+    let g2_usage = state
+        .app
+        .storage
+        .get_asset_usage_summary(
+            g2,
+            Some(rusty_discord_bot::asset_analytics::AssetKind::Emoji),
+            "7d",
+        )
+        .await
+        .unwrap();
+    assert_eq!(g2_usage.total_usages, 0);
+
+    // 5. Global flush (worker/shutdown) flushes remaining G2 items
+    let worker_flushed = state.app.asset_analytics.flush().await.unwrap();
+    assert_eq!(worker_flushed, 1);
+    assert_eq!(state.app.asset_analytics.pending_counts_len(), 0);
+}
+
+#[tokio::test]
+async fn test_help_forum_session_close_requires_active_membership_for_owner() {
+    let (state, _) = test_web_state().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+
+    let guild_id = "555000000000000001";
+    let forum_channel_id = "555000000000000002";
+    let thread_id = "555000000000000003";
+
+    let former_member_user_id = "555000000000000010";
+    let other_active_member_user_id = "555000000000000020";
+
+    // Create HelpForumConfig with owner_can_close = true
+    let config = rusty_discord_bot::help_forum::HelpForumConfig {
+        guild_id: guild_id.to_string(),
+        forum_channel_id: forum_channel_id.to_string(),
+        owner_can_close: true,
+        ..Default::default()
+    };
+    state
+        .app
+        .storage
+        .upsert_help_forum_config(config)
+        .await
+        .unwrap();
+
+    // Create HelpForumSession owned by former_member_user_id
+    let help_session = rusty_discord_bot::storage::HelpForumSession {
+        guild_id: guild_id.to_string(),
+        forum_channel_id: forum_channel_id.to_string(),
+        thread_id: thread_id.to_string(),
+        owner_user_id: former_member_user_id.to_string(),
+        status: "open".to_string(),
+        opened_at: Utc::now() - Duration::hours(3),
+        last_activity_at: Utc::now() - Duration::hours(1),
+        first_helper_response_at: None,
+        closed_at: None,
+        closing_reason: None,
+        generation: 1,
+    };
+    state
+        .app
+        .storage
+        .create_help_forum_session(help_session)
+        .await
+        .unwrap();
+
+    // Case 1: Former member user has a valid session, but NOT member of guild_id (left the guild)
+    let former_sess_id = "session_former_member_close_test";
+    let former_csrf = "csrf_former_member_close_test";
+    state
+        .app
+        .sessions
+        .save_session(
+            former_sess_id,
+            DashboardUser {
+                id: former_member_user_id.to_owned(),
+                username: "FormerMember".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![], // session has NO guilds (or different guilds)
+            former_csrf.to_owned(),
+            Utc::now() + Duration::hours(24),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let former_cookie = format!("rusty_discord_bot_session={former_sess_id}");
+
+    let former_close_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/help-forums/{thread_id}/close"
+        ))
+        .header(COOKIE, &former_cookie)
+        .header("x-csrf-token", former_csrf)
+        .json(&serde_json::json!({
+            "status": "solved",
+            "reason": "Trying to close after leaving"
+        }))
+        .send()
+        .await
+        .unwrap();
+    // Must be 403 Forbidden!
+    assert_eq!(former_close_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Verify session in storage remains "open"
+    let session_check1 = state
+        .app
+        .storage
+        .get_help_forum_session(guild_id, thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(session_check1.status, "open");
+
+    // Case 2: Other active member (member of guild_id, but NOT the owner and NOT an admin) tries to close
+    let other_sess_id = "session_other_member_close_test";
+    let other_csrf = "csrf_other_member_close_test";
+    state
+        .app
+        .sessions
+        .save_session(
+            other_sess_id,
+            DashboardUser {
+                id: other_active_member_user_id.to_owned(),
+                username: "OtherMember".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_owned(),
+                name: "Guild 555".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_owned(),
+            }],
+            other_csrf.to_owned(),
+            Utc::now() + Duration::hours(24),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let other_cookie = format!("rusty_discord_bot_session={other_sess_id}");
+
+    let other_close_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/help-forums/{thread_id}/close"
+        ))
+        .header(COOKIE, &other_cookie)
+        .header("x-csrf-token", other_csrf)
+        .json(&serde_json::json!({
+            "status": "solved",
+            "reason": "Closing someone else's post"
+        }))
+        .send()
+        .await
+        .unwrap();
+    // Must be 403 Forbidden!
+    assert_eq!(other_close_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Case 3: Owner user is an ACTIVE member of guild_id
+    let active_owner_sess_id = "session_active_owner_close_test";
+    let active_owner_csrf = "csrf_active_owner_close_test";
+    state
+        .app
+        .sessions
+        .save_session(
+            active_owner_sess_id,
+            DashboardUser {
+                id: former_member_user_id.to_owned(),
+                username: "ActiveOwnerMember".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_owned(),
+                name: "Guild 555".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_owned(), // regular member, not admin
+            }],
+            active_owner_csrf.to_owned(),
+            Utc::now() + Duration::hours(24),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let active_owner_cookie = format!("rusty_discord_bot_session={active_owner_sess_id}");
+
+    let active_owner_close_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/help-forums/{thread_id}/close"
+        ))
+        .header(COOKIE, &active_owner_cookie)
+        .header("x-csrf-token", active_owner_csrf)
+        .json(&serde_json::json!({
+            "status": "solved",
+            "reason": "Closed by author who is active member"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(active_owner_close_resp.status(), reqwest::StatusCode::OK);
+
+    // Verify session in storage is now solved
+    let session_check2 = state
+        .app
+        .storage
+        .get_help_forum_session(guild_id, thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(session_check2.status, "solved");
+    assert_eq!(
+        session_check2.closing_reason.as_deref(),
+        Some("Closed by author who is active member")
+    );
+}

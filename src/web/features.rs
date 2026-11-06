@@ -5569,13 +5569,14 @@ pub async fn close_help_forum_session_endpoint(
     let is_admin = ensure_guild_access(&state, &session, &guild_id)
         .await
         .is_ok();
-    let can_close =
-        is_admin || (session.user.id == help_session.owner_user_id && config.owner_can_close);
 
-    if !can_close {
-        return Err(ApiError::forbidden(
-            "You do not have permission to close this help forum post",
-        ));
+    if !is_admin {
+        ensure_guild_member_access(&state, &session, &guild_id).await?;
+        if session.user.id != help_session.owner_user_id || !config.owner_can_close {
+            return Err(ApiError::forbidden(
+                "You do not have permission to close this help forum post",
+            ));
+        }
     }
 
     let token = &state.app.config.discord_token;
@@ -5742,13 +5743,14 @@ pub async fn flush_asset_analytics_endpoint(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
     ensure_guild_access(&state, &session, &guild_id).await?;
     validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     let count = state
         .app
         .asset_analytics
-        .flush()
+        .flush_guild(&guild_id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 

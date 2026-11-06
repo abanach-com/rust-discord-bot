@@ -484,12 +484,15 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Implemented transactional batch persistence (`batch_upsert_companion_mappings`) for PostgreSQL using `pg_advisory_xact_lock` and single-transaction rollbacks on constraint violations, and thread-safe atomic batch persistence for `MemoryStore` under synchronization locks.
   - Segmented `POST /companion-channels/batch` into a three-phase pipeline: (1) upfront preflight validation of all mappings, channel snowflakes, voice!=text invariants, tenant isolation, and live Discord channel types; (2) atomic storage batch upsert guaranteeing all-or-nothing execution without partial persistence; (3) post-commit Discord permission revocation and audit logging.
 
-## 17. Lua Legacy Loader Hardening, Community RBAC & SSE Lifecycle (Issues #212, #213, #214, #216, #217, #220, #222, #223, #225)
+## 17. Lua Legacy Loader Hardening, Community RBAC & SSE Lifecycle (Issues #212, #213, #214, #216, #217, #220, #222, #223, #225, #226, #227)
 
 - **Lua Legacy Discovery Hardening & Symlink Containment (#212)**:
   - In legacy discovery mode (when `install.xml` is absent), symlinks are strictly forbidden via `DirEntry::file_type().is_symlink()`, preventing unintended loading of arbitrary external code or configuration leakage.
   - Hardened recursive discovery with a maximum depth limit of 16 (`MAX_DISCOVERY_DEPTH = 16`), maximum script count limit of 512 (`MAX_DISCOVERY_FILES = 512`), canonical root containment checks (`canonical_current.starts_with(canonical_root)`), and cycle detection via visited canonical directories.
   - Symlinked or directory loop references (`loop -> .`) fail closed with controlled load errors without recursion hangs, and preserve the active Lua registry upon reload.
+- **XML Tag Lexer & Parser Resilience (#213, #221)**:
+  - Robust XML attribute lexer in `src/lua/install_xml.rs` preventing infinite loops on corrupted XML attributes containing unescaped slashes, quotes, or trailing fragments.
+  - Strict XML root verification (#221): installer manifest parser strictly rejects documents with multiple root elements, non-whitespace/content outside root tag boundaries, and unclosed tags on EOF, preventing bypass of permission manifests and script declarations.
 - **Giveaway Community Member Access, Deadline Enforcement & Admin Boundaries (#213, #217)**:
   - `GET /api/guilds/{guild_id}/giveaways/{giveaway_id}` and `POST .../join` employ `ensure_guild_member_access`, allowing regular community members without `MANAGE_GUILD` privileges to view active giveaways and enter drawings with CSRF validation.
   - Enforced strict deadline validation (#217): both REST handler and storage persistence layers (`MemoryStore` and PostgreSQL `SELECT ... FOR UPDATE`) reject joins when `Utc::now() >= ga.expires_at`, preventing participant additions to expired giveaways prior to rerolls.
@@ -504,6 +507,12 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
 - **Staff Recruitment Re-Application Cooldown Precision (#225)**:
   - In `apply_recruitment_track`, cooldown evaluation calculates `latest_rejection_at` as `rejected_apps.iter().filter_map(|app| app.decided_at).max()` instead of blindly inspecting `rejected_apps.first()`.
   - Guarantees that cooldown enforcement is authoritatively anchored to the most recent decision date (`MAX(decided_at)`), independent of the application submission order (`submitted_at DESC`) or interleaved review outcomes across concurrent application tracks.
+- **Asset Analytics Manual Flush CSRF Guard & Per-Guild Tenant Isolation (#226)**:
+  - `POST /api/guilds/{guild_id}/assets/flush` strictly requires valid CSRF verification via `verify_csrf(&headers, &session)` prior to executing flush mutations, rejecting unauthenticated or cross-origin requests with 403 Forbidden.
+  - Introduced `AssetAnalyticsBatcher::flush_guild(guild_id)` using scoped key filtration `flush_inner(Some(guild_id))`. Manual dashboard flushes drain and persist solely the requesting guild's buffered counts and inventory records, preventing cross-tenant side effects, locking interference, and information leakage from other guilds. Global `flush()` (`flush_inner(None)`) remains exclusively reserved for internal background worker loops and graceful process shutdown.
+- **Help Forum Session Owner Close Guild Member Lifecycle Verification (#227)**:
+  - `POST /api/guilds/{guild_id}/help-forums/{thread_id}/close` verifies active guild membership via `ensure_guild_member_access(&state, &session, &guild_id)` for non-administrative post owners before checking `session.user.id == help_session.owner_user_id` and `config.owner_can_close`.
+  - Guarantees that former members who departed or were removed from the server cannot remotely archive, lock, or transition historical help forum posts via the dashboard. Administrative access (`ensure_guild_access`) continues to govern moderator closures.
 - **SSE Guild Realtime Events Stream Re-Authentication & Disconnect Cleanup (#214, #216)**:
   - `GET /api/guilds/{guild_id}/events` utilizes an asynchronous dispatch pipeline with dual periodic re-authentication (15-second interval) and pre-event verification against storage and `permissions_cache`.
   - Stale, expired, or deleted user sessions, as well as revoked guild management permissions (`can_manage: false`), immediately terminate active Server-Sent Events (SSE) connections, preventing administrative and moderation event leakage to unauthorized parties. Handled broadcast channel lagging with explicit client resync events.

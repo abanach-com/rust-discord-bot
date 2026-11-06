@@ -561,12 +561,34 @@ impl AssetAnalyticsBatcher {
     /// In case of storage failure, the snapshot items are merged back into
     /// the in-memory maps so no analytics counts are lost.
     pub async fn flush(&self) -> anyhow::Result<usize> {
+        self.flush_inner(None).await
+    }
+
+    /// Flushes buffered usage counts and inventory items specifically for one guild.
+    pub async fn flush_guild(&self, guild_id: &str) -> anyhow::Result<usize> {
+        self.flush_inner(Some(guild_id)).await
+    }
+
+    async fn flush_inner(&self, guild_filter: Option<&str>) -> anyhow::Result<usize> {
         let _guard = self.flush_lock.lock().await;
 
-        // 1. Drain counts snapshot
-        let count_keys: Vec<AssetUsageKey> =
-            self.counts.iter().map(|kv| kv.key().clone()).collect();
-        if count_keys.is_empty() && self.inventory.is_empty() {
+        // 1. Drain counts snapshot (filtered by guild if specified)
+        let count_keys: Vec<AssetUsageKey> = self
+            .counts
+            .iter()
+            .filter(|kv| guild_filter.is_none_or(|g| kv.key().guild_id == g))
+            .map(|kv| kv.key().clone())
+            .collect();
+
+        // 2. Drain inventory snapshot (filtered by guild if specified)
+        let inv_keys: Vec<(String, AssetKind, String)> = self
+            .inventory
+            .iter()
+            .filter(|kv| guild_filter.is_none_or(|g| kv.key().0 == g))
+            .map(|kv| kv.key().clone())
+            .collect();
+
+        if count_keys.is_empty() && inv_keys.is_empty() {
             return Ok(0);
         }
 
@@ -582,9 +604,6 @@ impl AssetAnalyticsBatcher {
             }
         }
 
-        // 2. Drain inventory snapshot
-        let inv_keys: Vec<(String, AssetKind, String)> =
-            self.inventory.iter().map(|kv| kv.key().clone()).collect();
         let mut snapshot_inventory = Vec::with_capacity(inv_keys.len());
         for key in inv_keys {
             if let Some((_, inv)) = self.inventory.remove(&key) {
