@@ -491,7 +491,7 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Stale, expired, or deleted user sessions, as well as revoked guild management permissions (`can_manage: false`), immediately terminate active Server-Sent Events (SSE) connections, preventing administrative and moderation event leakage to unauthorized parties. Handled broadcast channel lagging with explicit client resync events.
   - Mitigated orphaned background task leaks upon idle SSE disconnects (#216): worker task listens for `tx.closed()` in `tokio::select!`, immediately terminating background loops, timers, and broadcast receiver subscriptions when a client drops the connection without requiring new events.
 
-## 18. Moderation Delete Coordinator & Queue Architecture (Issue #218)
+## 18. Moderation Delete Coordinator & Queue Architecture (Issues #218, #219)
 
 - **Per-Channel Shared Moderation Delete Queue & Backpressure (#218)**:
   - Introduced host-managed `DeleteCoordinator` in `src/discord/delete_queue.rs` coordinating moderation deletions across `LuaAction::DeleteMessage`, `LuaAction::Purge`, and cleanup routines.
@@ -499,6 +499,11 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Enforced bounded backpressure (`channel_queue_capacity`, `try_send`) and per-guild channel concurrency limits (`max_channels_per_guild`), preventing queue bloat and memory leaks during high-volume bursts.
   - Automatic partition into Discord Bulk Delete batches (2–100 messages < 14 days old) and single deletes for older messages. Explicitly categorizes `Unknown Message` (10008) errors as `already_gone` while propagating permissions (403) and rate limits (429) without masking.
   - Idle worker cleanup automatically deallocates channels after inactivity periods without lingering background tasks.
+- **Atomic Registration & Shutdown Drain Protocol (#219)**:
+  - Eliminated race conditions between channel worker registration, concurrency check, and idle worker shutdown using per-guild locking (`guild_locks: Arc<DashMap<GuildId, Arc<Mutex<()>>>>`). Guarantees atomic check-then-spawn and strictly enforces `max_channels_per_guild` under concurrent load.
+  - Safe channel worker idle shutdown: workers remove their registration conditionally (`remove_if`) only if the entry still points to the same active channel sender (`same_channel`), preventing inadvertent de-registration of newly spawned workers.
+  - Full queue drain on idle timeout: before termination, worker closes receiver (`rx.close()`), drains all buffered requests, and processes final moderation delete batches (`process_delete_batch`), guaranteeing zero lost moderation deletes.
+  - Enqueue retry loop with channel refresh: if an enqueue operation encounters a closing worker channel (`TrySendError::Closed`), it recovers the oneshot reply channel, re-acquires or spawns an active worker channel under lock, and retries delivery.
 
 ## Delivery order
 

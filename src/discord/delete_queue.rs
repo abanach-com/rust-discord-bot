@@ -29,6 +29,7 @@ pub struct DeleteRequest {
 #[derive(Clone)]
 pub struct DeleteCoordinator {
     channels: Arc<DashMap<(GuildId, ChannelId), mpsc::Sender<DeleteRequest>>>,
+    guild_locks: Arc<DashMap<GuildId, Arc<std::sync::Mutex<()>>>>,
     max_channels_per_guild: usize,
     channel_queue_capacity: usize,
     batch_window_ms: u64,
@@ -38,6 +39,7 @@ impl DeleteCoordinator {
     pub fn new(max_channels_per_guild: usize, channel_queue_capacity: usize) -> Self {
         Self {
             channels: Arc::new(DashMap::new()),
+            guild_locks: Arc::new(DashMap::new()),
             max_channels_per_guild,
             channel_queue_capacity,
             batch_window_ms: 100,
@@ -60,15 +62,26 @@ impl DeleteCoordinator {
         channel_id: ChannelId,
     ) -> Result<mpsc::Sender<DeleteRequest>> {
         let key = (guild_id, channel_id);
+
+        let lock = self
+            .guild_locks
+            .entry(guild_id)
+            .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
+            .clone();
+        let _guard = lock.lock().unwrap();
+
         if let Some(sender) = self.channels.get(&key) {
-            return Ok(sender.value().clone());
+            if !sender.is_closed() {
+                return Ok(sender.value().clone());
+            }
+            drop(sender);
+            self.channels.remove(&key);
         }
 
-        // Count channels in this guild to prevent channel queue exhaustion
         let guild_channel_count = self
             .channels
             .iter()
-            .filter(|entry| entry.key().0 == guild_id)
+            .filter(|entry| entry.key().0 == guild_id && !entry.value().is_closed())
             .count();
 
         if guild_channel_count >= self.max_channels_per_guild {
@@ -81,9 +94,10 @@ impl DeleteCoordinator {
         let (tx, rx) = mpsc::channel(self.channel_queue_capacity);
         let channels_map = self.channels.clone();
         let batch_window = Duration::from_millis(self.batch_window_ms);
+        let worker_tx = tx.clone();
 
         tokio::spawn(async move {
-            run_channel_worker(channels_map, key, rx, http, batch_window).await;
+            run_channel_worker(channels_map, key, rx, worker_tx, http, batch_window).await;
         });
 
         self.channels.insert(key, tx.clone());
@@ -105,22 +119,33 @@ impl DeleteCoordinator {
             return Ok(());
         }
 
-        let sender = self.get_or_spawn_channel_worker(http, guild_id, channel_id)?;
-        let req = DeleteRequest {
-            guild_id,
-            channel_id,
-            message_ids,
-            reply,
-        };
+        let mut reply_slot = reply;
+        for attempt in 0..3 {
+            let sender = self.get_or_spawn_channel_worker(http.clone(), guild_id, channel_id)?;
+            let req = DeleteRequest {
+                guild_id,
+                channel_id,
+                message_ids: message_ids.clone(),
+                reply: reply_slot.take(),
+            };
 
-        sender.try_send(req).map_err(|e| match e {
-            mpsc::error::TrySendError::Full(_) => {
-                anyhow!("Moderation delete queue full for channel {channel_id} (backpressure)")
+            match sender.try_send(req) {
+                Ok(()) => return Ok(()),
+                Err(mpsc::error::TrySendError::Closed(returned_req)) => {
+                    reply_slot = returned_req.reply;
+                    if attempt == 2 {
+                        return Err(anyhow!(
+                            "Moderation delete queue closed for channel {channel_id}"
+                        ));
+                    }
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    return Err(anyhow!(
+                        "Moderation delete queue full for channel {channel_id} (backpressure)"
+                    ));
+                }
             }
-            mpsc::error::TrySendError::Closed(_) => {
-                anyhow!("Moderation delete queue closed for channel {channel_id}")
-            }
-        })?;
+        }
 
         Ok(())
     }
@@ -159,6 +184,7 @@ async fn run_channel_worker(
     channels_map: Arc<DashMap<(GuildId, ChannelId), mpsc::Sender<DeleteRequest>>>,
     key: (GuildId, ChannelId),
     mut rx: mpsc::Receiver<DeleteRequest>,
+    worker_tx: mpsc::Sender<DeleteRequest>,
     http: Arc<Http>,
     batch_window: Duration,
 ) {
@@ -169,7 +195,20 @@ async fn run_channel_worker(
         let first_req = match tokio::time::timeout(idle_timeout, rx.recv()).await {
             Ok(Some(req)) => req,
             Ok(None) | Err(_) => {
-                channels_map.remove(&key);
+                // 1. Remove from map only if the entry still points to this worker's channel
+                channels_map.remove_if(&key, |_, registered_tx| {
+                    registered_tx.same_channel(&worker_tx)
+                });
+                // 2. Close receiver to immediately reject subsequent try_send calls
+                rx.close();
+                // 3. Drain and process any requests that raced in before close
+                let mut pending = Vec::new();
+                while let Ok(req) = rx.try_recv() {
+                    pending.push(req);
+                }
+                if !pending.is_empty() {
+                    process_delete_batch(&http, channel_id, pending).await;
+                }
                 break;
             }
         };
@@ -188,103 +227,65 @@ async fn run_channel_worker(
             }
         }
 
-        let mut message_to_replies: HashMap<MessageId, Vec<usize>> = HashMap::new();
-        let mut reply_senders: Vec<Option<oneshot::Sender<DeleteOutcome>>> = Vec::new();
-        let mut outcomes_per_request: Vec<DeleteOutcome> = Vec::new();
+        process_delete_batch(&http, channel_id, batch).await;
+    }
+}
 
-        for (idx, req) in batch.into_iter().enumerate() {
-            let requested_count = req.message_ids.len();
-            reply_senders.push(req.reply);
-            outcomes_per_request.push(DeleteOutcome {
-                requested: requested_count,
-                unique: 0,
-                deleted: 0,
-                already_gone: 0,
-                failed: 0,
-            });
+async fn process_delete_batch(http: &Http, channel_id: ChannelId, batch: Vec<DeleteRequest>) {
+    let mut message_to_replies: HashMap<MessageId, Vec<usize>> = HashMap::new();
+    let mut reply_senders: Vec<Option<oneshot::Sender<DeleteOutcome>>> = Vec::new();
+    let mut outcomes_per_request: Vec<DeleteOutcome> = Vec::new();
 
-            let mut req_unique_seen = HashSet::new();
-            for mid in req.message_ids {
-                if req_unique_seen.insert(mid) {
-                    message_to_replies.entry(mid).or_default().push(idx);
-                }
-            }
-            outcomes_per_request[idx].unique = req_unique_seen.len();
-        }
+    for (idx, req) in batch.into_iter().enumerate() {
+        let requested_count = req.message_ids.len();
+        reply_senders.push(req.reply);
+        outcomes_per_request.push(DeleteOutcome {
+            requested: requested_count,
+            unique: 0,
+            deleted: 0,
+            already_gone: 0,
+            failed: 0,
+        });
 
-        let unique_message_ids: Vec<MessageId> = message_to_replies.keys().copied().collect();
-        if unique_message_ids.is_empty() {
-            for (idx, sender) in reply_senders.into_iter().enumerate() {
-                if let Some(s) = sender {
-                    let _ = s.send(outcomes_per_request[idx].clone());
-                }
-            }
-            continue;
-        }
-
-        let two_weeks_ago_unix = (Utc::now() - chrono::Duration::days(14)).timestamp();
-        let mut bulk_ids = Vec::new();
-        let mut old_ids = Vec::new();
-
-        for mid in unique_message_ids {
-            let created_unix = mid.created_at().unix_timestamp();
-            if created_unix >= two_weeks_ago_unix {
-                bulk_ids.push(mid);
-            } else {
-                old_ids.push(mid);
+        let mut req_unique_seen = HashSet::new();
+        for mid in req.message_ids {
+            if req_unique_seen.insert(mid) {
+                message_to_replies.entry(mid).or_default().push(idx);
             }
         }
+        outcomes_per_request[idx].unique = req_unique_seen.len();
+    }
 
-        let mut message_status: HashMap<MessageId, (usize, usize, usize)> = HashMap::new();
-
-        // 1. Bulk deletable messages in chunks of 2..=100
-        for chunk in bulk_ids.chunks(100) {
-            if chunk.len() == 1 {
-                let mid = chunk[0];
-                match channel_id.delete_message(&http, mid).await {
-                    Ok(()) => {
-                        message_status.insert(mid, (1, 0, 0));
-                    }
-                    Err(e) => {
-                        if is_already_gone_error(&e) {
-                            message_status.insert(mid, (0, 1, 0));
-                        } else {
-                            tracing::warn!(error = %e, message_id = %mid, "Failed to delete single message via queue");
-                            message_status.insert(mid, (0, 0, 1));
-                        }
-                    }
-                }
-            } else {
-                match channel_id.delete_messages(&http, chunk).await {
-                    Ok(()) => {
-                        for &mid in chunk {
-                            message_status.insert(mid, (1, 0, 0));
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, count = chunk.len(), "Failed to bulk delete chunk via queue; falling back to individual deletes");
-                        for &mid in chunk {
-                            match channel_id.delete_message(&http, mid).await {
-                                Ok(()) => {
-                                    message_status.insert(mid, (1, 0, 0));
-                                }
-                                Err(err) => {
-                                    if is_already_gone_error(&err) {
-                                        message_status.insert(mid, (0, 1, 0));
-                                    } else {
-                                        message_status.insert(mid, (0, 0, 1));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+    let unique_message_ids: Vec<MessageId> = message_to_replies.keys().copied().collect();
+    if unique_message_ids.is_empty() {
+        for (idx, sender) in reply_senders.into_iter().enumerate() {
+            if let Some(s) = sender {
+                let _ = s.send(outcomes_per_request[idx].clone());
             }
         }
+        return;
+    }
 
-        // 2. Older messages individually
-        for mid in old_ids {
-            match channel_id.delete_message(&http, mid).await {
+    let two_weeks_ago_unix = (Utc::now() - chrono::Duration::days(14)).timestamp();
+    let mut bulk_ids = Vec::new();
+    let mut old_ids = Vec::new();
+
+    for mid in unique_message_ids {
+        let created_unix = mid.created_at().unix_timestamp();
+        if created_unix >= two_weeks_ago_unix {
+            bulk_ids.push(mid);
+        } else {
+            old_ids.push(mid);
+        }
+    }
+
+    let mut message_status: HashMap<MessageId, (usize, usize, usize)> = HashMap::new();
+
+    // 1. Bulk deletable messages in chunks of 2..=100
+    for chunk in bulk_ids.chunks(100) {
+        if chunk.len() == 1 {
+            let mid = chunk[0];
+            match channel_id.delete_message(http, mid).await {
                 Ok(()) => {
                     message_status.insert(mid, (1, 0, 0));
                 }
@@ -292,27 +293,69 @@ async fn run_channel_worker(
                     if is_already_gone_error(&e) {
                         message_status.insert(mid, (0, 1, 0));
                     } else {
-                        tracing::warn!(error = %e, message_id = %mid, "Failed to delete older message via queue");
+                        tracing::warn!(error = %e, message_id = %mid, "Failed to delete single message via queue");
                         message_status.insert(mid, (0, 0, 1));
                     }
                 }
             }
-        }
-
-        for (mid, (del, gone, fail)) in message_status {
-            if let Some(request_indices) = message_to_replies.get(&mid) {
-                for &req_idx in request_indices {
-                    outcomes_per_request[req_idx].deleted += del;
-                    outcomes_per_request[req_idx].already_gone += gone;
-                    outcomes_per_request[req_idx].failed += fail;
+        } else {
+            match channel_id.delete_messages(http, chunk).await {
+                Ok(()) => {
+                    for &mid in chunk {
+                        message_status.insert(mid, (1, 0, 0));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, count = chunk.len(), "Failed to bulk delete chunk via queue; falling back to individual deletes");
+                    for &mid in chunk {
+                        match channel_id.delete_message(http, mid).await {
+                            Ok(()) => {
+                                message_status.insert(mid, (1, 0, 0));
+                            }
+                            Err(err) => {
+                                if is_already_gone_error(&err) {
+                                    message_status.insert(mid, (0, 1, 0));
+                                } else {
+                                    message_status.insert(mid, (0, 0, 1));
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
+    }
 
-        for (idx, sender) in reply_senders.into_iter().enumerate() {
-            if let Some(s) = sender {
-                let _ = s.send(outcomes_per_request[idx].clone());
+    // 2. Older messages individually
+    for mid in old_ids {
+        match channel_id.delete_message(http, mid).await {
+            Ok(()) => {
+                message_status.insert(mid, (1, 0, 0));
             }
+            Err(e) => {
+                if is_already_gone_error(&e) {
+                    message_status.insert(mid, (0, 1, 0));
+                } else {
+                    tracing::warn!(error = %e, message_id = %mid, "Failed to delete older message via queue");
+                    message_status.insert(mid, (0, 0, 1));
+                }
+            }
+        }
+    }
+
+    for (mid, (del, gone, fail)) in message_status {
+        if let Some(request_indices) = message_to_replies.get(&mid) {
+            for &req_idx in request_indices {
+                outcomes_per_request[req_idx].deleted += del;
+                outcomes_per_request[req_idx].already_gone += gone;
+                outcomes_per_request[req_idx].failed += fail;
+            }
+        }
+    }
+
+    for (idx, sender) in reply_senders.into_iter().enumerate() {
+        if let Some(s) = sender {
+            let _ = s.send(outcomes_per_request[idx].clone());
         }
     }
 }
@@ -418,6 +461,40 @@ mod tests {
             )
             .await
             .expect("enqueue other guild");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_delete_queue_concurrent_registration_single_worker() {
+        let coordinator = Arc::new(DeleteCoordinator::new(10, 100));
+        let http = Arc::new(Http::new("dummy-token"));
+        let guild_id = GuildId::new(555);
+        let channel_id = ChannelId::new(777);
+
+        // Spawn 8 concurrent enqueues to the exact same channel
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            let coord = coordinator.clone();
+            let h = http.clone();
+            handles.push(tokio::spawn(async move {
+                coord
+                    .enqueue(
+                        h,
+                        guild_id,
+                        channel_id,
+                        vec![MessageId::new(1000 + i)],
+                        None,
+                    )
+                    .await
+            }));
+        }
+
+        for h in handles {
+            let res = h.await.expect("join handle");
+            assert!(res.is_ok(), "concurrent enqueue must succeed");
+        }
+
+        // Exactly 1 worker should be registered in the channels map
+        assert_eq!(coordinator.active_channel_count(), 1);
     }
 
     #[test]
