@@ -2623,7 +2623,7 @@ pub async fn submit_counting_number(
 
     verify_csrf(&headers, &session)?;
 
-    ensure_guild_access(&state, &session, &guild_id).await?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
 
     let (valid, game) = state
         .app
@@ -2654,7 +2654,7 @@ pub async fn list_user_cards(
 ) -> Result<Json<Vec<CardCollection>>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
 
-    ensure_guild_access(&state, &session, &guild_id).await?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
 
     let cards = state
         .app
@@ -2689,7 +2689,7 @@ pub async fn propose_card_trade(
 
     verify_csrf(&headers, &session)?;
 
-    ensure_guild_access(&state, &session, &guild_id).await?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
 
     let trade = state
         .app
@@ -2718,7 +2718,7 @@ pub async fn accept_card_trade(
 
     verify_csrf(&headers, &session)?;
 
-    ensure_guild_access(&state, &session, &guild_id).await?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
 
     let accepted = state
         .app
@@ -2753,7 +2753,7 @@ pub async fn create_tupper(
 
     verify_csrf(&headers, &session)?;
 
-    ensure_guild_access(&state, &session, &guild_id).await?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
 
     let profile = state
         .app
@@ -2780,7 +2780,7 @@ pub async fn list_tuppers(
 ) -> Result<Json<Vec<TupperProfile>>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
 
-    ensure_guild_access(&state, &session, &guild_id).await?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
 
     let list = state
         .app

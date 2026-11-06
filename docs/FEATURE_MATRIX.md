@@ -451,7 +451,7 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
 - **Unified Offline Mode & Live Member Verification (#205)**: Centralized `Config::offline_mode` and `is_offline_mode()` across Gateway and web dashboard. Prevents `OFFLINE_MODE=false` or empty values from bypassing live Discord membership verification in store and web routes, failing closed with 403 on Discord 404/403.
 - **Steam LFG Self-Service Access (#206)**: Relaxed permission checks on `/steam/lfg` endpoints from `MANAGE_GUILD` to `ensure_guild_member_access`, allowing regular community members to view, create, and join teams while maintaining CSRF validation, tenant isolation, and author attribution.
 
-## 15. Storage Parity & Lua Installer Sandboxing (Issues #207, #208, #209, #221, #224)
+## 15. Storage Parity & Lua Installer Sandboxing (Issues #207, #208, #209, #221, #224, #231)
 
 - **MemoryStore & PostgreSQL UPSERT Semantics Parity (#207)**:
   - Keyed `github_devops_mappings` by business identity tuple `(guild_id, repo_full_name.to_ascii_lowercase(), issue_or_pr_number)` instead of raw UUID in `MemoryStore`, matching PostgreSQL's `UNIQUE` constraint and `ON CONFLICT DO UPDATE`.
@@ -472,6 +472,9 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Replaced non-atomic `contains_key(&key)` + `insert(key, Utc::now())` in `MemoryStore::check_and_record_event_dedupe` with a single atomic `DashMap::entry(key)`, matching PostgreSQL's `INSERT ... ON CONFLICT DO NOTHING` atomicity.
   - Guarantees strict single-winner semantics under concurrent replays (16–64 parallel requests for the same event ID produce exactly one `true`/`processed` and remainder `false`/`deduplicated`).
   - Standardized provider case-insensitivity (`provider.to_ascii_lowercase()`) across both MemoryStore and PostgreSQL backends.
+- **Game Account Links PostgreSQL Schema & Challenge TTL Reset Parity (#231)**:
+  - Corrected `PostgresStore::verify_game_link` to evaluate TTL against real table schema (`created_at > NOW() - INTERVAL '15 minutes'`) instead of non-existent `expires_at` column, eliminating SQL `undefined_column` errors (HTTP 500) on `/games/verify`.
+  - Updated `create_game_link` conflict resolution (`ON CONFLICT (guild_id, user_id, platform) DO UPDATE`) to refresh `created_at = $8`, ensuring newly issued challenges reset the 15-minute verification window across both PostgreSQL and MemoryStore.
 
 ## 16. Duty Policy & Companion Mapping Batch Atomicity (Issues #210, #211, #215)
 
@@ -484,7 +487,7 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Implemented transactional batch persistence (`batch_upsert_companion_mappings`) for PostgreSQL using `pg_advisory_xact_lock` and single-transaction rollbacks on constraint violations, and thread-safe atomic batch persistence for `MemoryStore` under synchronization locks.
   - Segmented `POST /companion-channels/batch` into a three-phase pipeline: (1) upfront preflight validation of all mappings, channel snowflakes, voice!=text invariants, tenant isolation, and live Discord channel types; (2) atomic storage batch upsert guaranteeing all-or-nothing execution without partial persistence; (3) post-commit Discord permission revocation and audit logging.
 
-## 17. Lua Legacy Loader Hardening, Community RBAC & SSE Lifecycle (Issues #212, #213, #214, #216, #217, #220, #222, #223, #225, #226, #227, #228, #229, #230)
+## 17. Lua Legacy Loader Hardening, Community RBAC & SSE Lifecycle (Issues #212, #213, #214, #216, #217, #220, #222, #223, #225, #226, #227, #228, #229, #230, #232)
 
 - **Lua Legacy Discovery Hardening & Symlink Containment (#212)**:
   - In legacy discovery mode (when `install.xml` is absent), symlinks are strictly forbidden via `DirEntry::file_type().is_symlink()`, preventing unintended loading of arbitrary external code or configuration leakage.
@@ -524,6 +527,10 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - `GET /api/guilds/{guild_id}/polls/{poll_id}` and `POST .../vote` relaxed permission checks from `ensure_guild_access` (`MANAGE_GUILD`) to `ensure_guild_member_access`, allowing regular guild members without server management rights to view community polls and cast their votes via the web interface.
   - Administrative creation (`create_poll`) strictly remains protected by `ensure_guild_access` (`MANAGE_GUILD`), preventing unauthorized poll creation.
   - Mutating vote handler strictly enforces CSRF token validation (`verify_csrf`), voter attribution bound to authenticated `session.user.id`, cross-guild tenant boundary matching (`poll.guild_id == guild_id`), and idempotency/expiration checks.
+- **Community Features Self-Service Member RBAC Boundary (#232)**:
+  - `POST /api/guilds/{guild_id}/counting/{channel_id}`, `GET /api/guilds/{guild_id}/cards`, `POST .../cards/trade`, `POST .../cards/trade/{trade_id}/accept`, `GET /api/guilds/{guild_id}/tuppers`, and `POST .../tuppers` relaxed permission checks from `ensure_guild_access` (`MANAGE_GUILD`) to `ensure_guild_member_access`.
+  - Enables regular guild members to participate in counting games, inspect and trade their own card collections, and create/list Tupper RP personas via the web dashboard.
+  - Retained strict CSRF validation on all mutating endpoints (`verify_csrf`), actor identity bound to authenticated `session.user.id`, cross-guild tenant boundary matching, and atomic trade ownership transitions.
 - **SSE Guild Realtime Events Stream Re-Authentication & Disconnect Cleanup (#214, #216)**:
   - `GET /api/guilds/{guild_id}/events` utilizes an asynchronous dispatch pipeline with dual periodic re-authentication (15-second interval) and pre-event verification against storage and `permissions_cache`.
   - Stale, expired, or deleted user sessions, as well as revoked guild management permissions (`can_manage: false`), immediately terminate active Server-Sent Events (SSE) connections, preventing administrative and moderation event leakage to unauthorized parties. Handled broadcast channel lagging with explicit client resync events.

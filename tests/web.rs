@@ -5839,3 +5839,307 @@ async fn test_polls_member_access_and_admin_boundary() {
         .expect("vote expired poll");
     assert_eq!(expired_vote_resp.status(), reqwest::StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn test_community_member_self_service_and_admin_boundary() {
+    let (state, _) = test_web_state().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let guild_a = "111222333444555666";
+    let guild_b = "999888777666555444";
+
+    // User A: regular member of guild_a, permissions = "0"
+    let user_a_session_id = "user_a_session_token";
+    let user_a_id = "user_a_123";
+    let user_a = DashboardUser {
+        id: user_a_id.to_owned(),
+        username: "member_alice".to_owned(),
+        global_name: None,
+        avatar: None,
+    };
+    let a_guilds = vec![DashboardGuild {
+        id: guild_a.to_owned(),
+        name: "Guild A".to_owned(),
+        icon: None,
+        owner: false,
+        permissions: "0".to_owned(),
+    }];
+
+    state
+        .app
+        .sessions
+        .save_session(
+            user_a_session_id,
+            user_a,
+            a_guilds,
+            "csrf_a_123".to_owned(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .expect("save user a session");
+
+    // User B: another regular member of guild_a, permissions = "0"
+    let user_b_session_id = "user_b_session_token";
+    let user_b_id = "user_b_456";
+    let user_b = DashboardUser {
+        id: user_b_id.to_owned(),
+        username: "member_bob".to_owned(),
+        global_name: None,
+        avatar: None,
+    };
+    let b_guilds = vec![DashboardGuild {
+        id: guild_a.to_owned(),
+        name: "Guild A".to_owned(),
+        icon: None,
+        owner: false,
+        permissions: "0".to_owned(),
+    }];
+
+    state
+        .app
+        .sessions
+        .save_session(
+            user_b_session_id,
+            user_b,
+            b_guilds,
+            "csrf_b_123".to_owned(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .expect("save user b session");
+
+    // Outsider C: member of guild_b only
+    let outsider_session_id = "outsider_session_token";
+    let outsider_user = DashboardUser {
+        id: "outsider_789".to_owned(),
+        username: "outsider_charlie".to_owned(),
+        global_name: None,
+        avatar: None,
+    };
+    let outsider_guilds = vec![DashboardGuild {
+        id: guild_b.to_owned(),
+        name: "Guild B".to_owned(),
+        icon: None,
+        owner: false,
+        permissions: "0".to_owned(),
+    }];
+
+    state
+        .app
+        .sessions
+        .save_session(
+            outsider_session_id,
+            outsider_user,
+            outsider_guilds,
+            "csrf_c_123".to_owned(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .expect("save outsider session");
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let a_cookie = format!("rusty_discord_bot_session={user_a_session_id}");
+    let b_cookie = format!("rusty_discord_bot_session={user_b_session_id}");
+    let c_cookie = format!("rusty_discord_bot_session={outsider_session_id}");
+
+    // Grant test cards to User A and User B
+    let card_a = state
+        .app
+        .storage
+        .grant_user_card(guild_a, user_a_id, "card_dragon", "Red Dragon", "legendary")
+        .await
+        .expect("grant card to A");
+    let card_b = state
+        .app
+        .storage
+        .grant_user_card(guild_a, user_b_id, "card_phoenix", "Solar Phoenix", "rare")
+        .await
+        .expect("grant card to B");
+
+    // 1. Regular member User A can list their own cards -> 200 OK
+    let list_cards_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_a}/cards"))
+        .header(COOKIE, &a_cookie)
+        .send()
+        .await
+        .expect("list cards");
+    assert_eq!(list_cards_resp.status(), reqwest::StatusCode::OK);
+    let cards_json: serde_json::Value = list_cards_resp.json().await.unwrap();
+    let cards_arr = cards_json.as_array().expect("array of cards");
+    assert_eq!(cards_arr.len(), 1);
+    assert_eq!(cards_arr[0]["card_name"], "Red Dragon");
+
+    // 2. Regular member User A can participate in counting with valid CSRF -> 200 OK
+    let count1_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/counting/chan_count_1"
+        ))
+        .header(COOKIE, &a_cookie)
+        .header("X-CSRF-Token", "csrf_a_123")
+        .json(&serde_json::json!({ "count": 1 }))
+        .send()
+        .await
+        .expect("submit count 1");
+    assert_eq!(count1_resp.status(), reqwest::StatusCode::OK);
+    let count1_json: serde_json::Value = count1_resp.json().await.unwrap();
+    assert_eq!(count1_json["valid"], true);
+    assert_eq!(count1_json["current_count"], 1);
+
+    // 3. User B can submit next count -> 200 OK
+    let count2_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/counting/chan_count_1"
+        ))
+        .header(COOKIE, &b_cookie)
+        .header("X-CSRF-Token", "csrf_b_123")
+        .json(&serde_json::json!({ "count": 2 }))
+        .send()
+        .await
+        .expect("submit count 2");
+    assert_eq!(count2_resp.status(), reqwest::StatusCode::OK);
+    let count2_json: serde_json::Value = count2_resp.json().await.unwrap();
+    assert_eq!(count2_json["valid"], true);
+    assert_eq!(count2_json["current_count"], 2);
+
+    // 4. Missing CSRF on counting -> 403 Forbidden
+    let no_csrf_count = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/counting/chan_count_1"
+        ))
+        .header(COOKIE, &a_cookie)
+        .json(&serde_json::json!({ "count": 3 }))
+        .send()
+        .await
+        .expect("submit count without csrf");
+    assert_eq!(no_csrf_count.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 5. User A proposes trade with User B with valid CSRF -> 200 OK
+    let propose_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/cards/trade"))
+        .header(COOKIE, &a_cookie)
+        .header("X-CSRF-Token", "csrf_a_123")
+        .json(&serde_json::json!({
+            "initiator_card_id": card_a.id,
+            "target_user_id": user_b_id,
+            "target_card_id": card_b.id
+        }))
+        .send()
+        .await
+        .expect("propose trade");
+    assert_eq!(propose_resp.status(), reqwest::StatusCode::OK);
+    let trade_json: serde_json::Value = propose_resp.json().await.unwrap();
+    let trade_id = trade_json["id"].as_str().expect("trade id");
+
+    // 6. User B accepts the trade with valid CSRF -> 200 OK
+    let accept_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/cards/trade/{trade_id}/accept"
+        ))
+        .header(COOKIE, &b_cookie)
+        .header("X-CSRF-Token", "csrf_b_123")
+        .send()
+        .await
+        .expect("accept trade");
+    assert_eq!(accept_resp.status(), reqwest::StatusCode::OK);
+    let accept_json: serde_json::Value = accept_resp.json().await.unwrap();
+    assert_eq!(accept_json["accepted"], true);
+
+    // Verify ownership swapped
+    let a_cards_after = state
+        .app
+        .storage
+        .list_user_cards(guild_a, user_a_id)
+        .await
+        .unwrap();
+    assert!(a_cards_after.iter().any(|c| c.card_id == "card_phoenix"));
+
+    // 7. Regular member User A can create Tupper RP persona with CSRF -> 200 OK
+    let tupper_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/tuppers"))
+        .header(COOKIE, &a_cookie)
+        .header("X-CSRF-Token", "csrf_a_123")
+        .json(&serde_json::json!({
+            "name": "Valeros the Fighter",
+            "prefix_or_brackets": "v:"
+        }))
+        .send()
+        .await
+        .expect("create tupper");
+    assert_eq!(tupper_resp.status(), reqwest::StatusCode::OK);
+    let tupper_json: serde_json::Value = tupper_resp.json().await.unwrap();
+    assert_eq!(tupper_json["name"], "Valeros the Fighter");
+
+    // 8. Regular member User A can list their Tupper profiles -> 200 OK
+    let list_tuppers_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_a}/tuppers"))
+        .header(COOKIE, &a_cookie)
+        .send()
+        .await
+        .expect("list tuppers");
+    assert_eq!(list_tuppers_resp.status(), reqwest::StatusCode::OK);
+    let tuppers_json: serde_json::Value = list_tuppers_resp.json().await.unwrap();
+    let tuppers_arr = tuppers_json.as_array().expect("array of tuppers");
+    assert_eq!(tuppers_arr.len(), 1);
+    assert_eq!(tuppers_arr[0]["prefix_or_brackets"], "v:");
+
+    // 9. Outsider C (Guild B only) cannot access Guild A counting, cards, or tuppers -> 403 Forbidden
+    let outsider_cards = client
+        .get(format!("{base_url}/api/guilds/{guild_a}/cards"))
+        .header(COOKIE, &c_cookie)
+        .send()
+        .await
+        .expect("outsider get cards");
+    assert_eq!(outsider_cards.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let outsider_tuppers = client
+        .get(format!("{base_url}/api/guilds/{guild_a}/tuppers"))
+        .header(COOKIE, &c_cookie)
+        .send()
+        .await
+        .expect("outsider get tuppers");
+    assert_eq!(outsider_tuppers.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let outsider_count = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/counting/chan_count_1"
+        ))
+        .header(COOKIE, &c_cookie)
+        .header("X-CSRF-Token", "csrf_c_123")
+        .json(&serde_json::json!({ "count": 3 }))
+        .send()
+        .await
+        .expect("outsider submit count");
+    assert_eq!(outsider_count.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 10. Regular member cannot manage administrative endpoints (e.g. FAQ creation) -> 403 Forbidden
+    let admin_faq_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/faq"))
+        .header(COOKIE, &a_cookie)
+        .header("X-CSRF-Token", "csrf_a_123")
+        .json(&serde_json::json!({
+            "question": "Admin question?",
+            "answer": "Admin answer."
+        }))
+        .send()
+        .await
+        .expect("create faq as member");
+    assert_eq!(admin_faq_resp.status(), reqwest::StatusCode::FORBIDDEN);
+}

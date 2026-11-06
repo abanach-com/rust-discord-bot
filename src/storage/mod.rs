@@ -6989,4 +6989,85 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn test_game_link_lifecycle_ttl_and_upsert_parity() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_id = "111222333444555666";
+        let user_id = "user_777";
+        let platform = "steam";
+
+        // 1. Create game link with verification code
+        let link1 = store
+            .create_game_link(
+                guild_id,
+                user_id,
+                platform,
+                "steam_id_1",
+                Some("code_alpha"),
+            )
+            .await
+            .expect("create game link");
+        assert!(!link1.verified);
+        assert_eq!(link1.verification_code.as_deref(), Some("code_alpha"));
+
+        // 2. Wrong code fails
+        let wrong_code = store
+            .verify_game_link(guild_id, user_id, platform, "wrong_code")
+            .await
+            .expect("verify game link");
+        assert!(!wrong_code);
+
+        // 3. Re-issuing challenge for same (guild_id, user_id, platform) updates code and resets TTL
+        let link2 = store
+            .create_game_link(guild_id, user_id, platform, "steam_id_1", Some("code_beta"))
+            .await
+            .expect("re-create game link");
+        assert!(!link2.verified);
+        assert_eq!(link2.verification_code.as_deref(), Some("code_beta"));
+
+        // Old code is invalidated
+        let old_code_verify = store
+            .verify_game_link(guild_id, user_id, platform, "code_alpha")
+            .await
+            .expect("verify old code");
+        assert!(!old_code_verify);
+
+        // Cross-guild check fails
+        let cross_guild_verify = store
+            .verify_game_link("other_guild", user_id, platform, "code_beta")
+            .await
+            .expect("verify cross guild");
+        assert!(!cross_guild_verify);
+
+        // Cross-user check fails
+        let cross_user_verify = store
+            .verify_game_link(guild_id, "other_user", platform, "code_beta")
+            .await
+            .expect("verify cross user");
+        assert!(!cross_user_verify);
+
+        // 4. Correct code succeeds
+        let valid_verify = store
+            .verify_game_link(guild_id, user_id, platform, "code_beta")
+            .await
+            .expect("verify valid code");
+        assert!(valid_verify);
+
+        // 5. Code is invalidated after successful verification (cannot be re-used)
+        let replay_verify = store
+            .verify_game_link(guild_id, user_id, platform, "code_beta")
+            .await
+            .expect("verify replay");
+        assert!(!replay_verify);
+
+        // Verify link state
+        let links = store
+            .get_game_links(guild_id, user_id)
+            .await
+            .expect("get game links");
+        assert_eq!(links.len(), 1);
+        assert!(links[0].verified);
+        assert!(links[0].verification_code.is_none());
+    }
 }

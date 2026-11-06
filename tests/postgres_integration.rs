@@ -1994,4 +1994,42 @@ async fn test_postgres_integration_suite() {
         .await
         .expect("delete help forum config in pg");
     assert!(del_cfg);
+
+    // 25. Game account links PostgreSQL schema and TTL parity (Issue #231)
+    let gl_guild = "pg_game_link_guild_1";
+    let gl_user = "pg_game_link_user_1";
+    let gl_platform = "steam";
+    let gl_link = store
+        .create_game_link(
+            gl_guild,
+            gl_user,
+            gl_platform,
+            "steam_id_100",
+            Some("code_100"),
+        )
+        .await
+        .expect("create game link in pg");
+    assert!(!gl_link.verified);
+    assert_eq!(gl_link.verification_code.as_deref(), Some("code_100"));
+
+    // Verify invalid code
+    let wrong_ver = store
+        .verify_game_link(gl_guild, gl_user, gl_platform, "wrong_code")
+        .await
+        .expect("verify game link with wrong code in pg");
+    assert!(!wrong_ver);
+
+    // Verify valid code executes SQL query with created_at > NOW() - INTERVAL '15 minutes'
+    let ok_ver = store
+        .verify_game_link(gl_guild, gl_user, gl_platform, "code_100")
+        .await
+        .expect("verify game link with correct code in pg");
+    assert!(ok_ver);
+
+    // Replay fails
+    let replay_ver = store
+        .verify_game_link(gl_guild, gl_user, gl_platform, "code_100")
+        .await
+        .expect("verify replay in pg");
+    assert!(!replay_ver);
 }

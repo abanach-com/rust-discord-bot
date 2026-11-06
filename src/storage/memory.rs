@@ -3287,6 +3287,12 @@ impl MemoryStore {
             created_at: Utc::now(),
         };
 
+        self.game_links.retain(|_, existing| {
+            !(existing.guild_id == guild_id
+                && existing.user_id == user_id
+                && existing.platform == platform)
+        });
+
         self.game_links.insert(id, link.clone());
 
         link

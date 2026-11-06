@@ -4182,7 +4182,7 @@ impl PostgresStore {
 
             ON CONFLICT (guild_id, user_id, platform) DO UPDATE
 
-            SET platform_account_id = $5, verification_code = $6, verified = $7
+            SET platform_account_id = $5, verification_code = $6, verified = $7, created_at = $8
 
             RETURNING id, guild_id, user_id, platform, platform_account_id, verification_code, verified, created_at
 
@@ -4232,7 +4232,7 @@ impl PostgresStore {
 
             SET verified = true, verification_code = NULL
 
-            WHERE guild_id = $1 AND user_id = $2 AND platform = $3 AND verification_code = $4 AND verified = false AND expires_at > NOW()
+            WHERE guild_id = $1 AND user_id = $2 AND platform = $3 AND verification_code = $4 AND verified = false AND created_at > NOW() - INTERVAL '15 minutes'
 
             "#,
 
