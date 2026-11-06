@@ -656,6 +656,11 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Updated `close_ticket` and `TicketOperation::Transcript` in `src/discord/tickets.rs`: when transcripts are disabled, `/ticket close` proceeds safely without saving transcripts, and `/ticket transcript` informs callers with a clear configuration message.
   - Added ticket transcript health check diagnostics in `/health/ready` reporting `configured / disabled / unready` status without secret exposure.
   - Updated `.env.example`, `compose.yaml`, and `docs/TICKETS.md` documenting key generation (`openssl rand -hex 32`), keyring rotation, and deployment requirements.
+- **Config Debug Redaction for Secrets and Credentials (#256)**:
+  - Replaced derived `#[derive(Debug)]` on `Config` with a custom `fmt::Debug` implementation in `src/config.rs`.
+  - Redacted all sensitive secrets (`discord_token`, `discord_client_secret`, database connection credentials in `database_url`, and AEAD transcript encryption keys in `transcript_encryption_key` / `transcript_keyring`).
+  - Emitted safe non-sensitive booleans (`postgres_configured`, `transcript_crypto_configured`) preserving operational and diagnostic insight without exposing credentials in logs, traces, crash dumps, or telemetry.
+  - Added unit test `test_config_debug_redacts_all_secrets` asserting zero leakage across all secret fields.
 
 ## Delivery order
 

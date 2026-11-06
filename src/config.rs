@@ -1,8 +1,8 @@
-use std::{collections::HashSet, env, net::SocketAddr, path::PathBuf};
+use std::{collections::HashSet, env, fmt, net::SocketAddr, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Config {
     pub discord_token: String,
     pub discord_application_id: u64,
@@ -30,6 +30,41 @@ pub struct Config {
     pub transcript_active_key_id: String,
     pub transcript_keyring: Option<String>,
     pub ticket_transcripts_disabled: bool,
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Config")
+            .field("discord_application_id", &self.discord_application_id)
+            .field("discord_client_id", &self.discord_client_id)
+            .field("discord_dev_guild_id", &self.discord_dev_guild_id)
+            .field("dashboard_bind", &self.dashboard_bind)
+            .field("dashboard_public_url", &self.dashboard_public_url)
+            .field("scripts_dir", &self.scripts_dir)
+            .field("session_cookie_secure", &self.session_cookie_secure)
+            .field("session_ttl_seconds", &self.session_ttl_seconds)
+            .field("lua_memory_limit_bytes", &self.lua_memory_limit_bytes)
+            .field("lua_instruction_limit", &self.lua_instruction_limit)
+            .field("lua_hook_granularity", &self.lua_hook_granularity)
+            .field("lua_max_parallel", &self.lua_max_parallel)
+            .field("lua_max_per_guild", &self.lua_max_per_guild)
+            .field("lua_command_timeout_ms", &self.lua_command_timeout_ms)
+            .field("music_allowed_hosts", &self.music_allowed_hosts)
+            .field("trusted_proxies", &self.trusted_proxies)
+            .field("offline_mode", &self.offline_mode)
+            .field("discord_api_base_url", &self.discord_api_base_url)
+            .field("postgres_configured", &self.database_url.is_some())
+            .field(
+                "transcript_crypto_configured",
+                &(self.transcript_keyring.is_some() || self.transcript_encryption_key.is_some()),
+            )
+            .field("transcript_active_key_id", &self.transcript_active_key_id)
+            .field(
+                "ticket_transcripts_disabled",
+                &self.ticket_transcripts_disabled,
+            )
+            .finish()
+    }
 }
 
 impl Config {
@@ -285,5 +320,55 @@ mod tests {
         // Default returned for unset env var
         assert!(!env_bool("NON_EXISTENT_VAR_XYZ_9876", false).unwrap());
         assert!(env_bool("NON_EXISTENT_VAR_XYZ_9876", true).unwrap());
+    }
+
+    #[test]
+    fn test_config_debug_redacts_all_secrets() {
+        let test_config = Config {
+            discord_token: "fixture-discord-token-secret-12345".to_string(),
+            discord_application_id: 123456789,
+            discord_client_id: "123456789".to_string(),
+            discord_client_secret: "fixture-discord-client-secret-67890".to_string(),
+            discord_oauth_redirect_url: "http://localhost:8080/auth/callback".to_string(),
+            discord_dev_guild_id: None,
+            dashboard_bind: "127.0.0.1:8080".parse().unwrap(),
+            dashboard_public_url: "http://localhost:8080".to_string(),
+            database_url: Some("postgres://user:fixture-db-password@localhost:5432/db".to_string()),
+            scripts_dir: PathBuf::from("scripts"),
+            session_cookie_secure: false,
+            session_ttl_seconds: 604800,
+            lua_memory_limit_bytes: 4 * 1024 * 1024,
+            lua_instruction_limit: 200_000,
+            lua_hook_granularity: 100,
+            lua_max_parallel: 32,
+            lua_max_per_guild: 8,
+            lua_command_timeout_ms: 3000,
+            music_allowed_hosts: HashSet::new(),
+            trusted_proxies: HashSet::new(),
+            offline_mode: false,
+            discord_api_base_url: "https://discord.com/api/v10".to_string(),
+            transcript_encryption_key: Some("fixture-aead-key-hex-0123456789abcdef".to_string()),
+            transcript_active_key_id: "v1".to_string(),
+            transcript_keyring: Some("fixture-keyring-hex-9876543210fedcba".to_string()),
+            ticket_transcripts_disabled: false,
+        };
+
+        let rendered = format!("{test_config:?}");
+        for secret in [
+            "fixture-discord-token-secret-12345",
+            "fixture-discord-client-secret-67890",
+            "fixture-db-password",
+            "fixture-aead-key-hex-0123456789abcdef",
+            "fixture-keyring-hex-9876543210fedcba",
+        ] {
+            assert!(
+                !rendered.contains(secret),
+                "Config::Debug exposes secret '{secret}' in diagnostic output: {rendered}"
+            );
+        }
+
+        assert!(rendered.contains("postgres_configured: true"));
+        assert!(rendered.contains("transcript_crypto_configured: true"));
+        assert!(rendered.contains("discord_application_id: 123456789"));
     }
 }
