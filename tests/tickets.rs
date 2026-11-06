@@ -5,8 +5,8 @@ use rusty_discord_bot::{
     lua::{LuaAction, LuaEngine, LuaExecutionContext, LuaLimits, TicketOperation},
     tickets::{
         NewTicketReservation, NewTicketTranscript, ParticipantMutationOutcome,
-        ReserveTicketOutcome, STATUS_CLAIMED, STATUS_CLOSED, STATUS_OPEN, TicketMutationOutcome,
-        TicketStore,
+        ReserveTicketOutcome, STATUS_CLAIMED, STATUS_CLOSED, STATUS_OPEN,
+        TRANSCRIPT_CRYPTO_VERSION, TicketMutationOutcome, TicketStore, TranscriptCrypto,
     },
 };
 use serde_json::json;
@@ -361,4 +361,177 @@ async fn ticket_close_reopen_compensating_contract_issue_253() {
     };
     assert_eq!(reopened_ticket.status, STATUS_OPEN);
     assert!(reopened_ticket.version > closed_ticket.version);
+}
+
+#[tokio::test]
+async fn test_ticket_transcript_lifecycle_and_crypto() {
+    let store = TicketStore::memory();
+    let guild_id = "100000000000000001";
+    let ticket_id = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    let channel_id = "100000000000000002";
+    let actor_id = "100000000000000003";
+
+    // 1. Store transcript in memory store
+    let content = "User: Hello!\nSupport: How can I help you today?";
+    let stored = store
+        .store_transcript(NewTicketTranscript {
+            ticket_id: ticket_id.to_string(),
+            guild_id: guild_id.to_string(),
+            channel_id: channel_id.to_string(),
+            generated_by_user_id: actor_id.to_string(),
+            message_count: 2,
+            content: content.to_string(),
+        })
+        .await
+        .expect("storing transcript should succeed");
+
+    assert_eq!(stored.ticket_id, ticket_id);
+    assert_eq!(stored.guild_id, guild_id);
+    assert_eq!(stored.content, content);
+    assert_eq!(stored.message_count, 2);
+
+    // 2. Fetch transcript by ID
+    let fetched = store
+        .get_transcript(guild_id, &stored.id)
+        .await
+        .expect("fetching transcript should succeed")
+        .expect("transcript should exist");
+    assert_eq!(fetched.id, stored.id);
+    assert_eq!(fetched.content, content);
+
+    // Tenant isolation: fetching with different guild_id returns None
+    let other_guild_fetch = store
+        .get_transcript("999999999999999999", &stored.id)
+        .await
+        .expect("fetch call should succeed");
+    assert!(other_guild_fetch.is_none());
+
+    // 3. Fetch latest transcript by ticket ID
+    let latest = store
+        .get_latest_transcript(guild_id, ticket_id)
+        .await
+        .expect("fetching latest transcript should succeed")
+        .expect("latest transcript should exist");
+    assert_eq!(latest.id, stored.id);
+
+    // 4. Test TranscriptCrypto primitives
+    let key1_hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let key2_hex = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+    // Invalid hex lengths
+    assert!(TranscriptCrypto::parse_hex_key("too_short").is_err());
+    assert!(TranscriptCrypto::parse_hex_key(&format!("{key1_hex}extra")).is_err());
+
+    // Keyring parsing (comma format)
+    let keyring_spec = format!("v1:{key1_hex},v2:{key2_hex}");
+    let crypto = TranscriptCrypto::from_keyring_spec("v2", &keyring_spec)
+        .expect("parse keyring spec should succeed");
+    assert_eq!(crypto.active_key_id(), "v2");
+
+    // Keyring parsing (JSON format)
+    let json_keyring = format!(r#"{{"v1": "{key1_hex}", "v2": "{key2_hex}"}}"#);
+    let crypto_json = TranscriptCrypto::from_keyring_spec("v2", &json_keyring)
+        .expect("parse JSON keyring should succeed");
+    assert_eq!(crypto_json.active_key_id(), "v2");
+
+    // Redaction in Debug
+    let debug_output = format!("{crypto:?}");
+    assert!(!debug_output.contains(key1_hex));
+    assert!(!debug_output.contains(key2_hex));
+    assert!(debug_output.contains("TranscriptCrypto"));
+
+    // Encryption roundtrip
+    let payload = crypto
+        .encrypt(guild_id, ticket_id, content)
+        .expect("encryption should succeed");
+    assert_eq!(payload.key_id, "v2");
+    assert_eq!(payload.crypto_version, TRANSCRIPT_CRYPTO_VERSION);
+    assert_eq!(payload.nonce.len(), 12);
+
+    let decrypted = crypto
+        .decrypt(
+            &payload.key_id,
+            guild_id,
+            ticket_id,
+            &payload.nonce,
+            &payload.ciphertext,
+        )
+        .expect("decryption should succeed");
+    assert_eq!(decrypted, content);
+
+    // Nonce uniqueness across 10 repeated encryptions
+    let mut nonces = std::collections::HashSet::new();
+    for _ in 0..10 {
+        let p = crypto.encrypt(guild_id, ticket_id, content).unwrap();
+        assert!(nonces.insert(p.nonce), "Nonces must be unique per write");
+    }
+
+    // AAD mismatch: wrong guild
+    let wrong_guild_res = crypto.decrypt(
+        &payload.key_id,
+        "other_guild",
+        ticket_id,
+        &payload.nonce,
+        &payload.ciphertext,
+    );
+    assert!(
+        wrong_guild_res.is_err(),
+        "Decryption must fail on guild AAD mismatch"
+    );
+
+    // AAD mismatch: wrong ticket
+    let wrong_ticket_res = crypto.decrypt(
+        &payload.key_id,
+        guild_id,
+        "other_ticket",
+        &payload.nonce,
+        &payload.ciphertext,
+    );
+    assert!(
+        wrong_ticket_res.is_err(),
+        "Decryption must fail on ticket AAD mismatch"
+    );
+
+    // Tampering with ciphertext
+    let mut tampered_ciphertext = payload.ciphertext.clone();
+    tampered_ciphertext[0] ^= 0x01;
+    let tamper_res = crypto.decrypt(
+        &payload.key_id,
+        guild_id,
+        ticket_id,
+        &payload.nonce,
+        &tampered_ciphertext,
+    );
+    assert!(
+        tamper_res.is_err(),
+        "Decryption must fail on tampered ciphertext"
+    );
+
+    // Historical key decryption (rotation support)
+    let crypto_v1_only = TranscriptCrypto::from_hex_key("v1", key1_hex).unwrap();
+    let payload_v1 = crypto_v1_only
+        .encrypt(guild_id, ticket_id, "Legacy v1 content")
+        .unwrap();
+
+    // Multikey keyring (active = v2) can still decrypt v1
+    let decrypted_v1 = crypto
+        .decrypt(
+            &payload_v1.key_id,
+            guild_id,
+            ticket_id,
+            &payload_v1.nonce,
+            &payload_v1.ciphertext,
+        )
+        .expect("should decrypt legacy v1 record with versioned keyring");
+    assert_eq!(decrypted_v1, "Legacy v1 content");
+
+    // Unknown key id fails closed
+    let unknown_key_res = crypto.decrypt(
+        "v999",
+        guild_id,
+        ticket_id,
+        &payload_v1.nonce,
+        &payload_v1.ciphertext,
+    );
+    assert!(unknown_key_res.is_err(), "Unknown key ID must fail closed");
 }

@@ -45,6 +45,9 @@ fn test_config() -> Config {
             .collect(),
         offline_mode: false,
         discord_api_base_url: "https://discord.com/api/v10".to_string(),
+        transcript_encryption_key: None,
+        transcript_active_key_id: "v1".to_string(),
+        transcript_keyring: None,
     }
 }
 

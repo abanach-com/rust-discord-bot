@@ -53,6 +53,22 @@ impl AppState {
             config.lua_max_per_guild,
             config.lua_command_timeout_ms,
         );
+        let transcript_crypto = if let Some(ref keyring_spec) = config.transcript_keyring {
+            Some(Arc::new(
+                crate::tickets::TranscriptCrypto::from_keyring_spec(
+                    &config.transcript_active_key_id,
+                    keyring_spec,
+                )?,
+            ))
+        } else if let Some(ref key_hex) = config.transcript_encryption_key {
+            Some(Arc::new(crate::tickets::TranscriptCrypto::from_hex_key(
+                &config.transcript_active_key_id,
+                key_hex,
+            )?))
+        } else {
+            None
+        };
+
         let (storage, scheduler, tickets, moderation_cases, sessions) = if let Some(url) =
             config.database_url.as_deref()
         {
@@ -67,7 +83,7 @@ impl AppState {
             (
                 Storage::postgres(pool.clone()),
                 SchedulerStore::postgres(pool.clone()),
-                TicketStore::postgres(pool.clone()),
+                TicketStore::postgres_with_crypto(pool.clone(), transcript_crypto),
                 ModerationCaseStore::postgres(pool.clone()),
                 SessionStore::postgres(pool),
             )

@@ -643,6 +643,13 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Implemented transactional compensation in `src/discord/tickets.rs` across both `TicketOperation::Reopen` and `close_ticket`: tracks all applied permission overwrites and channel modifications, immediately rolling back changes (`set_member_read_only` / `restore_member_access` and channel name/category restore) if any intermediate Discord API call fails, or if the database mutation fails or returns `InvalidState`.
   - Added `reconcile_ticket_channel(ctx, state, guild_id, channel_id)` helper guaranteeing convergence between authoritative DB ticket status and Discord channel write permissions.
   - Added migration `0036_ticket_channel_transitions.sql` defining `ticket_channel_transitions` for durable tracking of channel state transitions.
+- **Ticket Transcript Encryption at Rest (AEAD AES-256-GCM) with Key Rotation (#254)**:
+  - Implemented application-layer encryption for archived ticket transcripts at rest in PostgreSQL (`ticket_transcripts`) using authenticated encryption (AES-256-GCM via `aes-gcm = "=0.10.3"`).
+  - Designed per-write 96-bit random nonce generation using CSPRNG (`OsRng`) and authenticated additional data (AAD: `transcript:v1:guild={guild_id}:ticket={ticket_id}`) preventing cross-guild and cross-ticket ciphertext tampering or swap attacks.
+  - Implemented versioned keyring support (`TranscriptCrypto`) with `TRANSCRIPT_ACTIVE_KEY_ID`, `TRANSCRIPT_ENCRYPTION_KEY`, and `TRANSCRIPT_KEYRING` allowing seamless zero-downtime key rotation while retaining read access for historical transcripts.
+  - Enforced fail-closed security: missing active key prevents plaintext fallback, refusing to persist unencrypted records. Debug representation redacts raw key bytes to avoid secret leakage in telemetry, audit trails, and logs.
+  - Added migration `0037_encrypted_ticket_transcripts.sql` introducing `ciphertext BYTEA`, `nonce BYTEA`, `key_id TEXT`, `crypto_version SMALLINT`, updating check constraints (`char_length(content) > 0 OR content IS NULL`) and payload integrity constraints.
+  - Provided controlled batch-limited backfill mechanism (`PostgresTicketStore::backfill_encrypt_transcripts`) for migration of pre-existing unencrypted rows.
 
 ## Delivery order
 

@@ -1,9 +1,11 @@
+pub mod crypto;
 mod memory;
 mod model;
 mod postgres;
 
 use anyhow::Result;
 
+pub use crypto::{EncryptedTranscriptPayload, TRANSCRIPT_CRYPTO_VERSION, TranscriptCrypto};
 pub use memory::MemoryTicketStore;
 pub use model::{
     NewTicketReservation, NewTicketTranscript, ParticipantMutationOutcome, ReserveTicketOutcome,
@@ -38,6 +40,14 @@ impl TicketStore {
     #[must_use]
     pub fn postgres(pool: sqlx::PgPool) -> Self {
         Self::Postgres(PostgresTicketStore::new(pool))
+    }
+
+    #[must_use]
+    pub fn postgres_with_crypto(
+        pool: sqlx::PgPool,
+        crypto: Option<std::sync::Arc<TranscriptCrypto>>,
+    ) -> Self {
+        Self::Postgres(PostgresTicketStore::with_crypto(pool, crypto))
     }
 
     pub async fn reserve_ticket(
@@ -226,6 +236,28 @@ impl TicketStore {
         match self {
             Self::Memory(store) => Ok(store.store_transcript(transcript)),
             Self::Postgres(store) => Ok(store.store_transcript(transcript).await?),
+        }
+    }
+
+    pub async fn get_transcript(
+        &self,
+        guild_id: &str,
+        transcript_id: &str,
+    ) -> Result<Option<TicketTranscript>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_transcript(guild_id, transcript_id)),
+            Self::Postgres(store) => store.get_transcript(guild_id, transcript_id).await,
+        }
+    }
+
+    pub async fn get_latest_transcript(
+        &self,
+        guild_id: &str,
+        ticket_id: &str,
+    ) -> Result<Option<TicketTranscript>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_latest_transcript(guild_id, ticket_id)),
+            Self::Postgres(store) => store.get_latest_transcript(guild_id, ticket_id).await,
         }
     }
 

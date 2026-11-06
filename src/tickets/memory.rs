@@ -463,6 +463,27 @@ impl MemoryTicketStore {
         transcript
     }
 
+    pub fn get_transcript(&self, guild_id: &str, transcript_id: &str) -> Option<TicketTranscript> {
+        self.lock()
+            .transcripts
+            .iter()
+            .find(|t| t.guild_id == guild_id && t.id == transcript_id)
+            .cloned()
+    }
+
+    pub fn get_latest_transcript(
+        &self,
+        guild_id: &str,
+        ticket_id: &str,
+    ) -> Option<TicketTranscript> {
+        self.lock()
+            .transcripts
+            .iter()
+            .filter(|t| t.guild_id == guild_id && t.ticket_id == ticket_id)
+            .max_by_key(|t| t.created_at)
+            .cloned()
+    }
+
     pub fn prune_transcripts(&self, cutoff: chrono::DateTime<chrono::Utc>, limit: usize) -> u64 {
         let mut state = self.lock();
         let limit = limit.clamp(1, 5000);

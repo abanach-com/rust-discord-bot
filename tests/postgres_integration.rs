@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use chrono::{Duration, Utc};
 use rusty_discord_bot::{
     moderation_cases::{CaseKind, CaseSeverity, CreateCase, ModerationCaseStore},
@@ -7,8 +9,8 @@ use rusty_discord_bot::{
     session::{DashboardGuild, DashboardUser, PostgresSessionStore},
     storage::{PostgresStore, UpdateModuleSettingsParams},
     tickets::{
-        NewTicketReservation, PostgresTicketStore, ReserveTicketOutcome, STATUS_OPEN,
-        TicketMutationOutcome,
+        NewTicketReservation, NewTicketTranscript, PostgresTicketStore, ReserveTicketOutcome,
+        STATUS_OPEN, TicketMutationOutcome, TranscriptCrypto,
     },
 };
 use serde_json::json;
@@ -272,6 +274,155 @@ async fn test_postgres_integration_suite() {
         }
         other => panic!("expected Updated outcome, got {:?}", other),
     }
+
+    // 4b. Test Tickets Transcript Encryption in PostgreSQL (#254)
+    let transcript_content = "Operator: Support session initiated.\nUser: Need assistance.";
+    let new_transcript = NewTicketTranscript {
+        ticket_id: reservation_record.id.clone(),
+        guild_id: guild_id.clone(),
+        channel_id: "channel_999".to_string(),
+        generated_by_user_id: "ticket_creator_1".to_string(),
+        message_count: 2,
+        content: transcript_content.to_string(),
+    };
+
+    // Storing without crypto must fail closed (no plaintext in DB)
+    let fail_closed_res = tickets.store_transcript(new_transcript.clone()).await;
+    assert!(
+        fail_closed_res.is_err(),
+        "store_transcript without encryption keys configured must fail closed"
+    );
+
+    // Now configure crypto on PostgresTicketStore
+    let key_hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let crypto = Arc::new(TranscriptCrypto::from_hex_key("v1", key_hex).unwrap());
+    let mut encrypted_tickets = tickets.clone();
+    encrypted_tickets.set_crypto(Some(crypto.clone()));
+
+    let stored = encrypted_tickets
+        .store_transcript(new_transcript)
+        .await
+        .expect("storing encrypted transcript should succeed");
+    assert_eq!(stored.content, transcript_content);
+
+    // Verify directly in DB that content is NULL at rest and ciphertext is stored
+    #[derive(sqlx::FromRow)]
+    struct RawTranscriptRow {
+        content: Option<String>,
+        ciphertext: Option<Vec<u8>>,
+        nonce: Option<Vec<u8>>,
+        key_id: Option<String>,
+        crypto_version: Option<i16>,
+    }
+    let raw_row = sqlx::query_as::<_, RawTranscriptRow>(
+        "SELECT content, ciphertext, nonce, key_id, crypto_version FROM ticket_transcripts WHERE id = $1::uuid",
+    )
+    .bind(&stored.id)
+    .fetch_one(tickets.pool())
+    .await
+    .expect("fetch raw transcript from DB");
+
+    assert!(
+        raw_row.content.is_none(),
+        "content column must be NULL at rest in DB"
+    );
+    assert!(raw_row.ciphertext.is_some(), "ciphertext must be populated");
+    assert_eq!(
+        raw_row.nonce.map(|n| n.len()),
+        Some(12),
+        "nonce must be 12 bytes"
+    );
+    assert_eq!(raw_row.key_id.as_deref(), Some("v1"));
+    assert_eq!(raw_row.crypto_version, Some(1));
+
+    // Fetch and decrypt
+    let fetched = encrypted_tickets
+        .get_transcript(&guild_id, &stored.id)
+        .await
+        .expect("get_transcript should succeed")
+        .expect("transcript should exist");
+    assert_eq!(fetched.content, transcript_content);
+
+    // Tenant isolation: fetching with another guild fails to find or decrypt
+    let foreign_fetch = encrypted_tickets
+        .get_transcript("wrong_guild_snowflake", &stored.id)
+        .await
+        .expect("query should succeed");
+    assert!(
+        foreign_fetch.is_none(),
+        "Foreign guild must not see ticket transcript"
+    );
+
+    // Latest transcript retrieval
+    let latest = encrypted_tickets
+        .get_latest_transcript(&guild_id, &reservation_record.id)
+        .await
+        .expect("get_latest_transcript should succeed")
+        .expect("latest transcript should exist");
+    assert_eq!(latest.id, stored.id);
+    assert_eq!(latest.content, transcript_content);
+
+    // Test legacy unencrypted row read and backfill migration
+    let legacy_id = Uuid::new_v4().to_string();
+    let legacy_content = "Legacy unencrypted ticket message";
+    sqlx::query(
+        r#"
+        INSERT INTO ticket_transcripts (
+            id, ticket_id, guild_id, channel_id, generated_by_user_id, message_count, content, ciphertext, nonce, key_id, crypto_version
+        )
+        VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, NULL, NULL, NULL, 1)
+        "#,
+    )
+    .bind(&legacy_id)
+    .bind(&reservation_record.id)
+    .bind(&guild_id)
+    .bind("channel_999")
+    .bind("ticket_creator_1")
+    .bind(1)
+    .bind(legacy_content)
+    .execute(tickets.pool())
+    .await
+    .expect("insert legacy unencrypted transcript");
+
+    // Reading legacy row works during migration window
+    let legacy_fetched = encrypted_tickets
+        .get_transcript(&guild_id, &legacy_id)
+        .await
+        .expect("fetch legacy transcript")
+        .expect("legacy transcript should exist");
+    assert_eq!(legacy_fetched.content, legacy_content);
+
+    // Run backfill
+    let backfilled_count = encrypted_tickets
+        .backfill_encrypt_transcripts(100)
+        .await
+        .expect("backfill transcripts");
+    assert!(backfilled_count >= 1);
+
+    // Verify legacy row is now encrypted in DB
+    let backfilled_row = sqlx::query_as::<_, RawTranscriptRow>(
+        "SELECT content, ciphertext, nonce, key_id, crypto_version FROM ticket_transcripts WHERE id = $1::uuid",
+    )
+    .bind(&legacy_id)
+    .fetch_one(tickets.pool())
+    .await
+    .expect("fetch backfilled raw transcript");
+    assert!(
+        backfilled_row.content.is_none(),
+        "backfilled row content must be NULL at rest"
+    );
+    assert!(
+        backfilled_row.ciphertext.is_some(),
+        "backfilled row ciphertext must be populated"
+    );
+
+    // Decrypting backfilled row works
+    let backfilled_decrypted = encrypted_tickets
+        .get_transcript(&guild_id, &legacy_id)
+        .await
+        .expect("fetch decrypted backfilled transcript")
+        .expect("backfilled transcript should exist");
+    assert_eq!(backfilled_decrypted.content, legacy_content);
 
     // 5. Test Sessions Store in PostgreSQL
     let sessions = PostgresSessionStore::connect(&database_url)

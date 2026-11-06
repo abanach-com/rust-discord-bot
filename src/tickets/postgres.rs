@@ -1,8 +1,11 @@
+use std::sync::Arc;
+
 use chrono::Utc;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
 use uuid::Uuid;
 
+use super::crypto::TranscriptCrypto;
 use super::model::{
     NewTicketReservation, NewTicketTranscript, ParticipantMutationOutcome, ReserveTicketOutcome,
     STATUS_CLAIMED, STATUS_CLOSED, STATUS_OPEN, STATUS_PROVISIONING, TicketEvent, TicketMutation,
@@ -12,12 +15,32 @@ use super::model::{
 #[derive(Clone)]
 pub struct PostgresTicketStore {
     pool: PgPool,
+    crypto: Option<Arc<TranscriptCrypto>>,
 }
 
 impl PostgresTicketStore {
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self { pool, crypto: None }
+    }
+
+    #[must_use]
+    pub fn with_crypto(pool: PgPool, crypto: Option<Arc<TranscriptCrypto>>) -> Self {
+        Self { pool, crypto }
+    }
+
+    pub fn set_crypto(&mut self, crypto: Option<Arc<TranscriptCrypto>>) {
+        self.crypto = crypto;
+    }
+
+    #[must_use]
+    pub fn crypto(&self) -> Option<&Arc<TranscriptCrypto>> {
+        self.crypto.as_ref()
+    }
+
+    #[must_use]
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
     }
 
     pub async fn connect(database_url: &str) -> anyhow::Result<Self> {
@@ -26,7 +49,7 @@ impl PostgresTicketStore {
             .connect(database_url)
             .await?;
         crate::storage::run_safe_migrations(&pool).await?;
-        Ok(Self { pool })
+        Ok(Self { pool, crypto: None })
     }
 
     pub async fn reserve_ticket(
@@ -620,13 +643,37 @@ impl PostgresTicketStore {
         &self,
         transcript: NewTicketTranscript,
     ) -> anyhow::Result<TicketTranscript> {
+        let Some(ref crypto) = self.crypto else {
+            anyhow::bail!(
+                "transcript encryption key is missing or not configured; cannot store transcript in plaintext (fail-closed)"
+            );
+        };
+
+        let encrypted = crypto.encrypt(
+            &transcript.guild_id,
+            &transcript.ticket_id,
+            &transcript.content,
+        )?;
+
         let mut transaction = self.pool.begin().await?;
         let Some(ticket) = fetch_ticket_for_update(&mut transaction, &transcript.ticket_id).await?
         else {
             anyhow::bail!("ticket no longer exists while storing its transcript");
         };
         let transcript_id = Uuid::new_v4().to_string();
-        let stored = sqlx::query_as::<_, TicketTranscript>(
+
+        #[derive(sqlx::FromRow)]
+        struct InsertedTranscriptRow {
+            id: String,
+            ticket_id: String,
+            guild_id: String,
+            channel_id: String,
+            generated_by_user_id: String,
+            message_count: i32,
+            created_at: chrono::DateTime<chrono::Utc>,
+        }
+
+        let stored = sqlx::query_as::<_, InsertedTranscriptRow>(
             r#"
             INSERT INTO ticket_transcripts (
                 id,
@@ -635,9 +682,13 @@ impl PostgresTicketStore {
                 channel_id,
                 generated_by_user_id,
                 message_count,
-                content
+                content,
+                ciphertext,
+                nonce,
+                key_id,
+                crypto_version
             )
-            VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7)
+            VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, NULL, $7, $8, $9, $10)
             RETURNING
                 id::text AS id,
                 ticket_id::text AS ticket_id,
@@ -645,7 +696,6 @@ impl PostgresTicketStore {
                 channel_id,
                 generated_by_user_id,
                 message_count,
-                content,
                 created_at
             "#,
         )
@@ -655,9 +705,13 @@ impl PostgresTicketStore {
         .bind(&transcript.channel_id)
         .bind(&transcript.generated_by_user_id)
         .bind(transcript.message_count)
-        .bind(&transcript.content)
+        .bind(&encrypted.ciphertext)
+        .bind(&encrypted.nonce)
+        .bind(&encrypted.key_id)
+        .bind(encrypted.crypto_version)
         .fetch_one(&mut *transaction)
         .await?;
+
         insert_event(
             &mut transaction,
             &ticket,
@@ -666,11 +720,250 @@ impl PostgresTicketStore {
             json!({
                 "transcript_id": stored.id,
                 "message_count": stored.message_count,
+                "key_id": encrypted.key_id,
             }),
         )
         .await?;
         transaction.commit().await?;
-        Ok(stored)
+
+        Ok(TicketTranscript {
+            id: stored.id,
+            ticket_id: stored.ticket_id,
+            guild_id: stored.guild_id,
+            channel_id: stored.channel_id,
+            generated_by_user_id: stored.generated_by_user_id,
+            message_count: stored.message_count,
+            content: transcript.content,
+            created_at: stored.created_at,
+        })
+    }
+
+    fn resolve_transcript_content(
+        &self,
+        guild_id: &str,
+        ticket_id: &str,
+        legacy_content: Option<String>,
+        ciphertext: Option<Vec<u8>>,
+        nonce: Option<Vec<u8>>,
+        key_id: Option<String>,
+    ) -> anyhow::Result<String> {
+        if let Some(ciphertext) = ciphertext {
+            let Some(nonce) = nonce else {
+                anyhow::bail!("encrypted transcript record is missing nonce");
+            };
+            let Some(key_id) = key_id else {
+                anyhow::bail!("encrypted transcript record is missing key_id");
+            };
+            let Some(ref crypto) = self.crypto else {
+                anyhow::bail!(
+                    "cannot decrypt transcript: no transcript encryption keyring configured on store"
+                );
+            };
+            crypto.decrypt(&key_id, guild_id, ticket_id, &nonce, &ciphertext)
+        } else if let Some(content) = legacy_content {
+            Ok(content)
+        } else {
+            anyhow::bail!("corrupted transcript record: neither ciphertext nor content present");
+        }
+    }
+
+    pub async fn get_transcript(
+        &self,
+        guild_id: &str,
+        transcript_id: &str,
+    ) -> anyhow::Result<Option<TicketTranscript>> {
+        #[derive(sqlx::FromRow)]
+        struct TranscriptQueryRow {
+            id: String,
+            ticket_id: String,
+            guild_id: String,
+            channel_id: String,
+            generated_by_user_id: String,
+            message_count: i32,
+            content: Option<String>,
+            ciphertext: Option<Vec<u8>>,
+            nonce: Option<Vec<u8>>,
+            key_id: Option<String>,
+            created_at: chrono::DateTime<chrono::Utc>,
+        }
+
+        let row = sqlx::query_as::<_, TranscriptQueryRow>(
+            r#"
+            SELECT
+                id::text AS id,
+                ticket_id::text AS ticket_id,
+                guild_id,
+                channel_id,
+                generated_by_user_id,
+                message_count,
+                content,
+                ciphertext,
+                nonce,
+                key_id,
+                created_at
+            FROM ticket_transcripts
+            WHERE guild_id = $1 AND id = $2::uuid
+            "#,
+        )
+        .bind(guild_id)
+        .bind(transcript_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let content = self.resolve_transcript_content(
+            &row.guild_id,
+            &row.ticket_id,
+            row.content,
+            row.ciphertext,
+            row.nonce,
+            row.key_id,
+        )?;
+
+        Ok(Some(TicketTranscript {
+            id: row.id,
+            ticket_id: row.ticket_id,
+            guild_id: row.guild_id,
+            channel_id: row.channel_id,
+            generated_by_user_id: row.generated_by_user_id,
+            message_count: row.message_count,
+            content,
+            created_at: row.created_at,
+        }))
+    }
+
+    pub async fn get_latest_transcript(
+        &self,
+        guild_id: &str,
+        ticket_id: &str,
+    ) -> anyhow::Result<Option<TicketTranscript>> {
+        #[derive(sqlx::FromRow)]
+        struct TranscriptQueryRow {
+            id: String,
+            ticket_id: String,
+            guild_id: String,
+            channel_id: String,
+            generated_by_user_id: String,
+            message_count: i32,
+            content: Option<String>,
+            ciphertext: Option<Vec<u8>>,
+            nonce: Option<Vec<u8>>,
+            key_id: Option<String>,
+            created_at: chrono::DateTime<chrono::Utc>,
+        }
+
+        let row = sqlx::query_as::<_, TranscriptQueryRow>(
+            r#"
+            SELECT
+                id::text AS id,
+                ticket_id::text AS ticket_id,
+                guild_id,
+                channel_id,
+                generated_by_user_id,
+                message_count,
+                content,
+                ciphertext,
+                nonce,
+                key_id,
+                created_at
+            FROM ticket_transcripts
+            WHERE guild_id = $1 AND ticket_id = $2::uuid
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(guild_id)
+        .bind(ticket_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let content = self.resolve_transcript_content(
+            &row.guild_id,
+            &row.ticket_id,
+            row.content,
+            row.ciphertext,
+            row.nonce,
+            row.key_id,
+        )?;
+
+        Ok(Some(TicketTranscript {
+            id: row.id,
+            ticket_id: row.ticket_id,
+            guild_id: row.guild_id,
+            channel_id: row.channel_id,
+            generated_by_user_id: row.generated_by_user_id,
+            message_count: row.message_count,
+            content,
+            created_at: row.created_at,
+        }))
+    }
+
+    pub async fn backfill_encrypt_transcripts(&self, batch_size: usize) -> anyhow::Result<usize> {
+        let Some(ref crypto) = self.crypto else {
+            anyhow::bail!("cannot backfill transcripts: no transcript encryption keys configured");
+        };
+
+        #[derive(sqlx::FromRow)]
+        struct LegacyRow {
+            id: String,
+            ticket_id: String,
+            guild_id: String,
+            content: String,
+        }
+
+        let limit = i64::try_from(batch_size.clamp(1, 1000)).unwrap_or(1000);
+        let mut tx = self.pool.begin().await?;
+
+        let rows = sqlx::query_as::<_, LegacyRow>(
+            r#"
+            SELECT
+                id::text AS id,
+                ticket_id::text AS ticket_id,
+                guild_id,
+                content
+            FROM ticket_transcripts
+            WHERE ciphertext IS NULL AND content IS NOT NULL
+            ORDER BY created_at ASC
+            LIMIT $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        let count = rows.len();
+        for row in rows {
+            let encrypted = crypto.encrypt(&row.guild_id, &row.ticket_id, &row.content)?;
+            sqlx::query(
+                r#"
+                UPDATE ticket_transcripts
+                SET ciphertext = $1,
+                    nonce = $2,
+                    key_id = $3,
+                    crypto_version = $4,
+                    content = NULL
+                WHERE id = $5::uuid
+                "#,
+            )
+            .bind(&encrypted.ciphertext)
+            .bind(&encrypted.nonce)
+            .bind(&encrypted.key_id)
+            .bind(encrypted.crypto_version)
+            .bind(&row.id)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(count)
     }
 
     pub async fn prune_transcripts(

@@ -18,6 +18,7 @@ name = "rusty-discord-bot"
 path = "src/main.rs"
 
 [dependencies]
+aes-gcm = "=0.10.3"
 anyhow = "=1.0.104"
 axum = { version = "=0.8.9", features = ["http1", "json", "query", "tokio", "ws"] }
 chrono = { version = "=0.4.45", features = ["serde"] }

@@ -26,6 +26,9 @@ pub struct Config {
     pub trusted_proxies: HashSet<std::net::IpAddr>,
     pub offline_mode: bool,
     pub discord_api_base_url: String,
+    pub transcript_encryption_key: Option<String>,
+    pub transcript_active_key_id: String,
+    pub transcript_keyring: Option<String>,
 }
 
 impl Config {
@@ -95,6 +98,10 @@ impl Config {
             offline_mode: env_bool("OFFLINE_MODE", false)?,
             discord_api_base_url: env::var("DISCORD_API_BASE_URL")
                 .unwrap_or_else(|_| "https://discord.com/api/v10".to_owned()),
+            transcript_encryption_key: optional_non_empty("TRANSCRIPT_ENCRYPTION_KEY"),
+            transcript_active_key_id: env::var("TRANSCRIPT_ACTIVE_KEY_ID")
+                .unwrap_or_else(|_| "v1".to_owned()),
+            transcript_keyring: optional_non_empty("TRANSCRIPT_KEYRING"),
         };
 
         config.validate()?;
@@ -233,6 +240,9 @@ mod tests {
             trusted_proxies: HashSet::new(),
             offline_mode: false,
             discord_api_base_url: "https://discord.com/api/v10".to_string(),
+            transcript_encryption_key: None,
+            transcript_active_key_id: "v1".to_string(),
+            transcript_keyring: None,
         };
 
         // Real token with offline_mode false -> NOT offline mode
