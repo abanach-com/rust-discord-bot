@@ -4919,9 +4919,11 @@ pub async fn apply_recruitment_track(
             .await
             .map_err(|e| ApiError::internal(e.to_string()))?;
 
-        if let Some(last_rejected) = rejected_apps.first()
-            && let Some(decided_at) = last_rejected.decided_at
-            && Utc::now() - decided_at < chrono::Duration::days(track.config.cooldown_days as i64)
+        let latest_rejection_at = rejected_apps.iter().filter_map(|app| app.decided_at).max();
+
+        if let Some(decided_at) = latest_rejection_at
+            && Utc::now() - decided_at
+                < chrono::Duration::days(i64::from(track.config.cooldown_days))
         {
             return Err(ApiError::bad_request(format!(
                 "You must wait {} days after a rejected application before reapplying",

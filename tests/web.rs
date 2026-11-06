@@ -4573,3 +4573,229 @@ async fn test_scheduled_events_rsvp_point_lookup_and_tenant_isolation() {
         .expect("non existent join");
     assert_eq!(non_existent_join.status(), reqwest::StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn test_recruitment_cooldown_checks_latest_rejection_decision() {
+    let (state, _) = test_web_state().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let guild_id = "777000000000000001";
+    let candidate_user = "777000000000000002";
+    let candidate_session_id = "session_candidate_cd_test";
+    let csrf = "test_csrf_token_recruitment_cd";
+
+    state
+        .app
+        .sessions
+        .save_session(
+            candidate_session_id,
+            DashboardUser {
+                id: candidate_user.to_owned(),
+                username: "CandidateCD".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_owned(),
+                name: "Guild 777".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_owned(),
+            }],
+            csrf.to_owned(),
+            Utc::now() + Duration::hours(24),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let cand_cookie = format!("rusty_discord_bot_session={candidate_session_id}");
+
+    // Create track with cooldown_days = 3 and max_active_per_user = 2
+    let track = rusty_discord_bot::recruitment::RecruitmentTrack {
+        id: uuid::Uuid::new_v4(),
+        guild_id: guild_id.to_string(),
+        slug: "cooldown-track".to_string(),
+        name: "Cooldown Track".to_string(),
+        target_role_id: Some("999000111222333444".to_string()),
+        enabled: true,
+        config: sqlx::types::Json(rusty_discord_bot::recruitment::RecruitmentTrackConfig {
+            max_active_per_user: 2,
+            cooldown_days: 3,
+            final_approvals: 1,
+            auto_role_on_accept: false,
+            questions: vec![rusty_discord_bot::recruitment::RecruitmentQuestion {
+                id: "q1".to_string(),
+                label: "Question 1".to_string(),
+                field_type: "text".to_string(),
+                required: true,
+                options: vec![],
+            }],
+            ..Default::default()
+        }),
+        version: 1,
+        created_at: Utc::now() - Duration::days(50),
+        updated_at: Utc::now() - Duration::days(50),
+    };
+    state
+        .app
+        .storage
+        .upsert_recruitment_track(track.clone())
+        .await
+        .unwrap();
+
+    // Application A: submitted 40 days ago, rejected 1 day ago (decided_at = Utc::now() - 1 day -> inside cooldown)
+    let app_a = rusty_discord_bot::recruitment::RecruitmentApplication {
+        id: uuid::Uuid::new_v4(),
+        guild_id: guild_id.to_string(),
+        track_id: track.id,
+        applicant_user_id: candidate_user.to_string(),
+        track_version: 1,
+        status: "rejected".to_string(),
+        submitted_answers: sqlx::types::Json(vec![
+            rusty_discord_bot::recruitment::SubmittedAnswer {
+                question_id: "q1".to_string(),
+                answer: "Answer A".to_string(),
+            },
+        ]),
+        current_stage: "screening".to_string(),
+        version: 2,
+        submitted_at: Utc::now() - Duration::days(40),
+        updated_at: Utc::now() - Duration::days(1),
+        decided_at: Some(Utc::now() - Duration::days(1)),
+        decision_reason: Some("Not enough experience".to_string()),
+        decided_by: Some("admin_1".to_string()),
+    };
+    state
+        .app
+        .storage
+        .create_recruitment_application(app_a.clone())
+        .await
+        .unwrap();
+
+    // Application B: submitted 30 days ago, rejected 10 days ago (decided_at = Utc::now() - 10 days -> outside cooldown)
+    let app_b = rusty_discord_bot::recruitment::RecruitmentApplication {
+        id: uuid::Uuid::new_v4(),
+        guild_id: guild_id.to_string(),
+        track_id: track.id,
+        applicant_user_id: candidate_user.to_string(),
+        track_version: 1,
+        status: "rejected".to_string(),
+        submitted_answers: sqlx::types::Json(vec![
+            rusty_discord_bot::recruitment::SubmittedAnswer {
+                question_id: "q1".to_string(),
+                answer: "Answer B".to_string(),
+            },
+        ]),
+        current_stage: "screening".to_string(),
+        version: 2,
+        submitted_at: Utc::now() - Duration::days(30),
+        updated_at: Utc::now() - Duration::days(10),
+        decided_at: Some(Utc::now() - Duration::days(10)),
+        decision_reason: Some("Earlier rejection".to_string()),
+        decided_by: Some("admin_1".to_string()),
+    };
+    state
+        .app
+        .storage
+        .create_recruitment_application(app_b.clone())
+        .await
+        .unwrap();
+
+    // Application C: rejected with decided_at = None (must be handled gracefully without crashing or ignoring A)
+    let app_c = rusty_discord_bot::recruitment::RecruitmentApplication {
+        id: uuid::Uuid::new_v4(),
+        guild_id: guild_id.to_string(),
+        track_id: track.id,
+        applicant_user_id: candidate_user.to_string(),
+        track_version: 1,
+        status: "rejected".to_string(),
+        submitted_answers: sqlx::types::Json(vec![
+            rusty_discord_bot::recruitment::SubmittedAnswer {
+                question_id: "q1".to_string(),
+                answer: "Answer C".to_string(),
+            },
+        ]),
+        current_stage: "screening".to_string(),
+        version: 1,
+        submitted_at: Utc::now() - Duration::days(60),
+        updated_at: Utc::now() - Duration::days(60),
+        decided_at: None,
+        decision_reason: None,
+        decided_by: None,
+    };
+    state
+        .app
+        .storage
+        .create_recruitment_application(app_c)
+        .await
+        .unwrap();
+
+    // 1. Candidate tries to apply now -> must fail with HTTP 400 Bad Request because Application A was rejected 1 day ago (< 3 days cooldown)
+    let apply_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/recruitment/tracks/cooldown-track/apply"
+        ))
+        .header(COOKIE, &cand_cookie)
+        .header("x-csrf-token", csrf)
+        .json(&serde_json::json!({
+            "answers": [
+                { "question_id": "q1", "answer": "Trying again too soon" }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(apply_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let err_json: serde_json::Value = apply_resp.json().await.unwrap();
+    assert!(
+        err_json["error"]
+            .as_str()
+            .unwrap()
+            .contains("You must wait 3 days after a rejected application before reapplying")
+    );
+
+    // 2. Now simulate that Application A's rejection happened 5 days ago (> 3 days cooldown)
+    let mut app_a_older = app_a;
+    app_a_older.decided_at = Some(Utc::now() - Duration::days(5));
+    app_a_older.updated_at = Utc::now() - Duration::days(5);
+    state
+        .app
+        .storage
+        .create_recruitment_application(app_a_older)
+        .await
+        .unwrap();
+
+    // Now all rejection decisions are older than 3 days -> Apply must succeed with 200 OK
+    let apply_ok_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/recruitment/tracks/cooldown-track/apply"
+        ))
+        .header(COOKIE, &cand_cookie)
+        .header("x-csrf-token", csrf)
+        .json(&serde_json::json!({
+            "answers": [
+                { "question_id": "q1", "answer": "Applying after cooldown expired" }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(apply_ok_resp.status(), reqwest::StatusCode::OK);
+}

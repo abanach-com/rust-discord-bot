@@ -484,7 +484,7 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Implemented transactional batch persistence (`batch_upsert_companion_mappings`) for PostgreSQL using `pg_advisory_xact_lock` and single-transaction rollbacks on constraint violations, and thread-safe atomic batch persistence for `MemoryStore` under synchronization locks.
   - Segmented `POST /companion-channels/batch` into a three-phase pipeline: (1) upfront preflight validation of all mappings, channel snowflakes, voice!=text invariants, tenant isolation, and live Discord channel types; (2) atomic storage batch upsert guaranteeing all-or-nothing execution without partial persistence; (3) post-commit Discord permission revocation and audit logging.
 
-## 17. Lua Legacy Loader Hardening, Community RBAC & SSE Lifecycle (Issues #212, #213, #214, #216, #217, #220, #222, #223)
+## 17. Lua Legacy Loader Hardening, Community RBAC & SSE Lifecycle (Issues #212, #213, #214, #216, #217, #220, #222, #223, #225)
 
 - **Lua Legacy Discovery Hardening & Symlink Containment (#212)**:
   - In legacy discovery mode (when `install.xml` is absent), symlinks are strictly forbidden via `DirEntry::file_type().is_symlink()`, preventing unintended loading of arbitrary external code or configuration leakage.
@@ -501,6 +501,9 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Enforced cross-guild tenant isolation and live membership fail-closed behavior verified against live-mode Discord API mock (200 OK -> allowed; 404 Unknown Member & 503 Upstream Error -> 403 Forbidden).
   - Pre-cache session invariant hardening (#222): `ensure_guild_member_access` validates `session.guilds` presence upfront before reading `permissions_cache`, preventing positive manager cache entries from prior sessions from bypassing membership revocation when a user presents a session lacking the guild.
   - RSVP point lookup & zero-scan performance (#223): replaced full guild table scan and chronological sorting (`list_scheduled_events`) in `join_event_roster` and `leave_event_roster` with direct primary-key point lookup by UUID (`get_scheduled_event(event_id)`) and tenant boundary filtering (`ev.guild_id == guild_id`), eliminating $O(N \log N)$ sorting and large multi-column allocations.
+- **Staff Recruitment Re-Application Cooldown Precision (#225)**:
+  - In `apply_recruitment_track`, cooldown evaluation calculates `latest_rejection_at` as `rejected_apps.iter().filter_map(|app| app.decided_at).max()` instead of blindly inspecting `rejected_apps.first()`.
+  - Guarantees that cooldown enforcement is authoritatively anchored to the most recent decision date (`MAX(decided_at)`), independent of the application submission order (`submitted_at DESC`) or interleaved review outcomes across concurrent application tracks.
 - **SSE Guild Realtime Events Stream Re-Authentication & Disconnect Cleanup (#214, #216)**:
   - `GET /api/guilds/{guild_id}/events` utilizes an asynchronous dispatch pipeline with dual periodic re-authentication (15-second interval) and pre-event verification against storage and `permissions_cache`.
   - Stale, expired, or deleted user sessions, as well as revoked guild management permissions (`can_manage: false`), immediately terminate active Server-Sent Events (SSE) connections, preventing administrative and moderation event leakage to unauthorized parties. Handled broadcast channel lagging with explicit client resync events.
