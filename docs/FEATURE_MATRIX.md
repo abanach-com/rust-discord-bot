@@ -586,6 +586,25 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Embedded host policy check in `src/discord/executor.rs:execute_action` prior to action execution and side effects, evaluating `PolicyResource::Action { action_key }` against authoritative guild policy rules.
   - Rejects actions denied by guild policy with descriptive error without executing Discord HTTP calls, ensuring parity between `/policy/explain` dry-runs and actual Lua runtime execution.
 
+## 20. Lua Concurrency, Recruitment Performance, AI Knowledge Hardening & Logout Reliability (Issues #242, #243, #244, #245)
+
+- **Lua Engine Semaphore Eviction & Limiter Integrity (#242)**:
+  - Extended semaphore eviction predicate in `src/lua/engine.rs:get_guild_semaphore`: retained semaphores if `Arc::strong_count(sem) > 1 || sem.available_permits() < self.max_per_guild`.
+  - Prevents active guild semaphores from being evicted when semaphore cache exceeds threshold (>500 entries) during burst traffic across multiple guilds.
+  - Eliminates duplicate semaphore instantiation that bypassed `max_per_guild` parallelism limits and caused admission control starvation.
+- **Staff Recruitment N+1 Elimination, Batch Fetching & Fail-Safe Error Handling (#243)**:
+  - Eliminated N+1 query pattern (1+2N queries) in `features::list_recruitment_applications`: implemented batch loaders `list_recruitment_reviews_for_applications` and `get_role_fulfillments_for_applications` across `MemoryStore`, `PostgresStore` and `Storage` using SQL `WHERE application_id = ANY($1)`.
+  - Added query pagination with `limit` (default 20, clamp 1..=100) and `offset` in `ListRecruitmentApplicationsQuery`, sorting deterministically by `submitted_at DESC, id DESC`.
+  - Replaced silent error masking (`unwrap_or_default()`) with strict error propagation via `map_err(ApiError::internal)?` on review and fulfillment fetch failures.
+- **AI Knowledge Search LIKE Sanitization, Database ACL Filtering & Pagination (#244)**:
+  - Hardened `search_ai_documents` against wildcard amplification: escaped special LIKE characters (`\`, `%`, `_`) to ensure literal search matching across both `MemoryStore` and `PostgresStore`.
+  - Relocated channel ACL filtering directly into PostgreSQL query (`CASE WHEN jsonb_typeof(channel_acl) = 'array' THEN jsonb_array_length(channel_acl) = 0 OR channel_acl ?| $3::text[] ELSE FALSE END`), preventing full document text payloads from loading into memory before authorization checks.
+  - Added strict fail-closed handling for malformed or non-array `channel_acl` values across both storage engines.
+  - Enforced result limit clamping (1..=50, default 20) with deterministic ordering (`ORDER BY created_at DESC, id DESC`), empty query immediate zero-result fast path, and query length validation (max 500 characters) in `POST /api/guilds/{guild_id}/ai/search`.
+- **Fail-Closed Session Deletion on Logout (#245)**:
+  - Updated `logout` in `src/web/auth.rs`: propagated session deletion failure with `map_err(ApiError::internal)?` instead of ignoring it (`let _ = ...`).
+  - Updated `web/static/app.js`: UI only transitions to logged-out state (`showLogin()`) upon successful HTTP response; on failure, displays an error notification and preserves state, preventing client-side false sense of logout when server session remains active.
+
 ## Delivery order
 
 ### Phase 0 — foundation

@@ -1035,6 +1035,7 @@ pub struct SearchKnowledgeDocRequest {
     pub query: String,
     #[serde(default)]
     pub user_channels: Vec<String>,
+    pub limit: Option<usize>,
 }
 
 pub async fn search_ai_knowledge(
@@ -1045,6 +1046,15 @@ pub async fn search_ai_knowledge(
 ) -> Result<Json<Vec<AiKnowledgeDocument>>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
     ensure_guild_access(&state, &session, &guild_id).await?;
+
+    if payload.query.trim().is_empty() {
+        return Ok(Json(Vec::new()));
+    }
+    if payload.query.len() > 500 {
+        return Err(ApiError::bad_request(
+            "Search query exceeds maximum allowed length of 500 characters",
+        ));
+    }
 
     let is_admin_or_owner = session
         .guilds
@@ -1060,10 +1070,12 @@ pub async fn search_ai_knowledge(
         Vec::new()
     };
 
+    let limit = payload.limit.unwrap_or(20).clamp(1, 50);
+
     let results = state
         .app
         .storage
-        .search_ai_documents(&guild_id, &effective_channels, &payload.query)
+        .search_ai_documents(&guild_id, &effective_channels, &payload.query, limit)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 

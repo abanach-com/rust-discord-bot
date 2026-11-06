@@ -6653,40 +6653,46 @@ impl PostgresStore {
 
     pub async fn search_ai_documents(
         &self,
-
         guild_id: &str,
-
         user_channels: &[String],
-
         query: &str,
+        limit: usize,
     ) -> anyhow::Result<Vec<AiKnowledgeDocument>> {
+        if query.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let escaped = query
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("%{escaped}%");
+        let limit = limit.clamp(1, 50) as i64;
+
         let rows = sqlx::query_as::<_, AiKnowledgeDocument>(
-
-            "SELECT * FROM ai_knowledge_documents WHERE guild_id = $1 AND (title ILIKE $2 OR content ILIKE $2)"
-
+            r#"
+            SELECT id, guild_id, channel_acl, title, content, source_type, created_at
+            FROM ai_knowledge_documents
+            WHERE guild_id = $1
+              AND (title ILIKE $2 ESCAPE '\' OR content ILIKE $2 ESCAPE '\')
+              AND CASE
+                    WHEN jsonb_typeof(channel_acl) = 'array'
+                      THEN jsonb_array_length(channel_acl) = 0
+                           OR channel_acl ?| $3::text[]
+                    ELSE FALSE
+                  END
+            ORDER BY created_at DESC, id DESC
+            LIMIT $4
+            "#,
         )
-
         .bind(guild_id)
-
-        .bind(format!("%{query}%"))
-
+        .bind(pattern)
+        .bind(user_channels)
+        .bind(limit)
         .fetch_all(&self.pool)
-
         .await?;
 
-        // Filter by channel ACL
-
-        let filtered = rows
-            .into_iter()
-            .filter(|e| {
-                let acls: Vec<String> =
-                    serde_json::from_value(e.channel_acl.clone()).unwrap_or_default();
-
-                acls.is_empty() || acls.iter().any(|c| user_channels.contains(c))
-            })
-            .collect();
-
-        Ok(filtered)
+        Ok(rows)
     }
 
     pub async fn upsert_mcp_tool_authorization(
@@ -8130,6 +8136,60 @@ impl PostgresStore {
         .await?;
 
         Ok(rows)
+    }
+
+    pub async fn list_recruitment_reviews_for_applications(
+        &self,
+        application_ids: &[Uuid],
+    ) -> anyhow::Result<std::collections::HashMap<Uuid, Vec<RecruitmentReview>>> {
+        if application_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+
+        let rows = sqlx::query_as::<_, RecruitmentReview>(
+            r#"
+            SELECT id, application_id, guild_id, reviewer_user_id, recommendation, note, created_at, updated_at
+            FROM recruitment_reviews
+            WHERE application_id = ANY($1)
+            ORDER BY created_at ASC
+            "#,
+        )
+        .bind(application_ids)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut map: std::collections::HashMap<Uuid, Vec<RecruitmentReview>> =
+            std::collections::HashMap::new();
+        for row in rows {
+            map.entry(row.application_id).or_default().push(row);
+        }
+        Ok(map)
+    }
+
+    pub async fn get_role_fulfillments_for_applications(
+        &self,
+        application_ids: &[Uuid],
+    ) -> anyhow::Result<std::collections::HashMap<Uuid, RecruitmentRoleFulfillment>> {
+        if application_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+
+        let rows = sqlx::query_as::<_, RecruitmentRoleFulfillment>(
+            r#"
+            SELECT application_id, guild_id, user_id, role_id, status, attempts, last_error, next_attempt_at, created_at, updated_at
+            FROM recruitment_role_fulfillment
+            WHERE application_id = ANY($1)
+            "#,
+        )
+        .bind(application_ids)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            map.insert(row.application_id, row);
+        }
+        Ok(map)
     }
 
     pub async fn upsert_recruitment_review(

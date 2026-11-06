@@ -2969,7 +2969,7 @@ pub async fn query_ai_assistant(
     let mut docs = state
         .app
         .storage
-        .search_ai_documents(&guild_id, &[], clean_query)
+        .search_ai_documents(&guild_id, &[], clean_query, 5)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
@@ -2980,7 +2980,7 @@ pub async fn query_ai_assistant(
                 let found = state
                     .app
                     .storage
-                    .search_ai_documents(&guild_id, &[], word)
+                    .search_ai_documents(&guild_id, &[], word, 5)
                     .await
                     .map_err(|e| ApiError::internal(e.to_string()))?;
                 if !found.is_empty() {
@@ -4621,6 +4621,8 @@ pub struct ListRecruitmentApplicationsQuery {
     pub track_id: Option<Uuid>,
     pub status: Option<String>,
     pub mine: Option<bool>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
 }
 
 pub async fn list_recruitment_tracks(
@@ -4773,29 +4775,52 @@ pub async fn list_recruitment_applications(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
+    let limit = query.limit.unwrap_or(50).clamp(1, 100);
+    let offset = query.offset.unwrap_or(0);
+    let total = apps.len();
+    let apps_page: Vec<_> = apps.into_iter().skip(offset).take(limit).collect();
+
     if is_mine && !is_staff {
-        let views: Vec<_> = apps.into_iter().map(|a| a.to_candidate_view()).collect();
-        return Ok(Json(json!({ "applications": views })));
+        let views: Vec<_> = apps_page
+            .into_iter()
+            .map(|a| a.to_candidate_view())
+            .collect();
+        return Ok(Json(json!({
+            "applications": views,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        })));
     }
 
-    let mut staff_views = Vec::with_capacity(apps.len());
-    for app in apps {
-        let reviews = state
-            .app
-            .storage
-            .list_recruitment_reviews(app.id)
-            .await
-            .unwrap_or_default();
-        let fulfillment = state
-            .app
-            .storage
-            .get_role_fulfillment(app.id)
-            .await
-            .unwrap_or_default();
+    let app_ids: Vec<Uuid> = apps_page.iter().map(|a| a.id).collect();
+    let mut reviews_by_app = state
+        .app
+        .storage
+        .list_recruitment_reviews_for_applications(&app_ids)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to load reviews: {e}")))?;
+
+    let mut fulfillments_by_app = state
+        .app
+        .storage
+        .get_role_fulfillments_for_applications(&app_ids)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to load role fulfillment: {e}")))?;
+
+    let mut staff_views = Vec::with_capacity(apps_page.len());
+    for app in apps_page {
+        let reviews = reviews_by_app.remove(&app.id).unwrap_or_default();
+        let fulfillment = fulfillments_by_app.remove(&app.id);
         staff_views.push(app.to_staff_view(reviews, fulfillment));
     }
 
-    Ok(Json(json!({ "applications": staff_views })))
+    Ok(Json(json!({
+        "applications": staff_views,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    })))
 }
 
 pub async fn get_recruitment_application(

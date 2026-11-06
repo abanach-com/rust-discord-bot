@@ -317,7 +317,15 @@ pub async fn logout(
 ) -> Result<Response, ApiError> {
     let (session_id, session) = authenticate(&state, &headers).await?;
     verify_csrf(&headers, &session)?;
-    let _ = state.app.sessions.delete_session(&session_id).await;
+    state
+        .app
+        .sessions
+        .delete_session(&session_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(?error, "dashboard session revocation failed");
+            ApiError::internal("dashboard session revocation failed")
+        })?;
     state
         .permissions_cache
         .retain(|(user_id, _), _| user_id != &session.user.id);

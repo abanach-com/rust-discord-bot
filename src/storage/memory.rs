@@ -4454,26 +4454,40 @@ impl MemoryStore {
 
     pub fn search_ai_documents(
         &self,
-
         guild_id: &str,
-
         user_channels: &[String],
-
         query: &str,
+        limit: usize,
     ) -> Vec<AiKnowledgeDocument> {
-        let q = query.to_lowercase();
+        if query.trim().is_empty() {
+            return Vec::new();
+        }
 
-        self.ai_documents
+        let q = query.to_lowercase();
+        let limit = limit.clamp(1, 50);
+
+        let mut matched: Vec<AiKnowledgeDocument> = self
+            .ai_documents
             .iter()
             .filter(|e| {
                 if e.guild_id != guild_id {
                     return false;
                 }
 
-                let acls: Vec<String> =
-                    serde_json::from_value(e.channel_acl.clone()).unwrap_or_default();
-
-                let has_access = acls.is_empty() || acls.iter().any(|c| user_channels.contains(c));
+                let has_access = match &e.channel_acl {
+                    serde_json::Value::Array(arr) => {
+                        if arr.is_empty() {
+                            true
+                        } else {
+                            arr.iter().any(|val| {
+                                val.as_str()
+                                    .map(|ch| user_channels.contains(&ch.to_string()))
+                                    .unwrap_or(false)
+                            })
+                        }
+                    }
+                    _ => false, // Non-array is invalid ACL -> fail-closed (deny)
+                };
 
                 if !has_access {
                     return false;
@@ -4482,7 +4496,16 @@ impl MemoryStore {
                 e.title.to_lowercase().contains(&q) || e.content.to_lowercase().contains(&q)
             })
             .map(|e| e.value().clone())
-            .collect()
+            .collect();
+
+        matched.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+
+        matched.truncate(limit);
+        matched
     }
 
     pub fn upsert_mcp_tool_authorization(
@@ -4886,6 +4909,45 @@ impl MemoryStore {
             .collect();
         list.sort_by_key(|a| a.created_at);
         Ok(list)
+    }
+
+    pub fn list_recruitment_reviews_for_applications(
+        &self,
+        application_ids: &[Uuid],
+    ) -> anyhow::Result<HashMap<Uuid, Vec<crate::recruitment::RecruitmentReview>>> {
+        if application_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let target_set: HashSet<Uuid> = application_ids.iter().copied().collect();
+        let mut map: HashMap<Uuid, Vec<crate::recruitment::RecruitmentReview>> = HashMap::new();
+        for entry in self.recruitment_reviews.iter() {
+            if target_set.contains(&entry.application_id) {
+                map.entry(entry.application_id)
+                    .or_default()
+                    .push(entry.value().clone());
+            }
+        }
+        for reviews in map.values_mut() {
+            reviews.sort_by_key(|a| a.created_at);
+        }
+        Ok(map)
+    }
+
+    pub fn get_role_fulfillments_for_applications(
+        &self,
+        application_ids: &[Uuid],
+    ) -> anyhow::Result<HashMap<Uuid, crate::recruitment::RecruitmentRoleFulfillment>> {
+        if application_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let target_set: HashSet<Uuid> = application_ids.iter().copied().collect();
+        let mut map = HashMap::new();
+        for entry in self.recruitment_role_fulfillments.iter() {
+            if target_set.contains(&entry.application_id) {
+                map.insert(entry.application_id, entry.value().clone());
+            }
+        }
+        Ok(map)
     }
 
     pub fn upsert_recruitment_review(

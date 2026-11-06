@@ -6400,3 +6400,282 @@ async fn test_revalidate_guild_permission_owner_fallback_fails_closed_on_transfe
     let err = access.unwrap_err();
     assert_eq!(err.status, axum::http::StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn test_logout_revocation_success_and_lifecycle() {
+    let (state, perms_cache) = test_web_state().await;
+    let user_id = "user_logout_test";
+    let guild_id = "guild_logout_test";
+
+    let session = Session {
+        user: DashboardUser {
+            id: user_id.to_owned(),
+            username: "logout_user".to_owned(),
+            global_name: Some("Logout User".to_owned()),
+            avatar: None,
+        },
+        guilds: vec![DashboardGuild {
+            id: guild_id.to_owned(),
+            name: "Logout Guild".to_owned(),
+            icon: None,
+            owner: true,
+            permissions: "8".to_owned(),
+        }],
+        csrf_token: "csrf_token_logout_123".to_owned(),
+        expires_at: Utc::now() + Duration::days(1),
+        access_token: None,
+    };
+
+    let session_id = "test_session_id_logout_123";
+    state
+        .app
+        .sessions
+        .save_session(
+            session_id,
+            session.user,
+            session.guilds,
+            session.csrf_token.clone(),
+            session.expires_at,
+            session.access_token,
+        )
+        .await
+        .expect("save session");
+
+    perms_cache.insert(
+        (user_id.to_owned(), guild_id.to_owned()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind web listener");
+    let web_addr = web_listener.local_addr().expect("web addr");
+    let router = build_router(state.clone());
+    tokio::spawn(async move {
+        axum::serve(web_listener, router).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{web_addr}");
+
+    // 1. Without CSRF -> 403 Forbidden
+    let no_csrf = client
+        .post(format!("{base_url}/api/logout"))
+        .header(
+            reqwest::header::COOKIE,
+            format!("rusty_discord_bot_session={session_id}"),
+        )
+        .send()
+        .await
+        .expect("send no csrf");
+    assert_eq!(no_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 2. Successful logout -> 204 No Content, Set-Cookie expired
+    let valid_logout = client
+        .post(format!("{base_url}/api/logout"))
+        .header(
+            reqwest::header::COOKIE,
+            format!("rusty_discord_bot_session={session_id}"),
+        )
+        .header("X-CSRF-Token", "csrf_token_logout_123")
+        .send()
+        .await
+        .expect("send valid logout");
+    assert_eq!(valid_logout.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let cookie_header = valid_logout
+        .headers()
+        .get(reqwest::header::SET_COOKIE)
+        .expect("set-cookie header")
+        .to_str()
+        .unwrap();
+    assert!(cookie_header.contains("Max-Age=0") || cookie_header.contains("expires="));
+
+    // 3. Session must be deleted from storage
+    let stored_session = state
+        .app
+        .sessions
+        .get_session(session_id)
+        .await
+        .expect("get session");
+    assert!(stored_session.is_none());
+
+    // 4. Permissions cache for this user must be cleared
+    assert!(
+        perms_cache
+            .get(&(user_id.to_owned(), guild_id.to_owned()))
+            .is_none()
+    );
+
+    // 5. Subsequent request with old session -> 401 Unauthorized
+    let unauthed = client
+        .get(format!("{base_url}/api/session"))
+        .header(
+            reqwest::header::COOKIE,
+            format!("rusty_discord_bot_session={session_id}"),
+        )
+        .send()
+        .await
+        .expect("send unauthed");
+    assert_eq!(unauthed.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_recruitment_applications_pagination_and_batch_fetching() {
+    let (state, perms_cache) = test_web_state().await;
+    let admin_id = "111222333444555666";
+    let guild_id = "999888777666555444";
+
+    let session = Session {
+        user: DashboardUser {
+            id: admin_id.to_owned(),
+            username: "admin_user".to_owned(),
+            global_name: Some("Admin".to_owned()),
+            avatar: None,
+        },
+        guilds: vec![DashboardGuild {
+            id: guild_id.to_owned(),
+            name: "Recruitment Guild".to_owned(),
+            icon: None,
+            owner: true,
+            permissions: "8".to_owned(),
+        }],
+        csrf_token: "csrf_token_recruitment".to_owned(),
+        expires_at: Utc::now() + Duration::days(1),
+        access_token: None,
+    };
+
+    let session_id = "session_recruitment_pagination";
+    state
+        .app
+        .sessions
+        .save_session(
+            session_id,
+            session.user,
+            session.guilds,
+            session.csrf_token.clone(),
+            session.expires_at,
+            session.access_token,
+        )
+        .await
+        .expect("save session");
+
+    perms_cache.insert(
+        (admin_id.to_owned(), guild_id.to_owned()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    // Create 5 applications directly in storage
+    let track_id = uuid::Uuid::new_v4();
+    for i in 0..5 {
+        let app = rusty_discord_bot::recruitment::RecruitmentApplication {
+            id: uuid::Uuid::new_v4(),
+            guild_id: guild_id.to_owned(),
+            track_id,
+            applicant_user_id: format!("10000000000000000{i}"),
+            track_version: 1,
+            status: "submitted".to_owned(),
+            submitted_answers: sqlx::types::Json(Vec::new()),
+            current_stage: "submitted".to_owned(),
+            version: 1,
+            submitted_at: Utc::now() - chrono::Duration::minutes(i as i64),
+            updated_at: Utc::now() - chrono::Duration::minutes(i as i64),
+            decided_at: None,
+            decision_reason: None,
+            decided_by: None,
+        };
+        state
+            .app
+            .storage
+            .create_recruitment_application(app)
+            .await
+            .expect("create app");
+    }
+
+    let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind web listener");
+    let web_addr = web_listener.local_addr().expect("web addr");
+    let router = build_router(state.clone());
+    tokio::spawn(async move {
+        axum::serve(web_listener, router).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{web_addr}");
+
+    // Page 1: limit=2, offset=0
+    let page1_res = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/recruitment/applications?limit=2&offset=0"
+        ))
+        .header(
+            reqwest::header::COOKIE,
+            format!("rusty_discord_bot_session={session_id}"),
+        )
+        .send()
+        .await
+        .expect("get page 1");
+    assert_eq!(page1_res.status(), reqwest::StatusCode::OK);
+    let page1_json: serde_json::Value = page1_res.json().await.unwrap();
+    assert_eq!(page1_json["total"], 5);
+    assert_eq!(page1_json["limit"], 2);
+    assert_eq!(page1_json["offset"], 0);
+    let page1_apps = page1_json["applications"].as_array().unwrap();
+    assert_eq!(page1_apps.len(), 2);
+
+    // Page 2: limit=2, offset=2
+    let page2_res = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/recruitment/applications?limit=2&offset=2"
+        ))
+        .header(
+            reqwest::header::COOKIE,
+            format!("rusty_discord_bot_session={session_id}"),
+        )
+        .send()
+        .await
+        .expect("get page 2");
+    assert_eq!(page2_res.status(), reqwest::StatusCode::OK);
+    let page2_json: serde_json::Value = page2_res.json().await.unwrap();
+    let page2_apps = page2_json["applications"].as_array().unwrap();
+    assert_eq!(page2_apps.len(), 2);
+
+    // Page 3: limit=2, offset=4
+    let page3_res = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/recruitment/applications?limit=2&offset=4"
+        ))
+        .header(
+            reqwest::header::COOKIE,
+            format!("rusty_discord_bot_session={session_id}"),
+        )
+        .send()
+        .await
+        .expect("get page 3");
+    assert_eq!(page3_res.status(), reqwest::StatusCode::OK);
+    let page3_json: serde_json::Value = page3_res.json().await.unwrap();
+    let page3_apps = page3_json["applications"].as_array().unwrap();
+    assert_eq!(page3_apps.len(), 1);
+
+    // No overlap between page 1 and page 2
+    let id1 = page1_apps[0]["id"].as_str().unwrap();
+    let id2 = page1_apps[1]["id"].as_str().unwrap();
+    let id3 = page2_apps[0]["id"].as_str().unwrap();
+    let id4 = page2_apps[1]["id"].as_str().unwrap();
+    let id5 = page3_apps[0]["id"].as_str().unwrap();
+
+    let all_ids = [id1, id2, id3, id4, id5];
+    let unique_ids: std::collections::HashSet<_> = all_ids.iter().collect();
+    assert_eq!(
+        unique_ids.len(),
+        5,
+        "All pages must yield distinct application IDs"
+    );
+}

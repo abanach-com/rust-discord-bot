@@ -2885,6 +2885,34 @@ impl Storage {
         }
     }
 
+    pub async fn list_recruitment_reviews_for_applications(
+        &self,
+        application_ids: &[Uuid],
+    ) -> anyhow::Result<std::collections::HashMap<Uuid, Vec<RecruitmentReview>>> {
+        match self {
+            Self::Memory(store) => store.list_recruitment_reviews_for_applications(application_ids),
+            Self::Postgres(store) => {
+                store
+                    .list_recruitment_reviews_for_applications(application_ids)
+                    .await
+            }
+        }
+    }
+
+    pub async fn get_role_fulfillments_for_applications(
+        &self,
+        application_ids: &[Uuid],
+    ) -> anyhow::Result<std::collections::HashMap<Uuid, RecruitmentRoleFulfillment>> {
+        match self {
+            Self::Memory(store) => store.get_role_fulfillments_for_applications(application_ids),
+            Self::Postgres(store) => {
+                store
+                    .get_role_fulfillments_for_applications(application_ids)
+                    .await
+            }
+        }
+    }
+
     pub async fn upsert_recruitment_review(
         &self,
         review: RecruitmentReview,
@@ -4668,19 +4696,18 @@ impl Storage {
 
     pub async fn search_ai_documents(
         &self,
-
         guild_id: &str,
-
         user_channels: &[String],
-
         query: &str,
+        limit: usize,
     ) -> anyhow::Result<Vec<AiKnowledgeDocument>> {
         match self {
-            Self::Memory(store) => Ok(store.search_ai_documents(guild_id, user_channels, query)),
-
+            Self::Memory(store) => {
+                Ok(store.search_ai_documents(guild_id, user_channels, query, limit))
+            }
             Self::Postgres(store) => {
                 store
-                    .search_ai_documents(guild_id, user_channels, query)
+                    .search_ai_documents(guild_id, user_channels, query, limit)
                     .await
             }
         }

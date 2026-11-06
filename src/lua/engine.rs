@@ -183,8 +183,9 @@ impl LuaEngine {
         }
 
         if self.guild_slots.len() > 500 {
-            self.guild_slots
-                .retain(|_, sem| sem.available_permits() < self.max_per_guild);
+            self.guild_slots.retain(|_, sem| {
+                Arc::strong_count(sem) > 1 || sem.available_permits() < self.max_per_guild
+            });
         }
 
         self.guild_slots

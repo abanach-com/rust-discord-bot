@@ -332,3 +332,39 @@ async fn test_lua_engine_cancellation_and_error_does_not_leak_permits() {
     assert_eq!(engine.active_executions(), 0);
     assert_eq!(engine.execution_slots().available_permits(), 2);
 }
+
+#[tokio::test]
+async fn test_lua_engine_eviction_preserves_active_strong_refs_and_max_per_guild() {
+    let scripts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts");
+    let engine = LuaEngine::load(scripts, limits())
+        .expect("scripts load")
+        .with_concurrency_limits(4, 1, 1000); // max_per_guild = 1
+
+    // 1. Acquire reference to target guild semaphore
+    let target_guild = "target_guild_123";
+    let old_sem = engine.get_guild_semaphore(target_guild);
+
+    // 2. Populate 501 filler guilds to trigger eviction threshold (> 500)
+    for i in 0..501 {
+        let _ = engine.get_guild_semaphore(&format!("filler_guild_{i}"));
+    }
+
+    // 3. Request target guild semaphore again
+    let new_sem = engine.get_guild_semaphore(target_guild);
+
+    // Because old_sem was held with strong_count > 1, eviction must NOT discard it
+    assert!(
+        std::sync::Arc::ptr_eq(&old_sem, &new_sem),
+        "Eviction must not create duplicate semaphore when strong references exist"
+    );
+
+    // 4. Concurrency limit of max_per_guild = 1 must strictly hold
+    let permit1 = old_sem.try_acquire_owned();
+    assert!(permit1.is_ok(), "First permit acquired");
+
+    let permit2 = new_sem.try_acquire_owned();
+    assert!(
+        permit2.is_err(),
+        "Second permit must be denied under max_per_guild=1"
+    );
+}

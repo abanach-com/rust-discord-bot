@@ -1477,8 +1477,9 @@ ui.guildSelect?.addEventListener("change", async (event) => {
 ui.logoutButton?.addEventListener("click", async () => {
   try {
     await request("/api/logout", { method: "POST" });
-  } finally {
     showLogin();
+  } catch {
+    showToast("Nie udało się unieważnić sesji. Spróbuj ponownie.", "error");
   }
 });
 

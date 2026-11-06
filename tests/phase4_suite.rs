@@ -614,7 +614,7 @@ async fn test_phase4_integrations_and_extensibility_suite() {
     let no_access = state
         .app
         .storage
-        .search_ai_documents(guild_id, &["general_chat".to_string()], "Secret")
+        .search_ai_documents(guild_id, &["general_chat".to_string()], "Secret", 20)
         .await
         .unwrap();
     assert_eq!(
@@ -627,7 +627,12 @@ async fn test_phase4_integrations_and_extensibility_suite() {
     let with_access = state
         .app
         .storage
-        .search_ai_documents(guild_id, &["private_staff_channel".to_string()], "Secret")
+        .search_ai_documents(
+            guild_id,
+            &["private_staff_channel".to_string()],
+            "Secret",
+            20,
+        )
         .await
         .unwrap();
     assert_eq!(with_access.len(), 1, "Authorized member must find document");
@@ -760,4 +765,375 @@ async fn test_webhook_dedupe_parallel_replay_single_winner() {
         deduplicated_count, 15,
         "All other 15 webhook requests must be deduplicated"
     );
+}
+
+#[tokio::test]
+async fn test_ai_knowledge_search_security_and_performance_issue_244() {
+    let (state, _) = test_web_state().await;
+    let guild_id = "111000000000000099";
+    let other_guild_id = "111000000000000098";
+    let user_id = "user_ai_search_test";
+    let session_id = "test_ai_search_session_token";
+    let csrf_token = "csrf_ai_search_token";
+
+    // 1. Literal search semantics for %, _, \, empty/whitespace
+    let doc_percent = AiKnowledgeDocument {
+        id: Uuid::new_v4(),
+        guild_id: guild_id.to_string(),
+        channel_acl: serde_json::json!([]),
+        title: "100% discount deal".to_string(),
+        content: "Get everything free".to_string(),
+        source_type: "faq".to_string(),
+        created_at: Utc::now() - Duration::minutes(10),
+    };
+    let doc_regular = AiKnowledgeDocument {
+        id: Uuid::new_v4(),
+        guild_id: guild_id.to_string(),
+        channel_acl: serde_json::json!([]),
+        title: "Regular discount deal".to_string(),
+        content: "Save ten dollars".to_string(),
+        source_type: "faq".to_string(),
+        created_at: Utc::now() - Duration::minutes(9),
+    };
+    let doc_underscore = AiKnowledgeDocument {
+        id: Uuid::new_v4(),
+        guild_id: guild_id.to_string(),
+        channel_acl: serde_json::json!([]),
+        title: "snake_case_identifier doc".to_string(),
+        content: "Config file path".to_string(),
+        source_type: "manual".to_string(),
+        created_at: Utc::now() - Duration::minutes(8),
+    };
+    let doc_backslash = AiKnowledgeDocument {
+        id: Uuid::new_v4(),
+        guild_id: guild_id.to_string(),
+        channel_acl: serde_json::json!([]),
+        title: "Windows\\System32 path doc".to_string(),
+        content: "System folder".to_string(),
+        source_type: "manual".to_string(),
+        created_at: Utc::now() - Duration::minutes(7),
+    };
+
+    state
+        .app
+        .storage
+        .create_ai_document(doc_percent)
+        .await
+        .unwrap();
+    state
+        .app
+        .storage
+        .create_ai_document(doc_regular)
+        .await
+        .unwrap();
+    state
+        .app
+        .storage
+        .create_ai_document(doc_underscore)
+        .await
+        .unwrap();
+    state
+        .app
+        .storage
+        .create_ai_document(doc_backslash)
+        .await
+        .unwrap();
+
+    // Query "%" must ONLY match literal "%", not all documents
+    let res_pct = state
+        .app
+        .storage
+        .search_ai_documents(guild_id, &[], "%", 20)
+        .await
+        .unwrap();
+    assert_eq!(res_pct.len(), 1, "query '%' must match only literal '%'");
+    assert_eq!(res_pct[0].title, "100% discount deal");
+
+    // Query "_" must ONLY match literal "_", not any character
+    let res_und = state
+        .app
+        .storage
+        .search_ai_documents(guild_id, &[], "_", 20)
+        .await
+        .unwrap();
+    assert_eq!(res_und.len(), 1, "query '_' must match only literal '_'");
+    assert_eq!(res_und[0].title, "snake_case_identifier doc");
+
+    // Query "\" must match literal "\"
+    let res_bs = state
+        .app
+        .storage
+        .search_ai_documents(guild_id, &[], "\\", 20)
+        .await
+        .unwrap();
+    assert_eq!(res_bs.len(), 1, "query '\\' must match literal '\\'");
+    assert_eq!(res_bs[0].title, "Windows\\System32 path doc");
+
+    // Empty or whitespace query must return 0 documents immediately
+    let res_empty = state
+        .app
+        .storage
+        .search_ai_documents(guild_id, &[], "", 20)
+        .await
+        .unwrap();
+    assert_eq!(res_empty.len(), 0, "empty query must return empty result");
+
+    let res_ws = state
+        .app
+        .storage
+        .search_ai_documents(guild_id, &[], "   ", 20)
+        .await
+        .unwrap();
+    assert_eq!(res_ws.len(), 0, "whitespace query must return empty result");
+
+    // 2. Limit and ordering on large collection (>50 documents)
+    for i in 0..60 {
+        let paged_doc = AiKnowledgeDocument {
+            id: Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            channel_acl: serde_json::json!([]),
+            title: format!("Paged Article #{i:02}"),
+            content: "Unique content for pagination check".to_string(),
+            source_type: "paged".to_string(),
+            created_at: Utc::now() + Duration::seconds(i),
+        };
+        state
+            .app
+            .storage
+            .create_ai_document(paged_doc)
+            .await
+            .unwrap();
+    }
+
+    // Default/specified limit: requesting 20 returns exactly 20, newest first
+    let res_paged_20 = state
+        .app
+        .storage
+        .search_ai_documents(guild_id, &[], "Paged Article", 20)
+        .await
+        .unwrap();
+    assert_eq!(res_paged_20.len(), 20, "Must return at most 20 documents");
+    assert_eq!(
+        res_paged_20[0].title, "Paged Article #59",
+        "Must be ordered created_at DESC"
+    );
+    assert_eq!(res_paged_20[19].title, "Paged Article #40");
+
+    // Clamping: requesting 0 clamps to 1
+    let res_clamp_0 = state
+        .app
+        .storage
+        .search_ai_documents(guild_id, &[], "Paged Article", 0)
+        .await
+        .unwrap();
+    assert_eq!(res_clamp_0.len(), 1, "limit 0 must clamp to 1");
+
+    // Clamping: requesting 100 clamps to 50
+    let res_clamp_100 = state
+        .app
+        .storage
+        .search_ai_documents(guild_id, &[], "Paged Article", 100)
+        .await
+        .unwrap();
+    assert_eq!(res_clamp_100.len(), 50, "limit 100 must clamp to 50");
+
+    // 3. 100+ private documents and 1 public document
+    for i in 0..105 {
+        let priv_doc = AiKnowledgeDocument {
+            id: Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            channel_acl: serde_json::json!(["vip_exec_room"]),
+            title: format!("VIP Confidential Doc #{i:03}"),
+            content: "Super confidential executive strategy search_target".to_string(),
+            source_type: "confidential".to_string(),
+            created_at: Utc::now() + Duration::seconds(100 + i),
+        };
+        state
+            .app
+            .storage
+            .create_ai_document(priv_doc)
+            .await
+            .unwrap();
+    }
+    let pub_doc = AiKnowledgeDocument {
+        id: Uuid::new_v4(),
+        guild_id: guild_id.to_string(),
+        channel_acl: serde_json::json!([]),
+        title: "Publicly Visible Strategy Doc".to_string(),
+        content: "General information strategy search_target".to_string(),
+        source_type: "public".to_string(),
+        created_at: Utc::now() + Duration::seconds(999),
+    };
+    state.app.storage.create_ai_document(pub_doc).await.unwrap();
+
+    // Querying with non-matching channel permissions returns ONLY the public document
+    let res_restricted = state
+        .app
+        .storage
+        .search_ai_documents(
+            guild_id,
+            &["general_chat".to_string(), "random_chat".to_string()],
+            "search_target",
+            50,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res_restricted.len(),
+        1,
+        "User without VIP channel access must only see 1 public document"
+    );
+    assert_eq!(res_restricted[0].title, "Publicly Visible Strategy Doc");
+
+    // 4. Fail-closed on invalid JSON ACL
+    let malformed_doc = AiKnowledgeDocument {
+        id: Uuid::new_v4(),
+        guild_id: guild_id.to_string(),
+        channel_acl: serde_json::json!("not_an_array_string"),
+        title: "Corrupted ACL Doc".to_string(),
+        content: "Malformed ACL must deny access search_malformed".to_string(),
+        source_type: "corrupted".to_string(),
+        created_at: Utc::now(),
+    };
+    state
+        .app
+        .storage
+        .create_ai_document(malformed_doc)
+        .await
+        .unwrap();
+
+    let res_malformed = state
+        .app
+        .storage
+        .search_ai_documents(
+            guild_id,
+            &["general_chat".to_string()],
+            "search_malformed",
+            20,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res_malformed.len(),
+        0,
+        "Malformed non-array ACL must fail-closed (deny)"
+    );
+
+    // 5. Cross-guild tenant isolation
+    let other_guild_doc = AiKnowledgeDocument {
+        id: Uuid::new_v4(),
+        guild_id: other_guild_id.to_string(),
+        channel_acl: serde_json::json!([]),
+        title: "Other Guild Public Doc".to_string(),
+        content: "Should never leak to guild_id search_isolation_leak".to_string(),
+        source_type: "public".to_string(),
+        created_at: Utc::now(),
+    };
+    state
+        .app
+        .storage
+        .create_ai_document(other_guild_doc)
+        .await
+        .unwrap();
+
+    let res_isolated = state
+        .app
+        .storage
+        .search_ai_documents(guild_id, &[], "search_isolation_leak", 20)
+        .await
+        .unwrap();
+    assert_eq!(
+        res_isolated.len(),
+        0,
+        "Cross-guild leak must never occur in document search"
+    );
+
+    // 6. Web API test: POST /api/guilds/{guild_id}/ai/search
+    let user = DashboardUser {
+        id: user_id.to_owned(),
+        username: "AiSearchOperator".to_owned(),
+        global_name: None,
+        avatar: None,
+    };
+    let guilds = vec![DashboardGuild {
+        id: guild_id.to_owned(),
+        name: "AI Test Guild".to_owned(),
+        icon: None,
+        owner: true,
+        permissions: "8".to_owned(),
+    }];
+
+    state
+        .app
+        .sessions
+        .save_session(
+            session_id,
+            user,
+            guilds,
+            csrf_token.to_owned(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .expect("save session");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let session_cookie = format!("rusty_discord_bot_session={session_id}");
+
+    // Query > 500 characters returns 400 Bad Request
+    let long_query = "a".repeat(501);
+    let resp_too_long = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/ai/search"))
+        .header(COOKIE, &session_cookie)
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "query": long_query,
+        }))
+        .send()
+        .await
+        .expect("send too long query");
+    assert_eq!(resp_too_long.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Empty query returns 200 with []
+    let resp_empty = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/ai/search"))
+        .header(COOKIE, &session_cookie)
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "query": "",
+        }))
+        .send()
+        .await
+        .expect("send empty query");
+    assert_eq!(resp_empty.status(), reqwest::StatusCode::OK);
+    let empty_json: Vec<serde_json::Value> = resp_empty.json().await.expect("json");
+    assert_eq!(empty_json.len(), 0);
+
+    // Literal "%" query via API returns 1 document with limit
+    let resp_pct = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/ai/search"))
+        .header(COOKIE, &session_cookie)
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "query": "%",
+            "limit": 10
+        }))
+        .send()
+        .await
+        .expect("send % query");
+    assert_eq!(resp_pct.status(), reqwest::StatusCode::OK);
+    let pct_json: Vec<serde_json::Value> = resp_pct.json().await.expect("json");
+    assert_eq!(pct_json.len(), 1);
+    assert_eq!(pct_json[0]["title"], "100% discount deal");
 }
