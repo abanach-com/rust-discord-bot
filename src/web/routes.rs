@@ -189,19 +189,17 @@ pub async fn health_ready(
         }
         Err(e) => {
             is_ready = false;
-            checks.insert("storage".to_owned(), json!(format!("error: {e}")));
+            tracing::warn!(error = %e, "readiness storage ping failed");
+            checks.insert("storage".to_owned(), json!("unavailable"));
         }
     }
 
     let manifest_count = state.app.scripts.manifests().await.len();
     if manifest_count > 0 {
-        checks.insert(
-            "lua_engine".to_owned(),
-            json!(format!("ok ({manifest_count} modules)")),
-        );
+        checks.insert("lua_engine".to_owned(), json!("ok"));
     } else {
         is_ready = false;
-        checks.insert("lua_engine".to_owned(), json!("error: no modules loaded"));
+        checks.insert("lua_engine".to_owned(), json!("unavailable"));
     }
 
     if state.app.is_shutting_down.load(Ordering::SeqCst) {
@@ -232,16 +230,16 @@ pub async fn health_ready(
     }
 
     let transcript_status = if state.app.config.ticket_transcripts_disabled {
-        "disabled (transcripts disabled by administrator configuration)"
+        "disabled"
     } else if state.app.config.database_url.is_some() {
         if state.app.tickets.has_crypto() {
-            "ok (encrypted at rest with AEAD AES-256-GCM)"
+            "ok"
         } else {
             is_ready = false;
-            "unready (missing encryption keyring for PostgreSQL storage)"
+            "unready"
         }
     } else {
-        "ok (in-memory storage)"
+        "ok"
     };
     checks.insert("ticket_transcripts".to_owned(), json!(transcript_status));
 
@@ -260,8 +258,100 @@ pub async fn health_ready(
     }
 }
 
-pub async fn prometheus_metrics(State(state): State<WebState>) -> impl IntoResponse {
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+async fn is_metrics_authorized(
+    state: &WebState,
+    headers: &HeaderMap,
+    peer_addr: Option<std::net::SocketAddr>,
+) -> bool {
+    // 1. Bearer Token check
+    if let Some(ref expected_token) = state.app.config.metrics_token {
+        let is_valid = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|h| h.to_str().ok())
+            .and_then(|val| {
+                val.strip_prefix("Bearer ")
+                    .or_else(|| val.strip_prefix("bearer "))
+            })
+            .is_some_and(|provided| {
+                constant_time_eq(provided.trim().as_bytes(), expected_token.as_bytes())
+            });
+        if is_valid {
+            return true;
+        }
+    }
+
+    // 2. Active Session Cookie check
+    let has_valid_session = match super::auth::cookie_value(headers, super::auth::SESSION_COOKIE) {
+        Some(cookie) => matches!(state.app.sessions.get_session(&cookie).await, Ok(Some(_))),
+        None => false,
+    };
+    if has_valid_session {
+        return true;
+    }
+
+    // 3. Network Scraper Authorization (IP check)
+    if let Some(peer) = peer_addr {
+        let peer_ip = peer.ip();
+        if state.app.config.metrics_allowed_ips.contains(&peer_ip) {
+            return true;
+        }
+        // If no token is configured, allow local loopback scrapers
+        if state.app.config.metrics_token.is_none() && peer_ip.is_loopback() {
+            return true;
+        }
+    }
+
+    false
+}
+
+pub struct ClientSocketAddr(pub Option<std::net::SocketAddr>);
+
+impl<S> axum::extract::FromRequestParts<S> for ClientSocketAddr
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let addr = parts
+            .extensions
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|ci| ci.0)
+            .or_else(|| {
+                parts
+                    .extensions
+                    .get::<axum::extract::connect_info::MockConnectInfo<std::net::SocketAddr>>()
+                    .map(|m| m.0)
+            });
+        Ok(ClientSocketAddr(addr))
+    }
+}
+
+pub async fn prometheus_metrics(
+    State(state): State<WebState>,
+    ClientSocketAddr(peer_addr): ClientSocketAddr,
+    headers: HeaderMap,
+) -> Response {
     use axum::http::header::CONTENT_TYPE;
+
+    if !is_metrics_authorized(&state, &headers, peer_addr).await {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized\n").into_response();
+    }
+
     let active_sessions = state
         .app
         .sessions
@@ -277,6 +367,7 @@ pub async fn prometheus_metrics(State(state): State<WebState>) -> impl IntoRespo
         [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
         body,
     )
+        .into_response()
 }
 
 pub async fn list_modules(

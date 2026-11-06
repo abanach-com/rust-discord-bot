@@ -636,6 +636,8 @@ async fn moderation_api_strictly_validates_expected_version_and_guards_concurren
         transcript_active_key_id: "v1".to_string(),
         transcript_keyring: None,
         ticket_transcripts_disabled: false,
+        metrics_token: None,
+        metrics_allowed_ips: HashSet::new(),
     };
 
     let state = AppState::bootstrap(config)

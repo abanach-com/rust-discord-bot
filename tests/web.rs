@@ -46,6 +46,8 @@ fn test_config() -> Config {
         transcript_active_key_id: "v1".to_string(),
         transcript_keyring: None,
         ticket_transcripts_disabled: false,
+        metrics_token: None,
+        metrics_allowed_ips: std::collections::HashSet::new(),
     }
 }
 
@@ -7094,4 +7096,212 @@ async fn test_cleanup_dynamic_voice_csrf_and_atomic_isolation_issue_247() {
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn test_readiness_endpoint_sanitizes_internal_database_errors() {
+    let (state, _) = test_web_state().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+
+    // 1. Healthy state: storage ping passes -> 200 OK
+    let resp_ok = client
+        .get(format!("{base_url}/health/ready"))
+        .send()
+        .await
+        .expect("send ready check");
+    assert_eq!(resp_ok.status(), reqwest::StatusCode::OK);
+    let body_ok: serde_json::Value = resp_ok.json().await.unwrap();
+    assert_eq!(body_ok["status"], "ready");
+    assert_eq!(body_ok["checks"]["storage"], "ok");
+
+    // 2. Failure state: inject database failure
+    state.app.storage.inject_ping_failure(true);
+
+    let resp_fail = client
+        .get(format!("{base_url}/health/ready"))
+        .send()
+        .await
+        .expect("send ready check during failure");
+    assert_eq!(resp_fail.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let raw_text = resp_fail.text().await.unwrap();
+    let body_fail: serde_json::Value = serde_json::from_str(&raw_text).unwrap();
+
+    // Must report "unready" and "storage": "unavailable"
+    assert_eq!(body_fail["status"], "unready");
+    assert_eq!(body_fail["checks"]["storage"], "unavailable");
+
+    // Crucial security requirement: MUST NOT leak credentials, internal hostnames, or raw error string
+    assert!(
+        !raw_text.contains("postgres-prod.internal"),
+        "must not leak internal DB hostname"
+    );
+    assert!(!raw_text.contains("10.0.0.5"), "must not leak internal IP");
+    assert!(!raw_text.contains("5432"), "must not leak internal port");
+    assert!(
+        !raw_text.contains("rusty_prod"),
+        "must not leak database user"
+    );
+    assert!(
+        !raw_text.contains("password"),
+        "must not leak password or auth phrase"
+    );
+    assert!(
+        !raw_text.contains("error:"),
+        "must not leak raw error: prefix"
+    );
+    assert!(!raw_text.contains("SQLSTATE"), "must not leak SQLSTATE");
+
+    // 3. Recovery: storage ping returns to healthy -> 200 OK
+    state.app.storage.inject_ping_failure(false);
+    let resp_recovered = client
+        .get(format!("{base_url}/health/ready"))
+        .send()
+        .await
+        .expect("send recovered check");
+    assert_eq!(resp_recovered.status(), reqwest::StatusCode::OK);
+    let body_recovered: serde_json::Value = resp_recovered.json().await.unwrap();
+    assert_eq!(body_recovered["status"], "ready");
+    assert_eq!(body_recovered["checks"]["storage"], "ok");
+}
+
+#[tokio::test]
+async fn test_metrics_endpoint_bearer_token_session_cookie_and_ip_authorization() {
+    let mut config = test_config();
+    config.metrics_token = Some("super_secret_metrics_token_xyz987".to_string());
+    config.metrics_allowed_ips = ["192.0.2.1".parse().unwrap()].into_iter().collect();
+
+    let app = AppState::bootstrap(config)
+        .await
+        .expect("bootstrap app state");
+    let permissions_cache = Arc::new(DashMap::new());
+    let state = WebState {
+        app,
+        login_rate_limiter: Arc::new(LoginRateLimiter::new()),
+        permissions_cache,
+    };
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+
+    // 1. Healthcheck /health/ready remains accessible without any authentication (for Compose)
+    let ready_res = client
+        .get(format!("{base_url}/health/ready"))
+        .send()
+        .await
+        .expect("send ready check");
+    assert_eq!(ready_res.status(), reqwest::StatusCode::OK);
+
+    // 2. Anonymous GET /metrics without token or session -> 401 Unauthorized
+    let unauth_res = client
+        .get(format!("{base_url}/metrics"))
+        .send()
+        .await
+        .expect("send unauthenticated metrics check");
+    assert_eq!(unauth_res.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let unauth_body = unauth_res.text().await.unwrap();
+    assert!(!unauth_body.contains("rusty_discord_bot_active_sessions"));
+
+    // 3. Invalid Bearer token -> 401 Unauthorized
+    let wrong_token_res = client
+        .get(format!("{base_url}/metrics"))
+        .header("Authorization", "Bearer invalid_secret_123")
+        .send()
+        .await
+        .expect("send wrong token check");
+    assert_eq!(wrong_token_res.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // 4. Valid Bearer token -> 200 OK with Prometheus telemetry
+    let valid_token_res = client
+        .get(format!("{base_url}/metrics"))
+        .header("Authorization", "Bearer super_secret_metrics_token_xyz987")
+        .send()
+        .await
+        .expect("send valid bearer check");
+    assert_eq!(valid_token_res.status(), reqwest::StatusCode::OK);
+    let valid_body = valid_token_res.text().await.unwrap();
+    assert!(valid_body.contains("rusty_discord_bot_active_sessions"));
+    assert!(valid_body.contains("rusty_discord_bot_dashboard_requests_total"));
+
+    // 5. Valid Bearer token with lowercase prefix -> 200 OK
+    let lowercase_token_res = client
+        .get(format!("{base_url}/metrics"))
+        .header("Authorization", "bearer super_secret_metrics_token_xyz987")
+        .send()
+        .await
+        .expect("send valid lowercase bearer check");
+    assert_eq!(lowercase_token_res.status(), reqwest::StatusCode::OK);
+
+    // 6. Authenticated dashboard session cookie -> 200 OK
+    let session_id = "test_metrics_viewer_session_token";
+    let user = DashboardUser {
+        id: "777".to_owned(),
+        username: "metrics_operator".to_owned(),
+        global_name: None,
+        avatar: None,
+    };
+    state
+        .app
+        .sessions
+        .save_session(
+            session_id,
+            user,
+            vec![],
+            "csrf_metrics".to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .expect("save session");
+
+    let session_cookie = format!("rusty_discord_bot_session={session_id}");
+    let session_res = client
+        .get(format!("{base_url}/metrics"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .expect("send session check");
+    assert_eq!(session_res.status(), reqwest::StatusCode::OK);
+    let session_body = session_res.text().await.unwrap();
+    assert!(session_body.contains("rusty_discord_bot_active_sessions"));
+
+    // 7. Expired/invalid session cookie -> 401 Unauthorized
+    let bad_session_res = client
+        .get(format!("{base_url}/metrics"))
+        .header(COOKIE, "rusty_discord_bot_session=non_existent_session")
+        .send()
+        .await
+        .expect("send bad session check");
+    assert_eq!(bad_session_res.status(), reqwest::StatusCode::UNAUTHORIZED);
 }

@@ -30,6 +30,8 @@ pub struct Config {
     pub transcript_active_key_id: String,
     pub transcript_keyring: Option<String>,
     pub ticket_transcripts_disabled: bool,
+    pub metrics_token: Option<String>,
+    pub metrics_allowed_ips: HashSet<std::net::IpAddr>,
 }
 
 impl fmt::Debug for Config {
@@ -63,6 +65,8 @@ impl fmt::Debug for Config {
                 "ticket_transcripts_disabled",
                 &self.ticket_transcripts_disabled,
             )
+            .field("metrics_token_configured", &self.metrics_token.is_some())
+            .field("metrics_allowed_ips", &self.metrics_allowed_ips)
             .finish()
     }
 }
@@ -139,6 +143,14 @@ impl Config {
                 .unwrap_or_else(|_| "v1".to_owned()),
             transcript_keyring: optional_non_empty("TRANSCRIPT_KEYRING"),
             ticket_transcripts_disabled: env_bool("TICKET_TRANSCRIPTS_DISABLED", false)?,
+            metrics_token: optional_non_empty("METRICS_TOKEN"),
+            metrics_allowed_ips: env::var("METRICS_ALLOWED_IPS")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .filter_map(|value| value.parse::<std::net::IpAddr>().ok())
+                .collect(),
         };
 
         config.validate()?;
@@ -281,6 +293,8 @@ mod tests {
             transcript_active_key_id: "v1".to_string(),
             transcript_keyring: None,
             ticket_transcripts_disabled: false,
+            metrics_token: None,
+            metrics_allowed_ips: HashSet::new(),
         };
 
         // Real token with offline_mode false -> NOT offline mode
@@ -351,6 +365,8 @@ mod tests {
             transcript_active_key_id: "v1".to_string(),
             transcript_keyring: Some("fixture-keyring-hex-9876543210fedcba".to_string()),
             ticket_transcripts_disabled: false,
+            metrics_token: Some("fixture-metrics-token-secret-777".to_string()),
+            metrics_allowed_ips: ["10.0.0.1".parse().unwrap()].into_iter().collect(),
         };
 
         let rendered = format!("{test_config:?}");
@@ -360,6 +376,7 @@ mod tests {
             "fixture-db-password",
             "fixture-aead-key-hex-0123456789abcdef",
             "fixture-keyring-hex-9876543210fedcba",
+            "fixture-metrics-token-secret-777",
         ] {
             assert!(
                 !rendered.contains(secret),
@@ -369,6 +386,7 @@ mod tests {
 
         assert!(rendered.contains("postgres_configured: true"));
         assert!(rendered.contains("transcript_crypto_configured: true"));
+        assert!(rendered.contains("metrics_token_configured: true"));
         assert!(rendered.contains("discord_application_id: 123456789"));
     }
 }

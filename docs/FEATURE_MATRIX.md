@@ -661,6 +661,11 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Redacted all sensitive secrets (`discord_token`, `discord_client_secret`, database connection credentials in `database_url`, and AEAD transcript encryption keys in `transcript_encryption_key` / `transcript_keyring`).
   - Emitted safe non-sensitive booleans (`postgres_configured`, `transcript_crypto_configured`) preserving operational and diagnostic insight without exposing credentials in logs, traces, crash dumps, or telemetry.
   - Added unit test `test_config_debug_redacts_all_secrets` asserting zero leakage across all secret fields.
+- **Readiness Error Sanitization & Metrics Endpoint Protection (#257)**:
+  - Sanitized `/health/ready` endpoint: replaced raw SQLx database error strings in public JSON with fixed `"unavailable"` status and server-side `tracing::warn!` logging, preventing information disclosure of internal infrastructure, hostnames, and credentials during outages.
+  - Hardened `/metrics` Prometheus endpoint with multi-factor authorization (`is_metrics_authorized`): supports Bearer token (`METRICS_TOKEN`), active authenticated dashboard user session, and network-level scraper filtering (`METRICS_ALLOWED_IPS` or default loopback connections when token is unset).
+  - Maintained complete zero-secret compatibility with Docker Compose / Kubernetes container health checks (`GET /health/ready` returns 200/503 without requiring authentication).
+  - Redacted `metrics_token` in `Config` `Debug` formatting (emitted as `metrics_token_configured: bool` and safe `metrics_allowed_ips`).
 
 ## Delivery order
 

@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use super::{WebState, routes::ApiError};
 
-const SESSION_COOKIE: &str = "rusty_discord_bot_session";
+pub(crate) const SESSION_COOKIE: &str = "rusty_discord_bot_session";
 const OAUTH_STATE_COOKIE: &str = "rusty_oauth_state";
 const DISCORD_AUTHORIZE_URL: &str = "https://discord.com/oauth2/authorize";
 const DISCORD_TOKEN_URL: &str = "https://discord.com/api/v10/oauth2/token";
@@ -709,7 +709,7 @@ fn can_manage(guild: &DashboardGuild) -> bool {
         .is_ok_and(|bits| bits & (ADMINISTRATOR | MANAGE_GUILD) != 0)
 }
 
-fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+pub(crate) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get(COOKIE)?
         .to_str()
@@ -782,6 +782,8 @@ mod tests {
             transcript_active_key_id: "v1".to_string(),
             transcript_keyring: None,
             ticket_transcripts_disabled: false,
+            metrics_token: None,
+            metrics_allowed_ips: std::collections::HashSet::new(),
         }
     }
 

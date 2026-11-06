@@ -1348,9 +1348,25 @@ impl Storage {
         }
     }
 
+    pub fn inject_ping_failure(&self, fail: bool) {
+        if let Self::Memory(store) = self {
+            store.inject_ping_failure(fail);
+        }
+    }
+
     pub async fn ping(&self) -> anyhow::Result<()> {
         match self {
-            Self::Memory(_) => Ok(()),
+            Self::Memory(store) => {
+                if store
+                    .ping_failure_injected
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    anyhow::bail!(
+                        "connection to server at 'postgres-prod.internal' (10.0.0.5), port 5432 failed: password authentication failed for user 'rusty_prod'"
+                    );
+                }
+                Ok(())
+            }
 
             Self::Postgres(store) => store.ping().await,
         }

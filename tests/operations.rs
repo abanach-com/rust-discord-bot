@@ -32,6 +32,8 @@ fn test_config(bind: SocketAddr) -> Config {
         transcript_active_key_id: "v1".to_string(),
         transcript_keyring: None,
         ticket_transcripts_disabled: false,
+        metrics_token: None,
+        metrics_allowed_ips: HashSet::new(),
     }
 }
 

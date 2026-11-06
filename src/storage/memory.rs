@@ -50,6 +50,8 @@ pub struct MemoryStore {
 
     progression_failure_injected: Arc<std::sync::atomic::AtomicBool>,
 
+    pub(crate) ping_failure_injected: Arc<std::sync::atomic::AtomicBool>,
+
     progression: Arc<DashMap<MemberKey, MemberProgress>>,
 
     reputation_cooldowns: Arc<DashMap<ReputationKey, chrono::DateTime<Utc>>>,
@@ -262,6 +264,11 @@ impl MemoryStore {
 
     pub fn inject_audit_failure(&self, fail: bool) {
         self.audit_failure_injected
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn inject_ping_failure(&self, fail: bool) {
+        self.ping_failure_injected
             .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
