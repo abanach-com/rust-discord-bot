@@ -316,6 +316,29 @@ pub enum LuaAction {
 }
 
 impl LuaAction {
+    pub fn policy_action_key(&self) -> &'static str {
+        match self {
+            Self::Reply { .. } => "reply",
+            Self::SendMessage { .. } => "send_message",
+            Self::SendDirectMessage { .. } => "send_direct_message",
+            Self::DeleteMessage { .. } => "delete_message",
+            Self::TimeoutMember { .. } => "timeout_member",
+            Self::KickMember { .. } => "kick_member",
+            Self::BanMember { .. } => "ban_member",
+            Self::AddRole { .. } => "add_role",
+            Self::RemoveRole { .. } => "remove_role",
+            Self::Purge { .. } => "purge",
+            Self::Cleanup { .. } => "cleanup",
+            Self::ConfirmCleanup { .. } => "confirm_cleanup",
+            Self::Music { .. } => "music",
+            Self::Progression { .. } => "progression",
+            Self::Scheduler { .. } => "scheduler",
+            Self::Ticket { .. } => "ticket",
+            Self::ModerationCase { .. } => "moderation_case",
+            Self::Audit { .. } => "audit",
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         match self {
             Self::Reply { content, .. } => validate_content(content),

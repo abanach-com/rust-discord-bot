@@ -3704,6 +3704,14 @@ impl PostgresStore {
     ) -> anyhow::Result<Option<String>> {
         let mut tx = self.pool.begin().await?;
 
+        let _capacity: Option<i32> = sqlx::query_scalar(
+            "SELECT max_participants FROM scheduled_events WHERE id = $1 FOR UPDATE",
+        )
+        .bind(event_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Scheduled event not found"))?;
+
         let existing = sqlx::query_as::<_, EventRoster>(
             r#"
 
@@ -3747,6 +3755,7 @@ impl PostgresStore {
                 ORDER BY position ASC, joined_at ASC, user_id ASC
 
                 LIMIT 1
+                FOR UPDATE
 
                 "#,
             )
@@ -3755,17 +3764,17 @@ impl PostgresStore {
             .await?;
 
             if let Some(reserve) = next_reserve {
-                sqlx::query("UPDATE event_rosters SET role_type = 'main' WHERE event_id = $1 AND user_id = $2")
+                let updated = sqlx::query(
+                    "UPDATE event_rosters SET role_type = 'main' WHERE event_id = $1 AND user_id = $2 AND role_type = 'reserve'",
+                )
+                .bind(event_id)
+                .bind(&reserve.user_id)
+                .execute(&mut *tx)
+                .await?;
 
-                    .bind(event_id)
-
-                    .bind(&reserve.user_id)
-
-                    .execute(&mut *tx)
-
-                    .await?;
-
-                promoted = Some(reserve.user_id);
+                if updated.rows_affected() > 0 {
+                    promoted = Some(reserve.user_id);
+                }
             }
         }
 
@@ -5426,6 +5435,43 @@ impl PostgresStore {
         };
 
         Ok(rows)
+    }
+
+    pub async fn count_active_steam_lfg_posts(
+        &self,
+        guild_id: &str,
+        author_id: &str,
+    ) -> anyhow::Result<usize> {
+        let count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM steam_lfg_posts WHERE guild_id = $1 AND author_id = $2 AND expires_at > NOW()",
+        )
+        .bind(guild_id)
+        .bind(author_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count.0 as usize)
+    }
+
+    pub async fn count_active_steam_lfg_posts_guild(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<usize> {
+        let count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM steam_lfg_posts WHERE guild_id = $1 AND expires_at > NOW()",
+        )
+        .bind(guild_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count.0 as usize)
+    }
+
+    pub async fn prune_steam_lfg_posts(&self, cutoff: DateTime<Utc>) -> anyhow::Result<u64> {
+        let deleted = sqlx::query("DELETE FROM steam_lfg_posts WHERE expires_at <= $1")
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        Ok(deleted)
     }
 
     pub async fn join_steam_lfg_post(

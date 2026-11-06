@@ -98,7 +98,7 @@ pub struct MemoryStore {
 
     feeds: Arc<DashMap<Uuid, FeedSubscription>>,
 
-    game_links: Arc<DashMap<Uuid, GameAccountLink>>,
+    game_links: Arc<DashMap<(String, String, String), GameAccountLink>>,
 
     counting_games: Arc<DashMap<(String, String), CountingGame>>,
 
@@ -3287,13 +3287,9 @@ impl MemoryStore {
             created_at: Utc::now(),
         };
 
-        self.game_links.retain(|_, existing| {
-            !(existing.guild_id == guild_id
-                && existing.user_id == user_id
-                && existing.platform == platform)
-        });
+        let key = (guild_id.to_owned(), user_id.to_owned(), platform.to_owned());
 
-        self.game_links.insert(id, link.clone());
+        self.game_links.insert(key, link.clone());
 
         link
     }
@@ -3309,22 +3305,19 @@ impl MemoryStore {
 
         code: &str,
     ) -> bool {
-        for mut link in self.game_links.iter_mut() {
-            if link.guild_id == guild_id
-                && link.user_id == user_id
-                && link.platform == platform
-                && link.verification_code.as_deref() == Some(code)
-            {
-                if link.verified || Utc::now() - link.created_at > chrono::Duration::minutes(15) {
-                    return false;
-                }
-
-                link.verified = true;
-
-                link.verification_code = None; // Invalidate code so it cannot be reused
-
-                return true;
+        let key = (guild_id.to_owned(), user_id.to_owned(), platform.to_owned());
+        if let Some(mut link) = self.game_links.get_mut(&key)
+            && link.verification_code.as_deref() == Some(code)
+        {
+            if link.verified || Utc::now() - link.created_at > chrono::Duration::minutes(15) {
+                return false;
             }
+
+            link.verified = true;
+
+            link.verification_code = None; // Invalidate code so it cannot be reused
+
+            return true;
         }
 
         false
@@ -3333,7 +3326,7 @@ impl MemoryStore {
     pub fn get_game_links(&self, guild_id: &str, user_id: &str) -> Vec<GameAccountLink> {
         self.game_links
             .iter()
-            .filter(|e| e.guild_id == guild_id && e.user_id == user_id)
+            .filter(|e| e.key().0 == guild_id && e.key().1 == user_id)
             .map(|e| e.value().clone())
             .collect()
     }
@@ -3932,6 +3925,29 @@ impl MemoryStore {
         self.steam_lfg_posts.insert(post.id, post.clone());
 
         post
+    }
+
+    pub fn count_active_steam_lfg_posts(&self, guild_id: &str, author_id: &str) -> usize {
+        let now = Utc::now();
+        self.steam_lfg_posts
+            .iter()
+            .filter(|e| e.guild_id == guild_id && e.author_id == author_id && e.expires_at > now)
+            .count()
+    }
+
+    pub fn count_active_steam_lfg_posts_guild(&self, guild_id: &str) -> usize {
+        let now = Utc::now();
+        self.steam_lfg_posts
+            .iter()
+            .filter(|e| e.guild_id == guild_id && e.expires_at > now)
+            .count()
+    }
+
+    pub fn prune_steam_lfg_posts(&self, cutoff: DateTime<Utc>) -> u64 {
+        let before = self.steam_lfg_posts.len();
+        self.steam_lfg_posts
+            .retain(|_, post| post.expires_at > cutoff);
+        before.saturating_sub(self.steam_lfg_posts.len()) as u64
     }
 
     pub fn list_steam_lfg_posts(&self, guild_id: &str, game_id: Option<&str>) -> Vec<SteamLfgPost> {

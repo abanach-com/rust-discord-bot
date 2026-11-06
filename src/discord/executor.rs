@@ -599,6 +599,89 @@ async fn execute_action(
         }
     }
 
+    if let Some(guild_id) = origin.guild_id {
+        let action_key = action.policy_action_key();
+        let guild_id_str = guild_id.get().to_string();
+
+        let db_revision = state
+            .storage
+            .get_policy_revision(&guild_id_str)
+            .await
+            .map_err(|e| anyhow!("Nie udało się pobrać wersji polityk: {e}"))?;
+
+        let rules = match state.policy_engine.get_cached_rules(&guild_id_str) {
+            Some((rev, cached)) if rev >= db_revision => cached,
+            _ => {
+                let fetched = state
+                    .storage
+                    .list_policy_rules(&guild_id_str)
+                    .await
+                    .map_err(|e| anyhow!("Nie udało się wczytać reguł polityk: {e}"))?;
+                state
+                    .policy_engine
+                    .set_cached_rules(&guild_id_str, db_revision, fetched.clone());
+                fetched
+            }
+        };
+
+        let user_id_str = origin
+            .actor_id
+            .map(|u| u.get().to_string())
+            .unwrap_or_default();
+        let channel_id_str = origin
+            .channel_id
+            .map(|c| c.get().to_string())
+            .unwrap_or_default();
+        let is_owner = if let Some(actor_id) = origin.actor_id {
+            ctx.cache
+                .guild(guild_id)
+                .is_some_and(|g| g.owner_id == actor_id)
+        } else {
+            false
+        };
+        let is_admin = origin
+            .actor_permissions
+            .contains(serenity::all::Permissions::ADMINISTRATOR);
+
+        let roles_with_pos = if let Some(guild) = ctx.cache.guild(guild_id) {
+            origin
+                .actor_roles
+                .iter()
+                .map(|rid| {
+                    let pos = guild.roles.get(rid).map(|r| r.position as i64).unwrap_or(0);
+                    (rid.get().to_string(), pos)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let policy_ctx = crate::policy::PolicyContext {
+            guild_id: guild_id_str,
+            user_id: user_id_str,
+            roles: roles_with_pos,
+            channel_id: channel_id_str,
+            thread_parent_id: None,
+            voice_channel_id: None,
+            is_guild_owner: is_owner,
+            is_administrator: is_admin,
+        };
+
+        let resource = crate::policy::PolicyResource::Action {
+            action_key: action_key.to_string(),
+        };
+
+        let outcome = state
+            .policy_engine
+            .evaluate(&policy_ctx, &resource, &rules, true);
+        if !outcome.allowed {
+            return Err(anyhow!(
+                "Akcja `{action_key}` została zablokowana przez politykę serwera: {}",
+                outcome.reason
+            ));
+        }
+    }
+
     match action {
         LuaAction::Reply { .. } => Ok(None),
 

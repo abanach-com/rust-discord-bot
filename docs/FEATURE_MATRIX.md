@@ -561,6 +561,31 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Full queue drain on idle timeout: before termination, worker closes receiver (`rx.close()`), drains all buffered requests, and processes final moderation delete batches (`process_delete_batch`), guaranteeing zero lost moderation deletes.
   - Enqueue retry loop with channel refresh: if an enqueue operation encounters a closing worker channel (`TrySendError::Closed`), it recovers the oneshot reply channel, re-acquires or spawns an active worker channel under lock, and retries delivery.
 
+## 19. Concurrency, Steam LFG Retention & Action Policy Enforcement (Issues #236, #237, #238, #239, #240, #241)
+
+- **PostgreSQL Event Roster Leave Concurrency & Reserve Promotion Lock (#236)**:
+  - Synchronized `PostgresStore::leave_event_roster` with `join_event_roster` by acquiring parent event row lock upfront: `SELECT max_participants FROM scheduled_events WHERE id = $1 FOR UPDATE`.
+  - Serialized reserve candidate selection via `FOR UPDATE` and hardened reserve-to-main promotion with atomic condition: `UPDATE event_rosters SET role_type = 'main' WHERE event_id = $1 AND user_id = $2 AND role_type = 'reserve'`.
+  - Eliminates concurrent resignation races and duplicate reserve promotions under parallel departures, guaranteeing accurate main counts and preventing vacant spots.
+- **MemoryStore Atomic Game Account Links UPSERT Parity (#237)**:
+  - Re-keyed `MemoryStore.game_links` from random `Uuid` to the business identity tuple `(String, String, String)` (`guild_id, user_id, platform`).
+  - Replaced non-atomic `retain` + `insert` sequence with single atomic `DashMap::insert(key, link)` and keyed lookup `get_mut(&key)`, eliminating race windows during concurrent challenge reissue (64 parallel reissue requests produce exactly one active link).
+  - Guarantees strict parity with PostgreSQL's `INSERT ... ON CONFLICT (guild_id, user_id, platform) DO UPDATE`.
+- **Steam LFG Quota Limits & Retention Janitor (#238)**:
+  - Implemented admission control in `create_steam_lfg`: limits active LFG listings to max 5 per member (`count_active_steam_lfg_posts`) and max 100 per guild (`count_active_steam_lfg_posts_guild`), returning HTTP 429 Too Many Requests upon limit exhaustion.
+  - Introduced periodic retention janitor `prune_steam_lfg_posts` running every 60 seconds (and on startup) purging posts expired for more than 7 days across both `MemoryStore` and `PostgresStore`.
+  - Added PostgreSQL migration `0034_steam_lfg_retention_index.sql` creating `idx_steam_lfg_posts_expires_at` for high-performance batch cleanup without table scans.
+- **Fail-Closed Permission Revalidation on Server Ownership Transfer (#239)**:
+  - Hardened `revalidate_guild_permission` in `src/web/auth.rs`: when `GET /guilds/{guild_id}/permissions/member/{user_id}` returns 404 and member fallback lacks computed permissions bitfield, the handler fails closed (`Ok(false)` -> 403 Forbidden).
+  - Eliminated dangerous fallback that elevated users based on stale `session.guilds[].owner` snapshot, preventing former guild owners from retaining administrative privileges following ownership transfers.
+- **Command Policy Engine Tie-Breaker Fail-Closed Precedence (#240)**:
+  - Enhanced candidate comparator in `CommandPolicyEngine::evaluate` to prioritize explicit `Deny` rules over conflicting `Allow` rules on identical precedence matches (`tier`, `role_position`, `priority`, `resource_specificity`).
+  - Added secondary deterministic tie-breaker sorting by rule UUID (`a.rule.id.cmp(&b.rule.id)`), ensuring evaluation results never depend on database query row ordering or `DashMap` iteration order.
+- **Lua Action Policy ACL Runtime Enforcement (#241)**:
+  - Added canonical `LuaAction::policy_action_key(&self) -> &'static str` matching Serde action types (`ban_member`, `kick_member`, `timeout_member`, `send_message`, `purge`, etc.).
+  - Embedded host policy check in `src/discord/executor.rs:execute_action` prior to action execution and side effects, evaluating `PolicyResource::Action { action_key }` against authoritative guild policy rules.
+  - Rejects actions denied by guild policy with descriptive error without executing Discord HTTP calls, ensuring parity between `/policy/explain` dry-runs and actual Lua runtime execution.
+
 ## Delivery order
 
 ### Phase 0 — foundation

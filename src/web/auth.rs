@@ -529,9 +529,9 @@ pub async fn revalidate_guild_permission(
 
     // If 404, fall back to GET /guilds/{guild_id}/members/{user_id} for mocks or environments
     // where permissions/member is unavailable
-    let (response, is_fallback_member) = if response.status() == StatusCode::NOT_FOUND {
+    let response = if response.status() == StatusCode::NOT_FOUND {
         let member_url = format!("{base_url}/guilds/{guild_id}/members/{}", session.user.id);
-        let resp2 = state
+        state
             .app
             .http_client
             .get(&member_url)
@@ -541,10 +541,9 @@ pub async fn revalidate_guild_permission(
             )
             .send()
             .await
-            .map_err(ApiError::upstream)?;
-        (resp2, true)
+            .map_err(ApiError::upstream)?
     } else {
-        (response, false)
+        response
     };
 
     if response.status() == StatusCode::NOT_FOUND || response.status() == StatusCode::FORBIDDEN {
@@ -569,16 +568,13 @@ pub async fn revalidate_guild_permission(
         return Ok((perms & (ADMINISTRATOR | MANAGE_GUILD)) != 0);
     }
 
-    // If fallback member endpoint confirmed membership and user is the recorded owner, permit
-    if is_fallback_member && session.guilds.iter().any(|g| g.id == guild_id && g.owner) {
-        return Ok(true);
-    }
-
-    // FAIL-CLOSED: Ambiguous member response (missing permissions field); deny write access
+    // FAIL-CLOSED: A member response proves membership only. The snapshot's owner flag
+    // can be stale after an ownership transfer; never elevate based on it.
+    // If live computed permissions are unavailable, fail closed.
     tracing::warn!(
         guild_id,
         user_id = %session.user.id,
-        "Discord API member response lacked permissions field; failing closed"
+        "Discord API member response lacked computed permissions field; failing closed"
     );
     Ok(false)
 }

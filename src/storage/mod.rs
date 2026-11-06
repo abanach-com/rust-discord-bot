@@ -4188,6 +4188,38 @@ impl Storage {
         }
     }
 
+    pub async fn count_active_steam_lfg_posts(
+        &self,
+        guild_id: &str,
+        author_id: &str,
+    ) -> anyhow::Result<usize> {
+        match self {
+            Self::Memory(store) => Ok(store.count_active_steam_lfg_posts(guild_id, author_id)),
+            Self::Postgres(store) => {
+                store
+                    .count_active_steam_lfg_posts(guild_id, author_id)
+                    .await
+            }
+        }
+    }
+
+    pub async fn count_active_steam_lfg_posts_guild(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<usize> {
+        match self {
+            Self::Memory(store) => Ok(store.count_active_steam_lfg_posts_guild(guild_id)),
+            Self::Postgres(store) => store.count_active_steam_lfg_posts_guild(guild_id).await,
+        }
+    }
+
+    pub async fn prune_steam_lfg_posts(&self, cutoff: DateTime<Utc>) -> anyhow::Result<u64> {
+        match self {
+            Self::Memory(store) => Ok(store.prune_steam_lfg_posts(cutoff)),
+            Self::Postgres(store) => store.prune_steam_lfg_posts(cutoff).await,
+        }
+    }
+
     // Agent 06 (#95): GitHub DevOps
 
     pub async fn upsert_github_devops_mapping(
@@ -7069,5 +7101,140 @@ mod tests {
         assert_eq!(links.len(), 1);
         assert!(links[0].verified);
         assert!(links[0].verification_code.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_game_link_concurrent_upsert_single_winner() {
+        let store = std::sync::Arc::new(Storage::Memory(MemoryStore::default()));
+        let guild_id = "111222333444555666";
+        let user_id = "user_999";
+        let platform = "steam";
+
+        let mut handles = Vec::new();
+        for i in 0..64 {
+            let store_clone = std::sync::Arc::clone(&store);
+            let code = format!("code_{i}");
+            handles.push(tokio::spawn(async move {
+                store_clone
+                    .create_game_link(guild_id, user_id, platform, "account_1", Some(&code))
+                    .await
+                    .expect("create game link concurrent")
+            }));
+        }
+
+        let mut issued_codes = Vec::new();
+        for handle in handles {
+            let link = handle.await.expect("join handle");
+            if let Some(code) = link.verification_code {
+                issued_codes.push(code);
+            }
+        }
+
+        // Must be exactly one record stored for this (guild_id, user_id, platform)
+        let links = store
+            .get_game_links(guild_id, user_id)
+            .await
+            .expect("get game links");
+        assert_eq!(
+            links.len(),
+            1,
+            "There must be exactly 1 link stored despite 64 concurrent upserts"
+        );
+
+        let surviving_code = links[0]
+            .verification_code
+            .as_deref()
+            .expect("active code exists")
+            .to_string();
+
+        // Exactly one valid code works, all other 63 codes fail
+        let mut success_count = 0;
+        for code in issued_codes {
+            let ok = store
+                .verify_game_link(guild_id, user_id, platform, &code)
+                .await
+                .expect("verify code");
+            if ok {
+                success_count += 1;
+                assert_eq!(code, surviving_code);
+            }
+        }
+        assert_eq!(
+            success_count, 1,
+            "Only the surviving link's code should verify successfully"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_steam_lfg_quota_and_retention_janitor() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_id = "111222333444555666";
+        let author_id = "author_123";
+
+        // Create 3 active posts
+        for i in 0..3 {
+            store
+                .create_steam_lfg_post(SteamLfgPost {
+                    id: Uuid::new_v4(),
+                    guild_id: guild_id.to_string(),
+                    author_id: author_id.to_string(),
+                    game_id: format!("game_{i}"),
+                    game_name: "Test Game".to_string(),
+                    description: "Looking for group".to_string(),
+                    max_players: 4,
+                    current_players: serde_json::json!([author_id]),
+                    expires_at: Utc::now() + chrono::Duration::hours(1),
+                    created_at: Utc::now(),
+                })
+                .await
+                .expect("create active post");
+        }
+
+        // Create 2 expired posts (expired 10 days ago)
+        for i in 0..2 {
+            store
+                .create_steam_lfg_post(SteamLfgPost {
+                    id: Uuid::new_v4(),
+                    guild_id: guild_id.to_string(),
+                    author_id: author_id.to_string(),
+                    game_id: format!("old_game_{i}"),
+                    game_name: "Old Game".to_string(),
+                    description: "Old group".to_string(),
+                    max_players: 4,
+                    current_players: serde_json::json!([author_id]),
+                    expires_at: Utc::now() - chrono::Duration::days(10),
+                    created_at: Utc::now() - chrono::Duration::days(11),
+                })
+                .await
+                .expect("create expired post");
+        }
+
+        // Active count must be exactly 3
+        let active_user = store
+            .count_active_steam_lfg_posts(guild_id, author_id)
+            .await
+            .expect("count active user");
+        assert_eq!(active_user, 3);
+
+        let active_guild = store
+            .count_active_steam_lfg_posts_guild(guild_id)
+            .await
+            .expect("count active guild");
+        assert_eq!(active_guild, 3);
+
+        // Run janitor with 7-day cutoff: should prune the 2 posts expired 10 days ago
+        let cutoff = Utc::now() - chrono::Duration::days(7);
+        let pruned = store
+            .prune_steam_lfg_posts(cutoff)
+            .await
+            .expect("prune lfg");
+        assert_eq!(pruned, 2);
+
+        // Active posts still intact
+        let active_after = store
+            .count_active_steam_lfg_posts(guild_id, author_id)
+            .await
+            .expect("count active after prune");
+        assert_eq!(active_after, 3);
     }
 }

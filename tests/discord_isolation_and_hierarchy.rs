@@ -1375,3 +1375,68 @@ async fn test_message_update_author_verification_and_automod_guard() {
 
     shard_manager.shutdown_all().await;
 }
+
+#[tokio::test]
+async fn test_action_policy_denial_blocks_executor_without_discord_http_call() {
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state().await;
+    let guild_id = GuildId::new(100);
+    let target_user = UserId::new(333333333333333333);
+
+    // Upsert Action Policy Rule: deny "ban_member" guild-wide
+    let rule = rusty_discord_bot::policy::CommandPolicyRule {
+        id: uuid::Uuid::new_v4(),
+        guild_id: "100".to_string(),
+        subject_kind: "guild".to_string(),
+        subject_id: None,
+        resource_kind: "action".to_string(),
+        module_id: None,
+        command_name: None,
+        action_key: Some("ban_member".to_string()),
+        effect: "deny".to_string(),
+        priority: 0,
+        enabled: true,
+        version: 1,
+        created_by: "test_admin".to_string(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    state
+        .storage
+        .upsert_policy_rule(rule)
+        .await
+        .expect("upsert action policy rule");
+
+    let initial_modifications = mock.modifying_requests_count.load(Ordering::SeqCst);
+
+    let actions = vec![LuaAction::BanMember {
+        user_id: target_user.get().to_string(),
+        delete_message_days: 0,
+        reason: Some("Test ban blocked by policy".to_string()),
+    }];
+
+    let result = execute_event_actions(
+        &ctx,
+        &state,
+        "moderation",
+        Some(guild_id),
+        Some(ChannelId::new(101)),
+        None,
+        &actions,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "execute_event_actions handles failure gracefully"
+    );
+
+    // Zero modifying requests to Discord API! The action was blocked by Action Policy before Discord HTTP call.
+    let after_modifications = mock.modifying_requests_count.load(Ordering::SeqCst);
+    assert_eq!(
+        after_modifications, initial_modifications,
+        "Blocked action must NOT make any modifying HTTP requests to Discord"
+    );
+
+    shard_manager.shutdown_all().await;
+}

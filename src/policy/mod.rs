@@ -463,12 +463,20 @@ impl CommandPolicyEngine {
         // 2. Role position descending (if tier == Role)
         // 3. Priority descending
         // 4. Resource specificity descending (Command > Action > Module)
+        // 5. Fail-closed: Explicit Deny beats Allow on exact tie
+        // 6. Tie-breaker on UUID for deterministic outcome
         candidates.sort_by(|a, b| {
             b.tier
                 .cmp(&a.tier)
                 .then_with(|| b.role_position.cmp(&a.role_position))
                 .then_with(|| b.priority.cmp(&a.priority))
                 .then_with(|| b.resource_specificity.cmp(&a.resource_specificity))
+                .then_with(|| {
+                    let a_deny = a.rule.effect_enum() == PolicyEffect::Deny;
+                    let b_deny = b.rule.effect_enum() == PolicyEffect::Deny;
+                    b_deny.cmp(&a_deny)
+                })
+                .then_with(|| a.rule.id.cmp(&b.rule.id))
         });
 
         let winning = &candidates[0];
@@ -886,5 +894,66 @@ mod tests {
             "Role tier must beat guild tier regardless of priority"
         );
         assert_eq!(outcome.matched_rule_id, Some(role_deny.id));
+    }
+
+    #[test]
+    fn test_policy_tie_breaker_fails_closed_explicit_deny() {
+        let engine = CommandPolicyEngine::new();
+        let guild_id = "100000000000000001";
+        let user_id = "200000000000000001";
+        let resource = PolicyResource::Command {
+            module_id: "music".to_string(),
+            command_name: "play".to_string(),
+        };
+
+        let allow_rule = CommandPolicyRule::new_user_rule(
+            guild_id.to_string(),
+            user_id.to_string(),
+            resource.clone(),
+            PolicyEffect::Allow,
+            0,
+            "admin".to_string(),
+        )
+        .unwrap();
+
+        let deny_rule = CommandPolicyRule::new_user_rule(
+            guild_id.to_string(),
+            user_id.to_string(),
+            resource.clone(),
+            PolicyEffect::Deny,
+            0,
+            "admin".to_string(),
+        )
+        .unwrap();
+
+        let ctx = PolicyContext {
+            guild_id: guild_id.to_string(),
+            user_id: user_id.to_string(),
+            roles: Vec::new(),
+            channel_id: "400000000000000001".to_string(),
+            thread_parent_id: None,
+            voice_channel_id: None,
+            is_guild_owner: false,
+            is_administrator: false,
+        };
+
+        let outcome1 = engine.evaluate(
+            &ctx,
+            &resource,
+            &[allow_rule.clone(), deny_rule.clone()],
+            true,
+        );
+        assert!(
+            !outcome1.allowed,
+            "Tie-breaker must fail closed with Deny when [allow, deny]"
+        );
+        assert_eq!(outcome1.matched_rule_id, Some(deny_rule.id));
+
+        let outcome2 = engine.evaluate(&ctx, &resource, &[deny_rule.clone(), allow_rule], true);
+        assert!(
+            !outcome2.allowed,
+            "Tie-breaker must fail closed with Deny when [deny, allow]"
+        );
+        assert_eq!(outcome2.matched_rule_id, Some(deny_rule.id));
     }
 }

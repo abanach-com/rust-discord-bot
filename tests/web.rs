@@ -6317,3 +6317,86 @@ async fn test_github_webhook_route_hmac_verification_and_deduplication() {
     let replay_json: serde_json::Value = replay_resp.json().await.unwrap();
     assert_eq!(replay_json["duplicate"], true);
 }
+
+#[tokio::test]
+async fn test_revalidate_guild_permission_owner_fallback_fails_closed_on_transfer() {
+    let discord_mock_app = axum::Router::new()
+        // 1. permissions/member returns 404
+        .route(
+            "/guilds/{guild_id}/permissions/member/{user_id}",
+            axum::routing::get(|| async {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    axum::Json(serde_json::json!({ "message": "Unknown Member Permissions" })),
+                )
+            }),
+        )
+        // 2. Fallback members/{user_id} returns 200 without permissions field
+        .route(
+            "/guilds/{guild_id}/members/{user_id}",
+            axum::routing::get(|| async {
+                (
+                    axum::http::StatusCode::OK,
+                    axum::Json(serde_json::json!({
+                        "user": {
+                            "id": "user_former_owner",
+                            "username": "former_owner"
+                        },
+                        "roles": []
+                    })),
+                )
+            }),
+        );
+
+    let discord_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind discord mock");
+    let discord_addr = discord_listener.local_addr().expect("discord mock addr");
+    tokio::spawn(async move {
+        axum::serve(discord_listener, discord_mock_app)
+            .await
+            .unwrap();
+    });
+
+    let mut config = test_config();
+    config.discord_token = "live_bot_token_production_secret".to_string();
+    config.offline_mode = false;
+    config.discord_api_base_url = format!("http://{discord_addr}");
+
+    let app = AppState::bootstrap(config).await.expect("bootstrap");
+    let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
+    let state = WebState {
+        app,
+        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        permissions_cache,
+    };
+
+    let session = Session {
+        user: DashboardUser {
+            id: "user_former_owner".to_owned(),
+            username: "former_owner".to_owned(),
+            global_name: Some("Former Owner".to_owned()),
+            avatar: None,
+        },
+        guilds: vec![DashboardGuild {
+            id: "guild_transferred".to_owned(),
+            name: "Transferred Guild".to_owned(),
+            icon: None,
+            owner: true,                 // Historic snapshot from OAuth login
+            permissions: "0".to_owned(), // Live permissions are 0 (e.g. ownership was transferred)
+        }],
+        csrf_token: "csrf_transferred".to_owned(),
+        expires_at: Utc::now() + Duration::days(1),
+        access_token: None,
+    };
+
+    // permissions/member returns 404, fallback members returns 200 without permissions.
+    // Must fail closed (403 Forbidden) and NOT elevate permissions based on stale owner=true!
+    let access = ensure_guild_access(&state, &session, "guild_transferred").await;
+    assert!(
+        access.is_err(),
+        "Access must fail closed and deny management permissions"
+    );
+    let err = access.unwrap_err();
+    assert_eq!(err.status, axum::http::StatusCode::FORBIDDEN);
+}

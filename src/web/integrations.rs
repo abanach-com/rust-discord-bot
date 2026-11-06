@@ -513,6 +513,30 @@ pub async fn create_steam_lfg(
     verify_csrf(&headers, &session)?;
     ensure_guild_member_access(&state, &session, &guild_id).await?;
 
+    let active_user_posts = state
+        .app
+        .storage
+        .count_active_steam_lfg_posts(&guild_id, &session.user.id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    if active_user_posts >= 5 {
+        return Err(ApiError::too_many_requests(
+            "Active Steam LFG post limit reached (max 5 per member)",
+        ));
+    }
+
+    let active_guild_posts = state
+        .app
+        .storage
+        .count_active_steam_lfg_posts_guild(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    if active_guild_posts >= 100 {
+        return Err(ApiError::too_many_requests(
+            "Active Steam LFG post limit reached for guild (max 100)",
+        ));
+    }
+
     let ttl = payload.ttl_minutes.unwrap_or(60).clamp(5, 1440);
     let post = SteamLfgPost {
         id: Uuid::new_v4(),

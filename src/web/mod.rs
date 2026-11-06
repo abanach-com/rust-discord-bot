@@ -50,12 +50,20 @@ pub async fn serve_with_shutdown(
             interval.tick().await;
             let (states, sessions, perms) = auth::cleanup_stale_records(&cleanup_state).await;
             cleanup_state.app.rate_limiter.cleanup_stale_entries();
-            if states > 0 || sessions > 0 || perms > 0 {
+            let lfg_cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+            let pruned_lfg = cleanup_state
+                .app
+                .storage
+                .prune_steam_lfg_posts(lfg_cutoff)
+                .await
+                .unwrap_or(0);
+            if states > 0 || sessions > 0 || perms > 0 || pruned_lfg > 0 {
                 tracing::debug!(
                     states,
                     sessions,
                     perms,
-                    "pruned stale OAuth states, expired sessions, and permissions"
+                    pruned_lfg,
+                    "pruned stale OAuth states, expired sessions, permissions, and expired Steam LFG posts"
                 );
             }
         }
