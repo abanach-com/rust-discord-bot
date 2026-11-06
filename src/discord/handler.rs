@@ -1347,104 +1347,24 @@ async fn resolve_thread_parent_id(
     None
 }
 
-async fn execute_command_inner(
+#[allow(clippy::too_many_arguments)]
+async fn evaluate_command_guard(
     ctx: &Context,
-
     state: &AppState,
-
     command: &CommandInteraction,
-
+    module_id: &str,
+    command_name: &str,
+    enabled: bool,
     deferred: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-
     responded: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> anyhow::Result<()> {
-    if command.data.name == "policy" {
-        return handle_policy_builtin_command(ctx, state, command, deferred, responded).await;
-    }
-
-    if command.data.name == "duty" {
-        return handle_duty_builtin_command(ctx, state, command, deferred, responded).await;
-    }
-
-    if command.data.name == "help" {
-        return handle_help_builtin_command(ctx, state, command, deferred, responded).await;
-    }
-
-    if command.data.name == "emoji" {
-        return handle_emoji_builtin_command(ctx, state, command, deferred, responded).await;
-    }
-
-    if command.data.name == "sticker" {
-        return handle_sticker_builtin_command(ctx, state, command, deferred, responded).await;
-    }
-
-    let Some(module_id) = state.scripts.module_for_command(&command.data.name).await else {
-        respond_or_edit(
-            ctx,
-            command,
-            deferred,
-            responded,
-            &crate::translations::t(&command.locale, "system.command_unavailable"),
-        )
-        .await?;
-
-        return Ok(());
-    };
-
-    let Some(manifest) = state.scripts.manifest(&module_id).await else {
-        respond_or_edit(
-            ctx,
-            command,
-            deferred,
-            responded,
-            &crate::translations::t(&command.locale, "system.module_not_loaded"),
-        )
-        .await?;
-
-        return Ok(());
-    };
-
-    let (enabled, config) = match command.guild_id {
-        Some(guild_id) => match state
-            .storage
-            .get_module_settings(&guild_id.get().to_string(), &module_id)
-            .await?
-        {
-            Some(settings) => (settings.enabled, settings.config),
-
-            None => (
-                manifest.default_enabled,
-                state.scripts.default_config(&module_id).await,
-            ),
-        },
-
-        None => (
-            manifest.default_enabled,
-            state.scripts.default_config(&module_id).await,
-        ),
-    };
-
-    if !enabled {
-        respond_or_edit(
-            ctx,
-            command,
-            deferred,
-            responded,
-            &crate::translations::t(&command.locale, "system.module_disabled"),
-        )
-        .await?;
-
-        return Ok(());
-    }
-
+) -> anyhow::Result<bool> {
     let user_id = command.user.id.get().to_string();
-
     let guild_id_str = command.guild_id.map(|id| id.get().to_string());
 
     let rate_decision =
         state
             .rate_limiter
-            .check_command(&command.data.name, &user_id, guild_id_str.as_deref());
+            .check_command(command_name, &user_id, guild_id_str.as_deref());
 
     if !rate_decision.allowed {
         state
@@ -1458,14 +1378,13 @@ async fn execute_command_inner(
             &command.locale,
             "system.rate_limited",
             &[
-                ("command", &command.data.name),
+                ("command", command_name),
                 ("seconds", &retry_secs.to_string()),
             ],
         );
 
         respond_or_edit(ctx, command, deferred, responded, &msg).await?;
-
-        return Ok(());
+        return Ok(false);
     }
 
     if let Some(guild_id) = command.guild_id {
@@ -1532,7 +1451,7 @@ async fn execute_command_inner(
                     "Access policy service is temporarily unavailable. Please try again later.",
                 )
                 .await?;
-                return Ok(());
+                return Ok(false);
             }
         };
 
@@ -1555,7 +1474,7 @@ async fn execute_command_inner(
                             "Access policy service is temporarily unavailable. Please try again later.",
                         )
                         .await?;
-                        return Ok(());
+                        return Ok(false);
                     }
                 };
                 state
@@ -1566,8 +1485,8 @@ async fn execute_command_inner(
         };
 
         let resource = crate::policy::PolicyResource::Command {
-            module_id: module_id.clone(),
-            command_name: command.data.name.clone(),
+            module_id: module_id.to_string(),
+            command_name: command_name.to_string(),
         };
 
         let outcome = state
@@ -1576,8 +1495,140 @@ async fn execute_command_inner(
 
         if !outcome.allowed {
             respond_or_edit(ctx, command, deferred, responded, &outcome.reason).await?;
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+async fn execute_command_inner(
+    ctx: &Context,
+    state: &AppState,
+    command: &CommandInteraction,
+    deferred: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    responded: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> anyhow::Result<()> {
+    if command.data.name == "policy" {
+        return handle_policy_builtin_command(ctx, state, command, deferred, responded).await;
+    }
+
+    if command.data.name == "duty" {
+        if !evaluate_command_guard(
+            ctx, state, command, "duty", "duty", true, deferred, responded,
+        )
+        .await?
+        {
             return Ok(());
         }
+        return handle_duty_builtin_command(ctx, state, command, deferred, responded).await;
+    }
+
+    if command.data.name == "help" {
+        if !evaluate_command_guard(
+            ctx, state, command, "help", "help", true, deferred, responded,
+        )
+        .await?
+        {
+            return Ok(());
+        }
+        return handle_help_builtin_command(ctx, state, command, deferred, responded).await;
+    }
+
+    if command.data.name == "emoji" {
+        if !evaluate_command_guard(
+            ctx, state, command, "emoji", "emoji", true, deferred, responded,
+        )
+        .await?
+        {
+            return Ok(());
+        }
+        return handle_emoji_builtin_command(ctx, state, command, deferred, responded).await;
+    }
+
+    if command.data.name == "sticker" {
+        if !evaluate_command_guard(
+            ctx, state, command, "sticker", "sticker", true, deferred, responded,
+        )
+        .await?
+        {
+            return Ok(());
+        }
+        return handle_sticker_builtin_command(ctx, state, command, deferred, responded).await;
+    }
+
+    let Some(module_id) = state.scripts.module_for_command(&command.data.name).await else {
+        respond_or_edit(
+            ctx,
+            command,
+            deferred,
+            responded,
+            &crate::translations::t(&command.locale, "system.command_unavailable"),
+        )
+        .await?;
+
+        return Ok(());
+    };
+
+    let Some(manifest) = state.scripts.manifest(&module_id).await else {
+        respond_or_edit(
+            ctx,
+            command,
+            deferred,
+            responded,
+            &crate::translations::t(&command.locale, "system.module_not_loaded"),
+        )
+        .await?;
+
+        return Ok(());
+    };
+
+    let (enabled, config) = match command.guild_id {
+        Some(guild_id) => match state
+            .storage
+            .get_module_settings(&guild_id.get().to_string(), &module_id)
+            .await?
+        {
+            Some(settings) => (settings.enabled, settings.config),
+
+            None => (
+                manifest.default_enabled,
+                state.scripts.default_config(&module_id).await,
+            ),
+        },
+
+        None => (
+            manifest.default_enabled,
+            state.scripts.default_config(&module_id).await,
+        ),
+    };
+
+    if !enabled {
+        respond_or_edit(
+            ctx,
+            command,
+            deferred,
+            responded,
+            &crate::translations::t(&command.locale, "system.module_disabled"),
+        )
+        .await?;
+
+        return Ok(());
+    }
+
+    if !evaluate_command_guard(
+        ctx,
+        state,
+        command,
+        &module_id,
+        &command.data.name,
+        enabled,
+        deferred,
+        responded,
+    )
+    .await?
+    {
+        return Ok(());
     }
 
     let member_roles = command
@@ -1741,11 +1792,19 @@ async fn handle_policy_builtin_command(
             return Ok(());
         }
 
-        let module_id = state
-            .scripts
-            .module_for_command(target_command)
-            .await
-            .unwrap_or_else(|| "unknown".to_string());
+        let module_id = match state.scripts.module_for_command(target_command).await {
+            Some(m) => m,
+            None => {
+                if matches!(
+                    target_command,
+                    "duty" | "help" | "emoji" | "sticker" | "policy"
+                ) {
+                    target_command.to_string()
+                } else {
+                    "unknown".to_string()
+                }
+            }
+        };
 
         let target_user_id = opts
             .get("user")

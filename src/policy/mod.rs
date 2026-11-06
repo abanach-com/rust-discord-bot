@@ -956,4 +956,102 @@ mod tests {
         );
         assert_eq!(outcome2.matched_rule_id, Some(deny_rule.id));
     }
+
+    #[test]
+    fn test_host_commands_policy_and_recovery_rule_issue_252() {
+        let engine = CommandPolicyEngine::new();
+        let guild_id = "100000000000000001";
+        let user_id = "200000000000000001";
+
+        let ctx = PolicyContext {
+            guild_id: guild_id.to_string(),
+            user_id: user_id.to_string(),
+            roles: Vec::new(),
+            channel_id: "400000000000000001".to_string(),
+            thread_parent_id: None,
+            voice_channel_id: None,
+            is_guild_owner: false,
+            is_administrator: false,
+        };
+
+        // Deny rule targeting host command 'duty'
+        let duty_resource = PolicyResource::Command {
+            module_id: "duty".to_string(),
+            command_name: "duty".to_string(),
+        };
+        let duty_deny_rule = CommandPolicyRule::new_user_rule(
+            guild_id.to_string(),
+            user_id.to_string(),
+            duty_resource.clone(),
+            PolicyEffect::Deny,
+            0,
+            "admin".to_string(),
+        )
+        .unwrap();
+
+        let outcome = engine.evaluate(
+            &ctx,
+            &duty_resource,
+            std::slice::from_ref(&duty_deny_rule),
+            true,
+        );
+        assert!(
+            !outcome.allowed,
+            "Host command /duty must be denied by matching policy rule"
+        );
+        assert_eq!(outcome.matched_rule_id, Some(duty_deny_rule.id));
+
+        // Other host commands: 'help', 'emoji', 'sticker'
+        for cmd in &["help", "emoji", "sticker"] {
+            let res = PolicyResource::Command {
+                module_id: cmd.to_string(),
+                command_name: cmd.to_string(),
+            };
+            let deny = CommandPolicyRule::new_user_rule(
+                guild_id.to_string(),
+                user_id.to_string(),
+                res.clone(),
+                PolicyEffect::Deny,
+                0,
+                "admin".to_string(),
+            )
+            .unwrap();
+            let out = engine.evaluate(&ctx, &res, std::slice::from_ref(&deny), true);
+            assert!(
+                !out.allowed,
+                "Host command /{cmd} must be denied by matching policy rule"
+            );
+            assert_eq!(out.matched_rule_id, Some(deny.id));
+        }
+
+        // Policy recovery command remains allowed for administrators
+        let admin_ctx = PolicyContext {
+            guild_id: guild_id.to_string(),
+            user_id: user_id.to_string(),
+            roles: Vec::new(),
+            channel_id: "400000000000000001".to_string(),
+            thread_parent_id: None,
+            voice_channel_id: None,
+            is_guild_owner: false,
+            is_administrator: true,
+        };
+        let recovery_res = PolicyResource::Command {
+            module_id: "policy".to_string(),
+            command_name: "reset".to_string(),
+        };
+        let recovery_deny = CommandPolicyRule::new_user_rule(
+            guild_id.to_string(),
+            user_id.to_string(),
+            recovery_res.clone(),
+            PolicyEffect::Deny,
+            100,
+            "admin".to_string(),
+        )
+        .unwrap();
+        let recovery_out = engine.evaluate(&admin_ctx, &recovery_res, &[recovery_deny], true);
+        assert!(
+            recovery_out.allowed,
+            "Policy recovery command /policy reset must remain allowed for admin despite deny rule"
+        );
+    }
 }

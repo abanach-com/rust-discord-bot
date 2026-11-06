@@ -326,6 +326,7 @@ impl MemoryStore {
     }
 
     pub fn list_audit_events(&self, guild_id: &str, limit: i64) -> Vec<AuditLogEntry> {
+        let cutoff = Utc::now() - Duration::days(45);
         let mut entries: Vec<AuditLogEntry> = self
             .audit_log
             .iter()
@@ -338,7 +339,12 @@ impl MemoryStore {
                     return None;
                 }
 
-                serde_json::from_value(val.clone()).ok()
+                let parsed: AuditLogEntry = serde_json::from_value(val.clone()).ok()?;
+                if parsed.created_at < cutoff {
+                    return None;
+                }
+
+                Some(parsed)
             })
             .collect();
 
@@ -353,6 +359,92 @@ impl MemoryStore {
         }
 
         entries
+    }
+
+    pub fn list_audit_events_page(
+        &self,
+        guild_id: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Vec<AuditLogEntry> {
+        let cutoff = Utc::now() - Duration::days(45);
+        let mut entries: Vec<AuditLogEntry> = self
+            .audit_log
+            .iter()
+            .filter_map(|entry| {
+                let val = entry.value();
+
+                let gid = val.get("guild_id").and_then(|v| v.as_str())?;
+
+                if gid != guild_id {
+                    return None;
+                }
+
+                let parsed: AuditLogEntry = serde_json::from_value(val.clone()).ok()?;
+                if parsed.created_at < cutoff {
+                    return None;
+                }
+
+                Some(parsed)
+            })
+            .collect();
+
+        entries.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+
+        entries.into_iter().skip(offset).take(limit).collect()
+    }
+
+    pub fn count_audit_events(&self, guild_id: &str) -> u64 {
+        let cutoff = Utc::now() - Duration::days(45);
+        self.audit_log
+            .iter()
+            .filter(|entry| {
+                let val = entry.value();
+                let Some(gid) = val.get("guild_id").and_then(|v| v.as_str()) else {
+                    return false;
+                };
+                if gid != guild_id {
+                    return false;
+                }
+                if let Some(created_at_val) = val.get("created_at")
+                    && let Ok(created_at) =
+                        serde_json::from_value::<DateTime<Utc>>(created_at_val.clone())
+                {
+                    return created_at >= cutoff;
+                }
+                false
+            })
+            .count() as u64
+    }
+
+    pub fn prune_audit_events(&self, cutoff: DateTime<Utc>, limit: usize) -> u64 {
+        let limit = limit.clamp(1, 5000);
+        let mut expired_keys = Vec::new();
+        for entry in self.audit_log.iter() {
+            let val = entry.value();
+            if let Some(created_at_val) = val.get("created_at")
+                && let Ok(created_at) =
+                    serde_json::from_value::<DateTime<Utc>>(created_at_val.clone())
+                && created_at < cutoff
+            {
+                expired_keys.push(*entry.key());
+                if expired_keys.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        let mut deleted = 0u64;
+        for key in expired_keys {
+            if self.audit_log.remove(&key).is_some() {
+                deleted += 1;
+            }
+        }
+        deleted
     }
 
     pub fn update_module_settings_with_audit(
@@ -3721,10 +3813,18 @@ impl MemoryStore {
         entry
     }
 
-    pub fn list_faq_entries(&self, guild_id: &str, query: Option<&str>) -> Vec<FaqEntry> {
+    pub fn list_faq_entries(
+        &self,
+        guild_id: &str,
+        query: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Vec<FaqEntry> {
         let q = query.map(|s| s.to_lowercase());
+        let limit = limit.clamp(1, 50);
 
-        self.faqs
+        let mut matched: Vec<FaqEntry> = self
+            .faqs
             .iter()
             .filter(|e| {
                 if e.guild_id != guild_id {
@@ -3740,7 +3840,15 @@ impl MemoryStore {
                 }
             })
             .map(|e| e.value().clone())
-            .collect()
+            .collect();
+
+        matched.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+
+        matched.into_iter().skip(offset).take(limit).collect()
     }
 
     pub fn delete_faq_entry(&self, guild_id: &str, faq_id: Uuid) -> bool {

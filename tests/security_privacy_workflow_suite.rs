@@ -1352,4 +1352,192 @@ async fn test_security_privacy_workflow_suite() {
         .await
         .unwrap();
     assert_eq!(count_ok.status(), reqwest::StatusCode::OK);
+
+    // =========================================================================
+    // Issue #249 & #251: Audit retention, pagination and ticket transcript janitor
+    // =========================================================================
+    let audit_test_guild = "guild_audit_test_249_251";
+    // Seed session and permissions for audit_test_guild
+    state
+        .app
+        .sessions
+        .save_session(
+            session_id,
+            DashboardUser {
+                id: user_id.to_string(),
+                username: "SecUser".to_string(),
+                global_name: Some("Sec User".to_string()),
+                avatar: None,
+            },
+            vec![
+                DashboardGuild {
+                    id: guild_id.to_string(),
+                    name: "Sec Guild".to_string(),
+                    icon: None,
+                    owner: true,
+                    permissions: "8".to_string(),
+                },
+                DashboardGuild {
+                    id: audit_test_guild.to_string(),
+                    name: "Audit Test Guild".to_string(),
+                    icon: None,
+                    owner: true,
+                    permissions: "8".to_string(),
+                },
+            ],
+            csrf_token.to_string(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    perms_cache.insert(
+        (user_id.to_string(), audit_test_guild.to_string()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    // Record 5 audit events
+    for i in 0..5 {
+        state
+            .app
+            .storage
+            .record_audit(
+                Some(audit_test_guild),
+                Some(user_id),
+                "audit_module",
+                &format!("audit_event_{i}"),
+                json!({"index": i}),
+            )
+            .await
+            .unwrap();
+    }
+
+    // Page 1: limit 2, offset 0
+    let audit_p1_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{audit_test_guild}/audit?limit=2&offset=0"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(audit_p1_resp.status(), reqwest::StatusCode::OK);
+    let audit_p1: serde_json::Value = audit_p1_resp.json().await.unwrap();
+    assert_eq!(audit_p1["total"], 5);
+    assert_eq!(audit_p1["items"].as_array().unwrap().len(), 2);
+    assert_eq!(audit_p1["next_offset"], 2);
+
+    // Page 2: limit 2, offset 2
+    let audit_p2_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{audit_test_guild}/audit?limit=2&offset=2"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(audit_p2_resp.status(), reqwest::StatusCode::OK);
+    let audit_p2: serde_json::Value = audit_p2_resp.json().await.unwrap();
+    assert_eq!(audit_p2["total"], 5);
+    assert_eq!(audit_p2["items"].as_array().unwrap().len(), 2);
+    assert_eq!(audit_p2["next_offset"], 4);
+
+    // Page 3: limit 2, offset 4
+    let audit_p3_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{audit_test_guild}/audit?limit=2&offset=4"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(audit_p3_resp.status(), reqwest::StatusCode::OK);
+    let audit_p3: serde_json::Value = audit_p3_resp.json().await.unwrap();
+    assert_eq!(audit_p3["total"], 5);
+    assert_eq!(audit_p3["items"].as_array().unwrap().len(), 1);
+    assert!(audit_p3["next_offset"].is_null());
+
+    // Verify items between pages are disjoint
+    let p1_id0 = audit_p1["items"][0]["id"].as_u64().unwrap();
+    let p1_id1 = audit_p1["items"][1]["id"].as_u64().unwrap();
+    let p2_id0 = audit_p2["items"][0]["id"].as_u64().unwrap();
+    assert_ne!(p1_id0, p2_id0);
+    assert_ne!(p1_id1, p2_id0);
+
+    // Test Audit retention pruning
+    // Past cutoff: 0 pruned
+    let past_cutoff = Utc::now() - Duration::days(45);
+    let pruned_past = state
+        .app
+        .storage
+        .prune_audit_events(past_cutoff, 1000)
+        .await
+        .unwrap();
+    assert_eq!(
+        pruned_past, 0,
+        "No recent audit events should be pruned with past cutoff"
+    );
+
+    // Future cutoff: all 5 should be pruned
+    let future_cutoff = Utc::now() + Duration::days(1);
+    let pruned_future = state
+        .app
+        .storage
+        .prune_audit_events(future_cutoff, 1000)
+        .await
+        .unwrap();
+    assert!(
+        pruned_future >= 5,
+        "Audit events older than future cutoff must be pruned"
+    );
+
+    let count_after = state
+        .app
+        .storage
+        .count_audit_events(audit_test_guild)
+        .await
+        .unwrap();
+    assert_eq!(count_after, 0, "Audit count must be 0 after pruning");
+
+    // Test Ticket transcript retention pruning
+    let transcript = rusty_discord_bot::tickets::NewTicketTranscript {
+        ticket_id: uuid::Uuid::new_v4().to_string(),
+        guild_id: audit_test_guild.to_string(),
+        channel_id: "chan_ticket_1".to_string(),
+        generated_by_user_id: user_id.to_string(),
+        message_count: 3,
+        content: "Transcript test content".to_string(),
+    };
+    state
+        .app
+        .tickets
+        .store_transcript(transcript)
+        .await
+        .unwrap();
+
+    let pruned_transcripts_past = state
+        .app
+        .tickets
+        .prune_transcripts(past_cutoff, 1000)
+        .await
+        .unwrap();
+    assert_eq!(
+        pruned_transcripts_past, 0,
+        "Recent transcript should not be pruned"
+    );
+
+    let pruned_transcripts_future = state
+        .app
+        .tickets
+        .prune_transcripts(future_cutoff, 1000)
+        .await
+        .unwrap();
+    assert_eq!(
+        pruned_transcripts_future, 1,
+        "Transcript older than cutoff must be pruned"
+    );
 }

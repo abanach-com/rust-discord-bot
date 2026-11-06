@@ -229,6 +229,17 @@ impl TicketStore {
         }
     }
 
+    pub async fn prune_transcripts(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+        limit: usize,
+    ) -> Result<u64> {
+        match self {
+            Self::Memory(store) => Ok(store.prune_transcripts(cutoff, limit)),
+            Self::Postgres(store) => store.prune_transcripts(cutoff, limit).await,
+        }
+    }
+
     pub async fn list_events(&self, ticket_id: &str, limit: u16) -> Result<Vec<TicketEvent>> {
         match self {
             Self::Memory(store) => Ok(store.list_events(ticket_id, usize::from(limit))),

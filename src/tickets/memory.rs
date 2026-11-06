@@ -463,6 +463,21 @@ impl MemoryTicketStore {
         transcript
     }
 
+    pub fn prune_transcripts(&self, cutoff: chrono::DateTime<chrono::Utc>, limit: usize) -> u64 {
+        let mut state = self.lock();
+        let limit = limit.clamp(1, 5000);
+        let mut removed = 0usize;
+        state.transcripts.retain(|t| {
+            if removed < limit && t.created_at < cutoff {
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        });
+        removed as u64
+    }
+
     pub fn list_events(&self, ticket_id: &str, limit: usize) -> Vec<TicketEvent> {
         let state = self.lock();
         let mut events = state

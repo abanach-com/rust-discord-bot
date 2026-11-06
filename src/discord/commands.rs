@@ -21,6 +21,11 @@ pub(crate) enum RegistrationScope {
     Guild,
 }
 
+pub const MAX_CHAT_INPUT_COMMANDS_PER_SCOPE: usize = 100;
+pub const HOST_COMMAND_NAMES: &[&str] = &["policy", "duty", "help", "emoji", "sticker"];
+pub const HOST_COMMAND_COUNT: usize = HOST_COMMAND_NAMES.len();
+pub const MAX_LUA_COMMANDS: usize = MAX_CHAT_INPUT_COMMANDS_PER_SCOPE - HOST_COMMAND_COUNT;
+
 pub async fn register(ctx: &Context, state: &AppState) -> Result<usize> {
     let definitions = state.scripts.command_definitions().await;
     let scope = if state.config.discord_dev_guild_id.is_some() {
@@ -29,15 +34,23 @@ pub async fn register(ctx: &Context, state: &AppState) -> Result<usize> {
         RegistrationScope::Global
     };
 
-    if definitions.iter().any(|d| {
-        d.name == "policy"
-            || d.name == "duty"
-            || d.name == "help"
-            || d.name == "emoji"
-            || d.name == "sticker"
-    }) {
+    if definitions
+        .iter()
+        .any(|d| HOST_COMMAND_NAMES.contains(&d.name.as_str()))
+    {
         anyhow::bail!(
-            "Lua script cannot define reserved host command 'policy', 'duty', 'help', 'emoji', or 'sticker'"
+            "Lua script cannot define reserved host command: must not be one of {:?}",
+            HOST_COMMAND_NAMES
+        );
+    }
+
+    let needed = definitions.len() + HOST_COMMAND_COUNT;
+    if definitions.len() > MAX_LUA_COMMANDS || needed > MAX_CHAT_INPUT_COMMANDS_PER_SCOPE {
+        anyhow::bail!(
+            "Discord command limit: {needed} CHAT_INPUT ({lua} Lua + {host} host) > {max}",
+            lua = definitions.len(),
+            host = HOST_COMMAND_COUNT,
+            max = MAX_CHAT_INPUT_COMMANDS_PER_SCOPE,
         );
     }
 

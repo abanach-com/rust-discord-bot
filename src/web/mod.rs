@@ -57,13 +57,35 @@ pub async fn serve_with_shutdown(
                 .prune_steam_lfg_posts(lfg_cutoff)
                 .await
                 .unwrap_or(0);
-            if states > 0 || sessions > 0 || perms > 0 || pruned_lfg > 0 {
+            let audit_cutoff = chrono::Utc::now() - chrono::Duration::days(45);
+            let pruned_audit = cleanup_state
+                .app
+                .storage
+                .prune_audit_events(audit_cutoff, 1000)
+                .await
+                .unwrap_or(0);
+            let ticket_cutoff = chrono::Utc::now() - chrono::Duration::days(90);
+            let pruned_transcripts = cleanup_state
+                .app
+                .tickets
+                .prune_transcripts(ticket_cutoff, 1000)
+                .await
+                .unwrap_or(0);
+            if states > 0
+                || sessions > 0
+                || perms > 0
+                || pruned_lfg > 0
+                || pruned_audit > 0
+                || pruned_transcripts > 0
+            {
                 tracing::debug!(
                     states,
                     sessions,
                     perms,
                     pruned_lfg,
-                    "pruned stale OAuth states, expired sessions, permissions, and expired Steam LFG posts"
+                    pruned_audit,
+                    pruned_transcripts,
+                    "pruned stale OAuth states, expired sessions, permissions, Steam LFG posts, audit events, and ticket transcripts"
                 );
             }
         }

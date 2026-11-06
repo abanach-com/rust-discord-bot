@@ -24,7 +24,9 @@ use super::{
 };
 
 const MAX_ACTIONS_PER_EXECUTION: usize = 25;
-const MAX_COMMANDS: usize = 100;
+pub const MAX_CHAT_INPUT_COMMANDS: usize = 100;
+pub const HOST_COMMAND_COUNT: usize = 5;
+pub const MAX_LUA_COMMANDS: usize = MAX_CHAT_INPUT_COMMANDS - HOST_COMMAND_COUNT;
 const MAX_OPTIONS_PER_LEVEL: usize = 25;
 const MAX_DISCOVERY_DEPTH: usize = 16;
 const MAX_DISCOVERY_FILES: usize = 512;
@@ -760,11 +762,11 @@ fn build_registry(scripts_dir: &Path, limits: LuaLimits) -> Result<Registry, Lua
             message: "no .lua modules were found".to_owned(),
         });
     }
-    if registry.command_to_module.len() > MAX_COMMANDS {
+    if registry.command_to_module.len() > MAX_LUA_COMMANDS {
         return Err(LuaEngineError::InvalidModule {
             script: scripts_dir.display().to_string(),
             message: format!(
-                "the project defines {} global commands; Discord allows at most {MAX_COMMANDS}",
+                "the project defines {} Lua commands, exceeding limit of {MAX_LUA_COMMANDS} (Discord allows max {MAX_CHAT_INPUT_COMMANDS} commands, {HOST_COMMAND_COUNT} reserved by host)",
                 registry.command_to_module.len()
             ),
         });

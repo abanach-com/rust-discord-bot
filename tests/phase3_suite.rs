@@ -405,6 +405,117 @@ async fn test_phase3_games_rp_and_knowledge_suite() {
     let search_body: serde_json::Value = search_faq_resp.json().await.unwrap();
     assert_eq!(search_body.as_array().unwrap().len(), 1);
 
+    // Issue #248: Test literal search matching (%, _, \), pagination, and query length validation
+    let faq_percent_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/faq"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "question": "What is 100% discount?",
+            "answer": "Promo code is special: %percent%",
+            "aliases": ["discount"],
+            "category": "pricing"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(faq_percent_resp.status(), reqwest::StatusCode::OK);
+
+    let faq_underscore_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/faq"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "question": "What is user_name_format?",
+            "answer": "Escape with \\slash and use _underscore_",
+            "aliases": ["format"],
+            "category": "system"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(faq_underscore_resp.status(), reqwest::StatusCode::OK);
+
+    // Literal '%' search must ONLY return the percent entry, NOT all entries
+    let search_pct = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/faq?query=%25"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(search_pct.status(), reqwest::StatusCode::OK);
+    let pct_items: serde_json::Value = search_pct.json().await.unwrap();
+    assert_eq!(pct_items.as_array().unwrap().len(), 1);
+    assert_eq!(pct_items[0]["question"], "What is 100% discount?");
+
+    // Literal '_' search must ONLY return entries containing '_'
+    let search_und = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/faq?query=_"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(search_und.status(), reqwest::StatusCode::OK);
+    let und_items: serde_json::Value = search_und.json().await.unwrap();
+    assert_eq!(und_items.as_array().unwrap().len(), 1);
+    assert_eq!(und_items[0]["question"], "What is user_name_format?");
+
+    // Literal '\\' search must ONLY return entries containing '\\'
+    let search_backslash = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/faq?query=%5C"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(search_backslash.status(), reqwest::StatusCode::OK);
+    let bslash_items: serde_json::Value = search_backslash.json().await.unwrap();
+    assert_eq!(bslash_items.as_array().unwrap().len(), 1);
+    assert_eq!(bslash_items[0]["question"], "What is user_name_format?");
+
+    // Pagination: 3 total items, limit=2, offset=0 gives first 2; offset=2 gives remaining 1
+    let page1_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/faq?limit=2&offset=0"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page1_resp.status(), reqwest::StatusCode::OK);
+    let page1_items: serde_json::Value = page1_resp.json().await.unwrap();
+    assert_eq!(page1_items.as_array().unwrap().len(), 2);
+
+    let page2_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/faq?limit=2&offset=2"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page2_resp.status(), reqwest::StatusCode::OK);
+    let page2_items: serde_json::Value = page2_resp.json().await.unwrap();
+    assert_eq!(page2_items.as_array().unwrap().len(), 1);
+
+    // Verify disjoint sets across pages
+    let page1_id0 = page1_items[0]["id"].as_str().unwrap();
+    let page1_id1 = page1_items[1]["id"].as_str().unwrap();
+    let page2_id0 = page2_items[0]["id"].as_str().unwrap();
+    assert_ne!(page1_id0, page2_id0);
+    assert_ne!(page1_id1, page2_id0);
+
+    // Validation: query > 200 chars returns 400 Bad Request
+    let long_query = "a".repeat(201);
+    let bad_query_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/faq?query={long_query}"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_query_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
     // On-demand translation
     let trans_resp = client
         .post(format!("{base_url}/api/guilds/{guild_id}/translate"))

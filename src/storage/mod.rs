@@ -1424,15 +1424,49 @@ impl Storage {
 
     pub async fn list_audit_events(
         &self,
-
         guild_id: &str,
-
         limit: i64,
     ) -> anyhow::Result<Vec<AuditLogEntry>> {
         match self {
             Self::Memory(store) => Ok(store.list_audit_events(guild_id, limit)),
 
             Self::Postgres(store) => store.list_audit_events(guild_id, limit).await,
+        }
+    }
+
+    pub async fn list_audit_events_page(
+        &self,
+        guild_id: &str,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<Vec<AuditLogEntry>> {
+        match self {
+            Self::Memory(store) => Ok(store.list_audit_events_page(guild_id, limit, offset)),
+            Self::Postgres(store) => {
+                let limit_i64 = i64::try_from(limit).unwrap_or(200);
+                let offset_i64 = i64::try_from(offset).unwrap_or(0);
+                store
+                    .list_audit_events_page(guild_id, limit_i64, offset_i64)
+                    .await
+            }
+        }
+    }
+
+    pub async fn count_audit_events(&self, guild_id: &str) -> anyhow::Result<u64> {
+        match self {
+            Self::Memory(store) => Ok(store.count_audit_events(guild_id)),
+            Self::Postgres(store) => store.count_audit_events(guild_id).await,
+        }
+    }
+
+    pub async fn prune_audit_events(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+        limit: usize,
+    ) -> anyhow::Result<u64> {
+        match self {
+            Self::Memory(store) => Ok(store.prune_audit_events(cutoff, limit)),
+            Self::Postgres(store) => store.prune_audit_events(cutoff, limit).await,
         }
     }
 
@@ -4002,15 +4036,15 @@ impl Storage {
 
     pub async fn list_faq_entries(
         &self,
-
         guild_id: &str,
-
         query: Option<&str>,
+        limit: usize,
+        offset: usize,
     ) -> anyhow::Result<Vec<FaqEntry>> {
         match self {
-            Self::Memory(store) => Ok(store.list_faq_entries(guild_id, query)),
+            Self::Memory(store) => Ok(store.list_faq_entries(guild_id, query, limit, offset)),
 
-            Self::Postgres(store) => store.list_faq_entries(guild_id, query).await,
+            Self::Postgres(store) => store.list_faq_entries(guild_id, query, limit, offset).await,
         }
     }
 

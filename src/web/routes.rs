@@ -520,16 +520,21 @@ pub async fn guild_audit_events(
     let limit = pagination.limit.unwrap_or(50).clamp(1, 200);
     let offset = pagination.offset.unwrap_or(0);
 
-    let all_events = state
+    let total = state
         .app
         .storage
-        .list_audit_events(&guild_id, 10_000)
+        .count_audit_events(&guild_id)
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
 
-    let total = all_events.len();
-    let items: Vec<_> = all_events.into_iter().skip(offset).take(limit).collect();
-    let next_offset = if offset + items.len() < total {
+    let items = state
+        .app
+        .storage
+        .list_audit_events_page(&guild_id, limit, offset)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+
+    let next_offset = if (offset as u64) + (items.len() as u64) < total {
         Some(offset + items.len())
     } else {
         None

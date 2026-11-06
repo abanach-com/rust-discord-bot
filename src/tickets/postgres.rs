@@ -673,6 +673,33 @@ impl PostgresTicketStore {
         Ok(stored)
     }
 
+    pub async fn prune_transcripts(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+        limit: usize,
+    ) -> anyhow::Result<u64> {
+        let limit = limit.clamp(1, 5000) as i64;
+        let res = sqlx::query(
+            r#"
+            WITH expired AS (
+                SELECT id FROM ticket_transcripts
+                WHERE created_at < $1
+                ORDER BY created_at, id
+                LIMIT $2
+            )
+            DELETE FROM ticket_transcripts t
+            USING expired x
+            WHERE t.id = x.id
+            "#,
+        )
+        .bind(cutoff)
+        .bind(limit)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(res.rows_affected())
+    }
+
     pub async fn list_events(
         &self,
         ticket_id: &str,

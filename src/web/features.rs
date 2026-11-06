@@ -2753,28 +2753,36 @@ pub async fn list_tuppers(
 // ==========================================
 
 #[derive(Debug, Deserialize)]
-
 pub struct FaqQuery {
     pub query: Option<String>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
 }
 
 pub async fn list_faq(
     State(state): State<WebState>,
-
     Path(guild_id): Path<String>,
-
     headers: HeaderMap,
-
     Query(params): Query<FaqQuery>,
 ) -> Result<Json<Vec<FaqEntry>>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
-
     ensure_guild_access(&state, &session, &guild_id).await?;
+
+    if let Some(ref q) = params.query
+        && q.len() > 200
+    {
+        return Err(ApiError::bad_request(
+            "Search query exceeds maximum allowed length of 200 characters",
+        ));
+    }
+
+    let limit = params.limit.unwrap_or(20).clamp(1, 50);
+    let offset = params.offset.unwrap_or(0);
 
     let list = state
         .app
         .storage
-        .list_faq_entries(&guild_id, params.query.as_deref())
+        .list_faq_entries(&guild_id, params.query.as_deref(), limit, offset)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 

@@ -614,6 +614,32 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Implemented atomic guild-scoped cleanup in `Storage::cleanup_stale_dynamic_voice_rooms`: in PostgreSQL, executes `DELETE FROM dynamic_voice_rooms WHERE guild_id = $1 AND empty_since IS NOT NULL AND empty_since <= $2 RETURNING channel_id`, and in MemoryStore atomically prunes matching entries under lock, preventing TOCTOU races when empty rooms are reoccupied during cleanup.
   - Aligned response payload semantics with `removed_records_count` and `removed_channel_ids` alongside backwards-compatible aliases.
 
+## 21. FAQ Query Pagination, Data Retention Janitors, Command Budget & Host Policy Protection (Issues #248, #249, #250, #251, #252)
+
+- **FAQ Search SQL Sanitization, Literal Matching & Pagination (#248)**:
+  - Hardened `list_faq_entries` across `MemoryStore`, `PostgresStore`, and `Storage`: escaped SQL wildcard characters (`\`, `%`, `_`) using `ESCAPE '\'` to guarantee exact literal substring matching parity between memory and PostgreSQL backends.
+  - Added query pagination with `limit` (default 20, clamped 1..=50) and `offset` (default 0), sorted deterministically by `created_at DESC, id DESC`.
+  - Added query string validation in `src/web/features.rs:list_faq` rejecting search strings longer than 200 characters with HTTP 400 Bad Request.
+- **Audit Log & Ticket Transcript Retention Janitor & TTL Enforcement (#249)**:
+  - Enforced declared data lifecycle (45-day audit log retention, 90-day ticket transcript retention) at query and storage levels.
+  - Implemented `prune_audit_events(cutoff, limit)` and `prune_transcripts(cutoff, limit)` across `PostgresStore`, `MemoryStore`, and `Storage`/`TicketStore` executing batched pruning (`LIMIT $2`) to avoid long table locks.
+  - Added 45-day retention filtering (`created_at >= NOW() - INTERVAL '45 days'`) to `list_audit_events`, `list_audit_events_page`, and `count_audit_events`.
+  - Integrated periodic background janitor in `src/web/mod.rs` running every 60 seconds with migration `0035_audit_transcripts_retention_indexes.sql` adding indexes on `created_at` and `(guild_id, created_at DESC, id DESC)`.
+- **Slash Commands Per-Scope Limit Accounting for Host Commands (#250)**:
+  - Accounted for 5 reserved native host commands (`policy`, `duty`, `help`, `emoji`, `sticker`) within Discord's 100 CHAT_INPUT slash command limit per scope.
+  - Enforced maximum limit of 95 Lua commands (`MAX_LUA_COMMANDS = 95`) at Lua manifest load time (`src/lua/engine.rs`), failing fast on engine startup with actionable error messages when exceeded.
+  - Added compile-time and runtime validation in `src/discord/commands.rs:register` verifying that total commands (`definitions.len() + 5`) do not exceed `MAX_CHAT_INPUT_COMMANDS_PER_SCOPE = 100`.
+  - Updated developer documentation in `docs/lua/manifests.md`.
+- **Audit Log Database-Level Pagination & Accurate Counter (#251)**:
+  - Refactored `GET /api/guilds/{guild_id}/audit` to execute pagination directly at the database level instead of loading 10,000 records into process memory.
+  - Added `Storage::list_audit_events_page(guild_id, limit, offset)` and `Storage::count_audit_events(guild_id)` across `MemoryStore`, `PostgresStore`, and `Storage`.
+  - Preserved existing JSON response contract (`items`, `total`, `next_offset`) while returning accurate unexpired audit event counts and bounded page results.
+- **Host Commands Policy Protection & Rate Limiting with Recovery Exception (#252)**:
+  - Unified command dispatch guard via `evaluate_command_guard` in `src/discord/handler.rs` covering `/duty`, `/help`, `/emoji`, `/sticker` alongside Lua commands.
+  - Enforced per-user and per-guild rate limiting (`RateLimiter::check_command`) and Command Policy evaluation (`CommandPolicyEngine::evaluate`) for built-in host commands.
+  - Preserved administrative/owner recovery exception for `/policy` (`handle_policy_builtin_command`), preventing accidental policy lockouts.
+  - Fixed `/policy explain` target command resolution in Discord slash command handler, mapping host commands (`duty`, `help`, `emoji`, `sticker`, `policy`) to their respective module IDs for consistent policy explain trace output.
+
 ## Delivery order
 
 ### Phase 0 — foundation

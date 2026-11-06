@@ -289,24 +289,16 @@ impl PostgresStore {
 
     pub async fn list_audit_events(
         &self,
-
         guild_id: &str,
-
         limit: i64,
     ) -> anyhow::Result<Vec<AuditLogEntry>> {
         let rows = sqlx::query_as::<_, AuditLogEntry>(
             r#"
-
             SELECT id, guild_id, actor_id, module_id, event, data, created_at
-
             FROM audit_events
-
-            WHERE guild_id = $1
-
+            WHERE guild_id = $1 AND created_at >= NOW() - INTERVAL '45 days'
             ORDER BY created_at DESC, id DESC
-
             LIMIT $2
-
             "#,
         )
         .bind(guild_id)
@@ -315,6 +307,72 @@ impl PostgresStore {
         .await?;
 
         Ok(rows)
+    }
+
+    pub async fn list_audit_events_page(
+        &self,
+        guild_id: &str,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<Vec<AuditLogEntry>> {
+        let rows = sqlx::query_as::<_, AuditLogEntry>(
+            r#"
+            SELECT id, guild_id, actor_id, module_id, event, data, created_at
+            FROM audit_events
+            WHERE guild_id = $1 AND created_at >= NOW() - INTERVAL '45 days'
+            ORDER BY created_at DESC, id DESC
+            LIMIT $2 OFFSET $3
+            "#,
+        )
+        .bind(guild_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn count_audit_events(&self, guild_id: &str) -> anyhow::Result<u64> {
+        let count: (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(*)
+            FROM audit_events
+            WHERE guild_id = $1 AND created_at >= NOW() - INTERVAL '45 days'
+            "#,
+        )
+        .bind(guild_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(count.0 as u64)
+    }
+
+    pub async fn prune_audit_events(
+        &self,
+        cutoff: DateTime<Utc>,
+        limit: usize,
+    ) -> anyhow::Result<u64> {
+        let limit = limit.clamp(1, 5000) as i64;
+        let res = sqlx::query(
+            r#"
+            WITH expired AS (
+                SELECT id FROM audit_events
+                WHERE created_at < $1
+                ORDER BY created_at, id
+                LIMIT $2
+            )
+            DELETE FROM audit_events a
+            USING expired x
+            WHERE a.id = x.id
+            "#,
+        )
+        .bind(cutoff)
+        .bind(limit)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(res.rows_affected())
     }
 
     pub async fn get_member_progress(
@@ -4907,54 +4965,51 @@ impl PostgresStore {
 
     pub async fn list_faq_entries(
         &self,
-
         guild_id: &str,
-
         query: Option<&str>,
+        limit: usize,
+        offset: usize,
     ) -> anyhow::Result<Vec<FaqEntry>> {
+        let limit = limit.clamp(1, 50) as i64;
+        let offset = offset as i64;
+
         let rows = if let Some(q) = query {
-            let pattern = format!("%{}%", q);
+            let escaped = q
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            let pattern = format!("%{escaped}%");
 
             sqlx::query_as::<_, FaqEntry>(
-
                 r#"
-
                 SELECT id, guild_id, question, answer, aliases_json, category, created_at, updated_at
-
                 FROM faq_entries
-
-                WHERE guild_id = $1 AND (question ILIKE $2 OR answer ILIKE $2 OR category ILIKE $2)
-
+                WHERE guild_id = $1
+                  AND (question ILIKE $2 ESCAPE '\' OR answer ILIKE $2 ESCAPE '\' OR category ILIKE $2 ESCAPE '\')
+                ORDER BY created_at DESC, id DESC
+                LIMIT $3 OFFSET $4
                 "#,
-
             )
-
             .bind(guild_id)
-
             .bind(pattern)
-
+            .bind(limit)
+            .bind(offset)
             .fetch_all(&self.pool)
-
             .await?
         } else {
             sqlx::query_as::<_, FaqEntry>(
-
                 r#"
-
                 SELECT id, guild_id, question, answer, aliases_json, category, created_at, updated_at
-
                 FROM faq_entries
-
                 WHERE guild_id = $1
-
+                ORDER BY created_at DESC, id DESC
+                LIMIT $2 OFFSET $3
                 "#,
-
             )
-
             .bind(guild_id)
-
+            .bind(limit)
+            .bind(offset)
             .fetch_all(&self.pool)
-
             .await?
         };
 

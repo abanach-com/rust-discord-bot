@@ -368,3 +368,77 @@ async fn test_lua_engine_eviction_preserves_active_strong_refs_and_max_per_guild
         "Second permit must be denied under max_per_guild=1"
     );
 }
+
+#[test]
+fn test_lua_command_limit_accounts_for_host_commands_issue_250() {
+    let dir_95 = TempDir::new().expect("tempdir");
+    let mut commands_lua_95 = String::new();
+    for i in 0..95 {
+        commands_lua_95.push_str(&format!(
+            r#"{{ name = "cmd_{i:02}", description = "Command number {i}" }},"#
+        ));
+    }
+    std::fs::write(
+        dir_95.path().join("module_95.lua"),
+        format!(
+            r#"
+            return {{
+                manifest = {{
+                    id = "module_95",
+                    name = "Module 95",
+                    version = "1.0.0",
+                    description = "95 commands module.",
+                    category = "test",
+                    commands = {{ {commands_lua_95} }}
+                }},
+                on_command = function() return {{}} end
+            }}
+            "#
+        ),
+    )
+    .expect("write 95 module");
+
+    let engine_95 = LuaEngine::load(dir_95.path(), limits());
+    assert!(
+        engine_95.is_ok(),
+        "95 Lua commands must be accepted since 95 + 5 host = 100 max"
+    );
+
+    // 96 commands must fail startup (96 + 5 = 101 > 100)
+    let dir_96 = TempDir::new().expect("tempdir");
+    let mut commands_lua_96 = String::new();
+    for i in 0..96 {
+        commands_lua_96.push_str(&format!(
+            r#"{{ name = "cmd_{i:02}", description = "Command number {i}" }},"#
+        ));
+    }
+    std::fs::write(
+        dir_96.path().join("module_96.lua"),
+        format!(
+            r#"
+            return {{
+                manifest = {{
+                    id = "module_96",
+                    name = "Module 96",
+                    version = "1.0.0",
+                    description = "96 commands module.",
+                    category = "test",
+                    commands = {{ {commands_lua_96} }}
+                }},
+                on_command = function() return {{}} end
+            }}
+            "#
+        ),
+    )
+    .expect("write 96 module");
+
+    let err_96 = match LuaEngine::load(dir_96.path(), limits()) {
+        Ok(_) => panic!("96 Lua commands must fail"),
+        Err(err) => err,
+    };
+    let err_msg = err_96.to_string();
+    assert!(
+        err_msg.contains("exceeding limit of 95"),
+        "error message must describe exceeding limit of 95: got {err_msg}"
+    );
+}

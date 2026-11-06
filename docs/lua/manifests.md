@@ -22,7 +22,7 @@ The source file must evaluate to a **module table** containing a `manifest` fiel
 | `author` | string or absent | Absent | Optional metadata, may be supplied by installer |
 | `folder` | string or absent | Absent | Optional package metadata, may be supplied by installer |
 
-IDs and command names must be unique in the loaded module set. The total across all loaded modules is at most 100 commands. Event-name syntax validation is not a supported-event allowlist: an unknown but syntactically valid name can load and never be dispatched. Use the five names in [events](contexts-events.md#event-reference).
+IDs and command names must be unique in the loaded module set. The total across all loaded modules is at most 95 commands (Discord enforces a limit of 100 CHAT_INPUT commands per scope, with 5 commands reserved by host features: `policy`, `duty`, `help`, `emoji`, `sticker`). Event-name syntax validation is not a supported-event allowlist: an unknown but syntactically valid name can load and never be dispatched. Use the five names in [events](contexts-events.md#event-reference).
 
 There is no manifest `permissions`, `capabilities`, `dependencies`, `imports`, host HTTP grant or generic storage grant. Adding such fields does not enable a capability. Module ID restrictions on host services are described in [state and services](services.md).
 
