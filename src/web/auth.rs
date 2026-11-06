@@ -510,8 +510,9 @@ pub async fn revalidate_guild_permission(
     // Access token was discarded at rest for security; revalidate using Bot token via Discord API.
     // In Discord API v10, computed member permissions are retrieved via:
     // GET /guilds/{guild_id}/permissions/member/{user_id} -> { "permissions": "<bitfield>" }
+    let base_url = &state.app.config.discord_api_base_url;
     let perms_url = format!(
-        "https://discord.com/api/v10/guilds/{guild_id}/permissions/member/{}",
+        "{base_url}/guilds/{guild_id}/permissions/member/{}",
         session.user.id
     );
     let response = state
@@ -529,10 +530,7 @@ pub async fn revalidate_guild_permission(
     // If 404, fall back to GET /guilds/{guild_id}/members/{user_id} for mocks or environments
     // where permissions/member is unavailable
     let (response, is_fallback_member) = if response.status() == StatusCode::NOT_FOUND {
-        let member_url = format!(
-            "https://discord.com/api/v10/guilds/{guild_id}/members/{}",
-            session.user.id
-        );
+        let member_url = format!("{base_url}/guilds/{guild_id}/members/{}", session.user.id);
         let resp2 = state
             .app
             .http_client

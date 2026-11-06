@@ -1035,15 +1035,16 @@ impl MemoryStore {
 
     pub fn update_appeal_status(
         &self,
-
+        guild_id: &str,
         appeal_id: Uuid,
-
         status: &str,
-
         staff_notes: Option<&str>,
     ) -> bool {
         if let Some(mut entry) = self.appeals.get_mut(&appeal_id) {
             let appeal = entry.value_mut();
+            if appeal.guild_id != guild_id {
+                return false;
+            }
 
             appeal.status = status.to_owned();
 

@@ -17,6 +17,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use crate::lua::LuaModuleManifest;
+use crate::storage::validate_snowflake;
 
 use super::{
     WebState,
@@ -1010,6 +1011,353 @@ pub async fn get_setup_wizard(
     })))
 }
 
+#[derive(Clone, Debug)]
+struct CachedBotPerms {
+    permissions: Option<serenity::all::Permissions>,
+    checked_at: DateTime<Utc>,
+    #[allow(dead_code)]
+    status_code: StatusCode,
+    error_reason: Option<String>,
+}
+
+static BOT_DIAGNOSTICS_PERMS_CACHE: std::sync::LazyLock<dashmap::DashMap<String, CachedBotPerms>> =
+    std::sync::LazyLock::new(dashmap::DashMap::new);
+
+fn permission_flag_from_name(name: &str) -> serenity::all::Permissions {
+    use serenity::all::Permissions;
+    match name {
+        "MANAGE_ROLES" => Permissions::MANAGE_ROLES,
+        "MANAGE_MESSAGES" => Permissions::MANAGE_MESSAGES,
+        "MODERATE_MEMBERS" => Permissions::MODERATE_MEMBERS,
+        "KICK_MEMBERS" => Permissions::KICK_MEMBERS,
+        "BAN_MEMBERS" => Permissions::BAN_MEMBERS,
+        "MANAGE_CHANNELS" => Permissions::MANAGE_CHANNELS,
+        "VIEW_CHANNEL" => Permissions::VIEW_CHANNEL,
+        "SEND_MESSAGES" => Permissions::SEND_MESSAGES,
+        "ATTACH_FILES" => Permissions::ATTACH_FILES,
+        "READ_MESSAGE_HISTORY" => Permissions::READ_MESSAGE_HISTORY,
+        "CONNECT" => Permissions::CONNECT,
+        "SPEAK" => Permissions::SPEAK,
+        "ADD_REACTIONS" => Permissions::ADD_REACTIONS,
+        "VIEW_AUDIT_LOG" => Permissions::VIEW_AUDIT_LOG,
+        _ => Permissions::empty(),
+    }
+}
+
+fn required_permissions_for_module(
+    module_id: &str,
+) -> (serenity::all::Permissions, Vec<&'static str>) {
+    use serenity::all::Permissions;
+    match module_id {
+        "moderation" | "automod" | "join_guard" => (
+            Permissions::MANAGE_MESSAGES
+                | Permissions::MODERATE_MEMBERS
+                | Permissions::KICK_MEMBERS
+                | Permissions::BAN_MEMBERS,
+            vec![
+                "MANAGE_MESSAGES",
+                "MODERATE_MEMBERS",
+                "KICK_MEMBERS",
+                "BAN_MEMBERS",
+            ],
+        ),
+        "roles" | "reaction_roles" => (Permissions::MANAGE_ROLES, vec!["MANAGE_ROLES"]),
+        "tickets" => (
+            Permissions::MANAGE_CHANNELS
+                | Permissions::VIEW_CHANNEL
+                | Permissions::SEND_MESSAGES
+                | Permissions::ATTACH_FILES
+                | Permissions::READ_MESSAGE_HISTORY,
+            vec![
+                "MANAGE_CHANNELS",
+                "VIEW_CHANNEL",
+                "SEND_MESSAGES",
+                "ATTACH_FILES",
+                "READ_MESSAGE_HISTORY",
+            ],
+        ),
+        "music" => (
+            Permissions::CONNECT | Permissions::SPEAK,
+            vec!["CONNECT", "SPEAK"],
+        ),
+        "welcome" => (
+            Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES,
+            vec!["VIEW_CHANNEL", "SEND_MESSAGES"],
+        ),
+        "giveaway" | "starboard" => (
+            Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES | Permissions::ADD_REACTIONS,
+            vec!["VIEW_CHANNEL", "SEND_MESSAGES", "ADD_REACTIONS"],
+        ),
+        "logging" => (
+            Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES | Permissions::VIEW_AUDIT_LOG,
+            vec!["VIEW_CHANNEL", "SEND_MESSAGES", "VIEW_AUDIT_LOG"],
+        ),
+        _ => (
+            Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES,
+            vec!["VIEW_CHANNEL", "SEND_MESSAGES"],
+        ),
+    }
+}
+
+async fn resolve_bot_user_id(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+) -> Option<String> {
+    if token.starts_with("mock") || token.starts_with("dummy") || token == "offline" {
+        return Some("999999999999999999".to_string());
+    }
+
+    let resp = client
+        .get(format!("{base_url}/users/@me"))
+        .header(reqwest::header::AUTHORIZATION, format!("Bot {token}"))
+        .timeout(std::time::Duration::from_secs(4))
+        .send()
+        .await
+        .ok()?;
+
+    if resp.status().is_success() {
+        let val: Value = resp.json().await.ok()?;
+        val.get("id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    } else {
+        None
+    }
+}
+
+async fn fetch_bot_permissions(
+    state: &WebState,
+    guild_id: &str,
+) -> Result<serenity::all::Permissions, String> {
+    let now = Utc::now();
+    if let Some(cached) = BOT_DIAGNOSTICS_PERMS_CACHE.get(guild_id)
+        && now - cached.checked_at < chrono::Duration::seconds(30)
+    {
+        if let Some(perms) = cached.permissions {
+            return Ok(perms);
+        } else if let Some(ref err) = cached.error_reason {
+            return Err(err.clone());
+        }
+    }
+
+    let is_offline = state.app.config.is_offline_mode()
+        && state
+            .app
+            .config
+            .discord_api_base_url
+            .starts_with("https://discord.com");
+
+    if is_offline {
+        let perms = serenity::all::Permissions::ADMINISTRATOR;
+        BOT_DIAGNOSTICS_PERMS_CACHE.insert(
+            guild_id.to_string(),
+            CachedBotPerms {
+                permissions: Some(perms),
+                checked_at: now,
+                status_code: StatusCode::OK,
+                error_reason: None,
+            },
+        );
+        return Ok(perms);
+    }
+
+    let base_url = &state.app.config.discord_api_base_url;
+    let token = &state.app.config.discord_token;
+
+    let bot_id = match resolve_bot_user_id(&state.app.http_client, base_url, token).await {
+        Some(id) => id,
+        None => {
+            let err = "Failed to resolve bot user identity from Discord API".to_string();
+            BOT_DIAGNOSTICS_PERMS_CACHE.insert(
+                guild_id.to_string(),
+                CachedBotPerms {
+                    permissions: None,
+                    checked_at: now,
+                    status_code: StatusCode::INTERNAL_SERVER_ERROR,
+                    error_reason: Some(err.clone()),
+                },
+            );
+            return Err(err);
+        }
+    };
+
+    // Use official Discord computed member permissions endpoint (API v10)
+    let perms_url = format!("{base_url}/guilds/{guild_id}/permissions/member/{bot_id}");
+    let resp = state
+        .app
+        .http_client
+        .get(&perms_url)
+        .header(reqwest::header::AUTHORIZATION, format!("Bot {token}"))
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await;
+
+    let response = match resp {
+        Ok(r) => r,
+        Err(e) => {
+            let err = format!("Discord API connection error or timeout: {e}");
+            BOT_DIAGNOSTICS_PERMS_CACHE.insert(
+                guild_id.to_string(),
+                CachedBotPerms {
+                    permissions: None,
+                    checked_at: now,
+                    status_code: StatusCode::GATEWAY_TIMEOUT,
+                    error_reason: Some(err.clone()),
+                },
+            );
+            return Err(err);
+        }
+    };
+
+    let status = response.status();
+    if status == StatusCode::OK {
+        if let Ok(body) = response.json::<Value>().await
+            && let Some(perm_str) = body.get("permissions").and_then(|v| v.as_str())
+        {
+            let bits = perm_str.parse::<u64>().unwrap_or(0);
+            let perms = serenity::all::Permissions::from_bits_truncate(bits);
+            BOT_DIAGNOSTICS_PERMS_CACHE.insert(
+                guild_id.to_string(),
+                CachedBotPerms {
+                    permissions: Some(perms),
+                    checked_at: now,
+                    status_code: StatusCode::OK,
+                    error_reason: None,
+                },
+            );
+            return Ok(perms);
+        }
+    } else if status == StatusCode::NOT_FOUND {
+        // Fallback to GET /guilds/{guild_id}/members/{bot_id}
+        let member_url = format!("{base_url}/guilds/{guild_id}/members/{bot_id}");
+        if let Ok(member_resp) = state
+            .app
+            .http_client
+            .get(&member_url)
+            .header(reqwest::header::AUTHORIZATION, format!("Bot {token}"))
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+        {
+            let member_status = member_resp.status();
+            if member_status == StatusCode::OK {
+                if let Ok(m_body) = member_resp.json::<Value>().await
+                    && let Some(perm_str) = m_body.get("permissions").and_then(|v| v.as_str())
+                {
+                    let bits = perm_str.parse::<u64>().unwrap_or(0);
+                    let perms = serenity::all::Permissions::from_bits_truncate(bits);
+                    BOT_DIAGNOSTICS_PERMS_CACHE.insert(
+                        guild_id.to_string(),
+                        CachedBotPerms {
+                            permissions: Some(perms),
+                            checked_at: now,
+                            status_code: StatusCode::OK,
+                            error_reason: None,
+                        },
+                    );
+                    return Ok(perms);
+                }
+            } else if member_status == StatusCode::NOT_FOUND {
+                let err = "Bot is not a member of this guild".to_string();
+                BOT_DIAGNOSTICS_PERMS_CACHE.insert(
+                    guild_id.to_string(),
+                    CachedBotPerms {
+                        permissions: Some(serenity::all::Permissions::empty()),
+                        checked_at: now,
+                        status_code: StatusCode::NOT_FOUND,
+                        error_reason: Some(err.clone()),
+                    },
+                );
+                return Ok(serenity::all::Permissions::empty());
+            }
+        }
+    }
+
+    let err = match status {
+        StatusCode::FORBIDDEN => {
+            "Discord API returned 403 Forbidden (missing access to guild)".to_string()
+        }
+        StatusCode::TOO_MANY_REQUESTS => {
+            "Discord API returned 429 Too Many Requests (rate limited)".to_string()
+        }
+        _ => format!("Discord API returned HTTP {status}"),
+    };
+
+    BOT_DIAGNOSTICS_PERMS_CACHE.insert(
+        guild_id.to_string(),
+        CachedBotPerms {
+            permissions: None,
+            checked_at: now,
+            status_code: status,
+            error_reason: Some(err.clone()),
+        },
+    );
+    Err(err)
+}
+
+async fn verify_configured_channel(
+    state: &WebState,
+    guild_id: &str,
+    config: &Value,
+) -> Result<Option<String>, String> {
+    let channel_id_opt = config
+        .get("channel_id")
+        .or_else(|| config.get("welcome_channel_id"))
+        .or_else(|| config.get("log_channel_id"))
+        .and_then(|v| v.as_str());
+
+    let channel_id = match channel_id_opt {
+        Some(cid) => cid,
+        None => return Ok(None),
+    };
+
+    if crate::storage::validate_snowflake("channel_id", channel_id).is_err() {
+        return Ok(None);
+    }
+
+    let is_offline = state.app.config.is_offline_mode()
+        && state
+            .app
+            .config
+            .discord_api_base_url
+            .starts_with("https://discord.com");
+    if is_offline {
+        return Ok(Some(channel_id.to_string()));
+    }
+
+    let base_url = &state.app.config.discord_api_base_url;
+    let token = &state.app.config.discord_token;
+
+    let ch_url = format!("{base_url}/channels/{channel_id}");
+    let resp = state
+        .app
+        .http_client
+        .get(&ch_url)
+        .header(reqwest::header::AUTHORIZATION, format!("Bot {token}"))
+        .timeout(std::time::Duration::from_secs(4))
+        .send()
+        .await;
+
+    match resp {
+        Ok(r) if r.status() == StatusCode::OK => {
+            if let Ok(ch_json) = r.json::<Value>().await
+                && let Some(ch_guild) = ch_json.get("guild_id").and_then(|v| v.as_str())
+                && ch_guild != guild_id
+            {
+                return Err(format!(
+                    "Configured channel {channel_id} belongs to guild {ch_guild}, not current guild {guild_id}"
+                ));
+            }
+            Ok(Some(channel_id.to_string()))
+        }
+        Ok(r) if r.status() == StatusCode::NOT_FOUND => Err(format!(
+            "Configured channel {channel_id} was not found on Discord"
+        )),
+        Ok(_) | Err(_) => Ok(Some(channel_id.to_string())),
+    }
+}
+
 pub async fn get_guild_diagnostics(
     State(state): State<WebState>,
     Path(guild_id): Path<String>,
@@ -1017,43 +1365,131 @@ pub async fn get_guild_diagnostics(
 ) -> Result<Json<Value>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
     ensure_guild_access(&state, &session, &guild_id).await?;
+    if validate_snowflake("guild_id", &guild_id).is_err() && !guild_id.starts_with("guild_") {
+        return Err(ApiError::bad_request("Invalid guild_id"));
+    }
 
-    let is_gateway_ok = state.app.is_gateway_ready.load(Ordering::SeqCst)
-        || state.app.config.discord_token.starts_with("dummy")
-        || state.app.config.discord_token.starts_with("mock");
+    let is_gateway_ok =
+        state.app.is_gateway_ready.load(Ordering::SeqCst) || state.app.config.is_offline_mode();
+
+    let bot_perms_res = fetch_bot_permissions(&state, &guild_id).await;
 
     let manifests = state.app.scripts.manifests().await;
     let mut module_checks = Vec::new();
-    let mut healthy_count = 0;
+    let bot_hierarchy_ok = true;
+    let now = Utc::now();
 
     for m in &manifests {
-        let is_configured = state
+        let settings = state
             .app
             .storage
             .get_module_settings(&guild_id, &m.id)
             .await
             .ok()
-            .flatten()
-            .is_some();
-        healthy_count += 1;
-        module_checks.push(json!({
+            .flatten();
+        let is_configured = settings.is_some();
+        let config = settings.as_ref().map(|s| &s.config).unwrap_or(&Value::Null);
+
+        // Check channel isolation
+        let channel_check = verify_configured_channel(&state, &guild_id, config).await;
+
+        let (req_perms, req_names) = required_permissions_for_module(&m.id);
+
+        let (status, reason, remediation, missing_permissions) = match &bot_perms_res {
+            Err(err_msg) => ("unknown", Some(err_msg.clone()), None, None),
+            Ok(perms) => {
+                if let Err(ch_err) = channel_check {
+                    (
+                        "missing",
+                        Some(ch_err),
+                        Some(
+                            "Configure a channel that belongs to this server with proper permissions"
+                                .to_string(),
+                        ),
+                        None,
+                    )
+                } else if perms.contains(serenity::all::Permissions::ADMINISTRATOR)
+                    || perms.contains(req_perms)
+                {
+                    ("ok", None, None, None)
+                } else {
+                    let missing_names: Vec<&str> = req_names
+                        .into_iter()
+                        .filter(|name| {
+                            let flag = permission_flag_from_name(name);
+                            !perms.contains(flag)
+                        })
+                        .collect();
+                    (
+                        "missing",
+                        Some(format!(
+                            "Bot lacks required permissions: {}",
+                            missing_names.join(", ")
+                        )),
+                        Some(format!(
+                            "Grant the bot {} permission in server settings",
+                            missing_names.join(", ")
+                        )),
+                        Some(missing_names),
+                    )
+                }
+            }
+        };
+
+        let mut check_obj = json!({
             "id": m.id,
             "name": m.name,
             "category": m.category,
             "configured": is_configured,
-            "status": "healthy"
-        }));
+            "status": status,
+            "checked_at": now.to_rfc3339()
+        });
+
+        if let Some(r) = reason {
+            check_obj["reason"] = json!(r);
+        }
+        if let Some(rem) = remediation {
+            check_obj["remediation"] = json!(rem);
+        }
+        if let Some(mp) = missing_permissions {
+            check_obj["missing_permissions"] = json!(mp);
+        }
+
+        module_checks.push(check_obj);
     }
+
+    let ok_count = module_checks.iter().filter(|c| c["status"] == "ok").count();
+    let unknown_count = module_checks
+        .iter()
+        .filter(|c| c["status"] == "unknown")
+        .count();
+
+    let (overall_health_val, health_status) = if unknown_count > 0 {
+        (json!("incomplete"), "incomplete")
+    } else if manifests.is_empty() {
+        (json!(100), "healthy")
+    } else {
+        let mut pct = (ok_count * 100) / manifests.len();
+        if !bot_hierarchy_ok {
+            pct = pct.saturating_sub(15);
+        }
+        if !is_gateway_ok {
+            pct = pct.saturating_sub(20);
+        }
+        let status_str = if pct == 100 { "healthy" } else { "degraded" };
+        (json!(pct), status_str)
+    };
 
     Ok(Json(json!({
         "guild_id": guild_id,
         "gateway_connected": is_gateway_ok,
-        "bot_hierarchy_ok": true,
-        "missing_intents": [],
-        "active_modules_count": healthy_count,
+        "bot_hierarchy_ok": bot_hierarchy_ok,
+        "missing_intents": Vec::<String>::new(),
+        "active_modules_count": ok_count,
         "total_available_modules": manifests.len(),
         "module_diagnostics": module_checks,
-        "overall_health_percent": 100
+        "overall_health_status": health_status,
+        "overall_health_percent": overall_health_val,
     })))
 }
 
@@ -1422,6 +1858,9 @@ pub async fn decide_moderation_appeal(
     let (_, session) = authenticate(&state, &headers).await?;
     ensure_guild_access(&state, &session, &guild_id).await?;
     verify_csrf(&headers, &session)?;
+    if validate_snowflake("guild_id", &guild_id).is_err() && !guild_id.starts_with("guild_") {
+        return Err(ApiError::bad_request("Invalid guild_id"));
+    }
 
     let decision = payload.decision.to_lowercase();
     if !["approved", "rejected", "more_info"].contains(&decision.as_str()) {
@@ -1433,7 +1872,12 @@ pub async fn decide_moderation_appeal(
     let updated = state
         .app
         .storage
-        .update_appeal_status(appeal_id, &decision, payload.staff_notes.as_deref())
+        .update_appeal_status(
+            &guild_id,
+            appeal_id,
+            &decision,
+            payload.staff_notes.as_deref(),
+        )
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 

@@ -4177,6 +4177,10 @@ async fn test_scheduled_events_live_mode_discord_verification() {
         login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
         permissions_cache,
     };
+    web_state
+        .app
+        .is_gateway_ready
+        .store(true, std::sync::atomic::Ordering::SeqCst);
 
     let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -5170,4 +5174,408 @@ async fn test_help_forum_session_close_requires_active_membership_for_owner() {
         session_check2.closing_reason.as_deref(),
         Some("Closed by author who is active member")
     );
+}
+
+#[tokio::test]
+async fn test_moderation_appeal_cross_guild_tenant_isolation() {
+    let (state, _) = test_web_state().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+
+    let guild_a = "111000000000000001";
+    let guild_b = "222000000000000002";
+
+    let mod_a_id = "111000000000000010";
+    let mod_b_id = "222000000000000020";
+
+    let sess_a = "sess_mod_a_isolation_test";
+    let csrf_a = "csrf_mod_a_isolation_test";
+
+    let sess_b = "sess_mod_b_isolation_test";
+    let csrf_b = "csrf_mod_b_isolation_test";
+
+    // Moderator A has permissions ONLY on Guild A
+    state
+        .app
+        .sessions
+        .save_session(
+            sess_a,
+            DashboardUser {
+                id: mod_a_id.to_owned(),
+                username: "ModA".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_a.to_owned(),
+                name: "Guild A".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "32".to_owned(), // MANAGE_GUILD
+            }],
+            csrf_a.to_owned(),
+            Utc::now() + Duration::hours(24),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Moderator B has permissions on Guild B
+    state
+        .app
+        .sessions
+        .save_session(
+            sess_b,
+            DashboardUser {
+                id: mod_b_id.to_owned(),
+                username: "ModB".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_b.to_owned(),
+                name: "Guild B".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "32".to_owned(), // MANAGE_GUILD
+            }],
+            csrf_b.to_owned(),
+            Utc::now() + Duration::hours(24),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Create an appeal in Guild B
+    let appeal_b = rusty_discord_bot::storage::ModerationAppeal {
+        id: uuid::Uuid::new_v4(),
+        guild_id: guild_b.to_string(),
+        case_number: 101,
+        user_id: "888000000000000001".to_string(),
+        status: "pending".to_string(),
+        reason: "Unfair ban appeal".to_string(),
+        evidence_url: None,
+        staff_notes: None,
+        created_at: Utc::now() - Duration::hours(5),
+        updated_at: Utc::now() - Duration::hours(5),
+    };
+    state.app.storage.create_appeal(&appeal_b).await.unwrap();
+
+    let cookie_a = format!("rusty_discord_bot_session={sess_a}");
+    let cookie_b = format!("rusty_discord_bot_session={sess_b}");
+
+    // 1. Moderator A attempts to decide appeal B using Guild A's endpoint WITHOUT CSRF -> 403 Forbidden
+    let no_csrf_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/appeals/{}/decide",
+            appeal_b.id
+        ))
+        .header(COOKIE, &cookie_a)
+        .json(&serde_json::json!({
+            "decision": "approved",
+            "staff_notes": "Attempting cross-guild bypass without CSRF"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_csrf_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 2. Moderator A attempts to decide appeal B using Guild A's endpoint WITH valid CSRF -> must be 404 Not Found!
+    let cross_guild_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/appeals/{}/decide",
+            appeal_b.id
+        ))
+        .header(COOKIE, &cookie_a)
+        .header("x-csrf-token", csrf_a)
+        .json(&serde_json::json!({
+            "decision": "approved",
+            "staff_notes": "Attempting cross-guild bypass with CSRF"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cross_guild_resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // Verify appeal B in storage was NOT modified
+    let check_b = state
+        .app
+        .storage
+        .get_appeal(appeal_b.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(check_b.status, "pending");
+    assert_eq!(check_b.staff_notes, None);
+
+    // 3. Moderator B decides appeal B using Guild B's endpoint -> 200 OK
+    let legit_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_b}/appeals/{}/decide",
+            appeal_b.id
+        ))
+        .header(COOKIE, &cookie_b)
+        .header("x-csrf-token", csrf_b)
+        .json(&serde_json::json!({
+            "decision": "approved",
+            "staff_notes": "Legitimate moderator decision"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(legit_resp.status(), reqwest::StatusCode::OK);
+
+    // Verify appeal B in storage was properly updated
+    let updated_b = state
+        .app
+        .storage
+        .get_appeal(appeal_b.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated_b.status, "approved");
+    assert_eq!(
+        updated_b.staff_notes.as_deref(),
+        Some("Legitimate moderator decision")
+    );
+}
+
+#[tokio::test]
+async fn test_diagnostics_discord_permissions_and_failure_states() {
+    // 1. Setup mock Discord API server
+    let mock_status = std::sync::Arc::new(std::sync::atomic::AtomicU16::new(200));
+    let mock_status_clone = mock_status.clone();
+
+    let mock_perms_str = std::sync::Arc::new(tokio::sync::RwLock::new("8".to_string())); // Default: ADMINISTRATOR
+    let mock_perms_clone = mock_perms_str.clone();
+
+    let discord_mock_app = axum::Router::new()
+        .route(
+            "/users/@me",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "id": "999000000000000001",
+                    "username": "RustyBotMock"
+                }))
+            }),
+        )
+        .route(
+            "/guilds/{guild_id}/permissions/member/{user_id}",
+            axum::routing::get(
+                move |axum::extract::Path((_gid, uid)): axum::extract::Path<(String, String)>| {
+                    let status_val = mock_status_clone.load(std::sync::atomic::Ordering::SeqCst);
+                    let perms_val = mock_perms_clone.clone();
+                    async move {
+                        // If this is the dashboard user revalidation, grant MANAGE_GUILD (32)
+                        if uid != "999000000000000001" {
+                            return (
+                                axum::http::StatusCode::OK,
+                                axum::Json(serde_json::json!({ "permissions": "32" })),
+                            );
+                        }
+                        if status_val == 200 {
+                            let p = perms_val.read().await.clone();
+                            (
+                                axum::http::StatusCode::OK,
+                                axum::Json(serde_json::json!({ "permissions": p })),
+                            )
+                        } else if status_val == 403 {
+                            (
+                                axum::http::StatusCode::FORBIDDEN,
+                                axum::Json(serde_json::json!({ "message": "Missing Access" })),
+                            )
+                        } else if status_val == 429 {
+                            (
+                                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                                axum::Json(serde_json::json!({ "message": "Rate limited" })),
+                            )
+                        } else {
+                            (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                axum::Json(serde_json::json!({ "message": "Upstream error" })),
+                            )
+                        }
+                    }
+                },
+            ),
+        );
+
+    let discord_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind discord mock");
+    let discord_addr = discord_listener.local_addr().expect("discord mock addr");
+    tokio::spawn(async move {
+        axum::serve(discord_listener, discord_mock_app)
+            .await
+            .unwrap();
+    });
+
+    // 2. Setup web app configured in live mode pointing to the mock server
+    let mut config = test_config();
+    config.discord_token = "live_bot_token_diagnostics_test".to_string();
+    config.offline_mode = false;
+    config.discord_api_base_url = format!("http://{discord_addr}");
+
+    let app = AppState::bootstrap(config).await.expect("bootstrap");
+    let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
+    let web_state = WebState {
+        app,
+        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        permissions_cache,
+    };
+    web_state
+        .app
+        .is_gateway_ready
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind web listener");
+    let web_addr = web_listener.local_addr().expect("web addr");
+    let router = build_router(web_state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            web_listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{web_addr}");
+
+    let g_admin = "888000000000000001";
+    let g_limited = "888000000000000002";
+    let g_rate_limited = "888000000000000003";
+
+    let admin_user = "888000000000000010";
+    let session_id = "sess_diag_tests";
+    let csrf = "csrf_diag_tests";
+
+    web_state
+        .app
+        .sessions
+        .save_session(
+            session_id,
+            DashboardUser {
+                id: admin_user.to_owned(),
+                username: "DiagAdmin".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![
+                DashboardGuild {
+                    id: g_admin.to_owned(),
+                    name: "Admin Guild".to_owned(),
+                    icon: None,
+                    owner: false,
+                    permissions: "32".to_owned(),
+                },
+                DashboardGuild {
+                    id: g_limited.to_owned(),
+                    name: "Limited Guild".to_owned(),
+                    icon: None,
+                    owner: false,
+                    permissions: "32".to_owned(),
+                },
+                DashboardGuild {
+                    id: g_rate_limited.to_owned(),
+                    name: "Rate Limited Guild".to_owned(),
+                    icon: None,
+                    owner: false,
+                    permissions: "32".to_owned(),
+                },
+            ],
+            csrf.to_owned(),
+            Utc::now() + Duration::hours(24),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let cookie = format!("rusty_discord_bot_session={session_id}");
+
+    // Test Case 1: Bot has ADMINISTRATOR (perms = "8") -> 100% health, healthy status
+    mock_status.store(200, std::sync::atomic::Ordering::SeqCst);
+    *mock_perms_str.write().await = "8".to_string(); // ADMINISTRATOR
+
+    let diag_admin_resp = client
+        .get(format!("{base_url}/api/guilds/{g_admin}/diagnostics"))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(diag_admin_resp.status(), reqwest::StatusCode::OK);
+    let diag_admin_json: serde_json::Value = diag_admin_resp.json().await.unwrap();
+    assert_eq!(diag_admin_json["overall_health_percent"], 100);
+    assert_eq!(diag_admin_json["overall_health_status"], "healthy");
+
+    // Test Case 2: Bot has only VIEW_CHANNEL (perms = "1024"), missing MANAGE_ROLES / BAN_MEMBERS etc.
+    *mock_perms_str.write().await = "1024".to_string(); // VIEW_CHANNEL only
+
+    let diag_limited_resp = client
+        .get(format!("{base_url}/api/guilds/{g_limited}/diagnostics"))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(diag_limited_resp.status(), reqwest::StatusCode::OK);
+    let diag_limited_json: serde_json::Value = diag_limited_resp.json().await.unwrap();
+    // Health percent must be strictly < 100!
+    let pct = diag_limited_json["overall_health_percent"]
+        .as_u64()
+        .expect("number percent");
+    assert!(pct < 100, "Limited permissions must not report 100% health");
+    assert_eq!(diag_limited_json["overall_health_status"], "degraded");
+
+    // Check that a module requiring MANAGE_ROLES (like "roles") has status "missing"
+    let mod_diags = diag_limited_json["module_diagnostics"].as_array().unwrap();
+    let roles_check = mod_diags
+        .iter()
+        .find(|m| m["id"] == "roles")
+        .expect("roles module check");
+    assert_eq!(roles_check["status"], "missing");
+    assert!(
+        roles_check["reason"]
+            .as_str()
+            .unwrap()
+            .contains("MANAGE_ROLES")
+    );
+
+    // Test Case 3: Discord returns 429 Too Many Requests -> unknown status, overall_health_percent = "incomplete"
+    mock_status.store(429, std::sync::atomic::Ordering::SeqCst);
+
+    let diag_429_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{g_rate_limited}/diagnostics"
+        ))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(diag_429_resp.status(), reqwest::StatusCode::OK);
+    let diag_429_json: serde_json::Value = diag_429_resp.json().await.unwrap();
+    assert_eq!(diag_429_json["overall_health_status"], "incomplete");
+    assert_eq!(diag_429_json["overall_health_percent"], "incomplete");
+
+    let mod_diags_429 = diag_429_json["module_diagnostics"].as_array().unwrap();
+    assert_eq!(mod_diags_429[0]["status"], "unknown");
+    assert!(mod_diags_429[0]["reason"].as_str().unwrap().contains("429"));
 }

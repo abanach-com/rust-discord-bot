@@ -1366,25 +1366,20 @@ impl PostgresStore {
 
     pub async fn update_appeal_status(
         &self,
-
+        guild_id: &str,
         appeal_id: Uuid,
-
         status: &str,
-
         staff_notes: Option<&str>,
     ) -> anyhow::Result<bool> {
         let res = sqlx::query(
             r#"
-
             UPDATE moderation_appeals
-
-            SET status = $2, staff_notes = COALESCE($3, staff_notes), updated_at = NOW()
-
-            WHERE id = $1
-
+            SET status = $3, staff_notes = COALESCE($4, staff_notes), updated_at = NOW()
+            WHERE id = $1 AND guild_id = $2
             "#,
         )
         .bind(appeal_id)
+        .bind(guild_id)
         .bind(status)
         .bind(staff_notes)
         .execute(&self.pool)

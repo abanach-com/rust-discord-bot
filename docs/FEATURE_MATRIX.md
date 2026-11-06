@@ -484,7 +484,7 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Implemented transactional batch persistence (`batch_upsert_companion_mappings`) for PostgreSQL using `pg_advisory_xact_lock` and single-transaction rollbacks on constraint violations, and thread-safe atomic batch persistence for `MemoryStore` under synchronization locks.
   - Segmented `POST /companion-channels/batch` into a three-phase pipeline: (1) upfront preflight validation of all mappings, channel snowflakes, voice!=text invariants, tenant isolation, and live Discord channel types; (2) atomic storage batch upsert guaranteeing all-or-nothing execution without partial persistence; (3) post-commit Discord permission revocation and audit logging.
 
-## 17. Lua Legacy Loader Hardening, Community RBAC & SSE Lifecycle (Issues #212, #213, #214, #216, #217, #220, #222, #223, #225, #226, #227)
+## 17. Lua Legacy Loader Hardening, Community RBAC & SSE Lifecycle (Issues #212, #213, #214, #216, #217, #220, #222, #223, #225, #226, #227, #228, #229)
 
 - **Lua Legacy Discovery Hardening & Symlink Containment (#212)**:
   - In legacy discovery mode (when `install.xml` is absent), symlinks are strictly forbidden via `DirEntry::file_type().is_symlink()`, preventing unintended loading of arbitrary external code or configuration leakage.
@@ -513,6 +513,13 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
 - **Help Forum Session Owner Close Guild Member Lifecycle Verification (#227)**:
   - `POST /api/guilds/{guild_id}/help-forums/{thread_id}/close` verifies active guild membership via `ensure_guild_member_access(&state, &session, &guild_id)` for non-administrative post owners before checking `session.user.id == help_session.owner_user_id` and `config.owner_can_close`.
   - Guarantees that former members who departed or were removed from the server cannot remotely archive, lock, or transition historical help forum posts via the dashboard. Administrative access (`ensure_guild_access`) continues to govern moderator closures.
+- **Moderation Appeal Cross-Guild Tenant Isolation (#228)**:
+  - `POST /api/guilds/{guild_id}/appeals/{appeal_id}/decide` and storage layer (`update_appeal_status`) enforce strict tenant containment (`guild_id` passed to `MemoryStore` check `entry.value().guild_id == guild_id` and PostgreSQL query `WHERE id = $1 AND guild_id = $2`).
+  - Cross-guild modification attempts fail closed with HTTP 404 Not Found without modifying status or staff notes of appeals belonging to other guilds.
+- **Computed Discord Permissions & Truthful System Diagnostics (#229)**:
+  - `GET /api/guilds/{guild_id}/diagnostics` replaces dummy 100% / healthy responses with real validation against official Discord computed member permissions API (`GET /guilds/{guild_id}/permissions/member/{bot_id}`).
+  - Evaluates module-specific permission requirements (e.g. `MANAGE_ROLES`, `MANAGE_CHANNELS`, `BAN_MEMBERS`, `VIEW_AUDIT_LOG`), reports granular check status (`ok`, `missing`, `unknown`), remediation instructions, and cross-guild channel containment.
+  - Fail-safe reporting: Discord API errors (403, 429, timeout) report `unknown` and `overall_health_percent: "incomplete"` / `health_status: "incomplete"` instead of falsely declaring 100% health. In-memory 30s caching prevents API rate limiting.
 - **SSE Guild Realtime Events Stream Re-Authentication & Disconnect Cleanup (#214, #216)**:
   - `GET /api/guilds/{guild_id}/events` utilizes an asynchronous dispatch pipeline with dual periodic re-authentication (15-second interval) and pre-event verification against storage and `permissions_cache`.
   - Stale, expired, or deleted user sessions, as well as revoked guild management permissions (`can_manage: false`), immediately terminate active Server-Sent Events (SSE) connections, preventing administrative and moderation event leakage to unauthorized parties. Handled broadcast channel lagging with explicit client resync events.

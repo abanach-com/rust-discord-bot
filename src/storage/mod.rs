@@ -1847,19 +1847,19 @@ impl Storage {
 
     pub async fn update_appeal_status(
         &self,
-
+        guild_id: &str,
         appeal_id: Uuid,
-
         status: &str,
-
         staff_notes: Option<&str>,
     ) -> anyhow::Result<bool> {
         match self {
-            Self::Memory(store) => Ok(store.update_appeal_status(appeal_id, status, staff_notes)),
+            Self::Memory(store) => {
+                Ok(store.update_appeal_status(guild_id, appeal_id, status, staff_notes))
+            }
 
             Self::Postgres(store) => {
                 store
-                    .update_appeal_status(appeal_id, status, staff_notes)
+                    .update_appeal_status(guild_id, appeal_id, status, staff_notes)
                     .await
             }
         }
