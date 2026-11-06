@@ -67,6 +67,24 @@ impl RecurringSchedule {
             Weekday::Sun => &self.sunday,
         }
     }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for day in [
+            Weekday::Mon,
+            Weekday::Tue,
+            Weekday::Wed,
+            Weekday::Thu,
+            Weekday::Fri,
+            Weekday::Sat,
+            Weekday::Sun,
+        ] {
+            for (index, range) in self.ranges_for_weekday(day).iter().enumerate() {
+                DutyTimeRange::new(&range.start, &range.end)
+                    .map_err(|error| anyhow::anyhow!("{day:?}[{index}]: {error}"))?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -102,6 +120,7 @@ impl ModeratorDutyProfile {
         validate_snowflake("user_id", &user_id)?;
         let _ = Tz::from_str(&timezone)
             .map_err(|_| anyhow::anyhow!("Invalid IANA timezone: {}", timezone))?;
+        schedule.validate()?;
 
         let now = Utc::now();
         Ok(Self {
@@ -114,6 +133,13 @@ impl ModeratorDutyProfile {
             version: 0,
             updated_at: now,
         })
+    }
+
+    pub fn schedule_error(&self) -> Option<String> {
+        self.recurring_schedule
+            .validate()
+            .err()
+            .map(|e| e.to_string())
     }
 }
 
@@ -178,20 +204,32 @@ pub fn compute_is_on_call(
         .recurring_schedule
         .ranges_for_weekday(current_weekday);
     for range in today_ranges {
-        if let (Ok(start), Ok(end)) = (
+        match (
             NaiveTime::parse_from_str(&range.start, "%H:%M"),
             NaiveTime::parse_from_str(&range.end, "%H:%M"),
         ) {
-            if start <= end {
-                // Same-day shift: e.g. 18:00 - 22:00
-                if current_time >= start && current_time < end {
-                    return true;
+            (Ok(start), Ok(end)) => {
+                if start <= end {
+                    // Same-day shift: e.g. 18:00 - 22:00
+                    if current_time >= start && current_time < end {
+                        return true;
+                    }
+                } else {
+                    // Overnight shift starting today: e.g. 22:00 - 02:00
+                    if current_time >= start {
+                        return true;
+                    }
                 }
-            } else {
-                // Overnight shift starting today: e.g. 22:00 - 02:00
-                if current_time >= start {
-                    return true;
-                }
+            }
+            _ => {
+                tracing::warn!(
+                    guild_id = %profile.guild_id,
+                    user_id = %profile.user_id,
+                    weekday = ?current_weekday,
+                    start = %range.start,
+                    end = %range.end,
+                    "ignoring invalid duty schedule time range in stored profile"
+                );
             }
         }
     }
@@ -202,13 +240,25 @@ pub fn compute_is_on_call(
         .recurring_schedule
         .ranges_for_weekday(yesterday_weekday);
     for range in yesterday_ranges {
-        if let (Ok(start), Ok(end)) = (
+        match (
             NaiveTime::parse_from_str(&range.start, "%H:%M"),
             NaiveTime::parse_from_str(&range.end, "%H:%M"),
-        ) && start > end
-            && current_time < end
-        {
-            return true;
+        ) {
+            (Ok(start), Ok(end)) => {
+                if start > end && current_time < end {
+                    return true;
+                }
+            }
+            _ => {
+                tracing::warn!(
+                    guild_id = %profile.guild_id,
+                    user_id = %profile.user_id,
+                    weekday = ?yesterday_weekday,
+                    start = %range.start,
+                    end = %range.end,
+                    "ignoring invalid duty schedule time range in stored profile for overnight carryover"
+                );
+            }
         }
     }
 
@@ -1000,5 +1050,93 @@ mod tests {
         assert!(state.expected_on_call);
         assert!(state.last_reconciled_at.is_some());
         assert!(state.last_error.is_none());
+    }
+
+    #[test]
+    fn test_recurring_schedule_validation_and_diagnostics() {
+        // 1. Default empty schedule is valid
+        let default_sched = RecurringSchedule::default();
+        assert!(default_sched.validate().is_ok());
+
+        // 2. Valid day shifts and overnight shifts pass
+        let mut valid_sched = RecurringSchedule::default();
+        valid_sched.monday.push(DutyTimeRange {
+            start: "18:00".to_string(),
+            end: "22:00".to_string(),
+        });
+        valid_sched.friday.push(DutyTimeRange {
+            start: "22:00".to_string(),
+            end: "02:00".to_string(),
+        });
+        valid_sched.sunday.push(DutyTimeRange {
+            start: "12:00".to_string(),
+            end: "12:00".to_string(),
+        });
+        assert!(valid_sched.validate().is_ok());
+
+        // 3. Invalid hour: 25:00
+        let mut invalid_hour = RecurringSchedule::default();
+        invalid_hour.monday.push(DutyTimeRange {
+            start: "18:00".to_string(),
+            end: "25:00".to_string(),
+        });
+        let err = invalid_hour.validate().unwrap_err().to_string();
+        assert!(err.contains("Mon[0]"), "Expected Mon[0] in error: {err}");
+        assert!(err.contains("25:00"), "Expected 25:00 in error: {err}");
+
+        // 4. Invalid text: tomorrow
+        let mut invalid_text = RecurringSchedule::default();
+        invalid_text.tuesday.push(DutyTimeRange {
+            start: "tomorrow".to_string(),
+            end: "22:00".to_string(),
+        });
+        let err = invalid_text.validate().unwrap_err().to_string();
+        assert!(err.contains("Tue[0]"), "Expected Tue[0] in error: {err}");
+        assert!(
+            err.contains("tomorrow"),
+            "Expected tomorrow in error: {err}"
+        );
+
+        // 5. Empty string
+        let mut invalid_empty = RecurringSchedule::default();
+        invalid_empty.wednesday.push(DutyTimeRange {
+            start: "".to_string(),
+            end: "22:00".to_string(),
+        });
+        let err = invalid_empty.validate().unwrap_err().to_string();
+        assert!(err.contains("Wed[0]"), "Expected Wed[0] in error: {err}");
+
+        // 6. Invalid minute: 18:60
+        let mut invalid_minute = RecurringSchedule::default();
+        invalid_minute.thursday.push(DutyTimeRange {
+            start: "18:60".to_string(),
+            end: "22:00".to_string(),
+        });
+        let err = invalid_minute.validate().unwrap_err().to_string();
+        assert!(err.contains("Thu[0]"), "Expected Thu[0] in error: {err}");
+
+        // 7. ModeratorDutyProfile::new rejects invalid schedule
+        let res = ModeratorDutyProfile::new(
+            "100000000000000001".to_string(),
+            "200000000000000001".to_string(),
+            "Europe/Berlin".to_string(),
+            invalid_hour.clone(),
+        );
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("Mon[0]"));
+
+        // 8. schedule_error helper reports diagnostics
+        let profile = ModeratorDutyProfile {
+            guild_id: "100000000000000001".to_string(),
+            user_id: "200000000000000001".to_string(),
+            timezone: "Europe/Berlin".to_string(),
+            recurring_schedule: sqlx::types::Json(invalid_hour),
+            manual_override: None,
+            override_expires_at: None,
+            version: 0,
+            updated_at: Utc::now(),
+        };
+        assert!(profile.schedule_error().is_some());
+        assert!(profile.schedule_error().unwrap().contains("Mon[0]"));
     }
 }

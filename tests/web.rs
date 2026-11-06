@@ -1957,6 +1957,275 @@ async fn test_moderator_duty_api() {
 }
 
 #[tokio::test]
+async fn test_moderator_duty_schedule_validation_and_diagnostics_issue_258() {
+    let (state, _perms) = test_web_state().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let app = build_router(state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve axum");
+    });
+
+    let admin_user_id = "555000000000000001";
+    let guild_id = "777000000000000001";
+    let user_id = "666000000000000001";
+    let csrf_token = "valid_csrf_token_duty_validation";
+    let admin_session_id = "test_duty_admin_session_val";
+
+    state
+        .app
+        .sessions
+        .save_session(
+            admin_session_id,
+            DashboardUser {
+                id: admin_user_id.to_owned(),
+                username: "Admin".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_owned(),
+                name: "Test Guild".to_owned(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_owned(),
+            }],
+            csrf_token.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let session_cookie = format!("rusty_discord_bot_session={admin_session_id}");
+
+    // 1. Initial valid profile upsert: 18:00 - 22:00
+    let valid_upsert = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/duty/profiles/{user_id}"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "timezone": "Europe/Berlin",
+            "recurring_schedule": {
+                "monday": [{"start": "18:00", "end": "22:00"}]
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(valid_upsert.status(), reqwest::StatusCode::OK);
+
+    // Verify initial profile state
+    let get_init = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/duty/profiles/{user_id}"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_init.status(), reqwest::StatusCode::OK);
+    let get_init_json: serde_json::Value = get_init.json().await.unwrap();
+    assert_eq!(
+        get_init_json["profile"]["recurring_schedule"]["monday"][0]["end"],
+        "22:00"
+    );
+    assert!(get_init_json["invalid_schedule"].is_null());
+
+    // 2. Reject out-of-range hour: 25:00
+    let resp_25 = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/duty/profiles/{user_id}"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "timezone": "Europe/Berlin",
+            "recurring_schedule": {
+                "monday": [{"start": "18:00", "end": "25:00"}]
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_25.status(), reqwest::StatusCode::BAD_REQUEST);
+    let err_25: serde_json::Value = resp_25.json().await.unwrap();
+    let err_25_msg = err_25["error"].as_str().unwrap();
+    assert!(err_25_msg.contains("Mon[0]"));
+    assert!(err_25_msg.contains("25:00"));
+
+    // 3. Reject non-time text: "tomorrow"
+    let resp_tomorrow = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/duty/profiles/{user_id}"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "timezone": "Europe/Berlin",
+            "recurring_schedule": {
+                "tuesday": [{"start": "tomorrow", "end": "22:00"}]
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_tomorrow.status(), reqwest::StatusCode::BAD_REQUEST);
+    let err_tomorrow: serde_json::Value = resp_tomorrow.json().await.unwrap();
+    let err_tomorrow_msg = err_tomorrow["error"].as_str().unwrap();
+    assert!(err_tomorrow_msg.contains("Tue[0]"));
+    assert!(err_tomorrow_msg.contains("tomorrow"));
+
+    // 4. Reject empty string start time
+    let resp_empty = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/duty/profiles/{user_id}"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "timezone": "Europe/Berlin",
+            "recurring_schedule": {
+                "wednesday": [{"start": "", "end": "22:00"}]
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_empty.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 5. Reject invalid minute: 18:60
+    let resp_minute = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/duty/profiles/{user_id}"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "timezone": "Europe/Berlin",
+            "recurring_schedule": {
+                "thursday": [{"start": "18:60", "end": "22:00"}]
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_minute.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 6. Verify ATOMIC REJECTION: existing profile was NOT modified or overwritten
+    let get_after_fails = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/duty/profiles/{user_id}"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_after_fails.status(), reqwest::StatusCode::OK);
+    let get_after_json: serde_json::Value = get_after_fails.json().await.unwrap();
+    assert_eq!(
+        get_after_json["profile"]["recurring_schedule"]["monday"][0]["start"],
+        "18:00"
+    );
+    assert_eq!(
+        get_after_json["profile"]["recurring_schedule"]["monday"][0]["end"],
+        "22:00"
+    );
+
+    // 7. Valid overnight shift succeeds: 22:00 - 02:00
+    let resp_overnight = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/duty/profiles/{user_id}"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "timezone": "Europe/Berlin",
+            "recurring_schedule": {
+                "friday": [{"start": "22:00", "end": "02:00"}]
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_overnight.status(), reqwest::StatusCode::OK);
+
+    // 8. Non-destructive diagnostics for pre-existing legacy invalid record
+    let user_legacy = "666000000000000002";
+    let mut legacy_schedule = rusty_discord_bot::duty::RecurringSchedule::default();
+    legacy_schedule
+        .monday
+        .push(rusty_discord_bot::duty::DutyTimeRange {
+            start: "18:00".to_string(),
+            end: "25:00".to_string(),
+        });
+    let legacy_profile = rusty_discord_bot::duty::ModeratorDutyProfile {
+        guild_id: guild_id.to_string(),
+        user_id: user_legacy.to_string(),
+        timezone: "UTC".to_string(),
+        recurring_schedule: sqlx::types::Json(legacy_schedule),
+        manual_override: None,
+        override_expires_at: None,
+        version: 0,
+        updated_at: Utc::now(),
+    };
+    state
+        .app
+        .storage
+        .upsert_duty_profile(legacy_profile)
+        .await
+        .unwrap();
+
+    // GET specific legacy profile reports invalid_schedule without deleting the record
+    let get_legacy = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/duty/profiles/{user_legacy}"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_legacy.status(), reqwest::StatusCode::OK);
+    let get_legacy_json: serde_json::Value = get_legacy.json().await.unwrap();
+    assert_eq!(get_legacy_json["profile"]["user_id"], user_legacy);
+    let diag_err = get_legacy_json["invalid_schedule"].as_str().unwrap();
+    assert!(diag_err.contains("Mon[0]"));
+    assert!(diag_err.contains("25:00"));
+
+    // GET list reports invalid_schedule in the profile object
+    let list_legacy = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/duty/profiles"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_legacy.status(), reqwest::StatusCode::OK);
+    let list_json: serde_json::Value = list_legacy.json().await.unwrap();
+    let profiles_arr = list_json["profiles"].as_array().unwrap();
+    let legacy_item = profiles_arr
+        .iter()
+        .find(|p| p["user_id"] == user_legacy)
+        .expect("legacy item found in list");
+    assert!(
+        legacy_item["invalid_schedule"]
+            .as_str()
+            .unwrap()
+            .contains("Mon[0]")
+    );
+}
+
+#[tokio::test]
 async fn test_staff_recruitment_pipeline_full_lifecycle() {
     let (state, _perms) = test_web_state().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

@@ -4199,8 +4199,19 @@ pub async fn list_duty_profiles(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
+    let profiles_diagnostics: Vec<Value> = profiles
+        .iter()
+        .map(|p| {
+            let mut v = serde_json::to_value(p).unwrap_or(json!({}));
+            if let Some(err) = p.schedule_error() {
+                v["invalid_schedule"] = json!(err);
+            }
+            v
+        })
+        .collect();
+
     Ok(Json(json!({
-        "profiles": profiles,
+        "profiles": profiles_diagnostics,
         "states": states,
     })))
 }
@@ -4229,9 +4240,12 @@ pub async fn get_duty_profile(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
+    let invalid_schedule = profile.as_ref().and_then(|p| p.schedule_error());
+
     Ok(Json(json!({
         "profile": profile,
         "state": duty_state,
+        "invalid_schedule": invalid_schedule,
     })))
 }
 
@@ -4250,6 +4264,11 @@ pub async fn upsert_duty_profile(
     let _ = payload.timezone.parse::<chrono_tz::Tz>().map_err(|_| {
         ApiError::bad_request(format!("Invalid IANA timezone: {}", payload.timezone))
     })?;
+
+    payload
+        .recurring_schedule
+        .validate()
+        .map_err(|e| ApiError::bad_request(format!("Invalid duty schedule: {e}")))?;
 
     let existing = state
         .app

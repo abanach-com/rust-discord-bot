@@ -666,6 +666,11 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Hardened `/metrics` Prometheus endpoint with multi-factor authorization (`is_metrics_authorized`): supports Bearer token (`METRICS_TOKEN`), active authenticated dashboard user session, and network-level scraper filtering (`METRICS_ALLOWED_IPS` or default loopback connections when token is unset).
   - Maintained complete zero-secret compatibility with Docker Compose / Kubernetes container health checks (`GET /health/ready` returns 200/503 without requiring authentication).
   - Redacted `metrics_token` in `Config` `Debug` formatting (emitted as `metrics_token_configured: bool` and safe `metrics_allowed_ips`).
+- **Moderator Duty Schedule Validation & Non-Destructive Diagnostics (#258)**:
+  - Enforced strict input validation for moderator duty recurring schedules in `POST /api/guilds/{guild_id}/duty/profiles/{user_id}` and `ModeratorDutyProfile::new`: all time strings must match canonical `HH:MM` format via `DutyTimeRange::new` and `RecurringSchedule::validate`. Out-of-range hours (`25:00`), invalid minutes (`18:60`), malformed text (`tomorrow`), and empty strings are rejected with HTTP 400 Bad Request with granular day and index error details.
+  - Implemented atomic rejection: invalid payloads are rejected before storage mutation, ensuring existing valid schedules are not corrupted or overwritten.
+  - Enhanced on-call evaluation (`compute_is_on_call`): replaced silent ignoring of invalid ranges with structured operator warning logs (`tracing::warn!`) including guild ID, user ID, weekday, and raw range values.
+  - Added non-destructive diagnostics for legacy records: `GET /api/guilds/{guild_id}/duty/profiles/{user_id}` and `GET /api/guilds/{guild_id}/duty/profiles` expose `invalid_schedule` containing validation errors without deleting or mutating stored profiles, allowing administrators to inspect and fix legacy schedules safely.
 
 ## Delivery order
 
