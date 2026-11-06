@@ -887,14 +887,11 @@ pub async fn create_poll(
 
 pub async fn get_poll(
     State(state): State<WebState>,
-
     Path((guild_id, poll_id)): Path<(String, Uuid)>,
-
     headers: HeaderMap,
 ) -> Result<Json<CommunityPoll>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
-
-    ensure_guild_access(&state, &session, &guild_id).await?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
 
     let poll = state
         .app
@@ -912,25 +909,19 @@ pub async fn get_poll(
 }
 
 #[derive(Debug, Deserialize)]
-
 pub struct VotePollRequest {
     pub option_idx: usize,
 }
 
 pub async fn vote_poll(
     State(state): State<WebState>,
-
     Path((guild_id, poll_id)): Path<(String, Uuid)>,
-
     headers: HeaderMap,
-
     Json(payload): Json<VotePollRequest>,
 ) -> Result<Json<CommunityPoll>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
-
     verify_csrf(&headers, &session)?;
-
-    ensure_guild_access(&state, &session, &guild_id).await?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
 
     let poll = state
         .app

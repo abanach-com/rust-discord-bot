@@ -484,7 +484,7 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Implemented transactional batch persistence (`batch_upsert_companion_mappings`) for PostgreSQL using `pg_advisory_xact_lock` and single-transaction rollbacks on constraint violations, and thread-safe atomic batch persistence for `MemoryStore` under synchronization locks.
   - Segmented `POST /companion-channels/batch` into a three-phase pipeline: (1) upfront preflight validation of all mappings, channel snowflakes, voice!=text invariants, tenant isolation, and live Discord channel types; (2) atomic storage batch upsert guaranteeing all-or-nothing execution without partial persistence; (3) post-commit Discord permission revocation and audit logging.
 
-## 17. Lua Legacy Loader Hardening, Community RBAC & SSE Lifecycle (Issues #212, #213, #214, #216, #217, #220, #222, #223, #225, #226, #227, #228, #229)
+## 17. Lua Legacy Loader Hardening, Community RBAC & SSE Lifecycle (Issues #212, #213, #214, #216, #217, #220, #222, #223, #225, #226, #227, #228, #229, #230)
 
 - **Lua Legacy Discovery Hardening & Symlink Containment (#212)**:
   - In legacy discovery mode (when `install.xml` is absent), symlinks are strictly forbidden via `DirEntry::file_type().is_symlink()`, preventing unintended loading of arbitrary external code or configuration leakage.
@@ -520,6 +520,10 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - `GET /api/guilds/{guild_id}/diagnostics` replaces dummy 100% / healthy responses with real validation against official Discord computed member permissions API (`GET /guilds/{guild_id}/permissions/member/{bot_id}`).
   - Evaluates module-specific permission requirements (e.g. `MANAGE_ROLES`, `MANAGE_CHANNELS`, `BAN_MEMBERS`, `VIEW_AUDIT_LOG`), reports granular check status (`ok`, `missing`, `unknown`), remediation instructions, and cross-guild channel containment.
   - Fail-safe reporting: Discord API errors (403, 429, timeout) report `unknown` and `overall_health_percent: "incomplete"` / `health_status: "incomplete"` instead of falsely declaring 100% health. In-memory 30s caching prevents API rate limiting.
+- **Community Poll Member RBAC & Web Voting Access Boundary (#230)**:
+  - `GET /api/guilds/{guild_id}/polls/{poll_id}` and `POST .../vote` relaxed permission checks from `ensure_guild_access` (`MANAGE_GUILD`) to `ensure_guild_member_access`, allowing regular guild members without server management rights to view community polls and cast their votes via the web interface.
+  - Administrative creation (`create_poll`) strictly remains protected by `ensure_guild_access` (`MANAGE_GUILD`), preventing unauthorized poll creation.
+  - Mutating vote handler strictly enforces CSRF token validation (`verify_csrf`), voter attribution bound to authenticated `session.user.id`, cross-guild tenant boundary matching (`poll.guild_id == guild_id`), and idempotency/expiration checks.
 - **SSE Guild Realtime Events Stream Re-Authentication & Disconnect Cleanup (#214, #216)**:
   - `GET /api/guilds/{guild_id}/events` utilizes an asynchronous dispatch pipeline with dual periodic re-authentication (15-second interval) and pre-event verification against storage and `permissions_cache`.
   - Stale, expired, or deleted user sessions, as well as revoked guild management permissions (`can_manage: false`), immediately terminate active Server-Sent Events (SSE) connections, preventing administrative and moderation event leakage to unauthorized parties. Handled broadcast channel lagging with explicit client resync events.

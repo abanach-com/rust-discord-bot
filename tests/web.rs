@@ -5579,3 +5579,263 @@ async fn test_diagnostics_discord_permissions_and_failure_states() {
     assert_eq!(mod_diags_429[0]["status"], "unknown");
     assert!(mod_diags_429[0]["reason"].as_str().unwrap().contains("429"));
 }
+
+#[tokio::test]
+async fn test_polls_member_access_and_admin_boundary() {
+    let (state, _) = test_web_state().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let guild_a = "111222333444555666";
+    let guild_b = "999888777666555444";
+
+    let poll = state
+        .app
+        .storage
+        .create_community_poll(
+            guild_a,
+            "channel_123",
+            "What feature should we build next?",
+            &["Music Bot".to_string(), "Economy System".to_string()],
+            false,
+            Utc::now() + Duration::days(3),
+        )
+        .await
+        .expect("create test poll");
+
+    // Regular member session: member of guild_a, but permissions = "0" (no MANAGE_GUILD)
+    let member_session_id = "poll_member_session_token";
+    let member_user = DashboardUser {
+        id: "member_poll_1".to_owned(),
+        username: "voter_dan".to_owned(),
+        global_name: None,
+        avatar: None,
+    };
+    let member_guilds = vec![DashboardGuild {
+        id: guild_a.to_owned(),
+        name: "Guild A".to_owned(),
+        icon: None,
+        owner: false,
+        permissions: "0".to_owned(), // regular member, no MANAGE_GUILD
+    }];
+
+    state
+        .app
+        .sessions
+        .save_session(
+            member_session_id,
+            member_user,
+            member_guilds,
+            "csrf_poll_123".to_owned(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .expect("save member session");
+
+    // Guild B member session: only member of guild_b
+    let guild_b_session_id = "guild_b_member_session_token";
+    let b_user = DashboardUser {
+        id: "member_b_user".to_owned(),
+        username: "outsider_bob".to_owned(),
+        global_name: None,
+        avatar: None,
+    };
+    let b_guilds = vec![DashboardGuild {
+        id: guild_b.to_owned(),
+        name: "Guild B".to_owned(),
+        icon: None,
+        owner: false,
+        permissions: "0".to_owned(),
+    }];
+
+    state
+        .app
+        .sessions
+        .save_session(
+            guild_b_session_id,
+            b_user,
+            b_guilds,
+            "csrf_b_123".to_owned(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .expect("save guild b session");
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let session_cookie = format!("rusty_discord_bot_session={member_session_id}");
+    let b_cookie = format!("rusty_discord_bot_session={guild_b_session_id}");
+
+    // 1. Regular member without MANAGE_GUILD can view poll in guild A -> 200 OK
+    let get_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_a}/polls/{}", poll.id))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .expect("get poll");
+    assert_eq!(get_resp.status(), reqwest::StatusCode::OK);
+    let poll_json: serde_json::Value = get_resp.json().await.unwrap();
+    assert_eq!(poll_json["question"], "What feature should we build next?");
+
+    // 2. Regular member without MANAGE_GUILD can vote with valid CSRF -> 200 OK
+    let vote_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/polls/{}/vote",
+            poll.id
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", "csrf_poll_123")
+        .json(&serde_json::json!({ "option_idx": 0 }))
+        .send()
+        .await
+        .expect("vote poll");
+    assert_eq!(vote_resp.status(), reqwest::StatusCode::OK);
+    let vote_json: serde_json::Value = vote_resp.json().await.unwrap();
+    assert_eq!(vote_json["tallies_json"][0], 1);
+    assert_eq!(vote_json["tallies_json"][1], 0);
+
+    // 3. Repeat identical vote is idempotent -> 200 OK, tallies unchanged
+    let repeat_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/polls/{}/vote",
+            poll.id
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", "csrf_poll_123")
+        .json(&serde_json::json!({ "option_idx": 0 }))
+        .send()
+        .await
+        .expect("repeat vote poll");
+    assert_eq!(repeat_resp.status(), reqwest::StatusCode::OK);
+    let repeat_json: serde_json::Value = repeat_resp.json().await.unwrap();
+    assert_eq!(repeat_json["tallies_json"][0], 1);
+
+    // 4. Voting without CSRF -> 403 Forbidden
+    let no_csrf_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/polls/{}/vote",
+            poll.id
+        ))
+        .header(COOKIE, &session_cookie)
+        .json(&serde_json::json!({ "option_idx": 1 }))
+        .send()
+        .await
+        .expect("vote without csrf");
+    assert_eq!(no_csrf_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 5. Regular member cannot create polls (requires MANAGE_GUILD) -> 403 Forbidden
+    let create_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/polls"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", "csrf_poll_123")
+        .json(&serde_json::json!({
+            "channel_id": "channel_123",
+            "question": "Unauthorized poll?",
+            "options": ["Yes", "No"],
+            "is_anonymous": false,
+            "duration_minutes": 60
+        }))
+        .send()
+        .await
+        .expect("create poll as member");
+    assert_eq!(create_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 6. Member of Guild B cannot access Guild A poll endpoint -> 403 Forbidden
+    let outsider_get_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_a}/polls/{}", poll.id))
+        .header(COOKIE, &b_cookie)
+        .send()
+        .await
+        .expect("outsider get poll");
+    assert_eq!(outsider_get_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let outsider_vote_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/polls/{}/vote",
+            poll.id
+        ))
+        .header(COOKIE, &b_cookie)
+        .header("X-CSRF-Token", "csrf_b_123")
+        .json(&serde_json::json!({ "option_idx": 0 }))
+        .send()
+        .await
+        .expect("outsider vote poll");
+    assert_eq!(outsider_vote_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 7. Member of Guild B querying Guild B path with Guild A poll UUID -> 404 Not Found
+    let mismatched_guild_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_b}/polls/{}", poll.id))
+        .header(COOKIE, &b_cookie)
+        .send()
+        .await
+        .expect("mismatched guild poll");
+    assert_eq!(
+        mismatched_guild_resp.status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+
+    // 8. Anonymous unauthenticated request -> 401 Unauthorized
+    let anon_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_a}/polls/{}", poll.id))
+        .send()
+        .await
+        .expect("anonymous get poll");
+    assert_eq!(anon_resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // 9. Invalid option index -> 400 Bad Request
+    let invalid_idx_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/polls/{}/vote",
+            poll.id
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", "csrf_poll_123")
+        .json(&serde_json::json!({ "option_idx": 99 }))
+        .send()
+        .await
+        .expect("invalid option index vote");
+    assert_eq!(invalid_idx_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 10. Expired poll rejection -> 400 Bad Request
+    let expired_poll = state
+        .app
+        .storage
+        .create_community_poll(
+            guild_a,
+            "channel_123",
+            "Expired Question",
+            &["A".to_string(), "B".to_string()],
+            false,
+            Utc::now() - Duration::minutes(10),
+        )
+        .await
+        .expect("create expired poll");
+
+    let expired_vote_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/polls/{}/vote",
+            expired_poll.id
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", "csrf_poll_123")
+        .json(&serde_json::json!({ "option_idx": 0 }))
+        .send()
+        .await
+        .expect("vote expired poll");
+    assert_eq!(expired_vote_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+}
