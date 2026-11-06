@@ -84,7 +84,7 @@ Authentication flow:
 3. Discord redirects back with a code and state
 4. the server validates and consumes the state
 5. the server exchanges the code and fetches the user plus guild list
-6. only owned guilds or guilds with Manage Guild / Administrator are retained
+6. all user guilds are retained in the session for member self-service endpoints, while the administrative dashboard selector filters to manageable guilds (owner, MANAGE_GUILD, or ADMINISTRATOR)
 7. the Discord access token is discarded
 8. an opaque HttpOnly application session is issued
 

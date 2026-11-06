@@ -315,16 +315,30 @@ async function showDashboard() {
     ui.accountId.textContent = `Discord ID: ${state.session.user.id}`;
   }
 
+  const ADMINISTRATOR = 1n << 3n;
+  const MANAGE_GUILD = 1n << 5n;
+  function canManageInSelector(guild) {
+    if (guild.owner) return true;
+    try {
+      return (BigInt(guild.permissions) & (ADMINISTRATOR | MANAGE_GUILD)) !== 0n;
+    } catch {
+      return false;
+    }
+  }
+
+  const manageableGuilds = (state.session.guilds || []).filter(canManageInSelector);
+
   ui.guildSelect.replaceChildren();
-  for (const guild of state.session.guilds) {
+  for (const guild of manageableGuilds) {
     const option = document.createElement("option");
     option.value = guild.id;
     option.textContent = guild.name;
     ui.guildSelect.append(option);
   }
 
-  if (state.session.guilds.length === 0) {
+  if (manageableGuilds.length === 0) {
     ui.guildSelect.disabled = true;
+    state.guildId = null;
     ui.modules.replaceChildren(
       messageCard(
         "No servers",
@@ -338,7 +352,7 @@ async function showDashboard() {
     try { state.guildAbortController.abort(); } catch {}
   }
   state.guildAbortController = new AbortController();
-  state.guildId = state.session.guilds[0].id;
+  state.guildId = manageableGuilds[0].id;
   ui.guildSelect.value = state.guildId;
   initRealtimeStream();
   switchTab(state.activeTab);

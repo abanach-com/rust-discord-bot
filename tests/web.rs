@@ -6143,3 +6143,177 @@ async fn test_community_member_self_service_and_admin_boundary() {
         .expect("create faq as member");
     assert_eq!(admin_faq_resp.status(), reqwest::StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn test_read_only_get_endpoints_do_not_require_csrf() {
+    let (state, _) = test_web_state().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let guild_id = "111222333444555666";
+    let admin_user_id = "222333444555666777";
+
+    let session_id = "admin_session_token_no_csrf";
+    let admin_user = DashboardUser {
+        id: admin_user_id.to_owned(),
+        username: "admin_tester".to_owned(),
+        global_name: None,
+        avatar: None,
+    };
+    let admin_guilds = vec![DashboardGuild {
+        id: guild_id.to_owned(),
+        name: "Test Guild".to_owned(),
+        icon: None,
+        owner: true,
+        permissions: "8".to_owned(), // Administrator
+    }];
+
+    state
+        .app
+        .sessions
+        .save_session(
+            session_id,
+            admin_user,
+            admin_guilds,
+            "csrf_secret_token_123".to_owned(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .expect("save admin session");
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let session_cookie = format!("rusty_discord_bot_session={session_id}");
+
+    // 1. GET /api/guilds/{guild_id}/store/purchases WITHOUT X-CSRF-Token -> 200 OK
+    let purchases_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/store/purchases"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .expect("get purchases without csrf");
+    assert_eq!(purchases_resp.status(), reqwest::StatusCode::OK);
+
+    // 2. GET /api/guilds/{guild_id}/members/search WITHOUT X-CSRF-Token -> 200 OK
+    let search_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/members/search"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .expect("search members without csrf");
+    assert_eq!(search_resp.status(), reqwest::StatusCode::OK);
+
+    // 3. GET /api/guilds/{guild_id}/members/{user_id}/identity-history WITHOUT X-CSRF-Token -> 200 OK
+    let identity_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/members/{admin_user_id}/identity-history"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .expect("get identity history without csrf");
+    assert_eq!(identity_resp.status(), reqwest::StatusCode::OK);
+
+    // 4. Anonymous request without session -> 401 Unauthorized
+    let anon_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/store/purchases"))
+        .send()
+        .await
+        .expect("anon get purchases");
+    assert_eq!(anon_resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_github_webhook_route_hmac_verification_and_deduplication() {
+    let (state, _) = test_web_state().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+
+    let secret = "test-github-secret";
+    let body = r#"{"event_id":"gh_web_evt_100","repository":{"full_name":"org/repo"}}"#;
+    let hmac_bytes = rusty_discord_bot::integrations::webhook::compute_hmac_sha256(
+        secret.as_bytes(),
+        body.as_bytes(),
+    );
+    let valid_sig = format!("sha256={}", hex::encode(hmac_bytes));
+
+    // 1. Missing signature header -> 401 Unauthorized
+    let missing_sig_resp = client
+        .post(format!("{base_url}/api/webhooks/github"))
+        .header("X-GitHub-Delivery", "delivery-web-100")
+        .body(body)
+        .send()
+        .await
+        .expect("post missing sig");
+    assert_eq!(missing_sig_resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // 2. Bogus signature header -> 401 Unauthorized
+    let bad_sig_resp = client
+        .post(format!("{base_url}/api/webhooks/github"))
+        .header(
+            "X-Hub-Signature-256",
+            "sha256=bogus_hmac_00000000000000000000",
+        )
+        .header("X-GitHub-Delivery", "delivery-web-100")
+        .body(body)
+        .send()
+        .await
+        .expect("post bad sig");
+    assert_eq!(bad_sig_resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // 3. Valid HMAC signature -> 200 OK, duplicate: false
+    let valid_resp = client
+        .post(format!("{base_url}/api/webhooks/github"))
+        .header("X-Hub-Signature-256", &valid_sig)
+        .header("X-GitHub-Delivery", "delivery-web-100")
+        .body(body)
+        .send()
+        .await
+        .expect("post valid sig");
+    assert_eq!(valid_resp.status(), reqwest::StatusCode::OK);
+    let valid_json: serde_json::Value = valid_resp.json().await.unwrap();
+    assert_eq!(valid_json["duplicate"], false);
+
+    // 4. Replay with same delivery ID -> 200 OK, duplicate: true
+    let replay_resp = client
+        .post(format!("{base_url}/api/webhooks/github"))
+        .header("X-Hub-Signature-256", &valid_sig)
+        .header("X-GitHub-Delivery", "delivery-web-100")
+        .body(body)
+        .send()
+        .await
+        .expect("post replay sig");
+    assert_eq!(replay_resp.status(), reqwest::StatusCode::OK);
+    let replay_json: serde_json::Value = replay_resp.json().await.unwrap();
+    assert_eq!(replay_json["duplicate"], true);
+}

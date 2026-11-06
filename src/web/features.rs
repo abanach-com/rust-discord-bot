@@ -1342,8 +1342,6 @@ pub async fn list_store_purchases(
 ) -> Result<Json<Value>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
 
-    verify_csrf(&headers, &session)?;
-
     let target_user_id = if ensure_guild_access(&state, &session, &guild_id)
         .await
         .is_ok()
@@ -1387,7 +1385,6 @@ pub async fn search_members(
     Query(query): Query<SearchMembersQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
-    verify_csrf(&headers, &session)?;
     ensure_guild_access(&state, &session, &guild_id).await?;
 
     let role_ids = query
@@ -1453,7 +1450,6 @@ pub async fn get_member_identity_history(
     Query(query): Query<IdentityHistoryQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
-    verify_csrf(&headers, &session)?;
     ensure_guild_access(&state, &session, &guild_id).await?;
 
     let history = state
@@ -2384,40 +2380,17 @@ pub async fn create_feed(
 }
 
 pub async fn handle_github_webhook(
+    State(state): State<WebState>,
     headers: HeaderMap,
-
     body: String,
 ) -> Result<Json<Value>, ApiError> {
-    let sig_header = headers
-        .get("X-Hub-Signature-256")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| ApiError::unauthorized("Missing X-Hub-Signature-256 header"))?;
-
-    // In a live environment, secret is loaded from app config; for testing, verify header structure
-
-    if !sig_header.starts_with("sha256=") {
-        return Err(ApiError::unauthorized("Invalid X-Hub-Signature-256 format"));
-    }
-
-    let payload: Value =
-        serde_json::from_str(&body).map_err(|_| ApiError::bad_request("Malformed JSON payload"))?;
-
-    let event_type = headers
-        .get("X-GitHub-Event")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("push");
-
-    Ok(Json(json!({
-
-        "status": "processed",
-
-        "event": event_type,
-
-        "repository": payload.get("repository").and_then(|r| r.get("full_name")),
-
-        "discord_embed_dispatched": true
-
-    })))
+    super::integrations::handle_inbound_webhook(
+        State(state),
+        Path("github".to_string()),
+        headers,
+        body,
+    )
+    .await
 }
 
 // ==========================================

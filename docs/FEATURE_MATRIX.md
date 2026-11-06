@@ -487,7 +487,7 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Implemented transactional batch persistence (`batch_upsert_companion_mappings`) for PostgreSQL using `pg_advisory_xact_lock` and single-transaction rollbacks on constraint violations, and thread-safe atomic batch persistence for `MemoryStore` under synchronization locks.
   - Segmented `POST /companion-channels/batch` into a three-phase pipeline: (1) upfront preflight validation of all mappings, channel snowflakes, voice!=text invariants, tenant isolation, and live Discord channel types; (2) atomic storage batch upsert guaranteeing all-or-nothing execution without partial persistence; (3) post-commit Discord permission revocation and audit logging.
 
-## 17. Lua Legacy Loader Hardening, Community RBAC & SSE Lifecycle (Issues #212, #213, #214, #216, #217, #220, #222, #223, #225, #226, #227, #228, #229, #230, #232)
+## 17. Lua Legacy Loader Hardening, Community RBAC & SSE Lifecycle (Issues #212, #213, #214, #216, #217, #220, #222, #223, #225, #226, #227, #228, #229, #230, #232, #233, #234, #235)
 
 - **Lua Legacy Discovery Hardening & Symlink Containment (#212)**:
   - In legacy discovery mode (when `install.xml` is absent), symlinks are strictly forbidden via `DirEntry::file_type().is_symlink()`, preventing unintended loading of arbitrary external code or configuration leakage.
@@ -531,6 +531,17 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - `POST /api/guilds/{guild_id}/counting/{channel_id}`, `GET /api/guilds/{guild_id}/cards`, `POST .../cards/trade`, `POST .../cards/trade/{trade_id}/accept`, `GET /api/guilds/{guild_id}/tuppers`, and `POST .../tuppers` relaxed permission checks from `ensure_guild_access` (`MANAGE_GUILD`) to `ensure_guild_member_access`.
   - Enables regular guild members to participate in counting games, inspect and trade their own card collections, and create/list Tupper RP personas via the web dashboard.
   - Retained strict CSRF validation on all mutating endpoints (`verify_csrf`), actor identity bound to authenticated `session.user.id`, cross-guild tenant boundary matching, and atomic trade ownership transitions.
+- **Dashboard Guild Selector Manageable Scope Filtering (#233)**:
+  - Frontend `web/static/app.js` filters `state.session.guilds` using 64-bit BigInt bitmask checking for `owner === true`, `ADMINISTRATOR` (`1n << 3n`), or `MANAGE_GUILD` (`1n << 5n`).
+  - Precludes member-only guilds from populating the administrative server selector or triggering unauthorized `loadModules()` and administrative SSE stream connection attempts.
+  - Displays a clean informative state when no manageable servers exist (`guildSelect.disabled = true`, `state.guildId = null`), while preserving member-only guilds in the session for community self-service endpoints.
+- **Read-Only GET Safe Methods CSRF Guard Removal (#234)**:
+  - Removed erroneous `verify_csrf(&headers, &session)?` calls from non-mutating HTTP GET handlers: `GET /api/guilds/{guild_id}/store/purchases`, `GET /api/guilds/{guild_id}/members/search`, and `GET /api/guilds/{guild_id}/members/{user_id}/identity-history`.
+  - Restores compliance with HTTP safe/idempotent method semantics and frontend helper behavior (`request()` injects `X-CSRF-Token` solely on non-GET methods), eliminating 403 Forbidden errors on administrative and self-service reads while maintaining mandatory CSRF enforcement across all mutating POST/PUT/PATCH/DELETE endpoints.
+- **GitHub Webhook Cryptographic HMAC-SHA256 & Deduplication Unification (#235)**:
+  - Unified `/api/webhooks/github` route with `handle_inbound_webhook`, executing authentic raw-body HMAC-SHA256 verification via `verify_hmac_sha256` against configured secrets instead of inspecting prefix strings or reporting unverified dispatch success.
+  - Rejects missing, malformed, or invalid signatures with HTTP 401 Unauthorized (`Invalid GitHub signature`).
+  - Enforces persistent event deduplication using `X-GitHub-Delivery` via `check_and_record_event_dedupe`, ensuring strict idempotency and eliminating fake `discord_embed_dispatched: true` affirmations.
 - **SSE Guild Realtime Events Stream Re-Authentication & Disconnect Cleanup (#214, #216)**:
   - `GET /api/guilds/{guild_id}/events` utilizes an asynchronous dispatch pipeline with dual periodic re-authentication (15-second interval) and pre-event verification against storage and `permissions_cache`.
   - Stale, expired, or deleted user sessions, as well as revoked guild management permissions (`can_manage: false`), immediately terminate active Server-Sent Events (SSE) connections, preventing administrative and moderation event leakage to unauthorized parties. Handled broadcast channel lagging with explicit client resync events.

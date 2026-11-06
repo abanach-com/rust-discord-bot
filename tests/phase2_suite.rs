@@ -943,12 +943,33 @@ async fn test_phase2_community_operations_and_media_suite() {
         .unwrap();
     assert_eq!(feed_resp.status(), reqwest::StatusCode::OK);
 
-    // GitHub webhook validation
-    let gh_resp = client
+    // GitHub webhook validation (Issue #235)
+    // 1. Invalid signature rejection -> 401 Unauthorized
+    let gh_bad_resp = client
         .post(format!("{base_url}/api/webhooks/github"))
         .header("X-Hub-Signature-256", "sha256=abcdef1234567890")
         .header("X-GitHub-Event", "push")
+        .header("X-GitHub-Delivery", "delivery-p2-bad")
         .body(r#"{"repository":{"full_name":"abanach-com/rust-discord-bot"}}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(gh_bad_resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // 2. Valid HMAC signature acceptance -> 200 OK
+    let gh_body = r#"{"repository":{"full_name":"abanach-com/rust-discord-bot"}}"#;
+    let hmac_bytes = rusty_discord_bot::integrations::webhook::compute_hmac_sha256(
+        "test-github-secret".as_bytes(),
+        gh_body.as_bytes(),
+    );
+    let sig_hex = format!("sha256={}", hex::encode(hmac_bytes));
+
+    let gh_resp = client
+        .post(format!("{base_url}/api/webhooks/github"))
+        .header("X-Hub-Signature-256", &sig_hex)
+        .header("X-GitHub-Event", "push")
+        .header("X-GitHub-Delivery", "delivery-p2-good")
+        .body(gh_body)
         .send()
         .await
         .unwrap();
