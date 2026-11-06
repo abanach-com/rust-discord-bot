@@ -6748,3 +6748,346 @@ async fn test_login_rate_limiting_with_spoofed_x_forwarded_for_issue_246() {
         "Independent real client IP 203.0.113.46 must succeed"
     );
 }
+
+#[tokio::test]
+async fn test_cleanup_dynamic_voice_csrf_and_atomic_isolation_issue_247() {
+    let (state, _) = test_web_state().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("build client");
+
+    let base_url = format!("http://{}", addr);
+
+    let guild_id_1 = "111000000000000101";
+    let guild_id_2 = "111000000000000102";
+    let admin_user_id = "user_voice_admin";
+    let session_id = "test_session_voice_admin";
+    let csrf_token = "valid_csrf_token_voice_101";
+
+    let user = DashboardUser {
+        id: admin_user_id.to_owned(),
+        username: "VoiceAdmin".to_owned(),
+        global_name: None,
+        avatar: None,
+    };
+    let guilds = vec![
+        DashboardGuild {
+            id: guild_id_1.to_owned(),
+            name: "Guild One".to_owned(),
+            icon: None,
+            owner: true,
+            permissions: "8".to_owned(),
+        },
+        DashboardGuild {
+            id: guild_id_2.to_owned(),
+            name: "Guild Two".to_owned(),
+            icon: None,
+            owner: true,
+            permissions: "8".to_owned(),
+        },
+    ];
+
+    state
+        .app
+        .sessions
+        .save_session(
+            session_id,
+            user,
+            guilds,
+            csrf_token.to_owned(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .expect("save session");
+
+    let session_cookie = format!("rusty_discord_bot_session={session_id}");
+
+    // Setup voice rooms:
+    // Guild 1:
+    // - room_1_stale: empty 60s ago (stale > 30s threshold)
+    // - room_1_recent: empty 10s ago (not stale < 30s threshold)
+    // - room_1_active: active (empty_since = None)
+    // Guild 2:
+    // - room_2_stale: empty 60s ago (stale > 30s threshold)
+    state
+        .app
+        .storage
+        .register_dynamic_voice_room("chan_1_stale", guild_id_1, "owner_1")
+        .await
+        .unwrap();
+    state
+        .app
+        .storage
+        .set_dynamic_voice_empty_since("chan_1_stale", Some(Utc::now() - Duration::seconds(60)))
+        .await
+        .unwrap();
+
+    state
+        .app
+        .storage
+        .register_dynamic_voice_room("chan_1_recent", guild_id_1, "owner_2")
+        .await
+        .unwrap();
+    state
+        .app
+        .storage
+        .set_dynamic_voice_empty_since("chan_1_recent", Some(Utc::now() - Duration::seconds(10)))
+        .await
+        .unwrap();
+
+    state
+        .app
+        .storage
+        .register_dynamic_voice_room("chan_1_active", guild_id_1, "owner_3")
+        .await
+        .unwrap();
+
+    state
+        .app
+        .storage
+        .register_dynamic_voice_room("chan_2_stale", guild_id_2, "owner_4")
+        .await
+        .unwrap();
+    state
+        .app
+        .storage
+        .set_dynamic_voice_empty_since("chan_2_stale", Some(Utc::now() - Duration::seconds(60)))
+        .await
+        .unwrap();
+
+    // 1. GET /voice/dynamic/cleanup MUST be rejected with 405 Method Not Allowed (eliminating top-level GET CSRF)
+    let get_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id_1}/voice/dynamic/cleanup"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .expect("send GET cleanup");
+    assert_eq!(
+        get_resp.status(),
+        reqwest::StatusCode::METHOD_NOT_ALLOWED,
+        "GET request must return 405 Method Not Allowed"
+    );
+
+    // Verify all 4 rooms are still in storage after GET
+    assert!(
+        state
+            .app
+            .storage
+            .get_dynamic_voice_room("chan_1_stale")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        state
+            .app
+            .storage
+            .get_dynamic_voice_room("chan_1_recent")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        state
+            .app
+            .storage
+            .get_dynamic_voice_room("chan_1_active")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        state
+            .app
+            .storage
+            .get_dynamic_voice_room("chan_2_stale")
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // 2. POST without session -> 401 Unauthorized
+    let post_unauth = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id_1}/voice/dynamic/cleanup"
+        ))
+        .send()
+        .await
+        .expect("send unauth POST cleanup");
+    assert_eq!(post_unauth.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // 3. POST with session but missing CSRF token -> 403 Forbidden
+    let post_no_csrf = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id_1}/voice/dynamic/cleanup"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .expect("send POST without csrf");
+    assert_eq!(post_no_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 4. POST with session and invalid CSRF token -> 403 Forbidden
+    let post_bad_csrf = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id_1}/voice/dynamic/cleanup"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", "invalid_csrf_token_xyz")
+        .send()
+        .await
+        .expect("send POST with invalid csrf");
+    assert_eq!(post_bad_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Verify all 4 rooms are STILL in storage after failed CSRF attempts
+    assert!(
+        state
+            .app
+            .storage
+            .get_dynamic_voice_room("chan_1_stale")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        state
+            .app
+            .storage
+            .get_dynamic_voice_room("chan_1_recent")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        state
+            .app
+            .storage
+            .get_dynamic_voice_room("chan_1_active")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        state
+            .app
+            .storage
+            .get_dynamic_voice_room("chan_2_stale")
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // 5. POST with session and VALID CSRF token for Guild 1 -> 200 OK
+    let post_ok = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id_1}/voice/dynamic/cleanup"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .send()
+        .await
+        .expect("send valid POST cleanup");
+    assert_eq!(post_ok.status(), reqwest::StatusCode::OK);
+
+    let res_json: serde_json::Value = post_ok.json().await.unwrap();
+    assert_eq!(res_json["removed_records_count"], 1);
+    assert_eq!(
+        res_json["removed_channel_ids"],
+        serde_json::json!(["chan_1_stale"])
+    );
+    // Backwards-compatible aliases
+    assert_eq!(res_json["deleted_count"], 1);
+    assert_eq!(
+        res_json["deleted_channels"],
+        serde_json::json!(["chan_1_stale"])
+    );
+
+    // Verify storage states:
+    // - chan_1_stale in Guild 1 was removed
+    assert!(
+        state
+            .app
+            .storage
+            .get_dynamic_voice_room("chan_1_stale")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // - chan_1_recent in Guild 1 was NOT removed (<30s)
+    assert!(
+        state
+            .app
+            .storage
+            .get_dynamic_voice_room("chan_1_recent")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // - chan_1_active in Guild 1 was NOT removed (active)
+    assert!(
+        state
+            .app
+            .storage
+            .get_dynamic_voice_room("chan_1_active")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // - chan_2_stale in Guild 2 was NOT removed (cross-guild isolation)
+    assert!(
+        state
+            .app
+            .storage
+            .get_dynamic_voice_room("chan_2_stale")
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // 6. Cleanup Guild 2 -> removes chan_2_stale
+    let post_ok_g2 = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id_2}/voice/dynamic/cleanup"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .send()
+        .await
+        .expect("send valid POST cleanup g2");
+    assert_eq!(post_ok_g2.status(), reqwest::StatusCode::OK);
+    let res_g2_json: serde_json::Value = post_ok_g2.json().await.unwrap();
+    assert_eq!(res_g2_json["removed_records_count"], 1);
+    assert_eq!(
+        res_g2_json["removed_channel_ids"],
+        serde_json::json!(["chan_2_stale"])
+    );
+    assert!(
+        state
+            .app
+            .storage
+            .get_dynamic_voice_room("chan_2_stale")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}

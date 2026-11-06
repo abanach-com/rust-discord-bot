@@ -3635,6 +3635,48 @@ impl Storage {
         }
     }
 
+    pub async fn cleanup_stale_dynamic_voice_rooms(
+        &self,
+        guild_id: &str,
+        threshold_seconds: i64,
+    ) -> anyhow::Result<Vec<String>> {
+        match self {
+            Self::Memory(store) => {
+                Ok(store.cleanup_stale_dynamic_voice_rooms(guild_id, threshold_seconds))
+            }
+            Self::Postgres(store) => {
+                store
+                    .cleanup_stale_dynamic_voice_rooms(guild_id, threshold_seconds)
+                    .await
+            }
+        }
+    }
+
+    pub async fn get_dynamic_voice_room(
+        &self,
+        channel_id: &str,
+    ) -> anyhow::Result<Option<DynamicVoiceRoom>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_dynamic_voice_room(channel_id)),
+            Self::Postgres(store) => store.get_dynamic_voice_room(channel_id).await,
+        }
+    }
+
+    pub async fn set_dynamic_voice_empty_since(
+        &self,
+        channel_id: &str,
+        empty_since: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => Ok(store.set_dynamic_voice_empty_since(channel_id, empty_since)),
+            Self::Postgres(store) => {
+                store
+                    .set_dynamic_voice_empty_since(channel_id, empty_since)
+                    .await
+            }
+        }
+    }
+
     pub async fn create_feed_subscription(
         &self,
 

@@ -586,7 +586,7 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Embedded host policy check in `src/discord/executor.rs:execute_action` prior to action execution and side effects, evaluating `PolicyResource::Action { action_key }` against authoritative guild policy rules.
   - Rejects actions denied by guild policy with descriptive error without executing Discord HTTP calls, ensuring parity between `/policy/explain` dry-runs and actual Lua runtime execution.
 
-## 20. Lua Concurrency, Recruitment Performance, AI Knowledge Hardening & Logout Reliability (Issues #242, #243, #244, #245, #246)
+## 20. Lua Concurrency, Recruitment Performance, AI Knowledge Hardening & Logout Reliability (Issues #242, #243, #244, #245, #246, #247)
 
 - **Lua Engine Semaphore Eviction & Limiter Integrity (#242)**:
   - Extended semaphore eviction predicate in `src/lua/engine.rs:get_guild_semaphore`: retained semaphores if `Arc::strong_count(sem) > 1 || sem.available_permits() < self.max_per_guild`.
@@ -608,6 +608,11 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Implemented recursive right-to-left resolution in `src/web/auth.rs:resolve_client_ip`: walks backwards across `TRUSTED_PROXIES` hops to extract the actual untrusted client IP, ignoring attacker-spoofed leftmost addresses.
   - Guaranteed enforcement of per-IP login rate limiting (10 attempts/min) behind reverse proxies operating in append mode (`$proxy_add_x_forwarded_for`), preventing quota splitting and client impersonation.
   - Documented proxy configuration guides for Nginx and Traefik in `docs/SECURITY.md`.
+- **Dynamic Voice Cleanup CSRF Hardening, Method Safety & Atomic TOCTOU Prevention (#247)**:
+  - Migrated dynamic voice cleanup from state-changing `GET` to `POST /api/guilds/{guild_id}/voice/dynamic/cleanup` in `src/web/mod.rs`, rejecting top-level `GET` with HTTP 405 Method Not Allowed to eliminate cross-site request forgery risks under `SameSite=Lax`.
+  - Added strict `verify_csrf(&headers, &session)?` check in `src/web/features.rs:cleanup_dynamic_voice`.
+  - Implemented atomic guild-scoped cleanup in `Storage::cleanup_stale_dynamic_voice_rooms`: in PostgreSQL, executes `DELETE FROM dynamic_voice_rooms WHERE guild_id = $1 AND empty_since IS NOT NULL AND empty_since <= $2 RETURNING channel_id`, and in MemoryStore atomically prunes matching entries under lock, preventing TOCTOU races when empty rooms are reoccupied during cleanup.
+  - Aligned response payload semantics with `removed_records_count` and `removed_channel_ids` alongside backwards-compatible aliases.
 
 ## Delivery order
 

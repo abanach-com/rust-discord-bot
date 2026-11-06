@@ -2270,45 +2270,26 @@ pub async fn set_dynamic_voice_empty(
 
 pub async fn cleanup_dynamic_voice(
     State(state): State<WebState>,
-
     Path(guild_id): Path<String>,
-
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
-
+    verify_csrf(&headers, &session)?;
     ensure_guild_access(&state, &session, &guild_id).await?;
 
     // Threshold 30 seconds empty
-
-    let stale = state
+    let removed = state
         .app
         .storage
-        .get_stale_dynamic_voice_rooms(30)
+        .cleanup_stale_dynamic_voice_rooms(&guild_id, 30)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    let mut deleted = Vec::new();
-
-    for room in stale {
-        if room.guild_id == guild_id {
-            state
-                .app
-                .storage
-                .remove_dynamic_voice_room(&room.channel_id)
-                .await
-                .map_err(|e| ApiError::internal(e.to_string()))?;
-
-            deleted.push(room.channel_id);
-        }
-    }
-
     Ok(Json(json!({
-
-        "deleted_count": deleted.len(),
-
-        "deleted_channels": deleted
-
+        "removed_records_count": removed.len(),
+        "removed_channel_ids": removed,
+        "deleted_count": removed.len(),
+        "deleted_channels": removed,
     })))
 }
 

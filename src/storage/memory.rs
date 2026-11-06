@@ -3202,6 +3202,45 @@ impl MemoryStore {
         self.dynamic_voice.remove(channel_id).is_some()
     }
 
+    pub fn get_dynamic_voice_room(&self, channel_id: &str) -> Option<DynamicVoiceRoom> {
+        self.dynamic_voice
+            .get(channel_id)
+            .map(|r| r.value().clone())
+    }
+
+    pub fn set_dynamic_voice_empty_since(
+        &self,
+        channel_id: &str,
+        empty_since: Option<DateTime<Utc>>,
+    ) -> bool {
+        if let Some(mut room) = self.dynamic_voice.get_mut(channel_id) {
+            room.empty_since = empty_since;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn cleanup_stale_dynamic_voice_rooms(
+        &self,
+        guild_id: &str,
+        threshold_seconds: i64,
+    ) -> Vec<String> {
+        let cutoff = Utc::now() - Duration::seconds(threshold_seconds);
+        let mut removed = Vec::new();
+        self.dynamic_voice.retain(|channel_id, room| {
+            if room.guild_id == guild_id
+                && let Some(empty_since) = room.empty_since
+                && empty_since <= cutoff
+            {
+                removed.push(channel_id.clone());
+                return false;
+            }
+            true
+        });
+        removed
+    }
+
     pub fn create_feed_subscription(
         &self,
 

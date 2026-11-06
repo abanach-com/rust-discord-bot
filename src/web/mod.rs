@@ -363,7 +363,7 @@ pub fn build_router(state: WebState) -> Router {
         )
         .route(
             "/api/guilds/{guild_id}/voice/dynamic/cleanup",
-            get(features::cleanup_dynamic_voice),
+            post(features::cleanup_dynamic_voice),
         )
         .route(
             "/api/guilds/{guild_id}/voice/companion/mappings",

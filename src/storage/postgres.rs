@@ -4065,6 +4065,56 @@ impl PostgresStore {
         Ok(res.rows_affected() > 0)
     }
 
+    pub async fn cleanup_stale_dynamic_voice_rooms(
+        &self,
+        guild_id: &str,
+        threshold_seconds: i64,
+    ) -> anyhow::Result<Vec<String>> {
+        let cutoff = Utc::now() - Duration::seconds(threshold_seconds);
+        let rows = sqlx::query_scalar::<_, String>(
+            r#"
+            DELETE FROM dynamic_voice_rooms
+            WHERE guild_id = $1
+              AND empty_since IS NOT NULL
+              AND empty_since <= $2
+            RETURNING channel_id
+            "#,
+        )
+        .bind(guild_id)
+        .bind(cutoff)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn get_dynamic_voice_room(
+        &self,
+        channel_id: &str,
+    ) -> anyhow::Result<Option<DynamicVoiceRoom>> {
+        let rec = sqlx::query_as::<_, DynamicVoiceRoom>(
+            "SELECT channel_id, guild_id, owner_id, empty_since, created_at FROM dynamic_voice_rooms WHERE channel_id = $1",
+        )
+        .bind(channel_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(rec)
+    }
+
+    pub async fn set_dynamic_voice_empty_since(
+        &self,
+        channel_id: &str,
+        empty_since: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<bool> {
+        let res =
+            sqlx::query("UPDATE dynamic_voice_rooms SET empty_since = $1 WHERE channel_id = $2")
+                .bind(empty_since)
+                .bind(channel_id)
+                .execute(&self.pool)
+                .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
     pub async fn create_feed_subscription(
         &self,
 
