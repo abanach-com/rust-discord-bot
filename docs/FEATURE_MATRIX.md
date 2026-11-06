@@ -586,7 +586,7 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Embedded host policy check in `src/discord/executor.rs:execute_action` prior to action execution and side effects, evaluating `PolicyResource::Action { action_key }` against authoritative guild policy rules.
   - Rejects actions denied by guild policy with descriptive error without executing Discord HTTP calls, ensuring parity between `/policy/explain` dry-runs and actual Lua runtime execution.
 
-## 20. Lua Concurrency, Recruitment Performance, AI Knowledge Hardening & Logout Reliability (Issues #242, #243, #244, #245)
+## 20. Lua Concurrency, Recruitment Performance, AI Knowledge Hardening & Logout Reliability (Issues #242, #243, #244, #245, #246)
 
 - **Lua Engine Semaphore Eviction & Limiter Integrity (#242)**:
   - Extended semaphore eviction predicate in `src/lua/engine.rs:get_guild_semaphore`: retained semaphores if `Arc::strong_count(sem) > 1 || sem.available_permits() < self.max_per_guild`.
@@ -604,6 +604,10 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
 - **Fail-Closed Session Deletion on Logout (#245)**:
   - Updated `logout` in `src/web/auth.rs`: propagated session deletion failure with `map_err(ApiError::internal)?` instead of ignoring it (`let _ = ...`).
   - Updated `web/static/app.js`: UI only transitions to logged-out state (`showLogin()`) upon successful HTTP response; on failure, displays an error notification and preserves state, preventing client-side false sense of logout when server session remains active.
+- **Reverse Proxy X-Forwarded-For Right-to-Left Traversal & Rate-Limit Hardening (#246)**:
+  - Implemented recursive right-to-left resolution in `src/web/auth.rs:resolve_client_ip`: walks backwards across `TRUSTED_PROXIES` hops to extract the actual untrusted client IP, ignoring attacker-spoofed leftmost addresses.
+  - Guaranteed enforcement of per-IP login rate limiting (10 attempts/min) behind reverse proxies operating in append mode (`$proxy_add_x_forwarded_for`), preventing quota splitting and client impersonation.
+  - Documented proxy configuration guides for Nginx and Traefik in `docs/SECURITY.md`.
 
 ## Delivery order
 

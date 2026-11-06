@@ -650,46 +650,53 @@ pub fn resolve_client_ip(
     headers: &HeaderMap,
     trusted_proxies: &std::collections::HashSet<std::net::IpAddr>,
 ) -> String {
-    if let Some(peer) = peer_ip {
-        if trusted_proxies.contains(&peer) {
-            if let Some(forwarded) = headers
-                .get("x-forwarded-for")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.split(',').next())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .and_then(|s| s.parse::<std::net::IpAddr>().ok())
-            {
-                return forwarded.to_string();
-            }
-            if let Some(real_ip) = headers
-                .get("x-real-ip")
-                .and_then(|v| v.to_str().ok())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .and_then(|s| s.parse::<std::net::IpAddr>().ok())
-            {
-                return real_ip.to_string();
-            }
-        }
-        peer.to_string()
-    } else {
-        headers
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.split(',').next())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                headers
-                    .get("x-real-ip")
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-            })
-            .unwrap_or("127.0.0.1")
-            .to_owned()
+    let Some(peer) = peer_ip else {
+        // Without peer socket information we cannot verify proxy trust.
+        // Fail-safe to loopback default without trusting arbitrary headers.
+        return "127.0.0.1".to_string();
+    };
+
+    if !trusted_proxies.contains(&peer) {
+        // Direct untrusted peer: proxy headers are ignored
+        return peer.to_string();
     }
+
+    // Peer is a trusted proxy. Inspect X-Forwarded-For starting from the right (closest hop).
+    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        let mut effective = peer;
+        for raw in xff.split(',').rev().take(16) {
+            if !trusted_proxies.contains(&effective) {
+                break;
+            }
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(hop) = trimmed.parse::<std::net::IpAddr>() else {
+                // If the immediate hop added by the trusted proxy is unparseable,
+                // do not trust the header and fallback to peer IP.
+                return peer.to_string();
+            };
+            effective = hop;
+        }
+
+        if effective != peer {
+            return effective.to_string();
+        }
+    }
+
+    // Fallback to X-Real-IP if X-Forwarded-For was absent or only contained trusted proxies
+    if let Some(real_ip) = headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<std::net::IpAddr>().ok())
+    {
+        return real_ip.to_string();
+    }
+
+    peer.to_string()
 }
 
 fn can_manage(guild: &DashboardGuild) -> bool {
@@ -996,6 +1003,56 @@ mod tests {
             proxied, "203.0.113.195",
             "trusted proxy forwarded header must be extracted"
         );
+
+        // 4. Reverse proxy appending client IP to attacker-spoofed X-Forwarded-For (Issue #246)
+        let mut headers_spoofed_chain = HeaderMap::new();
+        headers_spoofed_chain.insert(
+            "x-forwarded-for",
+            "198.51.100.99, 203.0.113.45".parse().unwrap(),
+        );
+        let proxied_spoof =
+            resolve_client_ip(Some(trusted_peer), &headers_spoofed_chain, &trusted_proxies);
+        assert_eq!(
+            proxied_spoof, "203.0.113.45",
+            "must extract the rightmost untrusted client IP, ignoring attacker-spoofed leftmost IP"
+        );
+
+        // 5. Multi-proxy chain with attacker spoof: [attacker, real_client, trusted_proxy_1] -> trusted_proxy_2 (peer)
+        let mut headers_multi_proxy = HeaderMap::new();
+        headers_multi_proxy.insert(
+            "x-forwarded-for",
+            "198.51.100.99, 203.0.113.45, 10.0.0.1".parse().unwrap(),
+        );
+        let proxied_multi =
+            resolve_client_ip(Some(trusted_peer), &headers_multi_proxy, &trusted_proxies);
+        assert_eq!(
+            proxied_multi, "203.0.113.45",
+            "must traverse right-to-left across all trusted proxies to reach the real untrusted client"
+        );
+
+        // 6. Malformed rightmost hop from proxy fails safe to peer socket
+        let mut headers_malformed = HeaderMap::new();
+        headers_malformed.insert("x-forwarded-for", "not_a_valid_ip".parse().unwrap());
+        let proxied_malformed =
+            resolve_client_ip(Some(trusted_peer), &headers_malformed, &trusted_proxies);
+        assert_eq!(
+            proxied_malformed, "127.0.0.1",
+            "malformed header must fail safe to peer IP"
+        );
+
+        // 7. peer_ip is None -> fail-safe default, never trust unverified headers
+        let no_peer = resolve_client_ip(None, &headers_spoofed_chain, &trusted_proxies);
+        assert_eq!(
+            no_peer, "127.0.0.1",
+            "when peer_ip is None, must fallback to safe default without trusting headers"
+        );
+
+        // 8. X-Real-IP fallback from trusted proxy when XFF is absent
+        let mut headers_real_ip = HeaderMap::new();
+        headers_real_ip.insert("x-real-ip", "203.0.113.77".parse().unwrap());
+        let proxied_real_ip =
+            resolve_client_ip(Some(trusted_peer), &headers_real_ip, &trusted_proxies);
+        assert_eq!(proxied_real_ip, "203.0.113.77");
     }
 
     #[test]

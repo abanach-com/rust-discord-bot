@@ -90,6 +90,41 @@ Implemented:
 - 64 KiB configuration limit
 - audit event for configuration changes
 
+### Reverse Proxy and Client IP Resolution (Issue #246)
+
+The dashboard enforces both a global login attempt limiter (60/min) and an individual per-IP limiter (10 attempts/min) to prevent brute-force and credential-stuffing attacks.
+
+To protect against `X-Forwarded-For` spoofing behind trusted reverse proxies:
+- **Right-to-Left Recursive Traversal**: `resolve_client_ip` inspects hops from right to left (closest proxy to furthest). While the intermediate hop belongs to `TRUSTED_PROXIES`, traversal continues leftward until the first untrusted IP is encountered (analogous to Nginx `real_ip_recursive on`). Any arbitrary IP injected by the client at the far-left is discarded.
+- **Direct Connection Defense**: When the peer socket address does not match `TRUSTED_PROXIES`, all incoming `X-Forwarded-For` and `X-Real-IP` headers are ignored, and the peer socket IP is used directly.
+- **Fail-Safe Fallbacks**: Malformed hop IPs or requests without peer address fail safe to `127.0.0.1` and never trust unverified header payloads.
+
+#### Proxy Configuration Guidelines
+
+1. **Nginx (Edge Proxy)**:
+   - *Overwrite mode* (recommended when edge terminates public traffic):
+     ```nginx
+     proxy_set_header X-Forwarded-For $remote_addr;
+     proxy_set_header X-Real-IP $remote_addr;
+     ```
+   - *Append mode* (multi-hop reverse proxy with upstream CDN/LB):
+     ```nginx
+     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+     set_real_ip_from 10.0.0.0/8;
+     real_ip_header X-Forwarded-For;
+     real_ip_recursive on;
+     ```
+2. **Traefik**:
+   - Configure trusted entrypoints to sanitize forwarded headers:
+     ```yaml
+     entryPoints:
+       websecure:
+         forwardedHeaders:
+           trustedIPs:
+             - "127.0.0.1/32"
+             - "10.0.0.0/8"
+     ```
+
 Production requirements:
 
 - terminate HTTPS before the application

@@ -6679,3 +6679,72 @@ async fn test_recruitment_applications_pagination_and_batch_fetching() {
         "All pages must yield distinct application IDs"
     );
 }
+
+#[tokio::test]
+async fn test_login_rate_limiting_with_spoofed_x_forwarded_for_issue_246() {
+    let (state, _) = test_web_state().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("build client");
+
+    let base_url = format!("http://{}", addr);
+
+    // 10 requests from the same real client IP (203.0.113.45), but with rotating spoofed leftmost IP in X-Forwarded-For
+    for i in 1..=10 {
+        let spoofed_xff = format!("198.51.100.{i}, 203.0.113.45");
+        let resp = client
+            .get(format!("{base_url}/auth/discord"))
+            .header("X-Forwarded-For", spoofed_xff)
+            .send()
+            .await
+            .expect("send login attempt");
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::TEMPORARY_REDIRECT,
+            "Attempt {i} within per-IP quota (10/min) must succeed"
+        );
+    }
+
+    // 11th request from the same real client IP (with yet another spoofed leftmost IP) MUST be blocked with 429 Too Many Requests
+    let resp_blocked = client
+        .get(format!("{base_url}/auth/discord"))
+        .header("X-Forwarded-For", "198.51.100.99, 203.0.113.45")
+        .send()
+        .await
+        .expect("send 11th login attempt");
+    assert_eq!(
+        resp_blocked.status(),
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        "11th attempt from real IP 203.0.113.45 must return HTTP 429 despite spoofed leftmost XFF"
+    );
+
+    // A different real client IP (203.0.113.46) should NOT be blocked (independent per-IP rate limiting preserved)
+    let resp_other_client = client
+        .get(format!("{base_url}/auth/discord"))
+        .header("X-Forwarded-For", "198.51.100.99, 203.0.113.46")
+        .send()
+        .await
+        .expect("send login attempt for other client");
+    assert_eq!(
+        resp_other_client.status(),
+        reqwest::StatusCode::TEMPORARY_REDIRECT,
+        "Independent real client IP 203.0.113.46 must succeed"
+    );
+}
