@@ -4311,3 +4311,265 @@ async fn test_scheduled_events_live_mode_discord_verification() {
         .expect("join live 503");
     assert_eq!(join_resp_503.status(), reqwest::StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn test_ensure_guild_member_access_rejects_session_missing_guild_even_with_fresh_manage_cache()
+ {
+    let (state, perms_cache) = test_web_state().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let guild_id = "555000000000000001";
+    let user_id = "555000000000000002";
+
+    // 1. Pre-seed permissions_cache with can_manage: true for (user_id, guild_id)
+    perms_cache.insert(
+        (user_id.to_string(), guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    // 2. Create session for user_id where guilds does NOT contain guild_id (e.g. member left/removed)
+    let session_id = "sess_left_guild_manage_cache";
+    let csrf_token = "csrf_left_guild_123";
+    state
+        .app
+        .sessions
+        .save_session(
+            session_id,
+            DashboardUser {
+                id: user_id.to_string(),
+                username: "former_admin".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![], // guilds list is empty!
+            csrf_token.to_string(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .expect("save session");
+
+    // Helper call directly: must return 403 Forbidden
+    let session = state
+        .app
+        .sessions
+        .get_session(session_id)
+        .await
+        .expect("get session")
+        .expect("session exists");
+    let check_res =
+        rusty_discord_bot::web::auth::ensure_guild_member_access(&state, &session, guild_id).await;
+    assert!(check_res.is_err());
+    assert_eq!(
+        check_res.err().unwrap().status,
+        axum::http::StatusCode::FORBIDDEN
+    );
+
+    // 3. HTTP tests: GET scheduled-events returns 403 Forbidden
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let session_cookie = format!("rusty_discord_bot_session={session_id}");
+
+    let ev = state
+        .app
+        .storage
+        .create_scheduled_event(
+            guild_id,
+            "Secret Guild Event",
+            "Should not be visible without guild in session",
+            Utc::now() + Duration::days(1),
+            None,
+            "UTC",
+            Some(10),
+        )
+        .await
+        .expect("create event");
+
+    let list_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .expect("list events");
+    assert_eq!(list_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // POST join returns 403 Forbidden and makes zero changes
+    let join_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{}/roster/join",
+            ev.id
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("join event");
+    assert_eq!(join_resp.status(), reqwest::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_scheduled_events_rsvp_point_lookup_and_tenant_isolation() {
+    let (state, _) = test_web_state().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let guild_id = "666000000000000001";
+    let other_guild_id = "666000000000000002";
+
+    // Create 20 events in guild_id
+    let mut target_event_id = None;
+    for idx in 0..20 {
+        let ev = state
+            .app
+            .storage
+            .create_scheduled_event(
+                guild_id,
+                &format!("Event #{idx}"),
+                "Description",
+                Utc::now() + Duration::days(idx + 1),
+                None,
+                "UTC",
+                Some(15),
+            )
+            .await
+            .expect("create event");
+        if idx == 7 {
+            target_event_id = Some(ev.id);
+        }
+    }
+    let target_event_id = target_event_id.unwrap();
+
+    // Create 1 event in other_guild_id
+    let other_ev = state
+        .app
+        .storage
+        .create_scheduled_event(
+            other_guild_id,
+            "Other Guild Event",
+            "Other",
+            Utc::now() + Duration::days(5),
+            None,
+            "UTC",
+            Some(10),
+        )
+        .await
+        .expect("create other event");
+
+    // Session for guild_id member
+    let session_id = "sess_point_lookup_test";
+    let csrf_token = "csrf_point_lookup_test";
+    let user_id = "666000000000000003";
+
+    state
+        .app
+        .sessions
+        .save_session(
+            session_id,
+            DashboardUser {
+                id: user_id.to_string(),
+                username: "point_tester".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Guild 666".to_string(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_string(),
+            }],
+            csrf_token.to_string(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .expect("save session");
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let session_cookie = format!("rusty_discord_bot_session={session_id}");
+
+    // 1. Join target event in guild_id -> 200 OK
+    let join_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{target_event_id}/roster/join"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("join target event");
+    assert_eq!(join_resp.status(), reqwest::StatusCode::OK);
+
+    // 2. Leave target event in guild_id -> 200 OK
+    let leave_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{target_event_id}/roster/leave"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .send()
+        .await
+        .expect("leave target event");
+    assert_eq!(leave_resp.status(), reqwest::StatusCode::OK);
+
+    // 3. Trying to join other_guild's event under guild_id -> 404 Not Found
+    let cross_join = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{}/roster/join",
+            other_ev.id
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("cross join");
+    assert_eq!(cross_join.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // 4. Trying to join non-existent UUID -> 404 Not Found
+    let random_uuid = uuid::Uuid::new_v4();
+    let non_existent_join = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{random_uuid}/roster/join"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("non existent join");
+    assert_eq!(non_existent_join.status(), reqwest::StatusCode::NOT_FOUND);
+}

@@ -1804,18 +1804,14 @@ pub async fn join_event_roster(
 
     ensure_guild_member_access(&state, &session, &guild_id).await?;
 
-    let events = state
+    let _event = state
         .app
         .storage
-        .list_scheduled_events(&guild_id)
+        .get_scheduled_event(event_id)
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-
-    if !events.iter().any(|ev| ev.id == event_id) {
-        return Err(ApiError::not_found(
-            "Scheduled event was not found in this guild.",
-        ));
-    }
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .filter(|ev| ev.guild_id == guild_id)
+        .ok_or_else(|| ApiError::not_found("Scheduled event was not found in this guild."))?;
 
     let entry = state
         .app
@@ -1840,18 +1836,14 @@ pub async fn leave_event_roster(
 
     ensure_guild_member_access(&state, &session, &guild_id).await?;
 
-    let events = state
+    let _event = state
         .app
         .storage
-        .list_scheduled_events(&guild_id)
+        .get_scheduled_event(event_id)
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-
-    if !events.iter().any(|ev| ev.id == event_id) {
-        return Err(ApiError::not_found(
-            "Scheduled event was not found in this guild.",
-        ));
-    }
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .filter(|ev| ev.guild_id == guild_id)
+        .ok_or_else(|| ApiError::not_found("Scheduled event was not found in this guild."))?;
 
     let promoted = state
         .app

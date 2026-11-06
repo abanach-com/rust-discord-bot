@@ -409,7 +409,12 @@ pub async fn ensure_guild_member_access(
     session: &Session,
     guild_id: &str,
 ) -> Result<(), ApiError> {
-    // 1. If user is in session guilds and has manage rights (or manage rights already cached), they are definitely a member
+    // 1. Fast rejection if guild is not in session.guilds
+    if !session.guilds.iter().any(|g| g.id == guild_id) {
+        return Err(ApiError::forbidden("You are not a member of this server."));
+    }
+
+    // 2. If user is in session guilds and has manage rights (or manage rights already cached), they are definitely a member
     let cache_key = (session.user.id.clone(), guild_id.to_owned());
     let now = Utc::now();
     if let Some(entry) = state.permissions_cache.get(&cache_key)
@@ -417,11 +422,6 @@ pub async fn ensure_guild_member_access(
         && entry.can_manage
     {
         return Ok(());
-    }
-
-    // 2. Fast rejection if guild is not in session.guilds
-    if !session.guilds.iter().any(|g| g.id == guild_id) {
-        return Err(ApiError::forbidden("You are not a member of this server."));
     }
 
     // 3. In mock or test mode, session.guilds presence is sufficient
