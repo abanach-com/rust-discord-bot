@@ -29,6 +29,7 @@ pub struct Config {
     pub transcript_encryption_key: Option<String>,
     pub transcript_active_key_id: String,
     pub transcript_keyring: Option<String>,
+    pub ticket_transcripts_disabled: bool,
 }
 
 impl Config {
@@ -102,6 +103,7 @@ impl Config {
             transcript_active_key_id: env::var("TRANSCRIPT_ACTIVE_KEY_ID")
                 .unwrap_or_else(|_| "v1".to_owned()),
             transcript_keyring: optional_non_empty("TRANSCRIPT_KEYRING"),
+            ticket_transcripts_disabled: env_bool("TICKET_TRANSCRIPTS_DISABLED", false)?,
         };
 
         config.validate()?;
@@ -243,6 +245,7 @@ mod tests {
             transcript_encryption_key: None,
             transcript_active_key_id: "v1".to_string(),
             transcript_keyring: None,
+            ticket_transcripts_disabled: false,
         };
 
         // Real token with offline_mode false -> NOT offline mode

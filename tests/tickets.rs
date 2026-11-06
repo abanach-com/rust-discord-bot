@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use chrono::Utc;
 use rusty_discord_bot::{
+    AppState,
+    config::Config,
     lua::{LuaAction, LuaEngine, LuaExecutionContext, LuaLimits, TicketOperation},
     tickets::{
         NewTicketReservation, NewTicketTranscript, ParticipantMutationOutcome,
@@ -534,4 +536,88 @@ async fn test_ticket_transcript_lifecycle_and_crypto() {
         &payload_v1.ciphertext,
     );
     assert!(unknown_key_res.is_err(), "Unknown key ID must fail closed");
+}
+
+fn base_test_config() -> Config {
+    Config {
+        discord_token: "dummy_token".to_string(),
+        discord_application_id: 123456789,
+        discord_client_id: "123456789".to_string(),
+        discord_client_secret: "secret".to_string(),
+        discord_oauth_redirect_url: "http://127.0.0.1:8080/auth/discord/callback".to_string(),
+        discord_dev_guild_id: None,
+        dashboard_bind: "127.0.0.1:0".parse().unwrap(),
+        dashboard_public_url: "http://127.0.0.1:8080".to_string(),
+        database_url: None,
+        scripts_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts"),
+        session_cookie_secure: false,
+        session_ttl_seconds: 86400,
+        lua_memory_limit_bytes: 4 * 1024 * 1024,
+        lua_instruction_limit: 200_000,
+        lua_hook_granularity: 100,
+        lua_max_parallel: 32,
+        lua_max_per_guild: 8,
+        lua_command_timeout_ms: 3000,
+        music_allowed_hosts: std::collections::HashSet::new(),
+        trusted_proxies: ["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()]
+            .into_iter()
+            .collect(),
+        offline_mode: false,
+        discord_api_base_url: "https://discord.com/api/v10".to_string(),
+        transcript_encryption_key: None,
+        transcript_active_key_id: "v1".to_string(),
+        transcript_keyring: None,
+        ticket_transcripts_disabled: false,
+    }
+}
+
+#[tokio::test]
+async fn test_postgres_startup_preflight_fails_fast_without_transcript_encryption_key() {
+    // 1. PostgreSQL enabled, no encryption keys, transcripts NOT explicitly disabled:
+    // Must fail fast during startup preflight before opening connections.
+    let mut config = base_test_config();
+    config.database_url = Some("postgres://dummy:dummy@127.0.0.1:5432/dummy".to_string());
+    config.transcript_encryption_key = None;
+    config.transcript_keyring = None;
+    config.ticket_transcripts_disabled = false;
+
+    let res = AppState::bootstrap(config).await;
+    let err_msg = match res {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("Must fail fast when PostgreSQL has no encryption key"),
+    };
+    assert!(
+        err_msg.contains(
+            "PostgreSQL ticket storage requires TRANSCRIPT_KEYRING or TRANSCRIPT_ENCRYPTION_KEY"
+        ),
+        "Error message should explain requirement: {err_msg}"
+    );
+
+    // 2. Malformed keyring: must fail fast with parsing error
+    let mut config_malformed = base_test_config();
+    config_malformed.database_url = Some("postgres://dummy:dummy@127.0.0.1:5432/dummy".to_string());
+    config_malformed.transcript_encryption_key = Some("not_a_valid_64_hex_key".to_string());
+    let res_malformed = AppState::bootstrap(config_malformed).await;
+    assert!(res_malformed.is_err());
+
+    // 3. PostgreSQL enabled, no keys, BUT ticket_transcripts_disabled is explicitly true:
+    // Startup preflight does NOT fail on missing encryption key.
+    let mut config_disabled = base_test_config();
+    config_disabled.database_url = Some("postgres://dummy:dummy@127.0.0.1:5432/dummy".to_string());
+    config_disabled.ticket_transcripts_disabled = true;
+    let res_disabled = AppState::bootstrap(config_disabled).await;
+    let err_msg_disabled = match res_disabled {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("Expected connection failure to dummy PostgreSQL URL"),
+    };
+    assert!(
+        !err_msg_disabled.contains("PostgreSQL ticket storage requires TRANSCRIPT_KEYRING"),
+        "Preflight should be skipped when transcripts are explicitly disabled: {err_msg_disabled}"
+    );
+
+    // 4. MemoryStore without keys: succeeds without preflight error
+    let config_mem = base_test_config();
+    assert!(config_mem.database_url.is_none());
+    let res_mem = AppState::bootstrap(config_mem).await;
+    assert!(res_mem.is_ok(), "MemoryStore must bootstrap without keys");
 }

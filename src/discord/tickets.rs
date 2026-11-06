@@ -486,6 +486,12 @@ pub(super) async fn execute(
             log_channel_id,
             max_messages,
         } => {
+            if state.config.ticket_transcripts_disabled {
+                return Ok(Some(
+                    "❌ Ticket transcripts are disabled by administrator configuration on this instance."
+                        .to_string(),
+                ));
+            }
             ensure_bot_permissions(
                 execution.app_permissions,
                 Permissions::READ_MESSAGE_HISTORY | Permissions::ATTACH_FILES,
@@ -715,7 +721,7 @@ async fn close_ticket(
         Some(category_id) => Some(ensure_category(ctx, guild_id, category_id).await?),
         None => None,
     };
-    let transcript = if policy.generate_transcript {
+    let transcript = if policy.generate_transcript && !state.config.ticket_transcripts_disabled {
         let transcript = create_and_store_transcript(
             ctx,
             state,

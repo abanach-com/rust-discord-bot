@@ -650,6 +650,12 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Enforced fail-closed security: missing active key prevents plaintext fallback, refusing to persist unencrypted records. Debug representation redacts raw key bytes to avoid secret leakage in telemetry, audit trails, and logs.
   - Added migration `0037_encrypted_ticket_transcripts.sql` introducing `ciphertext BYTEA`, `nonce BYTEA`, `key_id TEXT`, `crypto_version SMALLINT`, updating check constraints (`char_length(content) > 0 OR content IS NULL`) and payload integrity constraints.
   - Provided controlled batch-limited backfill mechanism (`PostgresTicketStore::backfill_encrypt_transcripts`) for migration of pre-existing unencrypted rows.
+- **PostgreSQL Transcript Encryption Startup Preflight & Operator Contracts (#255)**:
+  - Enforced fail-fast startup preflight in `AppState::bootstrap`: when `DATABASE_URL` is set, `TRANSCRIPT_ENCRYPTION_KEY` or `TRANSCRIPT_KEYRING` is required unless `TICKET_TRANSCRIPTS_DISABLED=true`. Prevents "seemingly healthy" server start with broken `/ticket close` or `/ticket transcript` workflows.
+  - Added `TICKET_TRANSCRIPTS_DISABLED` configuration flag: allows operators to explicitly opt out of transcript storage in PostgreSQL without breaking ticket closures.
+  - Updated `close_ticket` and `TicketOperation::Transcript` in `src/discord/tickets.rs`: when transcripts are disabled, `/ticket close` proceeds safely without saving transcripts, and `/ticket transcript` informs callers with a clear configuration message.
+  - Added ticket transcript health check diagnostics in `/health/ready` reporting `configured / disabled / unready` status without secret exposure.
+  - Updated `.env.example`, `compose.yaml`, and `docs/TICKETS.md` documenting key generation (`openssl rand -hex 32`), keyring rotation, and deployment requirements.
 
 ## Delivery order
 

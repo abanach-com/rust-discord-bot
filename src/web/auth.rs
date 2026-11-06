@@ -781,6 +781,7 @@ mod tests {
             transcript_encryption_key: None,
             transcript_active_key_id: "v1".to_string(),
             transcript_keyring: None,
+            ticket_transcripts_disabled: false,
         }
     }
 

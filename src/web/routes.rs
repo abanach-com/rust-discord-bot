@@ -231,6 +231,20 @@ pub async fn health_ready(
         );
     }
 
+    let transcript_status = if state.app.config.ticket_transcripts_disabled {
+        "disabled (transcripts disabled by administrator configuration)"
+    } else if state.app.config.database_url.is_some() {
+        if state.app.tickets.has_crypto() {
+            "ok (encrypted at rest with AEAD AES-256-GCM)"
+        } else {
+            is_ready = false;
+            "unready (missing encryption keyring for PostgreSQL storage)"
+        }
+    } else {
+        "ok (in-memory storage)"
+    };
+    checks.insert("ticket_transcripts".to_owned(), json!(transcript_status));
+
     let payload = json!({
         "status": if is_ready { "ready" } else { "unready" },
         "version": env!("CARGO_PKG_VERSION"),

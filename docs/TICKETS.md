@@ -79,7 +79,7 @@ PostgreSQL mutations lock the selected ticket row with `SELECT ... FOR UPDATE`. 
 
 Discord and PostgreSQL cannot participate in one distributed transaction. Channel changes use compensating actions where practical, and all failures are logged. The design prioritizes preserving a private channel and its audit evidence over destructive automatic cleanup.
 
-## Transcripts
+## Transcripts and encryption at rest
 
 Transcripts:
 
@@ -90,7 +90,14 @@ Transcripts:
 - can be copied to the configured log channel;
 - do not include bot tokens, dashboard sessions or other host secrets.
 
-Plaintext was selected for the first version because it is portable, inspectable and safe to render without executing HTML or JavaScript. Retention periods, deletion requests and encryption-at-rest requirements must be defined by the operator before production use.
+### AEAD encryption at rest (AES-256-GCM)
+
+In PostgreSQL deployments, ticket transcripts are encrypted at rest using AES-256-GCM with authenticated additional data (AAD: `transcript:v1:guild={guild_id}:ticket={ticket_id}`) and unique per-write 96-bit random nonces:
+
+- **Startup Preflight**: When `DATABASE_URL` is set, `TRANSCRIPT_ENCRYPTION_KEY` or `TRANSCRIPT_KEYRING` is required. The bot fails fast on startup if no key is configured to prevent broken deployments where `/ticket close` or `/ticket transcript` would fail later.
+- **Key Generation**: Generate a persistent 32-byte (64 hex characters) secret using `openssl rand -hex 32` and set `TRANSCRIPT_ENCRYPTION_KEY`.
+- **Keyring & Rotation**: Set `TRANSCRIPT_ACTIVE_KEY_ID=v2` and `TRANSCRIPT_KEYRING=v1:<hex64>,v2:<hex64>` for zero-downtime key rotation while retaining read access for older records.
+- **Disabling Transcripts**: If an operator wishes to run PostgreSQL without transcripts, set `TICKET_TRANSCRIPTS_DISABLED=true`. In this mode, `/ticket close` succeeds without saving transcripts, and `/ticket transcript` reports that transcripts are disabled.
 
 ## Audit events
 

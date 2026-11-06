@@ -69,6 +69,18 @@ impl AppState {
             None
         };
 
+        if config.database_url.is_some()
+            && transcript_crypto.is_none()
+            && !config.ticket_transcripts_disabled
+        {
+            anyhow::bail!(
+                "PostgreSQL ticket storage requires TRANSCRIPT_KEYRING or \
+                 TRANSCRIPT_ENCRYPTION_KEY (32 bytes / 64 hex chars). \
+                 Configure a persistent secret before starting; plaintext fallback is forbidden. \
+                 Alternatively, set TICKET_TRANSCRIPTS_DISABLED=true to run without ticket transcripts."
+            );
+        }
+
         let (storage, scheduler, tickets, moderation_cases, sessions) = if let Some(url) =
             config.database_url.as_deref()
         {

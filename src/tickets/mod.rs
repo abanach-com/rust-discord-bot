@@ -50,6 +50,14 @@ impl TicketStore {
         Self::Postgres(PostgresTicketStore::with_crypto(pool, crypto))
     }
 
+    #[must_use]
+    pub fn has_crypto(&self) -> bool {
+        match self {
+            Self::Memory(_) => true,
+            Self::Postgres(store) => store.crypto().is_some(),
+        }
+    }
+
     pub async fn reserve_ticket(
         &self,
         reservation: NewTicketReservation,
