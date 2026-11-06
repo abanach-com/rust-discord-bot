@@ -3864,3 +3864,450 @@ async fn test_guild_events_stream_task_cancellation_on_client_drop() {
         state.app.guild_events.receiver_count()
     );
 }
+
+#[tokio::test]
+async fn test_scheduled_events_member_access_and_admin_boundary() {
+    let (state, _) = test_web_state().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let guild_id = "111222333444555666";
+    let other_guild_id = "222333444555666777";
+
+    let ev = state
+        .app
+        .storage
+        .create_scheduled_event(
+            guild_id,
+            "Community Game Night",
+            "Board games and fun",
+            Utc::now() + Duration::days(1),
+            Some(Utc::now() + Duration::days(1) + Duration::hours(2)),
+            "UTC",
+            Some(10),
+        )
+        .await
+        .expect("create test event");
+
+    let other_ev = state
+        .app
+        .storage
+        .create_scheduled_event(
+            other_guild_id,
+            "Other Guild Meeting",
+            "Secret admin meeting",
+            Utc::now() + Duration::days(2),
+            None,
+            "UTC",
+            Some(5),
+        )
+        .await
+        .expect("create other guild event");
+
+    // Regular member session (member of guild_id, permissions = "0", no MANAGE_GUILD)
+    let member_session_id = "events_regular_member_session";
+    let member_user = DashboardUser {
+        id: "member_555".to_owned(),
+        username: "event_goer".to_owned(),
+        global_name: None,
+        avatar: None,
+    };
+    let member_guilds = vec![DashboardGuild {
+        id: guild_id.to_owned(),
+        name: "Community Guild".to_owned(),
+        icon: None,
+        owner: false,
+        permissions: "0".to_owned(),
+    }];
+    let member_csrf = "csrf_events_member_555";
+
+    state
+        .app
+        .sessions
+        .save_session(
+            member_session_id,
+            member_user,
+            member_guilds,
+            member_csrf.to_owned(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .expect("save member session");
+
+    // Non-member session (member of other_guild_id only)
+    let non_member_session_id = "events_non_member_session";
+    let non_member_user = DashboardUser {
+        id: "outsider_777".to_owned(),
+        username: "outsider".to_owned(),
+        global_name: None,
+        avatar: None,
+    };
+    let non_member_guilds = vec![DashboardGuild {
+        id: other_guild_id.to_owned(),
+        name: "Other Guild".to_owned(),
+        icon: None,
+        owner: false,
+        permissions: "0".to_owned(),
+    }];
+    let non_member_csrf = "csrf_outsider_777";
+
+    state
+        .app
+        .sessions
+        .save_session(
+            non_member_session_id,
+            non_member_user,
+            non_member_guilds,
+            non_member_csrf.to_owned(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .expect("save non member session");
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let member_cookie = format!("rusty_discord_bot_session={member_session_id}");
+    let non_member_cookie = format!("rusty_discord_bot_session={non_member_session_id}");
+
+    // 1. Regular member CAN view events list (GET /api/guilds/{guild_id}/scheduled-events) -> 200 OK
+    let list_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .header(COOKIE, &member_cookie)
+        .send()
+        .await
+        .expect("list events");
+    assert_eq!(list_resp.status(), reqwest::StatusCode::OK);
+    let events_json: Vec<serde_json::Value> = list_resp.json().await.unwrap();
+    assert_eq!(events_json.len(), 1);
+    assert_eq!(events_json[0]["title"], "Community Game Night");
+
+    // 2. Regular member CAN join event roster with CSRF -> 200 OK
+    let join_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{}/roster/join",
+            ev.id
+        ))
+        .header(COOKIE, &member_cookie)
+        .header("X-CSRF-Token", member_csrf)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("join roster");
+    assert_eq!(join_resp.status(), reqwest::StatusCode::OK);
+    let roster_json: serde_json::Value = join_resp.json().await.unwrap();
+    assert_eq!(roster_json["user_id"], "member_555");
+    assert_eq!(roster_json["role_type"], "main");
+
+    // 3. Regular member CAN leave event roster with CSRF -> 200 OK
+    let leave_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{}/roster/leave",
+            ev.id
+        ))
+        .header(COOKIE, &member_cookie)
+        .header("X-CSRF-Token", member_csrf)
+        .send()
+        .await
+        .expect("leave roster");
+    assert_eq!(leave_resp.status(), reqwest::StatusCode::OK);
+    let leave_json: serde_json::Value = leave_resp.json().await.unwrap();
+    assert_eq!(leave_json["left"], true);
+
+    // 4. Regular member CANNOT create event -> 403 Forbidden (requires MANAGE_GUILD)
+    let create_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .header(COOKIE, &member_cookie)
+        .header("X-CSRF-Token", member_csrf)
+        .json(&serde_json::json!({
+            "title": "Unauthorized Event",
+            "description": "I have no admin rights",
+            "start_time": Utc::now() + Duration::days(3),
+            "timezone": "UTC"
+        }))
+        .send()
+        .await
+        .expect("create event unauthorized");
+    assert_eq!(create_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 5. POST join/leave without CSRF or with invalid CSRF -> 403 Forbidden
+    let no_csrf_join = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{}/roster/join",
+            ev.id
+        ))
+        .header(COOKIE, &member_cookie)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("join without csrf");
+    assert_eq!(no_csrf_join.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let bad_csrf_join = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{}/roster/join",
+            ev.id
+        ))
+        .header(COOKIE, &member_cookie)
+        .header("X-CSRF-Token", "wrong_csrf_token")
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("join bad csrf");
+    assert_eq!(bad_csrf_join.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let no_csrf_leave = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{}/roster/leave",
+            ev.id
+        ))
+        .header(COOKIE, &member_cookie)
+        .send()
+        .await
+        .expect("leave without csrf");
+    assert_eq!(no_csrf_leave.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 6. Non-member session accessing guild_id -> 403 Forbidden
+    let non_member_list = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .header(COOKIE, &non_member_cookie)
+        .send()
+        .await
+        .expect("non member list");
+    assert_eq!(non_member_list.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let non_member_join = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{}/roster/join",
+            ev.id
+        ))
+        .header(COOKIE, &non_member_cookie)
+        .header("X-CSRF-Token", non_member_csrf)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("non member join");
+    assert_eq!(non_member_join.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 7. Cross-guild tenant isolation: accessing other guild's event under guild_id -> 404 Not Found
+    let cross_guild_join = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{}/roster/join",
+            other_ev.id
+        ))
+        .header(COOKIE, &member_cookie)
+        .header("X-CSRF-Token", member_csrf)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("cross guild join");
+    assert_eq!(cross_guild_join.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_scheduled_events_live_mode_discord_verification() {
+    let mock_status = std::sync::Arc::new(std::sync::atomic::AtomicU16::new(200));
+    let mock_status_clone = mock_status.clone();
+
+    // 1. Mock Discord HTTP API server for GET /guilds/{guild_id}/members/{user_id}
+    let discord_mock_app = axum::Router::new().route(
+        "/guilds/{guild_id}/members/{user_id}",
+        axum::routing::get(move || {
+            let status_code = mock_status_clone.clone();
+            async move {
+                match status_code.load(std::sync::atomic::Ordering::SeqCst) {
+                    200 => (
+                        axum::http::StatusCode::OK,
+                        axum::Json(serde_json::json!({
+                            "user": {"id": "888000000000000002"},
+                            "roles": []
+                        })),
+                    ),
+                    404 => (
+                        axum::http::StatusCode::NOT_FOUND,
+                        axum::Json(serde_json::json!({
+                            "code": 10007,
+                            "message": "Unknown Member"
+                        })),
+                    ),
+                    _ => (
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(serde_json::json!({
+                            "message": "Discord upstream error"
+                        })),
+                    ),
+                }
+            }
+        }),
+    );
+    let discord_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind discord mock");
+    let discord_addr = discord_listener.local_addr().expect("discord mock addr");
+    tokio::spawn(async move {
+        axum::serve(discord_listener, discord_mock_app)
+            .await
+            .unwrap();
+    });
+
+    // 2. Configure app state in live mode (offline_mode = false, real token format)
+    let mut config = test_config();
+    config.discord_token = "live_bot_token_production_secret".to_string();
+    config.offline_mode = false;
+    config.discord_api_base_url = format!("http://{discord_addr}");
+
+    let app = AppState::bootstrap(config).await.expect("bootstrap");
+    let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
+    let web_state = WebState {
+        app,
+        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        permissions_cache,
+    };
+
+    let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind web listener");
+    let web_addr = web_listener.local_addr().expect("web addr");
+    let router = build_router(web_state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            web_listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{web_addr}");
+    let guild_id = "888000000000000001";
+    let user_id = "888000000000000002";
+    let session_id = "sess_live_events_test";
+    let csrf_token = "csrf_live_events_test";
+
+    let ev = web_state
+        .app
+        .storage
+        .create_scheduled_event(
+            guild_id,
+            "Live Guild Event",
+            "Testing live verification",
+            Utc::now() + Duration::days(1),
+            Some(Utc::now() + Duration::days(1) + Duration::hours(1)),
+            "UTC",
+            Some(20),
+        )
+        .await
+        .expect("create live event");
+
+    // Session has guild snapshot from login time, but permissions = "0" (no MANAGE_GUILD)
+    web_state
+        .app
+        .sessions
+        .save_session(
+            session_id,
+            DashboardUser {
+                id: user_id.to_string(),
+                username: "live_member".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Live Guild".to_string(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_string(),
+            }],
+            csrf_token.to_string(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .expect("save live session");
+
+    let session_cookie = format!("rusty_discord_bot_session={session_id}");
+
+    // Case 1: Member verified by Discord API (200 OK) -> Access granted
+    mock_status.store(200, std::sync::atomic::Ordering::SeqCst);
+    let list_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .expect("list events live");
+    assert_eq!(list_resp.status(), reqwest::StatusCode::OK);
+
+    let join_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{}/roster/join",
+            ev.id
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("join live");
+    assert_eq!(join_resp.status(), reqwest::StatusCode::OK);
+
+    // Case 2: Member was kicked/left guild -> Discord API returns 404 Not Found -> 403 Forbidden
+    mock_status.store(404, std::sync::atomic::Ordering::SeqCst);
+    let list_resp_404 = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .expect("list events 404");
+    assert_eq!(list_resp_404.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let join_resp_404 = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{}/roster/join",
+            ev.id
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("join live 404");
+    assert_eq!(join_resp_404.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Case 3: Discord API is down / errors out (503 Service Unavailable) -> Fails closed with 403 Forbidden
+    mock_status.store(503, std::sync::atomic::Ordering::SeqCst);
+    let list_resp_503 = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .expect("list events 503");
+    assert_eq!(list_resp_503.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let join_resp_503 = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{}/roster/join",
+            ev.id
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("join live 503");
+    assert_eq!(join_resp_503.status(), reqwest::StatusCode::FORBIDDEN);
+}

@@ -476,7 +476,7 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Implemented transactional batch persistence (`batch_upsert_companion_mappings`) for PostgreSQL using `pg_advisory_xact_lock` and single-transaction rollbacks on constraint violations, and thread-safe atomic batch persistence for `MemoryStore` under synchronization locks.
   - Segmented `POST /companion-channels/batch` into a three-phase pipeline: (1) upfront preflight validation of all mappings, channel snowflakes, voice!=text invariants, tenant isolation, and live Discord channel types; (2) atomic storage batch upsert guaranteeing all-or-nothing execution without partial persistence; (3) post-commit Discord permission revocation and audit logging.
 
-## 17. Lua Legacy Loader Hardening, Giveaway RBAC & SSE Lifecycle (Issues #212, #213, #214, #216)
+## 17. Lua Legacy Loader Hardening, Community RBAC & SSE Lifecycle (Issues #212, #213, #214, #216, #217, #220)
 
 - **Lua Legacy Discovery Hardening & Symlink Containment (#212)**:
   - In legacy discovery mode (when `install.xml` is absent), symlinks are strictly forbidden via `DirEntry::file_type().is_symlink()`, preventing unintended loading of arbitrary external code or configuration leakage.
@@ -486,6 +486,11 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - `GET /api/guilds/{guild_id}/giveaways/{giveaway_id}` and `POST .../join` employ `ensure_guild_member_access`, allowing regular community members without `MANAGE_GUILD` privileges to view active giveaways and enter drawings with CSRF validation.
   - Enforced strict deadline validation (#217): both REST handler and storage persistence layers (`MemoryStore` and PostgreSQL `SELECT ... FOR UPDATE`) reject joins when `Utc::now() >= ga.expires_at`, preventing participant additions to expired giveaways prior to rerolls.
   - Administrative operations (`POST /giveaways` and `POST .../reroll`) remain strictly protected by `ensure_guild_access`, requiring server management permissions.
+- **Scheduled Events Community Member Access & Self-Service RSVP Boundary (#220)**:
+  - `GET /api/guilds/{guild_id}/scheduled-events`, `POST .../scheduled-events/{event_id}/roster/join` and `POST .../roster/leave` relaxed permission checks from `ensure_guild_access` (`MANAGE_GUILD`) to `ensure_guild_member_access`, allowing regular community members to view server events and manage their own RSVP roster registrations.
+  - Administrative creation (`create_event`) strictly requires `ensure_guild_access` (`MANAGE_GUILD`), preventing unauthorized event creation.
+  - Preserved mandatory CSRF token validation on mutating actions and author attribution binding exclusively to authenticated `session.user.id`.
+  - Enforced cross-guild tenant isolation and live membership fail-closed behavior verified against live-mode Discord API mock (200 OK -> allowed; 404 Unknown Member & 503 Upstream Error -> 403 Forbidden).
 - **SSE Guild Realtime Events Stream Re-Authentication & Disconnect Cleanup (#214, #216)**:
   - `GET /api/guilds/{guild_id}/events` utilizes an asynchronous dispatch pipeline with dual periodic re-authentication (15-second interval) and pre-event verification against storage and `permissions_cache`.
   - Stale, expired, or deleted user sessions, as well as revoked guild management permissions (`can_manage: false`), immediately terminate active Server-Sent Events (SSE) connections, preventing administrative and moderation event leakage to unauthorized parties. Handled broadcast channel lagging with explicit client resync events.

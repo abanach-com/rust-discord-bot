@@ -1690,7 +1690,7 @@ pub async fn list_events(
 ) -> Result<Json<Vec<ScheduledEvent>>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
 
-    ensure_guild_access(&state, &session, &guild_id).await?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
 
     let events = state
         .app
@@ -1802,7 +1802,7 @@ pub async fn join_event_roster(
 
     verify_csrf(&headers, &session)?;
 
-    ensure_guild_access(&state, &session, &guild_id).await?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
 
     let events = state
         .app
@@ -1838,7 +1838,7 @@ pub async fn leave_event_roster(
 
     verify_csrf(&headers, &session)?;
 
-    ensure_guild_access(&state, &session, &guild_id).await?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
 
     let events = state
         .app
