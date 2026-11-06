@@ -305,6 +305,11 @@ pub fn parse_xml_to_dom(source: &str) -> Result<XmlElement, InstallXmlError> {
                 let cdata_text = &source[start_cdata..end_cdata];
                 if let Some(curr) = stack.last_mut() {
                     curr.text.push_str(cdata_text);
+                } else if !cdata_text.trim().is_empty() {
+                    return Err(InstallXmlError::ParseError {
+                        offset: start_cdata,
+                        message: "CDATA section outside root element".to_owned(),
+                    });
                 }
                 i = end_cdata + 3;
                 continue;
@@ -349,21 +354,34 @@ pub fn parse_xml_to_dom(source: &str) -> Result<XmlElement, InstallXmlError> {
                     parent.children.push(popped);
                 } else if root.is_none() {
                     root = Some(popped);
+                } else {
+                    return Err(InstallXmlError::ParseError {
+                        offset: start_tag,
+                        message: "multiple root elements".to_owned(),
+                    });
                 }
                 continue;
             }
 
             // Opening tag <tag attr="val"> or <tag attr="val" />
-            i += 1; // skip '<'
             let start_tag = i;
+            if stack.is_empty() && root.is_some() {
+                return Err(InstallXmlError::ParseError {
+                    offset: start_tag,
+                    message: "multiple root elements".to_owned(),
+                });
+            }
+
+            i += 1; // skip '<'
+            let start_tag_name = i;
             while i < len && !bytes[i].is_ascii_whitespace() && bytes[i] != b'>' && bytes[i] != b'/'
             {
                 i += 1;
             }
-            let tag_name = source[start_tag..i].trim().to_string();
+            let tag_name = source[start_tag_name..i].trim().to_string();
             if tag_name.is_empty() {
                 return Err(InstallXmlError::ParseError {
-                    offset: start_tag,
+                    offset: start_tag_name,
                     message: "empty tag name".to_string(),
                 });
             }
@@ -481,6 +499,11 @@ pub fn parse_xml_to_dom(source: &str) -> Result<XmlElement, InstallXmlError> {
                     parent.children.push(elem);
                 } else if root.is_none() {
                     root = Some(elem);
+                } else {
+                    return Err(InstallXmlError::ParseError {
+                        offset: start_tag,
+                        message: "multiple root elements".to_owned(),
+                    });
                 }
             } else {
                 stack.push(elem);
@@ -495,6 +518,11 @@ pub fn parse_xml_to_dom(source: &str) -> Result<XmlElement, InstallXmlError> {
             let unescaped = unescape_xml(raw_text);
             if let Some(curr) = stack.last_mut() {
                 curr.text.push_str(&unescaped);
+            } else if !raw_text.trim().is_empty() {
+                return Err(InstallXmlError::ParseError {
+                    offset: text_start,
+                    message: "text content outside root element".to_owned(),
+                });
             }
         }
 
@@ -506,13 +534,14 @@ pub fn parse_xml_to_dom(source: &str) -> Result<XmlElement, InstallXmlError> {
         }
     }
 
-    if let Some(r) = root {
-        Ok(r)
-    } else if stack.len() == 1 {
-        Ok(stack.pop().unwrap())
-    } else {
-        Err(InstallXmlError::MissingRoot)
+    if !stack.is_empty() {
+        return Err(InstallXmlError::ParseError {
+            offset: len,
+            message: "unclosed XML element".to_owned(),
+        });
     }
+
+    root.ok_or(InstallXmlError::MissingRoot)
 }
 
 fn unescape_xml(input: &str) -> String {
@@ -711,5 +740,45 @@ mod tests {
         assert!(parse_xml_to_dom("<?xml version=\"1.0\"").is_err());
         assert!(parse_xml_to_dom("<!-- unclosed comment").is_err());
         assert!(parse_xml_to_dom("<installer></unclosed").is_err());
+    }
+
+    #[test]
+    fn rejects_multiple_roots_and_unclosed_fragments() {
+        let fixtures = [
+            "<installer version=\"1.0.0\"/><other/>",
+            "<installer/><broken>",
+            "<installer/>unexpected-text",
+            "<installer></installer><installer></installer>",
+            "unexpected-text<installer/>",
+            "<installer><unclosed>",
+            "<installer>",
+            "<installer><![CDATA[outside]]></installer><![CDATA[invalid]]>",
+        ];
+
+        for xml in fixtures {
+            let res = InstallManifest::parse(xml);
+            assert!(
+                matches!(res, Err(InstallXmlError::ParseError { .. })),
+                "expected ParseError for fixture: {xml}, got: {res:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_single_root_with_comments_and_whitespace() {
+        let valid_cases = [
+            "<installer version=\"1.0.0\" />",
+            "<!-- comment --><installer><modules /></installer><!-- after -->",
+            "<?xml version=\"1.0\"?><installer />",
+            "   \n\t <installer>\n</installer> \n\t ",
+        ];
+
+        for xml in valid_cases {
+            let res = InstallManifest::parse(xml);
+            assert!(
+                res.is_ok(),
+                "expected Ok for valid XML: {xml}, got: {res:?}"
+            );
+        }
     }
 }

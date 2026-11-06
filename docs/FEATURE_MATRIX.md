@@ -451,7 +451,7 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
 - **Unified Offline Mode & Live Member Verification (#205)**: Centralized `Config::offline_mode` and `is_offline_mode()` across Gateway and web dashboard. Prevents `OFFLINE_MODE=false` or empty values from bypassing live Discord membership verification in store and web routes, failing closed with 403 on Discord 404/403.
 - **Steam LFG Self-Service Access (#206)**: Relaxed permission checks on `/steam/lfg` endpoints from `MANAGE_GUILD` to `ensure_guild_member_access`, allowing regular community members to view, create, and join teams while maintaining CSRF validation, tenant isolation, and author attribution.
 
-## 15. Storage Parity & Lua Installer Sandboxing (Issues #207, #208, #209)
+## 15. Storage Parity & Lua Installer Sandboxing (Issues #207, #208, #209, #221)
 
 - **MemoryStore & PostgreSQL UPSERT Semantics Parity (#207)**:
   - Keyed `github_devops_mappings` by business identity tuple `(guild_id, repo_full_name.to_ascii_lowercase(), issue_or_pr_number)` instead of raw UUID in `MemoryStore`, matching PostgreSQL's `UNIQUE` constraint and `ON CONFLICT DO UPDATE`.
@@ -464,6 +464,10 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - `InstallManifest::parse` validates that `folder`, `entry`, and `config` relative paths contain only normal or current-dir components (`Component::Normal(_) | Component::CurDir`), explicitly forbidding parent directory traversal (`..`) and absolute roots.
   - `ensure_confined_path` in `LuaEngine` canonicalizes paths on disk and enforces that resolved files and directories remain strictly within their parent package boundary (`starts_with(&canonical_base)`).
   - Symlinks attempting to escape package directories to read arbitrary system or secret JSON configuration files are rejected at load time, safeguarding runtime configuration and preventing sandbox escapes.
+- **Lua Installer XML Single Root & Trailing Fragment Hardening (#221)**:
+  - `parse_xml_to_dom` strictly enforces standard XML root-containment invariants: rejects multiple root elements (`stack.is_empty() && root.is_some()`), unclosed elements on EOF (`!stack.is_empty()`), and non-whitespace text/CDATA content outside the root document element.
+  - Guarantees fail-closed parsing of malformed manifests such as `<installer/><other/>`, `<installer/><broken>`, `<installer/>unexpected-text`, and unclosed root tags (`<installer>`), returning controlled `ParseError`.
+  - Preserves legitimate XML structures including self-closing roots (`<installer/>`), single rooted hierarchies, declarations (`<?xml ...?>`), and comments outside or within root elements without regressions.
 
 ## 16. Duty Policy & Companion Mapping Batch Atomicity (Issues #210, #211, #215)
 

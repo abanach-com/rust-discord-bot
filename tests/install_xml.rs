@@ -279,6 +279,69 @@ async fn test_install_xml_rejects_path_traversal_and_symlink_escape() {
 }
 
 #[tokio::test]
+async fn test_install_xml_rejects_multiple_roots_and_unclosed_trailing_fragments() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path();
+
+    // 1. Multiple roots
+    let bad_xml = r#"<installer version="1.0.0"/><other/>"#;
+    std::fs::write(base.join("install.xml"), bad_xml).expect("write install.xml");
+
+    let res = LuaEngine::load(base, limits());
+    assert!(
+        res.is_err(),
+        "engine must reject multiple root elements in install.xml"
+    );
+    match res.err().unwrap() {
+        LuaEngineError::InvalidInstallXml { message, .. } => {
+            assert!(
+                message.contains("multiple root elements"),
+                "expected multiple root elements error, got: {message}"
+            );
+        }
+        other => panic!("expected InvalidInstallXml error, got: {other:?}"),
+    }
+
+    // 2. Trailing unclosed fragment
+    let unclosed_xml = r#"<installer/><broken>"#;
+    std::fs::write(base.join("install.xml"), unclosed_xml).expect("write install.xml");
+
+    let res2 = LuaEngine::load(base, limits());
+    assert!(
+        res2.is_err(),
+        "engine must reject trailing unclosed fragment in install.xml"
+    );
+    match res2.err().unwrap() {
+        LuaEngineError::InvalidInstallXml { message, .. } => {
+            assert!(
+                message.contains("multiple root elements") || message.contains("unclosed"),
+                "expected parse error, got: {message}"
+            );
+        }
+        other => panic!("expected InvalidInstallXml error, got: {other:?}"),
+    }
+
+    // 3. Trailing text after root
+    let text_xml = r#"<installer/>unexpected-text"#;
+    std::fs::write(base.join("install.xml"), text_xml).expect("write install.xml");
+
+    let res3 = LuaEngine::load(base, limits());
+    assert!(
+        res3.is_err(),
+        "engine must reject unexpected trailing text in install.xml"
+    );
+    match res3.err().unwrap() {
+        LuaEngineError::InvalidInstallXml { message, .. } => {
+            assert!(
+                message.contains("text content outside root element"),
+                "expected trailing text error, got: {message}"
+            );
+        }
+        other => panic!("expected InvalidInstallXml error, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn test_legacy_loader_rejects_symlinks_and_loops_without_install_xml() {
     let temp = TempDir::new().expect("temp dir");
     let base = temp.path();
