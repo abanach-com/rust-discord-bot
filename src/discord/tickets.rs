@@ -240,36 +240,69 @@ pub(super) async fn execute(
             }
             let open_category = ensure_category(ctx, guild_id, open_category_id).await?;
             let participants = state.tickets.list_participants(&ticket.id).await?;
-            restore_member_access(
-                ctx,
-                channel_id,
-                UserId::new(parse_snowflake(&ticket.creator_user_id)?),
-            )
-            .await?;
-            for participant in &participants {
-                restore_member_access(
-                    ctx,
-                    channel_id,
-                    UserId::new(parse_snowflake(&participant.user_id)?),
-                )
-                .await?;
-            }
+            let creator_id = UserId::new(parse_snowflake(&ticket.creator_user_id)?);
             let reopened_name = ticket
                 .channel_name
                 .as_deref()
                 .map(remove_closed_prefix)
                 .unwrap_or_else(|| format!("ticket-{}", ticket.display_number()));
-            channel_id
+
+            let (orig_name, orig_category) = if let Ok(ch) = ctx.http.get_channel(channel_id).await
+                && let Some(gc) = ch.guild()
+            {
+                (gc.name.clone(), gc.parent_id)
+            } else {
+                (
+                    ticket
+                        .channel_name
+                        .clone()
+                        .unwrap_or_else(|| format!("ticket-{}", ticket.display_number())),
+                    None,
+                )
+            };
+
+            let mut restored_users = Vec::new();
+            restore_member_access(ctx, channel_id, creator_id).await?;
+            restored_users.push(creator_id);
+
+            for participant in &participants {
+                let p_id = UserId::new(parse_snowflake(&participant.user_id)?);
+                if let Err(e) = restore_member_access(ctx, channel_id, p_id).await {
+                    tracing::warn!(
+                        ticket_id = %ticket.id,
+                        error = %e,
+                        "Discord side effect failure during reopen; executing compensating rollback"
+                    );
+                    for uid in &restored_users {
+                        let _ = set_member_read_only(ctx, channel_id, *uid).await;
+                    }
+                    return Err(e);
+                }
+                restored_users.push(p_id);
+            }
+
+            if let Err(e) = channel_id
                 .edit(
                     &ctx.http,
                     EditChannel::new()
                         .name(&reopened_name)
                         .category(open_category),
                 )
-                .await?;
+                .await
+            {
+                tracing::warn!(
+                    ticket_id = %ticket.id,
+                    error = %e,
+                    "Discord channel edit failure during reopen; executing compensating rollback"
+                );
+                for uid in &restored_users {
+                    let _ = set_member_read_only(ctx, channel_id, *uid).await;
+                }
+                return Err(e.into());
+            }
 
-            match state.tickets.reopen_ticket(&ticket.id, &actor_key).await? {
-                TicketMutationOutcome::Updated(updated) => {
+            match state.tickets.reopen_ticket(&ticket.id, &actor_key).await {
+                Ok(TicketMutationOutcome::Updated(updated)) => {
                     if updated.channel_name.as_deref() != Some(&reopened_name) {
                         let _ = state
                             .tickets
@@ -289,7 +322,37 @@ pub(super) async fn execute(
                         updated.display_number()
                     )))
                 }
-                outcome => Ok(Some(format_mutation_outcome(outcome))),
+                Ok(outcome) => {
+                    tracing::warn!(
+                        ticket_id = %ticket.id,
+                        "Storage rejected ticket reopen with non-updated outcome; rolling back Discord channel"
+                    );
+                    for uid in &restored_users {
+                        let _ = set_member_read_only(ctx, channel_id, *uid).await;
+                    }
+                    let mut rollback_edit = EditChannel::new().name(&orig_name);
+                    if let Some(cat) = orig_category {
+                        rollback_edit = rollback_edit.category(cat);
+                    }
+                    let _ = channel_id.edit(&ctx.http, rollback_edit).await;
+                    Ok(Some(format_mutation_outcome(outcome)))
+                }
+                Err(e) => {
+                    tracing::error!(
+                        ticket_id = %ticket.id,
+                        error = %e,
+                        "Storage error during ticket reopen; executing compensating rollback"
+                    );
+                    for uid in &restored_users {
+                        let _ = set_member_read_only(ctx, channel_id, *uid).await;
+                    }
+                    let mut rollback_edit = EditChannel::new().name(&orig_name);
+                    if let Some(cat) = orig_category {
+                        rollback_edit = rollback_edit.category(cat);
+                    }
+                    let _ = channel_id.edit(&ctx.http, rollback_edit).await;
+                    Err(e)
+                }
             }
         }
         TicketOperation::AddMember {
@@ -674,34 +737,65 @@ async fn close_ticket(
     };
 
     let participants = state.tickets.list_participants(&ticket.id).await?;
-    set_member_read_only(
-        ctx,
-        channel_id,
-        UserId::new(parse_snowflake(&ticket.creator_user_id)?),
-    )
-    .await?;
-    for participant in &participants {
-        set_member_read_only(
-            ctx,
-            channel_id,
-            UserId::new(parse_snowflake(&participant.user_id)?),
+    let creator_id = UserId::new(parse_snowflake(&ticket.creator_user_id)?);
+    let closed_name = build_closed_channel_name(&ticket);
+
+    let (orig_name, orig_category) = if let Ok(ch) = ctx.http.get_channel(channel_id).await
+        && let Some(gc) = ch.guild()
+    {
+        (gc.name.clone(), gc.parent_id)
+    } else {
+        (
+            ticket
+                .channel_name
+                .clone()
+                .unwrap_or_else(|| format!("ticket-{}", ticket.display_number())),
+            None,
         )
-        .await?;
+    };
+
+    let mut read_only_users = Vec::new();
+    set_member_read_only(ctx, channel_id, creator_id).await?;
+    read_only_users.push(creator_id);
+
+    for participant in &participants {
+        let p_id = UserId::new(parse_snowflake(&participant.user_id)?);
+        if let Err(e) = set_member_read_only(ctx, channel_id, p_id).await {
+            tracing::warn!(
+                ticket_id = %ticket.id,
+                error = %e,
+                "Discord side effect failure during close; executing compensating rollback"
+            );
+            for uid in &read_only_users {
+                let _ = restore_member_access(ctx, channel_id, *uid).await;
+            }
+            return Err(e);
+        }
+        read_only_users.push(p_id);
     }
 
-    let closed_name = build_closed_channel_name(&ticket);
     let mut edit = EditChannel::new().name(&closed_name);
     if let Some(archive_category) = archive_category {
         edit = edit.category(archive_category);
     }
-    channel_id.edit(&ctx.http, edit).await?;
+    if let Err(e) = channel_id.edit(&ctx.http, edit).await {
+        tracing::warn!(
+            ticket_id = %ticket.id,
+            error = %e,
+            "Discord channel edit failure during close; executing compensating rollback"
+        );
+        for uid in &read_only_users {
+            let _ = restore_member_access(ctx, channel_id, *uid).await;
+        }
+        return Err(e.into());
+    }
 
     match state
         .tickets
         .close_ticket(&ticket.id, &actor_key, reason)
-        .await?
+        .await
     {
-        TicketMutationOutcome::Updated(updated) => {
+        Ok(TicketMutationOutcome::Updated(updated)) => {
             if updated.channel_name.as_deref() != Some(&closed_name) {
                 let _ = state
                     .tickets
@@ -737,7 +831,37 @@ async fn close_ticket(
                 updated.display_number()
             )))
         }
-        outcome => Ok(Some(format_mutation_outcome(outcome))),
+        Ok(outcome) => {
+            tracing::warn!(
+                ticket_id = %ticket.id,
+                "Storage rejected ticket close with non-updated outcome; rolling back Discord channel"
+            );
+            for uid in &read_only_users {
+                let _ = restore_member_access(ctx, channel_id, *uid).await;
+            }
+            let mut rollback_edit = EditChannel::new().name(&orig_name);
+            if let Some(cat) = orig_category {
+                rollback_edit = rollback_edit.category(cat);
+            }
+            let _ = channel_id.edit(&ctx.http, rollback_edit).await;
+            Ok(Some(format_mutation_outcome(outcome)))
+        }
+        Err(e) => {
+            tracing::error!(
+                ticket_id = %ticket.id,
+                error = %e,
+                "Storage error during ticket close; executing compensating rollback"
+            );
+            for uid in &read_only_users {
+                let _ = restore_member_access(ctx, channel_id, *uid).await;
+            }
+            let mut rollback_edit = EditChannel::new().name(&orig_name);
+            if let Some(cat) = orig_category {
+                rollback_edit = rollback_edit.category(cat);
+            }
+            let _ = channel_id.edit(&ctx.http, rollback_edit).await;
+            Err(e)
+        }
     }
 }
 
@@ -1570,6 +1694,38 @@ fn parse_snowflake(value: &str) -> Result<u64> {
         return Err(anyhow!("Discord ID cannot be zero"));
     }
     Ok(value)
+}
+
+pub async fn reconcile_ticket_channel(
+    ctx: &Context,
+    state: &AppState,
+    guild_id: GuildId,
+    channel_id: ChannelId,
+) -> Result<()> {
+    let Some(ticket) = state
+        .tickets
+        .get_by_channel(&guild_id.get().to_string(), &channel_id.get().to_string())
+        .await?
+    else {
+        return Ok(());
+    };
+    let participants = state.tickets.list_participants(&ticket.id).await?;
+    let creator_id = UserId::new(parse_snowflake(&ticket.creator_user_id)?);
+
+    if ticket.status == STATUS_CLOSED {
+        set_member_read_only(ctx, channel_id, creator_id).await?;
+        for p in &participants {
+            set_member_read_only(ctx, channel_id, UserId::new(parse_snowflake(&p.user_id)?))
+                .await?;
+        }
+    } else if ticket.status == STATUS_OPEN || ticket.status == STATUS_CLAIMED {
+        restore_member_access(ctx, channel_id, creator_id).await?;
+        for p in &participants {
+            restore_member_access(ctx, channel_id, UserId::new(parse_snowflake(&p.user_id)?))
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

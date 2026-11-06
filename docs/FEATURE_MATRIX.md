@@ -639,6 +639,10 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Enforced per-user and per-guild rate limiting (`RateLimiter::check_command`) and Command Policy evaluation (`CommandPolicyEngine::evaluate`) for built-in host commands.
   - Preserved administrative/owner recovery exception for `/policy` (`handle_policy_builtin_command`), preventing accidental policy lockouts.
   - Fixed `/policy explain` target command resolution in Discord slash command handler, mapping host commands (`duty`, `help`, `emoji`, `sticker`, `policy`) to their respective module IDs for consistent policy explain trace output.
+- **Ticket Close/Reopen Compensating Rollback & Reconciliation (#253)**:
+  - Implemented transactional compensation in `src/discord/tickets.rs` across both `TicketOperation::Reopen` and `close_ticket`: tracks all applied permission overwrites and channel modifications, immediately rolling back changes (`set_member_read_only` / `restore_member_access` and channel name/category restore) if any intermediate Discord API call fails, or if the database mutation fails or returns `InvalidState`.
+  - Added `reconcile_ticket_channel(ctx, state, guild_id, channel_id)` helper guaranteeing convergence between authoritative DB ticket status and Discord channel write permissions.
+  - Added migration `0036_ticket_channel_transitions.sql` defining `ticket_channel_transitions` for durable tracking of channel state transitions.
 
 ## Delivery order
 

@@ -304,3 +304,61 @@ fn test_render_html_transcript_sanitization_and_csp() {
     assert!(html.contains("&lt;script&gt;alert(&#39;pwned&#39;)&lt;/script&gt;"));
     assert!(html.contains("&amp; goodbye &quot;world&quot;!"));
 }
+
+#[tokio::test]
+async fn ticket_close_reopen_compensating_contract_issue_253() {
+    let store = TicketStore::memory();
+    let ticket = active_ticket(&store).await;
+    assert_eq!(ticket.status, STATUS_OPEN);
+
+    // 1. Reopening an already open ticket returns InvalidState (must trigger compensating rollback)
+    let invalid_reopen = store
+        .reopen_ticket(&ticket.id, "100000000000000030")
+        .await
+        .expect("reopen call should succeed");
+    assert!(
+        matches!(
+            invalid_reopen,
+            TicketMutationOutcome::InvalidState {
+                ref current_status,
+            } if current_status == STATUS_OPEN
+        ),
+        "Reopening open ticket must yield InvalidState"
+    );
+
+    // 2. Close ticket transitions to closed
+    let closed = store
+        .close_ticket(&ticket.id, "100000000000000030", Some("Closed"))
+        .await
+        .expect("close should succeed");
+    let TicketMutationOutcome::Updated(closed_ticket) = closed else {
+        panic!("expected updated closed ticket");
+    };
+    assert_eq!(closed_ticket.status, STATUS_CLOSED);
+
+    // 3. Closing an already closed ticket returns InvalidState (must trigger compensating rollback)
+    let invalid_close = store
+        .close_ticket(&ticket.id, "100000000000000030", Some("Again"))
+        .await
+        .expect("second close call should succeed");
+    assert!(
+        matches!(
+            invalid_close,
+            TicketMutationOutcome::InvalidState {
+                ref current_status,
+            } if current_status == STATUS_CLOSED
+        ),
+        "Closing closed ticket must yield InvalidState"
+    );
+
+    // 4. Reopening closed ticket succeeds
+    let reopened = store
+        .reopen_ticket(&ticket.id, "100000000000000030")
+        .await
+        .expect("reopen call should succeed");
+    let TicketMutationOutcome::Updated(reopened_ticket) = reopened else {
+        panic!("expected updated reopened ticket");
+    };
+    assert_eq!(reopened_ticket.status, STATUS_OPEN);
+    assert!(reopened_ticket.version > closed_ticket.version);
+}
