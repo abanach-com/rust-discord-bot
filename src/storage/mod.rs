@@ -6924,4 +6924,69 @@ mod tests {
             50
         );
     }
+
+    #[tokio::test]
+    async fn test_check_and_record_event_dedupe_atomic_single_winner_and_case_insensitive() {
+        let store = Storage::Memory(MemoryStore::default());
+
+        // 1. Case-insensitivity check
+        let first = store
+            .check_and_record_event_dedupe("GitHub", "evt-12345")
+            .await
+            .expect("dedupe check");
+        assert!(first);
+
+        let second = store
+            .check_and_record_event_dedupe("github", "evt-12345")
+            .await
+            .expect("dedupe check");
+        assert!(
+            !second,
+            "Different case of provider must be recognized as duplicate"
+        );
+
+        let third = store
+            .check_and_record_event_dedupe("GITHUB", "evt-12345")
+            .await
+            .expect("dedupe check");
+        assert!(!third, "Uppercase provider must be recognized as duplicate");
+
+        // 2. High-concurrency race condition test
+        for round in 0..50 {
+            let event_id = format!("round-event-{round}");
+            let gate = std::sync::Arc::new(tokio::sync::Barrier::new(16));
+            let mut handles = Vec::new();
+
+            for thread_idx in 0..16 {
+                let store = store.clone();
+                let gate = gate.clone();
+                let event_id = event_id.clone();
+                let provider = if thread_idx % 2 == 0 {
+                    "GitHub"
+                } else {
+                    "github"
+                };
+
+                handles.push(tokio::spawn(async move {
+                    gate.wait().await;
+                    store
+                        .check_and_record_event_dedupe(provider, &event_id)
+                        .await
+                        .expect("check dedupe")
+                }));
+            }
+
+            let mut true_count = 0;
+            for h in handles {
+                if h.await.unwrap() {
+                    true_count += 1;
+                }
+            }
+
+            assert_eq!(
+                true_count, 1,
+                "Exactly one worker must win deduplication for event {event_id}"
+            );
+        }
+    }
 }

@@ -5151,7 +5151,7 @@ impl PostgresStore {
 
         )
 
-        .bind(provider)
+        .bind(provider.to_ascii_lowercase())
 
         .bind(event_id)
 

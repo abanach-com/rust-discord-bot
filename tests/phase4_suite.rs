@@ -682,3 +682,82 @@ async fn test_phase4_integrations_and_extensibility_suite() {
         ">>> All 20 agents and 16 integration tracks (#92-#107) passed acceptance verification!"
     );
 }
+
+#[tokio::test]
+async fn test_webhook_dedupe_parallel_replay_single_winner() {
+    let (state, _) = test_web_state().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let base_url = format!("http://{addr}");
+    let client = reqwest::Client::new();
+    let secret = "test-github-secret";
+
+    // 16 concurrent requests for the exact same webhook payload
+    let event_id = "gh_evt_concurrent_999";
+    let body = format!(
+        r#"{{"event_id":"{event_id}","type":"push","repository":{{"full_name":"org/repo"}}}}"#
+    );
+    let hmac_bytes = compute_hmac_sha256(secret.as_bytes(), body.as_bytes());
+    let sig_hex = format!("sha256={}", hex::encode(hmac_bytes));
+
+    let gate = std::sync::Arc::new(tokio::sync::Barrier::new(16));
+    let mut handles = Vec::new();
+
+    for _ in 0..16 {
+        let client = client.clone();
+        let gate = gate.clone();
+        let url = format!("{base_url}/api/integrations/webhooks/github");
+        let sig = sig_hex.clone();
+        let b = body.clone();
+
+        handles.push(tokio::spawn(async move {
+            gate.wait().await;
+            let resp = client
+                .post(url)
+                .header("X-Hub-Signature-256", &sig)
+                .body(b)
+                .send()
+                .await
+                .expect("send webhook");
+            let json: serde_json::Value = resp.json().await.expect("json");
+            json
+        }));
+    }
+
+    let mut processed_count = 0;
+    let mut deduplicated_count = 0;
+
+    for h in handles {
+        let json = h.await.expect("handle");
+        if json["status"] == "processed" && json["duplicate"] == false {
+            processed_count += 1;
+        } else if json["status"] == "deduplicated" && json["duplicate"] == true {
+            deduplicated_count += 1;
+        } else {
+            panic!("Unexpected webhook response payload: {json:?}");
+        }
+    }
+
+    assert_eq!(
+        processed_count, 1,
+        "Exactly one webhook request must be processed"
+    );
+    assert_eq!(
+        deduplicated_count, 15,
+        "All other 15 webhook requests must be deduplicated"
+    );
+}

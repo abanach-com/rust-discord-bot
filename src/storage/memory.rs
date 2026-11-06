@@ -3804,14 +3804,14 @@ impl MemoryStore {
     }
 
     pub fn check_and_record_event_dedupe(&self, provider: &str, event_id: &str) -> bool {
-        let key = (provider.to_lowercase(), event_id.to_string());
+        let key = (provider.to_ascii_lowercase(), event_id.to_string());
 
-        if self.integration_event_dedupes.contains_key(&key) {
-            false
-        } else {
-            self.integration_event_dedupes.insert(key, Utc::now());
-
-            true
+        match self.integration_event_dedupes.entry(key) {
+            dashmap::mapref::entry::Entry::Occupied(_) => false,
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(Utc::now());
+                true
+            }
         }
     }
 
