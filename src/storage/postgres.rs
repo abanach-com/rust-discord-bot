@@ -608,6 +608,15 @@ impl PostgresStore {
                 .rows_affected();
         related_erased += deleted_afk as usize;
 
+        let deleted_rr_grants =
+            sqlx::query("DELETE FROM reaction_role_grants WHERE guild_id = $1 AND user_id = $2")
+                .bind(guild_id)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+        related_erased += deleted_rr_grants as usize;
+
         tx.commit().await?;
 
         let retained_records = vec![
@@ -3162,6 +3171,29 @@ impl PostgresStore {
         )
         .bind(guild_id)
         .bind(binding_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn list_user_reaction_role_grants(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Vec<ReactionRoleGrant>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+        let rows = sqlx::query_as::<_, ReactionRoleGrant>(
+            r#"
+            SELECT id, guild_id, user_id, role_id, binding_id, granted_by_bot, created_at
+            FROM reaction_role_grants
+            WHERE guild_id = $1 AND user_id = $2
+            ORDER BY created_at ASC
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
         .fetch_all(&self.pool)
         .await?;
 

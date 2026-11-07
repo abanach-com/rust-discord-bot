@@ -650,6 +650,11 @@ impl MemoryStore {
             related_erased += 1;
         }
 
+        let before_rr = self.reaction_role_grants.len();
+        self.reaction_role_grants
+            .retain(|_, grant| !(grant.guild_id == guild_id && grant.user_id == user_id));
+        related_erased += before_rr.saturating_sub(self.reaction_role_grants.len());
+
         let retained_records = vec![
             RetainedRecordNotice {
                 entity: "Moderation cases".to_string(),
@@ -2250,6 +2255,23 @@ impl MemoryStore {
             .filter(|e| e.guild_id == guild_id && e.binding_id == binding_id)
             .map(|e| e.value().clone())
             .collect();
+        Ok(matches)
+    }
+
+    pub fn list_user_reaction_role_grants(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Vec<ReactionRoleGrant>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+        let mut matches: Vec<ReactionRoleGrant> = self
+            .reaction_role_grants
+            .iter()
+            .filter(|e| e.guild_id == guild_id && e.user_id == user_id)
+            .map(|e| e.value().clone())
+            .collect();
+        matches.sort_by_key(|g| g.created_at);
         Ok(matches)
     }
 

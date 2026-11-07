@@ -1882,6 +1882,17 @@ pub async fn export_user_privacy_data(
         None
     };
 
+    let reaction_roles = if let (Ok(_), Ok(_)) = (guild_id.parse::<u64>(), user_id.parse::<u64>()) {
+        state
+            .app
+            .storage
+            .list_user_reaction_role_grants(&guild_id, user_id)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     Ok(Json(json!({
         "user_id": user_id,
         "guild_id": guild_id,
@@ -1889,7 +1900,8 @@ pub async fn export_user_privacy_data(
         "progression": profile,
         "moderation_cases": cases,
         "quotes": quotes,
-        "birthday": birthday
+        "birthday": birthday,
+        "reaction_roles": reaction_roles,
     })))
 }
 

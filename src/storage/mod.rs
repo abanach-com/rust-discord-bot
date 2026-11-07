@@ -2790,6 +2790,21 @@ impl Storage {
         }
     }
 
+    pub async fn list_user_reaction_role_grants(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Vec<ReactionRoleGrant>> {
+        match self {
+            Self::Memory(store) => store.list_user_reaction_role_grants(guild_id, user_id),
+            Self::Postgres(store) => {
+                store
+                    .list_user_reaction_role_grants(guild_id, user_id)
+                    .await
+            }
+        }
+    }
+
     pub async fn create_quote(&self, quote: QuoteRecord) -> anyhow::Result<QuoteRecord> {
         match self {
             Self::Memory(store) => store.create_quote(quote),

@@ -286,6 +286,30 @@ async fn test_security_privacy_workflow_suite() {
         .await
         .expect("create other user case");
 
+    // Setup Reaction Role grants for privacy export & erasure testing (Issue #304)
+    let rr_binding_id = uuid::Uuid::new_v4();
+    state
+        .app
+        .storage
+        .record_reaction_role_grant(guild_id, user_id, "1002", rr_binding_id, true)
+        .await
+        .unwrap();
+
+    // Isolated grants for other user and other guild
+    state
+        .app
+        .storage
+        .record_reaction_role_grant(guild_id, "888888888", "1002", rr_binding_id, true)
+        .await
+        .unwrap();
+
+    state
+        .app
+        .storage
+        .record_reaction_role_grant("200", user_id, "1002", rr_binding_id, true)
+        .await
+        .unwrap();
+
     // Verify export returns all 51 cases without truncation
     let export_initial = client
         .post(format!("{base_url}/api/guilds/{guild_id}/privacy/export"))
@@ -309,6 +333,14 @@ async fn test_security_privacy_workflow_suite() {
     for c in cases {
         assert_eq!(c["subject_user_id"], user_id);
     }
+    let initial_rr = initial_json["reaction_roles"].as_array().unwrap();
+    assert_eq!(
+        initial_rr.len(),
+        1,
+        "Export must include active reaction role grants"
+    );
+    assert_eq!(initial_rr[0]["user_id"], user_id);
+    assert_eq!(initial_rr[0]["role_id"], "1002");
 
     // Issue #135: Storage failure injection must yield HTTP 500, not fake 200
     state.app.storage.inject_progression_failure(true);
@@ -380,6 +412,43 @@ async fn test_security_privacy_workflow_suite() {
         .expect("check progress after erase");
     assert!(!has_prog, "Progress record must be deleted from storage");
 
+    // Verify storage no longer has reaction role grants for (guild_id, user_id)
+    let grants_after = state
+        .app
+        .storage
+        .list_user_reaction_role_grants(guild_id, user_id)
+        .await
+        .expect("check grants after erase");
+    assert!(
+        grants_after.is_empty(),
+        "Reaction role grants for (guild_id, user_id) must be erased"
+    );
+
+    // Multi-tenant & multi-user isolation check
+    let other_user_grants = state
+        .app
+        .storage
+        .list_user_reaction_role_grants(guild_id, "888888888")
+        .await
+        .expect("check other user grants");
+    assert_eq!(
+        other_user_grants.len(),
+        1,
+        "Other user's grants in same guild must remain intact"
+    );
+
+    let other_guild_grants = state
+        .app
+        .storage
+        .list_user_reaction_role_grants("200", user_id)
+        .await
+        .expect("check other guild grants");
+    assert_eq!(
+        other_guild_grants.len(),
+        1,
+        "User's grants in other guild must remain intact"
+    );
+
     // Verify export returns null for progression after genuine erasure
     let export_res = client
         .post(format!("{base_url}/api/guilds/{guild_id}/privacy/export"))
@@ -396,6 +465,11 @@ async fn test_security_privacy_workflow_suite() {
     assert!(
         export_json["progression"].is_null(),
         "Exported progression must be null after genuine erasure"
+    );
+    let rr_after = export_json["reaction_roles"].as_array().unwrap();
+    assert!(
+        rr_after.is_empty(),
+        "Exported reaction roles must be empty after genuine erasure"
     );
 
     // =========================================================================

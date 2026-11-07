@@ -2919,6 +2919,82 @@ async fn test_postgres_integration_suite() {
         .await
         .unwrap();
 
+    // Issue #304: Privacy erasure of reaction role grants in Postgres
+    let pg_rr_b3 = store
+        .upsert_reaction_role_binding(rusty_discord_bot::storage::ReactionRoleBinding {
+            id: uuid::Uuid::new_v4(),
+            guild_id: rr_guild.to_string(),
+            channel_id: Some("chan_1".to_string()),
+            message_id: "msg_rr_grant_privacy".to_string(),
+            emoji_key: "🔒".to_string(),
+            role_id: "role_privacy_test".to_string(),
+            created_by: None,
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    let privacy_user = "999000000000000095";
+    let other_privacy_user = "999000000000000096";
+
+    store
+        .record_reaction_role_grant(
+            rr_guild,
+            privacy_user,
+            "role_privacy_test",
+            pg_rr_b3.id,
+            true,
+        )
+        .await
+        .unwrap();
+
+    store
+        .record_reaction_role_grant(
+            rr_guild,
+            other_privacy_user,
+            "role_privacy_test",
+            pg_rr_b3.id,
+            true,
+        )
+        .await
+        .unwrap();
+
+    let user_grants_before = store
+        .list_user_reaction_role_grants(rr_guild, privacy_user)
+        .await
+        .unwrap();
+    assert_eq!(user_grants_before.len(), 1);
+
+    let rep = store
+        .erase_guild_user_data(rr_guild, privacy_user)
+        .await
+        .unwrap();
+    assert!(rep.related_records_erased >= 1);
+
+    let user_grants_after = store
+        .list_user_reaction_role_grants(rr_guild, privacy_user)
+        .await
+        .unwrap();
+    assert!(
+        user_grants_after.is_empty(),
+        "User reaction role grants must be erased in Postgres"
+    );
+
+    let other_user_grants_after = store
+        .list_user_reaction_role_grants(rr_guild, other_privacy_user)
+        .await
+        .unwrap();
+    assert_eq!(
+        other_user_grants_after.len(),
+        1,
+        "Other user grants must remain intact in Postgres"
+    );
+
+    store
+        .delete_reaction_role_binding_by_id(rr_guild, pg_rr_b3.id)
+        .await
+        .unwrap();
+
     // 30. Economy work & crime rewards, cooldowns and idempotency in Postgres (#278)
     let eco_guild = "777000000000000001";
     let eco_user = "888000000000000001";
