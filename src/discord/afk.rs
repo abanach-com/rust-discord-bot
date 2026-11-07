@@ -10,6 +10,24 @@ use crate::lua::AfkOperation;
 use crate::rate_limit::RateLimitQuota;
 use crate::storage::{AfkRecord, validate_snowflake};
 
+/// Bezpiecznie przycina ciąg znaków UTF-8 bez rozcinania znaków wielobajtowych (Unicode scalar values).
+/// Jeśli długość bajtowa przekracza `max_bytes`, obcina ciąg na granicy znaku Unicode,
+/// tak aby `safe_end + suffix.len() <= max_bytes`, po czym dopisuje `suffix`.
+pub fn truncate_to_utf8_boundary(s: &mut String, max_bytes: usize, suffix: &str) {
+    if s.len() <= max_bytes {
+        return;
+    }
+    let budget = max_bytes.saturating_sub(suffix.len());
+    let safe_end = s
+        .char_indices()
+        .take_while(|(start, ch)| start + ch.len_utf8() <= budget)
+        .map(|(start, ch)| start + ch.len_utf8())
+        .last()
+        .unwrap_or(0);
+    s.truncate(safe_end);
+    s.push_str(suffix);
+}
+
 #[derive(Clone, Copy)]
 pub struct AfkExecutionContext {
     pub guild_id: Option<GuildId>,
@@ -240,8 +258,10 @@ pub async fn execute_afk_action(
                 return Ok(None);
             }
 
-            let mut notices = Vec::new();
-            let mut announced_target_keys = Vec::new();
+            const MAX_DISCORD_MESSAGE_LEN: usize = 2000;
+            let mut selected_notices = Vec::new();
+            let mut selected_target_keys = Vec::new();
+            let mut current_total_len = 0;
             let target_quota = RateLimitQuota::new(1, 60);
 
             for mid in &candidate_ids {
@@ -258,17 +278,35 @@ pub async fn execute_afk_action(
                 }
 
                 if let Ok(Some(afk_record)) = state.storage.get_afk(&guild_id_str, mid).await {
-                    notices.push(format!(
+                    let mut notice = format!(
                         "ℹ️ <@{}> jest obecnie AFK od <t:{}:R>: **{}**",
                         afk_record.user_id,
                         afk_record.set_at.timestamp(),
                         afk_record.reason
-                    ));
-                    announced_target_keys.push(target_key);
+                    );
+
+                    if selected_notices.is_empty() {
+                        if notice.len() > MAX_DISCORD_MESSAGE_LEN {
+                            truncate_to_utf8_boundary(&mut notice, MAX_DISCORD_MESSAGE_LEN, "...");
+                        }
+                        current_total_len = notice.len();
+                        selected_notices.push(notice);
+                        selected_target_keys.push(target_key);
+                    } else if current_total_len + 1 + notice.len() <= MAX_DISCORD_MESSAGE_LEN {
+                        current_total_len += 1 + notice.len();
+                        selected_notices.push(notice);
+                        selected_target_keys.push(target_key);
+                    } else {
+                        tracing::debug!(
+                            guild_id = %guild_id_str,
+                            user_id = %mid,
+                            "Powiadomienie AFK pominięte: łączne powiadomienie przekracza limit długości Discorda"
+                        );
+                    }
                 }
             }
 
-            if notices.is_empty() {
+            if selected_notices.is_empty() {
                 return Ok(None);
             }
 
@@ -311,7 +349,7 @@ pub async fn execute_afk_action(
                         "afk_notice_throttled",
                         serde_json::json!({
                             "channel_id": channel_id.get().to_string(),
-                            "suppressed_notices": notices.len(),
+                            "suppressed_notices": selected_notices.len(),
                         }),
                     )
                     .await;
@@ -319,15 +357,14 @@ pub async fn execute_afk_action(
                 return Ok(None);
             }
 
-            // Consume per-target cooldown for each announced user
-            for key in announced_target_keys {
+            // Konsumuj cooldown per-target wyłącznie dla użytkowników, których powiadomienie faktycznie wysyłamy
+            for key in selected_target_keys {
                 state.rate_limiter.check_rate_limit(&key, target_quota);
             }
 
-            let mut content = notices.join("\n");
-            if content.len() > 2000 {
-                content.truncate(1997);
-                content.push_str("...");
+            let mut content = selected_notices.join("\n");
+            if content.len() > MAX_DISCORD_MESSAGE_LEN {
+                truncate_to_utf8_boundary(&mut content, MAX_DISCORD_MESSAGE_LEN, "...");
             }
 
             if let Err(e) = channel_id
@@ -344,5 +381,59 @@ pub async fn execute_afk_action(
 
             Ok(None)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_to_utf8_boundary_ascii_within_limit() {
+        let mut s = "hello world".to_string();
+        truncate_to_utf8_boundary(&mut s, 20, "...");
+        assert_eq!(s, "hello world");
+    }
+
+    #[test]
+    fn test_truncate_to_utf8_boundary_ascii_exceeding_limit() {
+        let mut s = "abcdefghij".to_string();
+        truncate_to_utf8_boundary(&mut s, 7, "...");
+        assert_eq!(s, "abcd...");
+        assert_eq!(s.len(), 7);
+    }
+
+    #[test]
+    fn test_truncate_to_utf8_boundary_multibyte_emoji_never_panics() {
+        // "🫠" is 4 bytes: [0xF0, 0x9F, 0xAB, 0xA0]
+        let mut s = "🫠".repeat(500); // 2000 bytes
+        assert_eq!(s.len(), 2000);
+
+        // Truncate at an arbitrary byte limit that cuts through a 4-byte emoji
+        truncate_to_utf8_boundary(&mut s, 1997, "...");
+        assert!(s.ends_with("..."));
+        assert!(s.len() <= 1997);
+        // Ensure string is valid UTF-8 and no char was sliced
+        let _ = s.chars().count();
+    }
+
+    #[test]
+    fn test_truncate_to_utf8_boundary_polish_chars() {
+        // "zażółć gęślą jaźń"
+        let mut s = "zażółć gęślą jaźń".repeat(100);
+        let orig_len = s.len();
+        truncate_to_utf8_boundary(&mut s, 50, "...");
+        assert!(s.ends_with("..."));
+        assert!(s.len() <= 50);
+        let _ = s.chars().count();
+        assert!(orig_len > 50);
+    }
+
+    #[test]
+    fn test_truncate_to_utf8_boundary_small_budget() {
+        let mut s = "🫠🫠🫠".to_string();
+        truncate_to_utf8_boundary(&mut s, 3, "...");
+        assert_eq!(s, "...");
+        assert_eq!(s.len(), 3);
     }
 }

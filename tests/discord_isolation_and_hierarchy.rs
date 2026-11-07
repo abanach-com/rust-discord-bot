@@ -6139,3 +6139,142 @@ async fn test_afk_mention_aggregation_and_rate_limiting_suite() {
 
     shard_manager.shutdown_all().await;
 }
+
+#[tokio::test]
+async fn test_afk_multibyte_emoji_truncation_utf8_safety_suite() {
+    use axum::http::Method;
+    use rusty_discord_bot::discord::afk::{AfkExecutionContext, execute_afk_action};
+    use rusty_discord_bot::lua::AfkOperation;
+    use serenity::all::{ChannelId, GuildId, Permissions, UserId};
+
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state().await;
+
+    let guild_id = GuildId::new(200);
+    let channel_id = ChannelId::new(201);
+
+    // Two users with 19-digit IDs and 256-character 4-byte emoji reasons ("🫠".repeat(256))
+    let user1 = UserId::new(1111111111111111111);
+    let user2 = UserId::new(2222222222222222222);
+    let emoji_reason = "🫠".repeat(256);
+
+    let _ = execute_afk_action(
+        &ctx,
+        &state,
+        "afk",
+        AfkExecutionContext::new(
+            Some(guild_id),
+            Some(channel_id),
+            Some(user1),
+            Permissions::empty(),
+            false,
+        ),
+        &AfkOperation::Set {
+            reason: Some(emoji_reason.clone()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let _ = execute_afk_action(
+        &ctx,
+        &state,
+        "afk",
+        AfkExecutionContext::new(
+            Some(guild_id),
+            Some(channel_id),
+            Some(user2),
+            Permissions::empty(),
+            false,
+        ),
+        &AfkOperation::Set {
+            reason: Some(emoji_reason),
+        },
+    )
+    .await
+    .unwrap();
+
+    mock.recorded_calls.lock().await.clear();
+
+    // Author mentions both user1 and user2 in channel 201
+    let author = UserId::new(333333333333333333);
+    let res = execute_afk_action(
+        &ctx,
+        &state,
+        "afk",
+        AfkExecutionContext::new(
+            Some(guild_id),
+            Some(channel_id),
+            Some(author),
+            Permissions::empty(),
+            false,
+        ),
+        &AfkOperation::OnMessage {
+            author_id: author.get().to_string(),
+            mentioned_user_ids: vec![user1.get().to_string(), user2.get().to_string()],
+            auto_clear: false,
+        },
+    )
+    .await;
+
+    assert!(
+        res.is_ok(),
+        "OnMessage must not panic on UTF-8 emoji boundary"
+    );
+
+    let calls = mock.recorded_calls.lock().await.clone();
+    let msg_posts: Vec<_> = calls
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/201/messages"))
+        .collect();
+    assert_eq!(msg_posts.len(), 1, "Exactly 1 message must be dispatched");
+
+    let (_, payload) = &msg_posts[0];
+    assert!(payload.contains(&user1.get().to_string()));
+    // Verify valid UTF-8 and bounded length
+    let parts: Vec<&str> = payload.split('|').collect();
+    let body_json: serde_json::Value = serde_json::from_str(parts[1]).expect("valid json body");
+    let content = body_json["content"].as_str().expect("content string");
+    assert!(content.len() <= 2000, "Content bytes must not exceed 2000");
+    assert!(
+        content.chars().count() <= 2000,
+        "Content chars must not exceed 2000"
+    );
+
+    // Because user2's notice did not fit, user2 must NOT have consumed their per-target cooldown.
+    // In a new message, mentioning user2 alone in channel 201 should succeed!
+    mock.recorded_calls.lock().await.clear();
+    let author2 = UserId::new(444444444444444444);
+    let res2 = execute_afk_action(
+        &ctx,
+        &state,
+        "afk",
+        AfkExecutionContext::new(
+            Some(guild_id),
+            Some(channel_id),
+            Some(author2),
+            Permissions::empty(),
+            false,
+        ),
+        &AfkOperation::OnMessage {
+            author_id: author2.get().to_string(),
+            mentioned_user_ids: vec![user2.get().to_string()],
+            auto_clear: false,
+        },
+    )
+    .await;
+
+    assert!(res2.is_ok());
+    let calls2 = mock.recorded_calls.lock().await.clone();
+    let msg_posts2: Vec<_> = calls2
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/201/messages"))
+        .collect();
+    assert_eq!(
+        msg_posts2.len(),
+        1,
+        "User 2 notice must be delivered in subsequent message since their cooldown was not consumed"
+    );
+
+    shard_manager.shutdown_all().await;
+}

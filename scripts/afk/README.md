@@ -24,6 +24,7 @@ Zarządzanie statusem nieobecności AFK, automatyczne powiadomienia przy wzmiank
   - Jeśli autor wiadomości był oznaczony jako AFK oraz włączona jest opcja `auto_clear_on_message` (domyślnie `true`), status jest automatycznie wyłączany i bot wysyła powiadomienie powitalne.
   - Jeśli w treści wiadomości wspomniano użytkowników posiadających status AFK:
     - Agregacja: co najwyżej **1 zbiorcza wiadomość** na zdarzenie (maks. 5 unikalnych użytkowników, treść <= 2000 znaków).
+    - Bezpieczeństwo Unicode (UTF-8): budowanie wiadomości respektuje budżet 2000 bajtów i znaków z bezpiecznym obcinaniem wyłącznie po pełnych Unicode scalar values (brak paniki przy wielobajtowych emoji); powiadomienia, które nie mieszczą się w budżecie, nie zużywają per-target cooldownu.
     - Per-target cooldown: powiadomienie o tej samej osobie na danym kanale nie częściej niż raz na 60 sekund.
     - Rate limit wyjściowy: maksymalnie 2 odpowiedzi na 30 sekund na kanał oraz 3 na 30 sekund na autora wiadomości.
     - Zero ping-loopów: powiadomienia wysyłane z wyczyszczonym `allowed_mentions` (bez pingowania).
