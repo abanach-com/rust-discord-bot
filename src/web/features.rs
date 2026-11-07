@@ -31,7 +31,7 @@ use super::{
     WebState,
     auth::{
         authenticate, ensure_channel_view_access, ensure_guild_access, ensure_guild_member_access,
-        verify_csrf,
+        ensure_manage_roles_access, verify_csrf,
     },
     routes::ApiError,
 };
@@ -5891,6 +5891,212 @@ pub async fn list_reaction_roles(
     Ok(Json(json!({ "reaction_roles": bindings })))
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct DiscordRoleItem {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub permissions: String,
+    #[serde(default)]
+    pub position: i64,
+    #[serde(default)]
+    pub managed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct DiscordMemberItem {
+    pub user: Option<DiscordUserRef>,
+    #[serde(default)]
+    pub roles: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct DiscordUserRef {
+    pub id: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct DiscordGuildDetails {
+    pub id: String,
+    pub owner_id: Option<String>,
+}
+
+pub async fn verify_reaction_role_setup(
+    state: &WebState,
+    session: &crate::web::auth::Session,
+    guild_id: &str,
+    channel_id: &str,
+    message_id: &str,
+    role_id: &str,
+) -> Result<(), ApiError> {
+    ensure_manage_roles_access(state, session, guild_id).await?;
+    ensure_channel_view_access(state, session, guild_id, channel_id).await?;
+
+    if state.app.config.is_offline_mode() {
+        return Ok(());
+    }
+
+    let base_url = &state.app.config.discord_api_base_url;
+    let token = &state.app.config.discord_token;
+    let auth_header = format!("Bot {token}");
+
+    // 1. Sprawdź czy wiadomość istnieje w kanale
+    let msg_url = format!("{base_url}/channels/{channel_id}/messages/{message_id}");
+    let msg_resp = state
+        .app
+        .http_client
+        .get(&msg_url)
+        .header(reqwest::header::AUTHORIZATION, &auth_header)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(ApiError::upstream)?;
+
+    if msg_resp.status() == reqwest::StatusCode::NOT_FOUND
+        || msg_resp.status() == reqwest::StatusCode::FORBIDDEN
+    {
+        return Err(ApiError::bad_request(
+            "Wskazana wiadomość nie istnieje w tym kanale lub bot nie ma do niej dostępu.",
+        ));
+    }
+    if !msg_resp.status().is_success() {
+        return Err(ApiError::forbidden(
+            "Nie udało się zweryfikować wiadomości w Discord API.",
+        ));
+    }
+
+    // 2. Pobierz role gildii
+    let roles_url = format!("{base_url}/guilds/{guild_id}/roles");
+    let roles_resp = state
+        .app
+        .http_client
+        .get(&roles_url)
+        .header(reqwest::header::AUTHORIZATION, &auth_header)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(ApiError::upstream)?;
+
+    if !roles_resp.status().is_success() {
+        return Err(ApiError::forbidden(
+            "Nie udało się pobrać listy ról gildii z Discord API.",
+        ));
+    }
+
+    let roles: Vec<DiscordRoleItem> = roles_resp.json().await.map_err(ApiError::upstream)?;
+    let target_role = roles
+        .iter()
+        .find(|r| r.id == role_id)
+        .ok_or_else(|| ApiError::bad_request("Wskazana rola nie istnieje na tym serwerze."))?;
+
+    if target_role.managed {
+        return Err(ApiError::bad_request(
+            "Role zarządzane przez integracje nie mogą być reaction roles.",
+        ));
+    }
+
+    let role_perms_bits = target_role.permissions.parse::<u64>().unwrap_or(0);
+    let role_perms = serenity::all::Permissions::from_bits_truncate(role_perms_bits);
+    if crate::discord::reaction_roles::is_privileged_role_permissions(role_perms) {
+        return Err(ApiError::forbidden(
+            "Rola posiada uprawnienia administracyjne i nie może być przypisywana jako rola samoobsługowa.",
+        ));
+    }
+
+    // 3. Sprawdź pozycję i uprawnienia bota
+    let bot_id =
+        crate::web::routes::resolve_bot_user_id(&state.app.http_client, base_url, token).await;
+    let roles_map: std::collections::HashMap<&str, &DiscordRoleItem> =
+        roles.iter().map(|r| (r.id.as_str(), r)).collect();
+
+    if let Some(bot_id) = bot_id {
+        let bot_url = format!("{base_url}/guilds/{guild_id}/members/{bot_id}");
+        let bot_resp = state
+            .app
+            .http_client
+            .get(&bot_url)
+            .header(reqwest::header::AUTHORIZATION, &auth_header)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+            .map_err(ApiError::upstream)?;
+
+        if bot_resp.status().is_success() {
+            let bot_member: DiscordMemberItem =
+                bot_resp.json().await.map_err(ApiError::upstream)?;
+            let bot_highest = bot_member
+                .roles
+                .iter()
+                .filter_map(|rid| roles_map.get(rid.as_str()))
+                .map(|r| r.position)
+                .max()
+                .unwrap_or(0);
+
+            if bot_highest <= target_role.position {
+                return Err(ApiError::forbidden(
+                    "Najwyższa rola bota musi znajdować się nad konfigurowaną rolą.",
+                ));
+            }
+        }
+    }
+
+    // 4. Pobierz dane gildii (owner_id) i sprawdź pozycję aktora
+    let guild_url = format!("{base_url}/guilds/{guild_id}");
+    let guild_resp = state
+        .app
+        .http_client
+        .get(&guild_url)
+        .header(reqwest::header::AUTHORIZATION, &auth_header)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(ApiError::upstream)?;
+
+    let is_owner = if guild_resp.status().is_success() {
+        let details: Result<DiscordGuildDetails, _> = guild_resp.json().await;
+        details
+            .ok()
+            .and_then(|g| g.owner_id)
+            .map(|oid| oid == session.user.id)
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    if !is_owner {
+        let actor_url = format!("{base_url}/guilds/{guild_id}/members/{}", session.user.id);
+        let actor_resp = state
+            .app
+            .http_client
+            .get(&actor_url)
+            .header(reqwest::header::AUTHORIZATION, &auth_header)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+            .map_err(ApiError::upstream)?;
+
+        if actor_resp.status().is_success() {
+            let actor_member: DiscordMemberItem =
+                actor_resp.json().await.map_err(ApiError::upstream)?;
+            let actor_highest = actor_member
+                .roles
+                .iter()
+                .filter_map(|rid| roles_map.get(rid.as_str()))
+                .map(|r| r.position)
+                .max()
+                .unwrap_or(0);
+
+            if actor_highest <= target_role.position {
+                return Err(ApiError::forbidden(
+                    "Twoja najwyższa rola musi znajdować się nad konfigurowaną rolą.",
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub async fn create_reaction_role(
     State(state): State<WebState>,
     Path(guild_id): Path<String>,
@@ -5906,9 +6112,24 @@ pub async fn create_reaction_role(
     validate_snowflake("role_id", &payload.role_id)
         .map_err(|e| ApiError::bad_request(format!("Invalid role_id: {e}")))?;
 
-    if let Some(channel_id) = &payload.channel_id {
-        ensure_channel_view_access(&state, &session, &guild_id, channel_id).await?;
-    }
+    let channel_id = payload
+        .channel_id
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| ApiError::bad_request("Reaction role wymaga wskazania channel_id"))?;
+
+    validate_snowflake("channel_id", channel_id)
+        .map_err(|e| ApiError::bad_request(format!("Invalid channel_id: {e}")))?;
+
+    verify_reaction_role_setup(
+        &state,
+        &session,
+        &guild_id,
+        channel_id,
+        &payload.message_id,
+        &payload.role_id,
+    )
+    .await?;
 
     let emoji_key = crate::discord::reaction_roles::canonicalize_emoji(&payload.emoji);
     if emoji_key.is_empty() || emoji_key.len() > 128 {
@@ -5918,7 +6139,7 @@ pub async fn create_reaction_role(
     let binding = ReactionRoleBinding {
         id: Uuid::new_v4(),
         guild_id: guild_id.clone(),
-        channel_id: payload.channel_id,
+        channel_id: Some(channel_id.to_string()),
         message_id: payload.message_id.clone(),
         emoji_key: emoji_key.clone(),
         role_id: payload.role_id.clone(),
@@ -5942,6 +6163,7 @@ pub async fn create_reaction_role(
             "reaction_roles",
             "reaction_role_create",
             json!({
+                "channel_id": channel_id,
                 "message_id": payload.message_id,
                 "emoji": emoji_key,
                 "role_id": payload.role_id,
@@ -5961,6 +6183,7 @@ pub async fn delete_reaction_role(
     let (_, session) = authenticate(&state, &headers).await?;
     verify_csrf(&headers, &session)?;
     ensure_guild_access(&state, &session, &guild_id).await?;
+    ensure_manage_roles_access(&state, &session, &guild_id).await?;
     validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     let deleted = state

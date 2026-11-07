@@ -26,6 +26,7 @@ const DISCORD_USER_URL: &str = "https://discord.com/api/v10/users/@me";
 const DISCORD_GUILDS_URL: &str = "https://discord.com/api/v10/users/@me/guilds";
 const ADMINISTRATOR: u64 = 1 << 3;
 const MANAGE_GUILD: u64 = 1 << 5;
+pub const MANAGE_ROLES: u64 = 1 << 28;
 
 pub const MAX_PENDING_OAUTH_STATES: usize = 1_000;
 pub const MAX_LOGIN_REQUESTS_PER_MINUTE_PER_IP: u32 = 10;
@@ -855,6 +856,70 @@ fn can_manage(guild: &DashboardGuild) -> bool {
         .permissions
         .parse::<u64>()
         .is_ok_and(|bits| bits & (ADMINISTRATOR | MANAGE_GUILD) != 0)
+}
+
+#[must_use]
+pub fn can_manage_roles(guild: &DashboardGuild) -> bool {
+    if guild.owner {
+        return true;
+    }
+    guild
+        .permissions
+        .parse::<u64>()
+        .is_ok_and(|bits| bits & (ADMINISTRATOR | MANAGE_ROLES) != 0)
+}
+
+pub async fn ensure_manage_roles_access(
+    state: &WebState,
+    session: &Session,
+    guild_id: &str,
+) -> Result<(), ApiError> {
+    ensure_guild_member_access(state, session, guild_id).await?;
+
+    let session_has_role_mgmt = session
+        .guilds
+        .iter()
+        .any(|g| g.id == guild_id && can_manage_roles(g));
+
+    if !session_has_role_mgmt {
+        return Err(ApiError::forbidden(
+            "Wymagane uprawnienie Zarządzanie rolami lub Administrator",
+        ));
+    }
+
+    if state.app.config.is_offline_mode() {
+        return Ok(());
+    }
+
+    let base_url = &state.app.config.discord_api_base_url;
+    let token = &state.app.config.discord_token;
+    let member_url = format!("{base_url}/guilds/{guild_id}/members/{}", session.user.id);
+    let response = state
+        .app
+        .http_client
+        .get(&member_url)
+        .header(reqwest::header::AUTHORIZATION, format!("Bot {token}"))
+        .send()
+        .await
+        .map_err(ApiError::upstream)?;
+
+    if !response.status().is_success() {
+        return Err(ApiError::forbidden(
+            "Nie udało się zweryfikować uprawnień użytkownika w Discord API",
+        ));
+    }
+
+    let member_json: serde_json::Value = response.json().await.map_err(ApiError::upstream)?;
+    if let Some(perms_str) = member_json.get("permissions").and_then(|p| p.as_str())
+        && let Ok(perms) = perms_str.parse::<u64>()
+        && (perms & (ADMINISTRATOR | MANAGE_ROLES)) == 0
+    {
+        return Err(ApiError::forbidden(
+            "Wymagane uprawnienie Zarządzanie rolami lub Administrator w Discord API",
+        ));
+    }
+
+    Ok(())
 }
 
 pub(crate) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {

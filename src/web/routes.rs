@@ -1209,7 +1209,7 @@ fn required_permissions_for_module(
     }
 }
 
-async fn resolve_bot_user_id(
+pub(crate) async fn resolve_bot_user_id(
     client: &reqwest::Client,
     base_url: &str,
     token: &str,

@@ -8759,8 +8759,86 @@ async fn test_reaction_roles_web_api_and_isolation() {
     let channel_a = "111111111111111101"; // belongs to guild A
     let channel_b = "222222222222222201"; // belongs to guild B
 
-    // 1. Mock Discord API for channel view verification
+    // 1. Mock Discord API for channel view, messages, guild, and role hierarchy verification
     let discord_mock_app = axum::Router::new()
+        .route(
+            "/users/@me",
+            get(|| async move {
+                axum::Json(serde_json::json!({
+                    "id": "999999999999999999"
+                }))
+                .into_response()
+            }),
+        )
+        .route(
+            "/guilds/{guild_id}",
+            get(
+                |axum::extract::Path(gid): axum::extract::Path<String>| async move {
+                    axum::Json(serde_json::json!({
+                        "id": gid,
+                        "owner_id": "999000000000000000"
+                    }))
+                    .into_response()
+                },
+            ),
+        )
+        .route(
+            "/guilds/{guild_id}/roles",
+            get(|| async move {
+                axum::Json(serde_json::json!([
+                    {
+                        "id": "1001",
+                        "name": "MemberRole",
+                        "permissions": "0",
+                        "position": 10,
+                        "managed": false
+                    },
+                    {
+                        "id": "1002",
+                        "name": "MemberRoleA",
+                        "permissions": "0",
+                        "position": 10,
+                        "managed": false
+                    },
+                    {
+                        "id": "1003",
+                        "name": "ModRole",
+                        "permissions": "268435456", // MANAGE_ROLES
+                        "position": 40,
+                        "managed": false
+                    },
+                    {
+                        "id": "1004",
+                        "name": "BotRole",
+                        "permissions": "268435456",
+                        "position": 60,
+                        "managed": false
+                    },
+                    {
+                        "id": "1005",
+                        "name": "AdminRole",
+                        "permissions": "8", // ADMINISTRATOR
+                        "position": 30,
+                        "managed": false
+                    },
+                    {
+                        "id": "1006",
+                        "name": "TooHighRole",
+                        "permissions": "0",
+                        "position": 50, // higher than actor's position 40
+                        "managed": false
+                    },
+                    {
+                        "id": "1007",
+                        "name": "ManagedIntegrationRole",
+                        "permissions": "0",
+                        "position": 15,
+                        "managed": true
+                    }
+                ]))
+                .into_response()
+            }),
+        )
         .route(
             "/channels/{channel_id}",
             get(
@@ -8788,17 +8866,66 @@ async fn test_reaction_roles_web_api_and_isolation() {
             ),
         )
         .route(
+            "/channels/{channel_id}/messages/{message_id}",
+            get(
+                |axum::extract::Path((_cid, mid)): axum::extract::Path<(String, String)>| async move {
+                    if mid == "900000000000000001" || mid == "900000000000000002" {
+                        axum::Json(serde_json::json!({
+                            "id": mid
+                        }))
+                        .into_response()
+                    } else {
+                        (
+                            axum::http::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({"message": "Unknown Message"})),
+                        )
+                            .into_response()
+                    }
+                },
+            ),
+        )
+        .route(
             "/guilds/{guild_id}/members/{user_id}",
             get(
-                |axum::extract::Path((_guild_id, user_id)): axum::extract::Path<(
+                |axum::extract::Path((gid, user_id)): axum::extract::Path<(
                     String,
                     String,
                 )>| async move {
-                    axum::Json(serde_json::json!({
-                        "user": { "id": user_id },
-                        "roles": []
-                    }))
-                    .into_response()
+                    if user_id == "999999999999999999" {
+                        // Bot member
+                        axum::Json(serde_json::json!({
+                            "user": { "id": user_id },
+                            "roles": ["1004"], // position 60
+                            "permissions": "268435456"
+                        }))
+                        .into_response()
+                    } else if (user_id == "111111111111111111" && gid == "777888999000111")
+                        || (user_id == "222222222222222222" && gid == "888999000111222")
+                    {
+                        // Admin A in Guild A or Admin B in Guild B: position 40
+                        axum::Json(serde_json::json!({
+                            "user": { "id": user_id },
+                            "roles": ["1003"],
+                            "permissions": "268435488" // MANAGE_GUILD | MANAGE_ROLES
+                        }))
+                        .into_response()
+                    } else if user_id == "333333333333333333" && gid == "777888999000111" {
+                        // Regular user in Guild A: has MANAGE_GUILD only (32)
+                        axum::Json(serde_json::json!({
+                            "user": { "id": user_id },
+                            "roles": [],
+                            "permissions": "32"
+                        }))
+                        .into_response()
+                    } else {
+                        // Non-admin or outsider: 0 permissions
+                        axum::Json(serde_json::json!({
+                            "user": { "id": user_id },
+                            "roles": [],
+                            "permissions": "0"
+                        }))
+                        .into_response()
+                    }
                 },
             ),
         )
@@ -8862,7 +8989,7 @@ async fn test_reaction_roles_web_api_and_isolation() {
     let client = reqwest::Client::new();
     let base_url = format!("http://{web_addr}");
 
-    // Sessions for Admin A and Admin B
+    // Sessions for Admin A (has MANAGE_ROLES | MANAGE_GUILD = 268435488), Admin B, and Regular User (only MANAGE_GUILD = 32)
     let admin_a_sess = "admin_a_sess_token_rr";
     let admin_a_csrf = "admin_a_csrf_token_rr";
     let admin_a_id = "111111111111111111";
@@ -8884,7 +9011,7 @@ async fn test_reaction_roles_web_api_and_isolation() {
                     name: "Guild A".to_owned(),
                     icon: None,
                     owner: false,
-                    permissions: "32".to_owned(), // MANAGE_GUILD
+                    permissions: "268435488".to_owned(), // MANAGE_GUILD | MANAGE_ROLES
                 },
                 DashboardGuild {
                     id: guild_b.to_owned(),
@@ -8930,7 +9057,7 @@ async fn test_reaction_roles_web_api_and_isolation() {
                     name: "Guild B".to_owned(),
                     icon: None,
                     owner: false,
-                    permissions: "32".to_owned(), // MANAGE_GUILD
+                    permissions: "268435488".to_owned(), // MANAGE_GUILD | MANAGE_ROLES
                 },
                 DashboardGuild {
                     id: guild_a.to_owned(),
@@ -8955,8 +9082,47 @@ async fn test_reaction_roles_web_api_and_isolation() {
         },
     );
 
+    // Regular User: has MANAGE_GUILD (32) but NOT MANAGE_ROLES (Issue #285 security regression test)
+    let no_role_mgmt_sess = "no_role_mgmt_sess_rr";
+    let no_role_mgmt_csrf = "no_role_mgmt_csrf_rr";
+    let no_role_mgmt_id = "333333333333333333";
+
+    web_state
+        .app
+        .sessions
+        .save_session(
+            no_role_mgmt_sess,
+            DashboardUser {
+                id: no_role_mgmt_id.to_owned(),
+                username: "no_role_mgmt".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_a.to_owned(),
+                name: "Guild A".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "32".to_owned(), // MANAGE_GUILD without MANAGE_ROLES
+            }],
+            no_role_mgmt_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    web_state.permissions_cache.insert(
+        (no_role_mgmt_id.to_owned(), guild_a.to_owned()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
     let cookie_a = format!("rusty_discord_bot_session={admin_a_sess}");
     let cookie_b = format!("rusty_discord_bot_session={admin_b_sess}");
+    let cookie_no_roles = format!("rusty_discord_bot_session={no_role_mgmt_sess}");
 
     // 1. Initial list for Guild A is empty
     let list_a_resp = client
@@ -8969,7 +9135,87 @@ async fn test_reaction_roles_web_api_and_isolation() {
     let list_a_body: serde_json::Value = list_a_resp.json().await.unwrap();
     assert_eq!(list_a_body["reaction_roles"].as_array().unwrap().len(), 0);
 
-    // 2. Admin A creates reaction role in Guild A -> 200 OK
+    // Issue #285 Check 1: User with MANAGE_GUILD but without MANAGE_ROLES -> 403 Forbidden!
+    let denied_no_role_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/reaction-roles"))
+        .header(COOKIE, &cookie_no_roles)
+        .header("x-csrf-token", no_role_mgmt_csrf)
+        .json(&serde_json::json!({
+            "channel_id": channel_a,
+            "message_id": "900000000000000001",
+            "emoji": "🎉",
+            "role_id": "1002"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied_no_role_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Issue #285 Check 2: Attempting to configure role with ADMINISTRATOR permissions (role 1005) -> 403 Forbidden!
+    let admin_role_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/reaction-roles"))
+        .header(COOKIE, &cookie_a)
+        .header("x-csrf-token", admin_a_csrf)
+        .json(&serde_json::json!({
+            "channel_id": channel_a,
+            "message_id": "900000000000000001",
+            "emoji": "🎉",
+            "role_id": "1005"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin_role_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Issue #285 Check 3: Attempting to configure role higher than actor's hierarchy (role 1006) -> 403 Forbidden!
+    let hierarchy_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/reaction-roles"))
+        .header(COOKIE, &cookie_a)
+        .header("x-csrf-token", admin_a_csrf)
+        .json(&serde_json::json!({
+            "channel_id": channel_a,
+            "message_id": "900000000000000001",
+            "emoji": "🎉",
+            "role_id": "1006"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hierarchy_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Issue #285 Check 4: Attempting to configure managed role (role 1007) -> 400 Bad Request!
+    let managed_role_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/reaction-roles"))
+        .header(COOKIE, &cookie_a)
+        .header("x-csrf-token", admin_a_csrf)
+        .json(&serde_json::json!({
+            "channel_id": channel_a,
+            "message_id": "900000000000000001",
+            "emoji": "🎉",
+            "role_id": "1007"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(managed_role_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Issue #285 Check 5: Non-existent message -> 400 Bad Request!
+    let missing_msg_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/reaction-roles"))
+        .header(COOKIE, &cookie_a)
+        .header("x-csrf-token", admin_a_csrf)
+        .json(&serde_json::json!({
+            "channel_id": channel_a,
+            "message_id": "900000000000000099",
+            "emoji": "🎉",
+            "role_id": "1002"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing_msg_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 2. Admin A creates legitimate reaction role in Guild A -> 200 OK
     let create_a_resp = client
         .post(format!("{base_url}/api/guilds/{guild_a}/reaction-roles"))
         .header(COOKIE, &cookie_a)
@@ -9013,7 +9259,7 @@ async fn test_reaction_roles_web_api_and_isolation() {
         .header("x-csrf-token", admin_a_csrf)
         .json(&serde_json::json!({
             "channel_id": channel_b, // belongs to Guild B!
-            "message_id": "900000000000000003",
+            "message_id": "900000000000000002",
             "emoji": "⭐",
             "role_id": "1002"
         }))
@@ -9058,6 +9304,18 @@ async fn test_reaction_roles_web_api_and_isolation() {
         .await
         .unwrap();
     assert_eq!(b_del_a_resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // Issue #285 Check 6: User without MANAGE_ROLES cannot delete binding -> 403 Forbidden!
+    let del_no_role_resp = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_a}/reaction-roles/{binding_a_id}"
+        ))
+        .header(COOKIE, &cookie_no_roles)
+        .header("x-csrf-token", no_role_mgmt_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del_no_role_resp.status(), reqwest::StatusCode::FORBIDDEN);
 
     // 8. Admin A deletes binding in Guild A -> 200 OK
     let del_a_resp = client

@@ -80,6 +80,22 @@ pub fn can_manage_reaction_roles(permissions: Permissions) -> bool {
         || permissions.contains(Permissions::MANAGE_ROLES)
 }
 
+#[must_use]
+pub fn is_privileged_role_permissions(permissions: Permissions) -> bool {
+    permissions.intersects(
+        Permissions::ADMINISTRATOR
+            | Permissions::MANAGE_GUILD
+            | Permissions::MANAGE_ROLES
+            | Permissions::MANAGE_CHANNELS
+            | Permissions::BAN_MEMBERS
+            | Permissions::KICK_MEMBERS
+            | Permissions::MANAGE_WEBHOOKS
+            | Permissions::MANAGE_GUILD_EXPRESSIONS
+            | Permissions::VIEW_AUDIT_LOG
+            | Permissions::MENTION_EVERYONE,
+    )
+}
+
 pub fn validate_reaction_role_execution(
     module_id: &str,
     execution: &ReactionRoleExecutionContext,
@@ -138,6 +154,22 @@ pub async fn execute_reaction_role_action(
                 .parse()
                 .map_err(|_| anyhow!("Nieprawidłowe ID roli"))?;
             let role_id_typed = RoleId::new(role_id_u64);
+
+            let guild = guild_id.to_partial_guild(&ctx.http).await?;
+            let role = guild
+                .roles
+                .get(&role_id_typed)
+                .ok_or_else(|| anyhow!("role does not exist on this server"))?;
+            if role.managed {
+                return Err(anyhow!(
+                    "Role zarządzane przez integracje nie mogą być reaction roles"
+                ));
+            }
+            if is_privileged_role_permissions(role.permissions) {
+                return Err(anyhow!(
+                    "Rola posiada uprawnienia administracyjne i nie może być przypisywana przez reaction roles"
+                ));
+            }
 
             crate::discord::executor::ensure_role_hierarchy(
                 ctx,
@@ -326,6 +358,29 @@ pub async fn handle_reaction_role_event(
     let role_id = RoleId::new(role_id_u64);
 
     if is_add {
+        let guild = guild_id.to_partial_guild(&ctx.http).await?;
+        if let Some(role) = guild.roles.get(&role_id)
+            && (role.managed || is_privileged_role_permissions(role.permissions))
+        {
+            tracing::warn!(
+                guild_id = %guild_id_str,
+                role_id = %binding.role_id,
+                "attempted to grant managed or privileged role via reaction role, denied"
+            );
+            return Ok(());
+        }
+        if crate::discord::executor::ensure_role_hierarchy(ctx, guild_id, None, role_id)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                guild_id = %guild_id_str,
+                role_id = %binding.role_id,
+                "bot lacks role hierarchy to grant reaction role, denied"
+            );
+            return Ok(());
+        }
+
         match ctx
             .http
             .add_member_role(guild_id, user_id, role_id, Some("Reaction role"))
