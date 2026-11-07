@@ -23,11 +23,11 @@ use super::{
     ProgressionSeason, RecordCompanionLeaseParams, RecruitmentApplication, RecruitmentReview,
     RecruitmentRoleFulfillment, RecruitmentTrack, RedditSubscription, ReputationGrantOutcome,
     RetainedRecordNotice, ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry,
-    SteamLfgPost, StickyMessage, StoreItem, StorePurchase, TelegramBridge, TelegramMessageMapping,
-    TimedRoleGrant, Tournament, TransitionApplicationParams, TupperError, TupperProfile,
-    TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport, VkSubscription,
-    WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
-    parse_member_search_cursor, snowflake_created_at, validate_snowflake,
+    SteamLfgPost, StickyMessage, StoreItem, StorePurchase, TagRecord, TelegramBridge,
+    TelegramMessageMapping, TimedRoleGrant, Tournament, TransitionApplicationParams, TupperError,
+    TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
+    VkSubscription, WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription,
+    level_for_xp, parse_member_search_cursor, snowflake_created_at, validate_snowflake,
 };
 
 pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
@@ -2111,8 +2111,26 @@ impl PostgresStore {
 
         expires_at: DateTime<Utc>,
     ) -> anyhow::Result<Giveaway> {
-        let id = Uuid::new_v4();
+        self.create_giveaway_with_id(
+            Uuid::new_v4(),
+            guild_id,
+            channel_id,
+            prize,
+            winners_count,
+            expires_at,
+        )
+        .await
+    }
 
+    pub async fn create_giveaway_with_id(
+        &self,
+        id: Uuid,
+        guild_id: &str,
+        channel_id: &str,
+        prize: &str,
+        winners_count: i32,
+        expires_at: DateTime<Utc>,
+    ) -> anyhow::Result<Giveaway> {
         let empty_json = serde_json::json!([]);
 
         let now = Utc::now();
@@ -2448,6 +2466,89 @@ impl PostgresStore {
 
         tx.commit().await?;
         Ok(winners)
+    }
+
+    pub async fn finish_expired_giveaways(&self) -> anyhow::Result<Vec<(Giveaway, Vec<String>)>> {
+        let expired_ids = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT id
+            FROM giveaways
+            WHERE ended = false AND expires_at <= NOW()
+            ORDER BY expires_at ASC
+            LIMIT 50
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut results = Vec::new();
+        for id in expired_ids {
+            match self.finish_giveaway(id).await {
+                Ok(winners) => {
+                    if let Ok(Some(ga)) = self.get_giveaway(id).await {
+                        results.push((ga, winners));
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(giveaway_id = %id, ?err, "Failed to finish expired giveaway");
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    pub async fn get_tag(&self, guild_id: &str, name: &str) -> anyhow::Result<Option<TagRecord>> {
+        let row = sqlx::query_scalar::<_, Value>(
+            r#"
+            SELECT value
+            FROM module_kv
+            WHERE guild_id = $1 AND module_id = 'tags' AND key = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(name.to_lowercase())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some(val) => {
+                let tag: TagRecord = serde_json::from_value(val)?;
+                Ok(Some(tag))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub async fn set_tag(&self, guild_id: &str, tag: TagRecord) -> anyhow::Result<()> {
+        let val = serde_json::to_value(&tag)?;
+        sqlx::query(
+            r#"
+            INSERT INTO module_kv (guild_id, module_id, key, value, updated_at)
+            VALUES ($1, 'tags', $2, $3, NOW())
+            ON CONFLICT (guild_id, module_id, key)
+            DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+            "#,
+        )
+        .bind(guild_id)
+        .bind(tag.name.to_lowercase())
+        .bind(val)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn delete_tag(&self, guild_id: &str, name: &str) -> anyhow::Result<bool> {
+        let res = sqlx::query(
+            r#"
+            DELETE FROM module_kv
+            WHERE guild_id = $1 AND module_id = 'tags' AND key = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(name.to_lowercase())
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
     }
 
     pub async fn record_starboard_entry(

@@ -20,7 +20,7 @@ use serenity::{
 
 use crate::{AppState, lua::LuaAction};
 
-use super::{giveaway, moderation_cases, music, progression, scheduler, tickets};
+use super::{giveaway, moderation_cases, music, progression, scheduler, tags, tickets};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 
@@ -541,6 +541,10 @@ fn action_rate_limit_scope(action: &LuaAction) -> Option<&'static str> {
         LuaAction::Giveaway {
             operation: crate::lua::GiveawayOperation::Start { .. },
         } => Some("giveaway_start"),
+
+        LuaAction::Tag {
+            operation: crate::lua::TagOperation::Create { .. },
+        } => Some("tag_create"),
 
         LuaAction::BanMember { .. }
         | LuaAction::KickMember { .. }
@@ -1413,6 +1417,72 @@ async fn execute_action(
                 operation,
             )
             .await
+        }
+
+        LuaAction::Tag { operation } => {
+            tags::execute_tag_action(
+                ctx,
+                state,
+                module_id,
+                tags::TagExecutionContext::new(
+                    origin.guild_id,
+                    origin.channel_id,
+                    origin.actor_id,
+                    origin.actor_permissions,
+                    origin.app_permissions,
+                    origin.enforce_actor_permissions,
+                ),
+                operation,
+            )
+            .await
+        }
+
+        LuaAction::PublishSubmission {
+            channel_id,
+            content,
+            success_reply,
+            audit_event,
+            audit_data,
+        } => {
+            let target_channel = resolve_and_validate_channel(
+                ctx,
+                origin,
+                Some(channel_id),
+                ChannelPurpose::SendMessage,
+            )
+            .await?;
+
+            let delivered = target_channel
+                .send_message(
+                    &ctx.http,
+                    CreateMessage::new()
+                        .content(content)
+                        .allowed_mentions(CreateAllowedMentions::new()),
+                )
+                .await?;
+
+            let mut audit_map = audit_data.clone();
+            audit_map.insert(
+                "message_id".to_string(),
+                serde_json::Value::String(delivered.id.get().to_string()),
+            );
+            audit_map.insert(
+                "channel_id".to_string(),
+                serde_json::Value::String(delivered.channel_id.get().to_string()),
+            );
+
+            let _ = state
+                .storage
+                .record_audit(
+                    origin.guild_id.map(|id| id.get().to_string()).as_deref(),
+                    origin.actor_id.map(|id| id.get().to_string()).as_deref(),
+                    module_id,
+                    audit_event,
+                    serde_json::Value::Object(audit_map.into_iter().collect()),
+                )
+                .await;
+
+            Ok(Some(success_reply.clone()))
         }
 
         LuaAction::Audit { event, data } => {

@@ -109,19 +109,25 @@ return {
         if sub == "get" then
             return {
                 {
-                    type = "reply",
-                    content = t("modules.tags.not_found", { name = name }, ctx),
-                    ephemeral = true,
+                    type = "tag",
+                    operation = {
+                        operation = "get",
+                        name = name,
+                    },
                 },
             }
         end
 
         if sub == "create" then
+            local content = opts.content or ""
             return {
                 {
-                    type = "reply",
-                    content = t("modules.tags.created", { name = name }, ctx),
-                    ephemeral = true,
+                    type = "tag",
+                    operation = {
+                        operation = "create",
+                        name = name,
+                        content = content,
+                    },
                 },
             }
         end
@@ -129,9 +135,11 @@ return {
         if sub == "delete" then
             return {
                 {
-                    type = "reply",
-                    content = t("modules.tags.deleted", { name = name }, ctx),
-                    ephemeral = true,
+                    type = "tag",
+                    operation = {
+                        operation = "delete",
+                        name = name,
+                    },
                 },
             }
         end

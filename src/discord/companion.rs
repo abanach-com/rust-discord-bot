@@ -550,32 +550,42 @@ pub async fn reconcile_guild_companion_channels_with_voice_states(
 
     // 2. Check active leases: if user is not in the mapped voice channel or mapping changed/disabled, revoke!
     for lease in active_leases {
-        let is_valid = match lease.user_id.parse::<u64>() {
-            Ok(uid) => {
-                let current_voice_channel = current_voice_states
-                    .get(&UserId::new(uid))
-                    .and_then(|vs| vs.channel_id)
-                    .map(|c| c.get().to_string());
+        let Ok(uid) = lease.user_id.parse::<u64>() else {
+            continue;
+        };
+        let user_id = UserId::new(uid);
+        let user_lock = get_user_lock(&guild_str, &lease.user_id);
+        let _guard = user_lock.lock().await;
 
-                let current_voice_matches_lease = match current_voice_channel {
-                    Some(ref v) => v == &lease.voice_channel_id,
-                    None => false,
-                };
+        // Resolve authoritative current voice channel under user lock (Issue #268).
+        // If the live guild cache is available, it is authoritative; do not fallback to
+        // a potentially stale snapshot, which would cause races with recent disconnects/moves.
+        let current_voice_channel = if let Some(guild) = ctx.cache.guild(guild_id) {
+            guild
+                .voice_states
+                .get(&user_id)
+                .and_then(|vs| vs.channel_id)
+        } else {
+            current_voice_states
+                .get(&user_id)
+                .and_then(|vs| vs.channel_id)
+        }
+        .map(|c| c.get().to_string());
 
-                let still_mapped_to_this_text = mappings.iter().any(|m| {
-                    m.voice_channel_id == lease.voice_channel_id
-                        && m.text_channel_id == lease.text_channel_id
-                        && m.enabled
-                });
-
-                current_voice_matches_lease && still_mapped_to_this_text
-            }
-            Err(_) => false,
+        let current_voice_matches_lease = match current_voice_channel {
+            Some(ref v) => v == &lease.voice_channel_id,
+            None => false,
         };
 
+        let still_mapped_to_this_text = mappings.iter().any(|m| {
+            m.voice_channel_id == lease.voice_channel_id
+                && m.text_channel_id == lease.text_channel_id
+                && m.enabled
+        });
+
+        let is_valid = current_voice_matches_lease && still_mapped_to_this_text;
+
         if !is_valid {
-            let user_lock = get_user_lock(&guild_str, &lease.user_id);
-            let _guard = user_lock.lock().await;
             match revoke_companion_lease(
                 ctx,
                 state,
@@ -592,27 +602,51 @@ pub async fn reconcile_guild_companion_channels_with_voice_states(
         }
     }
 
-    // 3. For all users currently in voice, ensure active lease if mapped and enabled
-    for (user_id, voice_state) in current_voice_states {
-        if let Some(voice_channel_id) = voice_state.channel_id {
+    // 3. For all users currently in voice, ensure active lease if mapped and enabled.
+    // When live guild cache is available, it is the authoritative source for voice presence.
+    // Stale snapshots must never re-grant access to users who have already disconnected (Issue #268).
+    let candidate_users: std::collections::HashSet<UserId> =
+        if let Some(guild) = ctx.cache.guild(guild_id) {
+            guild.voice_states.keys().copied().collect()
+        } else {
+            current_voice_states.keys().copied().collect()
+        };
+
+    for user_id in candidate_users {
+        let user_str = user_id.get().to_string();
+        let user_lock = get_user_lock(&guild_str, &user_str);
+        let _guard = user_lock.lock().await;
+
+        // Determine authoritative voice channel under user lock (Issue #268)
+        let live_voice_channel = if let Some(guild) = ctx.cache.guild(guild_id) {
+            guild
+                .voice_states
+                .get(&user_id)
+                .and_then(|vs| vs.channel_id)
+        } else {
+            current_voice_states
+                .get(&user_id)
+                .and_then(|vs| vs.channel_id)
+        };
+
+        if let Some(voice_channel_id) = live_voice_channel {
             let voice_str = voice_channel_id.get().to_string();
             if let Some(mapping) = mappings
                 .iter()
                 .find(|m| m.enabled && m.voice_channel_id == voice_str)
             {
-                let user_str = user_id.get().to_string();
                 let existing = state
                     .storage
                     .get_companion_lease(&guild_str, &mapping.text_channel_id, &user_str)
                     .await?;
-                if existing.is_none()
-                    || existing.as_ref().map(|l| l.status.as_str()) != Some("active")
+                let needs_grant = existing.is_none()
+                    || existing.as_ref().map(|l| l.status.as_str()) != Some("active");
+                if needs_grant
+                    && grant_companion_access(ctx, state, mapping, user_id)
+                        .await
+                        .is_ok()
                 {
-                    let user_lock = get_user_lock(&guild_str, &user_str);
-                    let _guard = user_lock.lock().await;
-                    if let Ok(()) = grant_companion_access(ctx, state, mapping, user_id).await {
-                        granted_count += 1;
-                    }
+                    granted_count += 1;
                 }
             }
         }

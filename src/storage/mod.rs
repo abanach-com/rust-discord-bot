@@ -298,6 +298,15 @@ pub struct Giveaway {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TagRecord {
+    pub name: String,
+    pub content: String,
+    pub author_id: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct StarboardEntry {
     pub guild_id: String,
@@ -2297,6 +2306,39 @@ impl Storage {
         }
     }
 
+    pub async fn create_giveaway_with_id(
+        &self,
+        id: Uuid,
+        guild_id: &str,
+        channel_id: &str,
+        prize: &str,
+        winners_count: i32,
+        expires_at: DateTime<Utc>,
+    ) -> anyhow::Result<Giveaway> {
+        match self {
+            Self::Memory(store) => Ok(store.create_giveaway_with_id(
+                id,
+                guild_id,
+                channel_id,
+                prize,
+                winners_count,
+                expires_at,
+            )),
+            Self::Postgres(store) => {
+                store
+                    .create_giveaway_with_id(
+                        id,
+                        guild_id,
+                        channel_id,
+                        prize,
+                        winners_count,
+                        expires_at,
+                    )
+                    .await
+            }
+        }
+    }
+
     pub async fn get_giveaway(&self, giveaway_id: Uuid) -> anyhow::Result<Option<Giveaway>> {
         match self {
             Self::Memory(store) => Ok(store.get_giveaway(giveaway_id)),
@@ -2325,6 +2367,34 @@ impl Storage {
             Self::Memory(store) => store.reroll_giveaway(giveaway_id),
 
             Self::Postgres(store) => store.reroll_giveaway(giveaway_id).await,
+        }
+    }
+
+    pub async fn finish_expired_giveaways(&self) -> anyhow::Result<Vec<(Giveaway, Vec<String>)>> {
+        match self {
+            Self::Memory(store) => store.finish_expired_giveaways(),
+            Self::Postgres(store) => store.finish_expired_giveaways().await,
+        }
+    }
+
+    pub async fn get_tag(&self, guild_id: &str, name: &str) -> anyhow::Result<Option<TagRecord>> {
+        match self {
+            Self::Memory(store) => store.get_tag(guild_id, name),
+            Self::Postgres(store) => store.get_tag(guild_id, name).await,
+        }
+    }
+
+    pub async fn set_tag(&self, guild_id: &str, tag: TagRecord) -> anyhow::Result<()> {
+        match self {
+            Self::Memory(store) => store.set_tag(guild_id, tag),
+            Self::Postgres(store) => store.set_tag(guild_id, tag).await,
+        }
+    }
+
+    pub async fn delete_tag(&self, guild_id: &str, name: &str) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => store.delete_tag(guild_id, name),
+            Self::Postgres(store) => store.delete_tag(guild_id, name).await,
         }
     }
 
@@ -7687,5 +7757,46 @@ mod tests {
                 .to_string()
                 .contains("has no participants")
         );
+
+        // 8. Automated expiration finish (Issue #270)
+        let expired_ga = store
+            .create_giveaway(
+                guild_id,
+                "chan_1",
+                "Expired Prize",
+                1,
+                Utc::now() + chrono::Duration::hours(1),
+            )
+            .await
+            .unwrap();
+        assert!(
+            store
+                .join_giveaway(expired_ga.id, "user_gamma")
+                .await
+                .unwrap()
+        );
+
+        if let Storage::Memory(ref mem) = store {
+            let mut g = mem.giveaways.get_mut(&expired_ga.id).unwrap();
+            g.expires_at = Utc::now() - chrono::Duration::minutes(5);
+        }
+
+        let finished_expired = store
+            .finish_expired_giveaways()
+            .await
+            .expect("finish expired giveaways");
+        assert_eq!(finished_expired.len(), 1);
+        assert_eq!(finished_expired[0].0.id, expired_ga.id);
+        assert_eq!(finished_expired[0].1, vec!["user_gamma".to_string()]);
+
+        let expired_after = store.get_giveaway(expired_ga.id).await.unwrap().unwrap();
+        assert!(expired_after.ended);
+
+        // Next poll should yield no expired giveaways
+        let second_expired_poll = store
+            .finish_expired_giveaways()
+            .await
+            .expect("second expired poll");
+        assert!(second_expired_poll.is_empty());
     }
 }

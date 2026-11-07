@@ -12,6 +12,7 @@ pub mod moderation_cases;
 pub mod music;
 pub mod progression;
 pub mod scheduler;
+pub mod tags;
 pub mod tickets;
 
 use std::sync::Arc;
@@ -65,6 +66,11 @@ pub async fn run_with_shutdown(
         state.clone(),
     ));
 
+    let giveaway_worker = tokio::spawn(giveaway::run_giveaway_worker(
+        Arc::clone(&client.http),
+        state.clone(),
+    ));
+
     let shard_manager = Arc::clone(&client.shard_manager);
     tokio::spawn(async move {
         let _ = shutdown_rx.recv().await;
@@ -74,6 +80,7 @@ pub async fn run_with_shutdown(
 
     let client_result = client.start_autosharded().await;
     scheduler_worker.abort();
+    giveaway_worker.abort();
     client_result?;
     Ok(())
 }

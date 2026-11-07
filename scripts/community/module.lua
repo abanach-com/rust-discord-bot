@@ -25,19 +25,12 @@ end
 local function accepted(message, channel_id, event, data)
     return {
         {
-            type = "reply",
-            content = message,
-            ephemeral = true,
-        },
-        {
-            type = "send_message",
+            type = "publish_submission",
             channel_id = channel_id,
             content = data.message,
-        },
-        {
-            type = "audit",
-            event = event,
-            data = data.audit,
+            success_reply = message,
+            audit_event = event,
+            audit_data = data.audit or {},
         },
     }
 end

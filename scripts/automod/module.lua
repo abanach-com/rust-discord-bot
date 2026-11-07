@@ -403,6 +403,14 @@ return {
         if event ~= "message_create" and event ~= "message_update" then return {} end
         if contains(ctx.config.excluded_channel_ids, ctx.channel_id) then return {} end
 
+        if event == "message_update" then
+            local content_changed = ctx.data.content_changed
+            local attachments_changed = ctx.data.attachments_changed
+            if content_changed == false and attachments_changed == false then
+                return {}
+            end
+        end
+
         local rule, evidence = evaluate(ctx)
         if not rule then return {} end
         return build_actions(ctx, rule, evidence, event == "message_update")

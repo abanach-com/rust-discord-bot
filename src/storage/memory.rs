@@ -23,11 +23,12 @@ use super::{
     ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
     ProgressionSeason, RecordCompanionLeaseParams, RedditSubscription, ReputationGrantOutcome,
     RetainedRecordNotice, ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry,
-    SteamLfgPost, StickyMessage, StoreItem, StorePurchase, TelegramBridge, TelegramMessageMapping,
-    TimedRoleGrant, Tournament, TupperError, TupperProfile, TwitchStreamSubscription,
-    UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WorkflowDefinition,
-    WorkflowRunExecution, XpAward, YouTubeChannelSubscription, is_member_after_cursor,
-    level_for_xp, parse_member_search_cursor, snowflake_created_at, validate_snowflake,
+    SteamLfgPost, StickyMessage, StoreItem, StorePurchase, TagRecord, TelegramBridge,
+    TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError, TupperProfile,
+    TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport, VkSubscription,
+    WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription,
+    is_member_after_cursor, level_for_xp, parse_member_search_cursor, snowflake_created_at,
+    validate_snowflake,
 };
 
 type ModuleKey = (String, String);
@@ -78,7 +79,7 @@ pub struct MemoryStore {
 
     polls: Arc<DashMap<Uuid, CommunityPoll>>,
 
-    giveaways: Arc<DashMap<Uuid, Giveaway>>,
+    pub(crate) giveaways: Arc<DashMap<Uuid, Giveaway>>,
 
     starboard_entries: Arc<DashMap<(String, String), StarboardEntry>>,
 
@@ -218,6 +219,7 @@ pub struct MemoryStore {
         Arc<DashMap<(String, String, String), crate::asset_analytics::AssetInventoryItem>>,
 
     asset_analytics_failure_injected: Arc<std::sync::atomic::AtomicBool>,
+    tags: Arc<DashMap<(String, String), TagRecord>>,
 }
 
 impl MemoryStore {
@@ -1506,8 +1508,25 @@ impl MemoryStore {
 
         expires_at: chrono::DateTime<Utc>,
     ) -> Giveaway {
-        let id = Uuid::new_v4();
+        self.create_giveaway_with_id(
+            Uuid::new_v4(),
+            guild_id,
+            channel_id,
+            prize,
+            winners_count,
+            expires_at,
+        )
+    }
 
+    pub fn create_giveaway_with_id(
+        &self,
+        id: Uuid,
+        guild_id: &str,
+        channel_id: &str,
+        prize: &str,
+        winners_count: i32,
+        expires_at: chrono::DateTime<Utc>,
+    ) -> Giveaway {
         let giveaway = Giveaway {
             id,
 
@@ -1705,6 +1724,48 @@ impl MemoryStore {
 
         ga.winners_json = serde_json::json!(winners);
         Ok(winners)
+    }
+
+    pub fn finish_expired_giveaways(&self) -> anyhow::Result<Vec<(Giveaway, Vec<String>)>> {
+        let now = chrono::Utc::now();
+        let mut expired_ids = Vec::new();
+        for entry in self.giveaways.iter() {
+            let ga = entry.value();
+            if !ga.ended && ga.expires_at <= now {
+                expired_ids.push(ga.id);
+            }
+        }
+
+        let mut results = Vec::new();
+        for id in expired_ids {
+            match self.finish_giveaway(id) {
+                Ok(winners) => {
+                    if let Some(ga) = self.get_giveaway(id) {
+                        results.push((ga, winners));
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(giveaway_id = %id, ?err, "Failed to finish expired giveaway");
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    pub fn get_tag(&self, guild_id: &str, name: &str) -> anyhow::Result<Option<TagRecord>> {
+        let key = (guild_id.to_owned(), name.to_lowercase());
+        Ok(self.tags.get(&key).map(|r| r.value().clone()))
+    }
+
+    pub fn set_tag(&self, guild_id: &str, tag: TagRecord) -> anyhow::Result<()> {
+        let key = (guild_id.to_owned(), tag.name.to_lowercase());
+        self.tags.insert(key, tag);
+        Ok(())
+    }
+
+    pub fn delete_tag(&self, guild_id: &str, name: &str) -> anyhow::Result<bool> {
+        let key = (guild_id.to_owned(), name.to_lowercase());
+        Ok(self.tags.remove(&key).is_some())
     }
 
     pub fn record_starboard_entry(

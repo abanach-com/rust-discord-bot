@@ -5,6 +5,7 @@ mod model;
 mod moderation_cases;
 mod progression;
 mod scheduler;
+mod tags;
 mod tickets;
 
 pub use engine::{LuaEngine, LuaEngineError, LuaLimits};
@@ -18,6 +19,7 @@ pub use model::{
 pub use moderation_cases::ModerationCaseOperation;
 pub use progression::{ProgressionMetric, ProgressionOperation};
 pub use scheduler::{SchedulerOperation, SchedulerScope};
+pub use tags::{TagOperation, normalize_tag_name, validate_tag_name};
 pub use tickets::{
     TicketClosePolicy, TicketOpenPolicy, TicketOperation, TicketPriority, TicketScope,
 };

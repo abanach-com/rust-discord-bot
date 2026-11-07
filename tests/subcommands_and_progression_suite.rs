@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use rusty_discord_bot::lua::{
     GiveawayOperation, LuaAction, LuaEngine, LuaExecutionContext, LuaLimits, ProgressionOperation,
+    TagOperation,
 };
 use serde_json::json;
 
@@ -493,18 +494,34 @@ async fn test_tags_subcommands() {
         .execute_command("tags", "tag", context(json!({ "get": { "name": "info" } })))
         .await
         .expect("tag get should succeed");
-    assert!(actions.iter().any(|a| matches!(a, LuaAction::Reply { .. })));
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            LuaAction::Tag {
+                operation: TagOperation::Get { name }
+            } if name == "info"
+        )),
+        "expected LuaAction::Tag with Get operation"
+    );
 
     // /tag create
     let actions = eng
         .execute_command(
             "tags",
             "tag",
-            context(json!({ "create": { "name": "info" } })),
+            context(json!({ "create": { "name": "info", "content": "Witaj na serwerze!" } })),
         )
         .await
         .expect("tag create should succeed");
-    assert!(actions.iter().any(|a| matches!(a, LuaAction::Reply { .. })));
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            LuaAction::Tag {
+                operation: TagOperation::Create { name, content }
+            } if name == "info" && content == "Witaj na serwerze!"
+        )),
+        "expected LuaAction::Tag with Create operation"
+    );
 
     // /tag delete
     let actions = eng
@@ -515,7 +532,15 @@ async fn test_tags_subcommands() {
         )
         .await
         .expect("tag delete should succeed");
-    assert!(actions.iter().any(|a| matches!(a, LuaAction::Reply { .. })));
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            LuaAction::Tag {
+                operation: TagOperation::Delete { name }
+            } if name == "info"
+        )),
+        "expected LuaAction::Tag with Delete operation"
+    );
 
     // Missing subcommand
     let actions = eng
@@ -523,4 +548,66 @@ async fn test_tags_subcommands() {
         .await
         .expect("tag missing subcommand should return safe reply");
     assert!(actions.iter().any(|a| matches!(a, LuaAction::Reply { content, .. } if content.contains("Unsupported or missing subcommand."))));
+}
+
+#[tokio::test]
+async fn test_tags_storage_lifecycle() {
+    use chrono::Utc;
+    use rusty_discord_bot::storage::{Storage, TagRecord};
+
+    let storage = Storage::memory();
+    let guild_id = "111111111111111111";
+
+    // 1. Tag doesn't exist
+    assert!(
+        storage
+            .get_tag(guild_id, "rules")
+            .await
+            .expect("query tag")
+            .is_none()
+    );
+
+    // 2. Create tag
+    let tag = TagRecord {
+        name: "rules".to_string(),
+        content: "1. Be polite\n2. No spam".to_string(),
+        author_id: "222222222222222222".to_string(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    storage
+        .set_tag(guild_id, tag.clone())
+        .await
+        .expect("set tag");
+
+    // 3. Read tag (case-insensitive)
+    let fetched = storage
+        .get_tag(guild_id, "RULES")
+        .await
+        .expect("get tag")
+        .expect("tag must exist");
+    assert_eq!(fetched.name, "rules");
+    assert_eq!(fetched.content, tag.content);
+    assert_eq!(fetched.author_id, tag.author_id);
+
+    // 4. Delete tag
+    let deleted = storage
+        .delete_tag(guild_id, "rules")
+        .await
+        .expect("delete tag");
+    assert!(deleted);
+
+    // 5. Subsequent get and delete
+    assert!(
+        storage
+            .get_tag(guild_id, "rules")
+            .await
+            .expect("query after delete")
+            .is_none()
+    );
+    let deleted_again = storage
+        .delete_tag(guild_id, "rules")
+        .await
+        .expect("delete again");
+    assert!(!deleted_again);
 }

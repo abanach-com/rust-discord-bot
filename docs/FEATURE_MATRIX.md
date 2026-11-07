@@ -239,6 +239,9 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 | Anonymous polls | Implemented |
 | Giveaways | Implemented |
 | Reroll and fraud controls | Implemented |
+| Automated giveaway expiration and winner resolution | Implemented |
+| Custom tags persistence and management (`/tag`) | Implemented |
+| Community submissions delivery assurance (`/report`, `/suggest`, etc.) | Implemented |
 | Suggestions with voting | Planned |
 | Starboard | Implemented |
 | Counting channels | Implemented |
@@ -255,6 +258,14 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 | Question of the day | Planned |
 | Custom collectible cards | Implemented |
 | Achievements | Planned |
+
+### 7.1 Community, Giveaways & Platform Reliability Hardening (Issues #266, #267, #268, #269, #270, #271)
+- **AutoMod Embed-Only Update Guard (Issue #266)**: Calculation of `content_changed` and `attachments_changed` flags during `MESSAGE_UPDATE` gateway handling prevents spurious re-moderation and repeat actions on link unfurls and embed-only updates.
+- **Custom Tags Persistence & ACL (Issue #267)**: End-to-end `/tag create/get/delete` execution pipeline backed by PostgreSQL `module_kv`, strongly-typed `TagOperation` and `LuaAction::Tag`, `MANAGE_MESSAGES`/`ADMINISTRATOR` privilege validation, sanitized mentions on read, and audit logging.
+- **Voice Companion Delayed Reconcile Race Safety (Issue #268)**: Reconciliation on delayed `GUILD_CREATE` checks live guild cache under per-user mutex locks, preventing stale gateway snapshots from revoking or granting permissions contrary to newer `VOICE_STATE_UPDATE` events.
+- **Community Submissions Delivery Assurance (Issue #269)**: Replaced premature success replies in `/report`, `/suggest`, `/feedback`, `/apply`, and `/bugreport` with typed `LuaAction::PublishSubmission`, verifying Discord HTTP delivery before confirming to the user and auditing.
+- **Automated Giveaway Expiration & Winner Resolution (Issue #270)**: Background worker `run_giveaway_worker` periodically reconciles expired giveaways via transactional `finish_expired_giveaways`, randomly picks winners, updates persistence, announces winners to channel, and audits results.
+- **Giveaway Announcement Reliability & Idempotency (Issue #271)**: Ensures announcement publication succeeds prior to persistent record commit in `/giveaway start`, preventing orphan records on HTTP failures, and reports delivery status explicitly in `/end` and `/reroll`.
 
 ## 8. Levels and economy
 

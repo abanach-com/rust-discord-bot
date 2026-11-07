@@ -5,7 +5,8 @@ use serde_json::Value;
 
 use super::{
     giveaway::GiveawayOperation, moderation_cases::ModerationCaseOperation,
-    progression::ProgressionOperation, scheduler::SchedulerOperation, tickets::TicketOperation,
+    progression::ProgressionOperation, scheduler::SchedulerOperation, tags::TagOperation,
+    tickets::TicketOperation,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -311,6 +312,17 @@ pub enum LuaAction {
     Giveaway {
         operation: GiveawayOperation,
     },
+    Tag {
+        operation: TagOperation,
+    },
+    PublishSubmission {
+        channel_id: String,
+        content: String,
+        success_reply: String,
+        audit_event: String,
+        #[serde(default)]
+        audit_data: BTreeMap<String, Value>,
+    },
     Audit {
         event: String,
         #[serde(default)]
@@ -339,6 +351,8 @@ impl LuaAction {
             Self::Ticket { .. } => "ticket",
             Self::ModerationCase { .. } => "moderation_case",
             Self::Giveaway { .. } => "giveaway",
+            Self::Tag { .. } => "tag",
+            Self::PublishSubmission { .. } => "publish_submission",
             Self::Audit { .. } => "audit",
         }
     }
@@ -467,6 +481,22 @@ impl LuaAction {
             Self::Ticket { operation } => operation.validate(),
             Self::ModerationCase { operation } => operation.validate(),
             Self::Giveaway { operation } => operation.validate(),
+            Self::Tag { operation } => operation.validate(),
+            Self::PublishSubmission {
+                channel_id,
+                content,
+                success_reply,
+                audit_event,
+                ..
+            } => {
+                validate_snowflake(channel_id)?;
+                validate_content(content)?;
+                validate_content(success_reply)?;
+                if audit_event.trim().is_empty() || audit_event.len() > 64 {
+                    return Err("audit event must contain 1 to 64 bytes".to_owned());
+                }
+                Ok(())
+            }
             Self::Audit { event, .. } => {
                 if event.trim().is_empty() || event.len() > 64 {
                     return Err("audit event must contain 1 to 64 bytes".to_owned());

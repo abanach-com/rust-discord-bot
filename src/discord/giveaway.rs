@@ -119,18 +119,7 @@ pub(super) async fn execute(
 
             let expires_at = Utc::now() + Duration::minutes(*duration_minutes);
             let target_channel_str = target_channel.get().to_string();
-
-            let giveaway = state
-                .storage
-                .create_giveaway(
-                    &guild_id_str,
-                    &target_channel_str,
-                    prize,
-                    *winners,
-                    expires_at,
-                )
-                .await
-                .context("Failed to create giveaway in database")?;
+            let ga_id = Uuid::new_v4();
 
             let end_unix = expires_at.timestamp();
             let host_mention = actor_id_str
@@ -145,8 +134,7 @@ pub(super) async fn execute(
                 ⏳ **Koniec:** <t:{end_unix}:R> (<t:{end_unix}:f>)\n\
                 Host: {host_mention}\n\n\
                 Aby dołączyć, użyj komendy lub dołącz przez panel!\n\
-                ID losowania: `{}`",
-                giveaway.id
+                ID losowania: `{ga_id}`"
             );
 
             let send_res = target_channel
@@ -158,9 +146,28 @@ pub(super) async fn execute(
                 )
                 .await;
 
-            if let Err(e) = send_res {
-                tracing::warn!(error = %e, "Could not post giveaway announcement message");
-            }
+            let delivered = match send_res {
+                Ok(msg) => msg,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Could not post giveaway announcement message");
+                    return Err(anyhow!(
+                        "Nie udało się opublikować ogłoszenia konkursu na kanale <#{target_channel_str}>: {e}"
+                    ));
+                }
+            };
+
+            let giveaway = state
+                .storage
+                .create_giveaway_with_id(
+                    ga_id,
+                    &guild_id_str,
+                    &target_channel_str,
+                    prize,
+                    *winners,
+                    expires_at,
+                )
+                .await
+                .context("Failed to create giveaway in database")?;
 
             let audit_payload = serde_json::json!({
                 "giveaway_id": giveaway.id.to_string(),
@@ -168,6 +175,7 @@ pub(super) async fn execute(
                 "winners_count": winners,
                 "duration_minutes": duration_minutes,
                 "channel_id": target_channel_str,
+                "message_id": delivered.id.to_string(),
             });
 
             let _ = state
@@ -182,7 +190,7 @@ pub(super) async fn execute(
                 .await;
 
             Ok(Some(format!(
-                "🎉 Konkurs na **{prize}** został pomyślnie utworzony!\nID: `{}`\nKanał: <#{target_channel_str}>",
+                "🎉 Konkurs na **{prize}** został pomyślnie utworzony i ogłoszony!\nID: `{}`\nKanał: <#{target_channel_str}>",
                 giveaway.id
             )))
         }
@@ -208,7 +216,7 @@ pub(super) async fn execute(
                 .await
                 .context("Failed to end giveaway")?;
 
-            if let Ok(chan_num) = ga.channel_id.parse::<u64>() {
+            let send_res = if let Ok(chan_num) = ga.channel_id.parse::<u64>() {
                 let chan_id = ChannelId::new(chan_num);
                 let winners_text = format_winners(&winners);
                 let finish_announcement = format!(
@@ -220,7 +228,7 @@ pub(super) async fn execute(
                     ga.prize, winners_text, ga_uuid
                 );
 
-                let _ = chan_id
+                chan_id
                     .send_message(
                         &ctx.http,
                         CreateMessage::new()
@@ -234,12 +242,19 @@ pub(super) async fn execute(
                                 ),
                             ),
                     )
-                    .await;
+                    .await
+            } else {
+                Err(serenity::Error::Other("Invalid channel ID on giveaway"))
+            };
+
+            if let Err(ref e) = send_res {
+                tracing::warn!(giveaway_id = %ga_uuid, error = %e, "Could not post giveaway finish announcement");
             }
 
             let audit_payload = serde_json::json!({
                 "giveaway_id": ga_uuid.to_string(),
                 "winners": winners,
+                "announcement_delivered": send_res.is_ok(),
             });
 
             let _ = state
@@ -253,10 +268,16 @@ pub(super) async fn execute(
                 )
                 .await;
 
-            Ok(Some(format!(
-                "🏁 Konkurs `{ga_uuid}` został zakończony.\nWyłonieni zwycięzcy: {}",
-                format_winners(&winners)
-            )))
+            match send_res {
+                Ok(_) => Ok(Some(format!(
+                    "🏁 Konkurs `{ga_uuid}` został zakończony.\nWyłonieni zwycięzcy: {}",
+                    format_winners(&winners)
+                ))),
+                Err(e) => Ok(Some(format!(
+                    "🏁 Konkurs `{ga_uuid}` został zakończony (wyłonieni zwycięzcy: {}), lecz nie udało się opublikować ogłoszenia na kanale: {e}",
+                    format_winners(&winners)
+                ))),
+            }
         }
 
         GiveawayOperation::Reroll { giveaway_id } => {
@@ -286,7 +307,7 @@ pub(super) async fn execute(
                 .await
                 .context("Failed to reroll giveaway")?;
 
-            if let Ok(chan_num) = ga.channel_id.parse::<u64>() {
+            let send_res = if let Ok(chan_num) = ga.channel_id.parse::<u64>() {
                 let chan_id = ChannelId::new(chan_num);
                 let winners_text = format_winners(&winners);
                 let reroll_announcement = format!(
@@ -298,7 +319,7 @@ pub(super) async fn execute(
                     ga.prize, winners_text, ga_uuid
                 );
 
-                let _ = chan_id
+                chan_id
                     .send_message(
                         &ctx.http,
                         CreateMessage::new()
@@ -312,12 +333,19 @@ pub(super) async fn execute(
                                 ),
                             ),
                     )
-                    .await;
+                    .await
+            } else {
+                Err(serenity::Error::Other("Invalid channel ID on giveaway"))
+            };
+
+            if let Err(ref e) = send_res {
+                tracing::warn!(giveaway_id = %ga_uuid, error = %e, "Could not post giveaway reroll announcement");
             }
 
             let audit_payload = serde_json::json!({
                 "giveaway_id": ga_uuid.to_string(),
                 "new_winners": winners,
+                "announcement_delivered": send_res.is_ok(),
             });
 
             let _ = state
@@ -331,10 +359,71 @@ pub(super) async fn execute(
                 )
                 .await;
 
-            Ok(Some(format!(
-                "🎲 Ponowne losowanie dla konkursu `{ga_uuid}` zakończone!\nNowi zwycięzcy: {}",
-                format_winners(&winners)
-            )))
+            match send_res {
+                Ok(_) => Ok(Some(format!(
+                    "🎲 Ponowne losowanie dla konkursu `{ga_uuid}` zakończone!\nNowi zwycięzcy: {}",
+                    format_winners(&winners)
+                ))),
+                Err(e) => Ok(Some(format!(
+                    "🎲 Ponowne losowanie dla konkursu `{ga_uuid}` zakończone (nowi zwycięzcy: {}), lecz nie udało się opublikować ogłoszenia na kanale: {e}",
+                    format_winners(&winners)
+                ))),
+            }
+        }
+    }
+}
+
+pub async fn run_giveaway_worker(http: std::sync::Arc<serenity::http::Http>, state: AppState) {
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+    loop {
+        interval.tick().await;
+        match state.storage.finish_expired_giveaways().await {
+            Ok(finished_list) => {
+                for (ga, winners) in finished_list {
+                    tracing::info!(giveaway_id = %ga.id, "Automated finish for expired giveaway");
+                    if let Ok(chan_num) = ga.channel_id.parse::<u64>() {
+                        let chan_id = ChannelId::new(chan_num);
+                        let winners_text = format_winners(&winners);
+                        let announcement = format!(
+                            "🏁 **KONKURS ZAKOŃCZONY (AUTOMATYCZNIE)!** 🏁\n\n\
+                            🎁 **Nagroda:** {}\n\
+                            🎉 **Zwycięzcy:** {}\n\
+                            ID konkursu: `{}`\n\
+                            Gratulacje!",
+                            ga.prize, winners_text, ga.id
+                        );
+                        let _ = chan_id
+                            .send_message(
+                                &http,
+                                CreateMessage::new().content(announcement).allowed_mentions(
+                                    CreateAllowedMentions::new().users(
+                                        winners
+                                            .iter()
+                                            .filter_map(|w| w.parse::<u64>().ok())
+                                            .map(UserId::new),
+                                    ),
+                                ),
+                            )
+                            .await;
+                    }
+                    let _ = state
+                        .storage
+                        .record_audit(
+                            Some(&ga.guild_id),
+                            None,
+                            "giveaway",
+                            "giveaway_auto_end",
+                            serde_json::json!({
+                                "giveaway_id": ga.id.to_string(),
+                                "winners": winners,
+                            }),
+                        )
+                        .await;
+                }
+            }
+            Err(err) => {
+                tracing::error!(?err, "Error checking expired giveaways in worker");
+            }
         }
     }
 }

@@ -561,6 +561,33 @@ impl EventHandler for Handler {
             return;
         };
 
+        let content_changed = match &event.content {
+            Some(new_content) => {
+                if let Some(ref old_msg) = _old_if_available {
+                    old_msg.content != *new_content
+                } else {
+                    true
+                }
+            }
+            None => false,
+        };
+
+        let attachments_changed = match &event.attachments {
+            Some(new_atts) => {
+                if let Some(ref old_msg) = _old_if_available {
+                    old_msg.attachments.len() != new_atts.len()
+                        || old_msg
+                            .attachments
+                            .iter()
+                            .zip(new_atts.iter())
+                            .any(|(a, b)| a.id != b.id)
+                } else {
+                    true
+                }
+            }
+            None => false,
+        };
+
         let author_id = author.id;
         let author_name = author.name.clone();
         let author_global_name = author.global_name.clone();
@@ -635,6 +662,10 @@ impl EventHandler for Handler {
                 "message_id": event.id,
 
                 "content": content,
+
+                "content_changed": content_changed,
+
+                "attachments_changed": attachments_changed,
 
                 "author": {
 

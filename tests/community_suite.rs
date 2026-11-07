@@ -113,15 +113,20 @@ async fn report_routes_only_to_the_configured_staff_channel() {
         .await
         .expect("report command should execute");
 
-    assert_eq!(actions.len(), 3);
+    assert_eq!(actions.len(), 1);
     assert!(matches!(
-        &actions[1],
-        LuaAction::SendMessage {
-            channel_id: Some(channel_id),
-            content: _,
+        &actions[0],
+        LuaAction::PublishSubmission {
+            channel_id,
+            content,
+            success_reply,
+            audit_event,
+            ..
         } if channel_id == "100000000000000006"
+            && success_reply.contains("Report has been safely delivered")
+            && audit_event == "user_report_created"
+            && content.contains("Private Report")
     ));
-    assert!(matches!(actions.get(2), Some(LuaAction::Audit { .. })));
 }
 
 #[tokio::test]

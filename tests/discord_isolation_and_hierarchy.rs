@@ -1379,6 +1379,75 @@ async fn test_message_update_author_verification_and_automod_guard() {
         "AutoMod edit rule match audit must be recorded for confirmed human author"
     );
 
+    // Scenario E: Embed-only message_update with confirmed human author in cache but content=None (Issue #266)
+    // Criteria: 0 modifying actions executed (no delete, no notice), 0 new automod audit entries
+    let baseline_after_d = mock.modifying_requests_count.load(Ordering::SeqCst);
+    let audits_count_after_d = state
+        .storage
+        .list_audit_events("100", 50)
+        .await
+        .unwrap()
+        .len();
+
+    let event_embed_only: MessageUpdateEvent = serde_json::from_value(json!({
+        "id": "900000000000000014",
+        "channel_id": "101",
+        "guild_id": "100",
+        "content": null,
+        "embeds": [{
+            "title": "Embedded Link Preview",
+            "type": "link",
+            "url": "https://discord.gg/malicious-invite"
+        }],
+    }))
+    .expect("deserialize event_embed_only");
+
+    let cached_human_msg: Message = serde_json::from_value(json!({
+        "id": "900000000000000014",
+        "channel_id": "101",
+        "guild_id": "100",
+        "author": {
+            "id": "777777777777777777",
+            "username": "HumanMember",
+            "discriminator": "0000",
+            "avatar": null,
+            "bot": false,
+        },
+        "content": "message with https://discord.gg/malicious-invite",
+        "timestamp": "2026-10-31T07:00:00Z",
+        "tts": false,
+        "mention_everyone": false,
+        "mentions": [],
+        "mention_roles": [],
+        "attachments": [],
+        "embeds": [],
+        "pinned": false,
+        "type": 0,
+    }))
+    .expect("deserialize cached_human_msg");
+
+    handler
+        .message_update(
+            ctx.clone(),
+            Some(cached_human_msg.clone()),
+            Some(cached_human_msg),
+            event_embed_only,
+        )
+        .await;
+
+    assert_eq!(
+        mock.modifying_requests_count.load(Ordering::SeqCst),
+        baseline_after_d,
+        "Embed-only message_update without content change must NOT trigger AutoMod actions (Issue #266)"
+    );
+
+    let audits_e = state.storage.list_audit_events("100", 50).await.unwrap();
+    assert_eq!(
+        audits_e.len(),
+        audits_count_after_d,
+        "No additional AutoMod audit entries should be recorded for embed-only update"
+    );
+
     shard_manager.shutdown_all().await;
 }
 
@@ -1773,6 +1842,214 @@ async fn test_voice_companion_ready_empty_cache_defers_reconciliation_without_re
     assert!(
         final_lease.is_none(),
         "Stale lease must be deleted after successful revocation"
+    );
+
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn test_voice_companion_delayed_guild_create_reconciliation_race_safe() {
+    use rusty_discord_bot::discord::companion::reconcile_guild_companion_channels_with_voice_states;
+    use rusty_discord_bot::storage::{CompanionMappingItem, RecordCompanionLeaseParams};
+    use serenity::all::{GuildCreateEvent, VoiceState, VoiceStateUpdateEvent};
+
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state().await;
+
+    let guild_id = GuildId::new(100);
+    let voice_str = "105";
+    let text_str = "101";
+    let user_str = "222222222222222222";
+    let guild_str = "100";
+    let user_id = UserId::new(222222222222222222);
+
+    // 1. Setup enabled companion mapping
+    let item = CompanionMappingItem::new(voice_str, text_str, true, true);
+    state
+        .storage
+        .batch_upsert_companion_mappings(guild_str, &[item])
+        .await
+        .expect("upsert companion mapping");
+
+    // 2. Setup active lease
+    let generation_id = uuid::Uuid::new_v4();
+    state
+        .storage
+        .record_companion_lease(RecordCompanionLeaseParams {
+            guild_id: guild_str,
+            voice_channel_id: voice_str,
+            text_channel_id: text_str,
+            user_id: user_str,
+            generation: generation_id,
+            allow_bits: 1024,
+            deny_bits: 0,
+        })
+        .await
+        .expect("seed active lease");
+
+    // 3. Populate live guild cache with user present in voice channel 105
+    let guild_raw_str = format!(
+        r#"{{
+        "id": "100",
+        "name": "Test Guild",
+        "owner_id": "111111111111111111",
+        "roles": [],
+        "emojis": [],
+        "stickers": [],
+        "features": [],
+        "icon": null,
+        "splash": null,
+        "banner": null,
+        "description": null,
+        "verification_level": 0,
+        "default_message_notifications": 0,
+        "explicit_content_filter": 0,
+        "afk_channel_id": null,
+        "afk_timeout": 300,
+        "system_channel_id": null,
+        "system_channel_flags": 0,
+        "rules_channel_id": null,
+        "public_updates_channel_id": null,
+        "preferred_locale": "en-US",
+        "mfa_level": 0,
+        "nsfw_level": 0,
+        "premium_tier": 0,
+        "premium_subscription_count": 0,
+        "premium_progress_bar_enabled": false,
+        "large": false,
+        "unavailable": false,
+        "member_count": 1,
+        "joined_at": "2026-01-01T00:00:00Z",
+        "threads": [],
+        "presences": [],
+        "stage_instances": [],
+        "guild_scheduled_events": [],
+        "channels": [{{
+            "id": "101",
+            "guild_id": "100",
+            "name": "companion-text",
+            "type": 0,
+            "permission_overwrites": []
+        }}],
+        "members": [],
+        "voice_states": [{{
+            "guild_id": "100",
+            "channel_id": "105",
+            "user_id": "{user_str}",
+            "session_id": "live_session_1",
+            "deaf": false,
+            "mute": false,
+            "self_deaf": false,
+            "self_mute": false,
+            "self_video": false,
+            "suppress": false,
+            "request_to_speak_timestamp": null
+        }}]
+    }}"#
+    );
+
+    let mut guild_create_event: GuildCreateEvent =
+        serde_json::from_str(&guild_raw_str).expect("deserialize guild_create_event");
+    ctx.cache.update(&mut guild_create_event);
+
+    let initial_modifications = mock.modifying_requests_count.load(Ordering::SeqCst);
+
+    // Scenario A: GUILD_CREATE carried a stale EMPTY snapshot (taken before user joined voice).
+    // Reconcile must check live cache and NOT revoke the active lease (Issue #268).
+    let stale_empty_snapshot = std::collections::HashMap::new();
+    let summary_a = reconcile_guild_companion_channels_with_voice_states(
+        &ctx,
+        &state,
+        guild_id,
+        stale_empty_snapshot,
+    )
+    .await
+    .expect("reconcile with stale empty snapshot");
+
+    assert_eq!(
+        summary_a.revoked, 0,
+        "Delayed GUILD_CREATE reconcile with empty snapshot must NOT revoke lease when user is present in live cache"
+    );
+    assert_eq!(
+        mock.modifying_requests_count.load(Ordering::SeqCst),
+        initial_modifications,
+        "Zero HTTP delete requests should be sent to Discord"
+    );
+
+    let lease_a = state
+        .storage
+        .get_companion_lease(guild_str, text_str, user_str)
+        .await
+        .unwrap()
+        .expect("lease must remain active");
+    assert_eq!(lease_a.status, "active");
+
+    // Scenario B: User now disconnected in live cache (VOICE_STATE_UPDATE arrived).
+    // Update live cache with channel_id: null
+    let mut disconnect_event: VoiceStateUpdateEvent = serde_json::from_value(serde_json::json!({
+        "guild_id": "100",
+        "channel_id": null,
+        "user_id": user_str,
+        "session_id": "live_session_1",
+        "deaf": false,
+        "mute": false,
+        "self_deaf": false,
+        "self_mute": false,
+        "self_video": false,
+        "suppress": false,
+        "request_to_speak_timestamp": null
+    }))
+    .unwrap();
+    ctx.cache.update(&mut disconnect_event);
+
+    // Now a delayed GUILD_CREATE carries a stale snapshot with user in voice.
+    // Reconcile must check live cache, realize user disconnected, and NOT re-grant (Issue #268).
+    let mut stale_populated_snapshot = std::collections::HashMap::new();
+    let voice_state: VoiceState = serde_json::from_value(serde_json::json!({
+        "guild_id": "100",
+        "channel_id": "105",
+        "user_id": user_str,
+        "session_id": "stale_session",
+        "deaf": false,
+        "mute": false,
+        "self_deaf": false,
+        "self_mute": false,
+        "self_video": false,
+        "suppress": false,
+        "request_to_speak_timestamp": null
+    }))
+    .unwrap();
+    stale_populated_snapshot.insert(user_id, voice_state);
+
+    // Also remove the lease from storage to test if phase 3 re-grants it inappropriately
+    state
+        .storage
+        .delete_companion_lease(guild_str, text_str, user_str)
+        .await
+        .unwrap();
+
+    let summary_b = reconcile_guild_companion_channels_with_voice_states(
+        &ctx,
+        &state,
+        guild_id,
+        stale_populated_snapshot,
+    )
+    .await
+    .expect("reconcile with stale populated snapshot");
+
+    assert_eq!(
+        summary_b.granted, 0,
+        "Delayed GUILD_CREATE reconcile must NOT re-grant access when user disconnected in live cache"
+    );
+
+    let lease_b = state
+        .storage
+        .get_companion_lease(guild_str, text_str, user_str)
+        .await
+        .unwrap();
+    assert!(
+        lease_b.is_none(),
+        "Lease must NOT be created for disconnected member"
     );
 
     shard_manager.shutdown_all().await;
