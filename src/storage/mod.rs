@@ -341,6 +341,16 @@ pub struct ReleaseReactionRoleGrantOutcome {
     pub should_revoke_role: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::FromRow)]
+pub struct QuoteRecord {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub added_by: String,
+    pub author_id: String,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct StarboardEntry {
     pub guild_id: String,
@@ -2728,6 +2738,38 @@ impl Storage {
                     .list_active_reaction_role_grants_for_user_role(guild_id, user_id, role_id)
                     .await
             }
+        }
+    }
+
+    pub async fn create_quote(&self, quote: QuoteRecord) -> anyhow::Result<QuoteRecord> {
+        match self {
+            Self::Memory(store) => store.create_quote(quote),
+            Self::Postgres(store) => store.create_quote(quote).await,
+        }
+    }
+
+    pub async fn get_random_quote(&self, guild_id: &str) -> anyhow::Result<Option<QuoteRecord>> {
+        match self {
+            Self::Memory(store) => store.get_random_quote(guild_id),
+            Self::Postgres(store) => store.get_random_quote(guild_id).await,
+        }
+    }
+
+    pub async fn list_quotes(
+        &self,
+        guild_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<QuoteRecord>> {
+        match self {
+            Self::Memory(store) => store.list_quotes(guild_id, limit),
+            Self::Postgres(store) => store.list_quotes(guild_id, limit).await,
+        }
+    }
+
+    pub async fn delete_quote(&self, guild_id: &str, quote_id: Uuid) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => store.delete_quote(guild_id, quote_id),
+            Self::Postgres(store) => store.delete_quote(guild_id, quote_id).await,
         }
     }
 

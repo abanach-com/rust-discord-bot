@@ -4574,3 +4574,245 @@ async fn test_starboard_config_execution_and_persistence_suite() {
 
     shard_manager.shutdown_all().await;
 }
+
+#[tokio::test]
+async fn test_quotes_storage_and_execution_lifecycle_suite() {
+    use rusty_discord_bot::discord::quotes::{QuoteExecutionContext, execute_quote_action};
+    use rusty_discord_bot::lua::QuoteOperation;
+    use serenity::all::{ChannelId, GuildId, Permissions, UserId};
+
+    let (ctx, _mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state().await;
+
+    let guild_a = "100";
+    let actor_id = UserId::new(111111111111111111);
+    let author_a = "222222222222222222";
+    let author_b = "333333333333333333";
+
+    // 1. Initial random / list on empty storage returns safe empty message
+    let res_empty_random = execute_quote_action(
+        &ctx,
+        &state,
+        "quotes",
+        QuoteExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(actor_id),
+            Permissions::empty(),
+            false,
+        ),
+        &QuoteOperation::Random,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        res_empty_random.as_deref(),
+        Some("Brak zapisanych cytatów na tym serwerze.")
+    );
+
+    let res_empty_list = execute_quote_action(
+        &ctx,
+        &state,
+        "quotes",
+        QuoteExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(actor_id),
+            Permissions::empty(),
+            false,
+        ),
+        &QuoteOperation::List { limit: 10 },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        res_empty_list.as_deref(),
+        Some("Brak zapisanych cytatów na tym serwerze.")
+    );
+
+    // 2. Add quotes to Guild A
+    let res_add_1 = execute_quote_action(
+        &ctx,
+        &state,
+        "quotes",
+        QuoteExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(actor_id),
+            Permissions::empty(),
+            false,
+        ),
+        &QuoteOperation::Add {
+            author_id: author_a.to_string(),
+            text: "Cytat numer jeden".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let reply_1 = res_add_1.unwrap();
+    assert!(reply_1.contains("Dodano cytat"));
+    assert!(reply_1.contains(author_a));
+    assert!(reply_1.contains("Cytat numer jeden"));
+
+    let res_add_2 = execute_quote_action(
+        &ctx,
+        &state,
+        "quotes",
+        QuoteExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(actor_id),
+            Permissions::empty(),
+            false,
+        ),
+        &QuoteOperation::Add {
+            author_id: author_b.to_string(),
+            text: "Drugi cytat z gildii A".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(res_add_2.unwrap().contains("Drugi cytat"));
+
+    // Add quote to Guild B (tenant isolation test)
+    let _ = execute_quote_action(
+        &ctx,
+        &state,
+        "quotes",
+        QuoteExecutionContext::new(
+            Some(GuildId::new(200)),
+            Some(ChannelId::new(201)),
+            Some(actor_id),
+            Permissions::empty(),
+            false,
+        ),
+        &QuoteOperation::Add {
+            author_id: author_b.to_string(),
+            text: "Cytat z gildii B - sekretny".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    // 3. Verify List in Guild A returns only Guild A quotes
+    let list_a = execute_quote_action(
+        &ctx,
+        &state,
+        "quotes",
+        QuoteExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(actor_id),
+            Permissions::empty(),
+            false,
+        ),
+        &QuoteOperation::List { limit: 10 },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert!(list_a.contains("Cytat numer jeden"));
+    assert!(list_a.contains("Drugi cytat z gildii A"));
+    assert!(
+        !list_a.contains("Cytat z gildii B"),
+        "Tenant isolation: Guild B quotes must not leak to Guild A"
+    );
+
+    // 4. Verify Random in Guild A returns one of Guild A quotes, never Guild B
+    for _ in 0..10 {
+        let rand_a = execute_quote_action(
+            &ctx,
+            &state,
+            "quotes",
+            QuoteExecutionContext::new(
+                Some(GuildId::new(100)),
+                Some(ChannelId::new(101)),
+                Some(actor_id),
+                Permissions::empty(),
+                false,
+            ),
+            &QuoteOperation::Random,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert!(
+            !rand_a.contains("Cytat z gildii B"),
+            "Random quote must respect guild boundary"
+        );
+    }
+
+    // 5. Validation: length checks
+    let op_empty = QuoteOperation::Add {
+        author_id: author_a.to_string(),
+        text: "   ".to_string(),
+    };
+    assert!(op_empty.validate().is_err());
+
+    let op_too_long = QuoteOperation::Add {
+        author_id: author_a.to_string(),
+        text: "a".repeat(501),
+    };
+    assert!(op_too_long.validate().is_err());
+
+    // 6. Delete quote: requires MANAGE_MESSAGES when enforced
+    let quotes_in_a = state.storage.list_quotes(guild_a, 10).await.unwrap();
+    assert_eq!(quotes_in_a.len(), 2);
+    let to_delete_id = quotes_in_a[0].id;
+
+    let res_del_unauthorized = execute_quote_action(
+        &ctx,
+        &state,
+        "quotes",
+        QuoteExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(actor_id),
+            Permissions::empty(),
+            true, // Enforce actor permissions
+        ),
+        &QuoteOperation::Delete {
+            quote_id: to_delete_id,
+        },
+    )
+    .await;
+    assert!(
+        res_del_unauthorized.is_err(),
+        "Unauthorized deletion must be rejected"
+    );
+
+    let res_del_authorized = execute_quote_action(
+        &ctx,
+        &state,
+        "quotes",
+        QuoteExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(actor_id),
+            Permissions::MANAGE_MESSAGES,
+            true,
+        ),
+        &QuoteOperation::Delete {
+            quote_id: to_delete_id,
+        },
+    )
+    .await;
+    assert!(
+        res_del_authorized.is_ok(),
+        "Authorized deletion must succeed"
+    );
+
+    // After deletion, remaining count is 1
+    let remaining_in_a = state.storage.list_quotes(guild_a, 10).await.unwrap();
+    assert_eq!(remaining_in_a.len(), 1);
+    assert_eq!(remaining_in_a[0].id, quotes_in_a[1].id);
+
+    // Verify audit events recorded
+    let audits = state.storage.list_audit_events(guild_a, 10).await.unwrap();
+    assert!(audits.iter().any(|a| a.event == "quote_add"));
+    assert!(audits.iter().any(|a| a.event == "quote_delete"));
+
+    shard_manager.shutdown_all().await;
+}

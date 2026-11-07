@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use rusty_discord_bot::lua::{
     EconomyOperation, GiveawayOperation, LuaAction, LuaEngine, LuaExecutionContext, LuaLimits,
-    ProgressionOperation, ReactionRoleOperation, StarboardOperation, TagOperation,
+    ProgressionOperation, QuoteOperation, ReactionRoleOperation, StarboardOperation, TagOperation,
 };
 use serde_json::json;
 
@@ -521,21 +521,58 @@ async fn test_quotes_subcommands() {
         .execute_command("quotes", "quote", context(json!({ "random": {} })))
         .await
         .expect("quotes random should succeed");
-    assert!(actions.iter().any(|a| matches!(a, LuaAction::Reply { .. })));
+    assert!(actions.iter().any(|a| matches!(
+        a,
+        LuaAction::Quote {
+            operation: QuoteOperation::Random
+        }
+    )));
 
-    // /quote add
+    // /quote add with valid author and text
     let actions = eng
-        .execute_command("quotes", "quote", context(json!({ "add": {} })))
+        .execute_command(
+            "quotes",
+            "quote",
+            context(json!({
+                "add": {
+                    "author": "123456789012345678",
+                    "text": "The greatest glory in living lies not in never falling, but in rising every time we fall."
+                }
+            })),
+        )
         .await
         .expect("quotes add should succeed");
-    assert!(actions.iter().any(|a| matches!(a, LuaAction::Reply { .. })));
+    assert!(actions.iter().any(|a| matches!(
+        a,
+        LuaAction::Quote {
+            operation: QuoteOperation::Add {
+                author_id,
+                text,
+            }
+        } if author_id == "123456789012345678" && text.contains("greatest glory")
+    )));
+
+    // /quote add missing options -> safe reply
+    let actions_missing = eng
+        .execute_command("quotes", "quote", context(json!({ "add": {} })))
+        .await
+        .expect("quotes add missing options should succeed");
+    assert!(actions_missing.iter().any(|a| matches!(
+        a,
+        LuaAction::Reply { content, .. } if content.contains("Missing required options")
+    )));
 
     // /quote list
     let actions = eng
         .execute_command("quotes", "quote", context(json!({ "list": {} })))
         .await
         .expect("quotes list should succeed");
-    assert!(actions.iter().any(|a| matches!(a, LuaAction::Reply { .. })));
+    assert!(actions.iter().any(|a| matches!(
+        a,
+        LuaAction::Quote {
+            operation: QuoteOperation::List { limit: 10 }
+        }
+    )));
 
     // Missing subcommand
     let actions = eng

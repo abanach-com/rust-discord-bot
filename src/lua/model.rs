@@ -6,7 +6,7 @@ use serde_json::Value;
 use super::{
     economy::EconomyOperation, giveaway::GiveawayOperation,
     moderation_cases::ModerationCaseOperation, progression::ProgressionOperation,
-    reaction_roles::ReactionRoleOperation, scheduler::SchedulerOperation,
+    quotes::QuoteOperation, reaction_roles::ReactionRoleOperation, scheduler::SchedulerOperation,
     starboard::StarboardOperation, tags::TagOperation, tickets::TicketOperation,
 };
 
@@ -322,6 +322,9 @@ pub enum LuaAction {
     Starboard {
         operation: StarboardOperation,
     },
+    Quote {
+        operation: QuoteOperation,
+    },
     Economy {
         operation: EconomyOperation,
     },
@@ -364,6 +367,7 @@ impl LuaAction {
             Self::Tag { .. } => "tag",
             Self::ReactionRole { .. } => "reaction_role",
             Self::Starboard { .. } => "starboard",
+            Self::Quote { .. } => "quote",
             Self::Economy { .. } => "economy",
             Self::PublishSubmission { .. } => "publish_submission",
             Self::Audit { .. } => "audit",
@@ -497,6 +501,7 @@ impl LuaAction {
             Self::Tag { operation } => operation.validate(),
             Self::ReactionRole { operation } => operation.validate(),
             Self::Starboard { operation } => operation.validate(),
+            Self::Quote { operation } => operation.validate(),
             Self::Economy { operation } => operation.validate(),
             Self::PublishSubmission {
                 channel_id,

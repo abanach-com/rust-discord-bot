@@ -24,8 +24,8 @@ use crate::{
 };
 
 use super::{
-    economy, giveaway, moderation_cases, music, progression, reaction_roles, scheduler, starboard,
-    tags, tickets,
+    economy, giveaway, moderation_cases, music, progression, quotes, reaction_roles, scheduler,
+    starboard, tags, tickets,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -560,6 +560,7 @@ fn action_rate_limit_scope(action: &LuaAction) -> Option<&'static str> {
 
         LuaAction::ReactionRole { .. } => Some("reaction_role"),
         LuaAction::Starboard { .. } => Some("starboard"),
+        LuaAction::Quote { .. } => Some("quote"),
         LuaAction::Economy { .. } => Some("economy"),
 
         LuaAction::BanMember { .. }
@@ -1494,6 +1495,23 @@ async fn execute_action(
             .await
         }
 
+        LuaAction::Quote { operation } => {
+            quotes::execute_quote_action(
+                ctx,
+                state,
+                module_id,
+                quotes::QuoteExecutionContext::new(
+                    origin.guild_id,
+                    origin.channel_id,
+                    origin.actor_id,
+                    origin.actor_permissions,
+                    origin.enforce_actor_permissions,
+                ),
+                operation,
+            )
+            .await
+        }
+
         LuaAction::Economy { operation } => {
             economy::execute(
                 ctx,
@@ -1614,6 +1632,9 @@ fn required_permission(action: &LuaAction) -> Option<Permissions> {
 
         LuaAction::Tag {
             operation: TagOperation::Create { .. } | TagOperation::Delete { .. },
+        }
+        | LuaAction::Quote {
+            operation: crate::lua::QuoteOperation::Delete { .. },
         } => Some(Permissions::MANAGE_MESSAGES),
 
         LuaAction::TimeoutMember { .. } => Some(Permissions::MODERATE_MEMBERS),

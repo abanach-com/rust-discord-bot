@@ -8,7 +8,7 @@ Silnik: **rusty-discord-bot (Rust + Lua 5.4)**
 ---
 
 ## 📌 Opis
-Złote myśli i pamiętne cytaty użytkowników z losowaniem i numeracją.
+Złote myśli i pamiętne cytaty użytkowników z trwałym zapisem w storage, losowaniem i numeracją.
 
 ---
 
@@ -19,8 +19,10 @@ Złote myśli i pamiętne cytaty użytkowników z losowaniem i numeracją.
 
 ---
 
-## ⚙️ Konfiguracja (`config.json`)
-Moduł ładuje swoje parametry początkowe z pliku `config.json`. Administratorzy mogą nadpisywać te wartości per-serwer w bazie PostgreSQL oraz przez panel WWW.
+## ⚙️ Komendy i operacje
+- `/quote add author:@użytkownik text:"treść"` — Zapisuje cytat w bazie danych serwera (limit 1–500 znaków) z identyfikatorem UUID i powiązaniem z dodającym (`added_by`). Rejestruje zdarzenie audytowe `quote_add`.
+- `/quote random` — Zwraca losowy cytat należący do bieżącego serwera.
+- `/quote list` — Zwraca listę ostatnich cytatów serwera z numeracją i identyfikatorami.
 
 ---
 
@@ -41,4 +43,4 @@ Wpis modułu w pliku instalatora `scripts/install.xml`:
 ---
 
 ## 🛡️ Bezpieczeństwo i audyt
-Wszystkie krytyczne operacje podlegają walidacji uprawnień Discorda, limitom zapytań (rate limiting) oraz rejestracji w audycie platformy.
+Wszystkie operacje podlegają izolacji per-gildia (`guild_id`), walidacji snowflake, limitom zapytań (rate limiting `quote`) oraz rejestracji w audycie platformy (`quote_add`, `quote_delete`). Usuwanie cytatów wymaga uprawnienia `MANAGE_MESSAGES` lub `ADMINISTRATOR`.

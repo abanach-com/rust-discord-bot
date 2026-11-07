@@ -93,29 +93,47 @@ return {
         if sub == "random" then
             return {
                 {
-                    type = "reply",
-                    content = t("modules.quotes.no_quotes", ctx),
-                    ephemeral = false,
+                    type = "quote",
+                    operation = {
+                        operation = "random",
+                    },
                 },
             }
         end
 
         if sub == "add" then
+            local author_id = tostring(opts.author or "")
+            local text = tostring(opts.text or "")
+            if author_id == "" or text == "" then
+                return {
+                    {
+                        type = "reply",
+                        content = "Missing required options: author and text are required.",
+                        ephemeral = true,
+                    },
+                }
+            end
             return {
                 {
-                    type = "reply",
-                    content = t("modules.quotes.added", ctx),
-                    ephemeral = true,
+                    type = "quote",
+                    operation = {
+                        operation = "add",
+                        author_id = author_id,
+                        text = text,
+                    },
                 },
             }
         end
 
         if sub == "list" then
+            local limit = tonumber(opts.limit) or 10
             return {
                 {
-                    type = "reply",
-                    content = t("modules.quotes.no_quotes", ctx),
-                    ephemeral = false,
+                    type = "quote",
+                    operation = {
+                        operation = "list",
+                        limit = limit,
+                    },
                 },
             }
         end

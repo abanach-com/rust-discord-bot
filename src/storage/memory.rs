@@ -22,13 +22,13 @@ use super::{
     MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
     ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
     ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
-    ProgressionSeason, ReactionRoleBinding, ReactionRoleGrant, RecordCompanionLeaseParams,
-    RedditSubscription, ReleaseReactionRoleGrantOutcome, ReputationGrantOutcome,
-    RetainedRecordNotice, ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry,
-    SteamLfgPost, StickyMessage, StoreItem, StorePurchase, TagRecord, TelegramBridge,
-    TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError, TupperProfile,
-    TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport, VkSubscription,
-    WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
+    ProgressionSeason, QuoteRecord, ReactionRoleBinding, ReactionRoleGrant,
+    RecordCompanionLeaseParams, RedditSubscription, ReleaseReactionRoleGrantOutcome,
+    ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent, ServerSnapshot,
+    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
+    TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError,
+    TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
+    VkSubscription, WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
     YouTubeChannelSubscription, is_member_after_cursor, level_for_xp, parse_member_search_cursor,
     snowflake_created_at, validate_snowflake,
 };
@@ -230,6 +230,7 @@ pub struct MemoryStore {
     tags: Arc<DashMap<(String, String), TagRecord>>,
     reaction_roles: Arc<DashMap<(String, String, String), ReactionRoleBinding>>,
     reaction_role_grants: Arc<DashMap<(String, String, Uuid), ReactionRoleGrant>>,
+    quotes: Arc<DashMap<Uuid, QuoteRecord>>,
 }
 
 impl MemoryStore {
@@ -2229,6 +2230,70 @@ impl MemoryStore {
             .map(|e| e.value().clone())
             .collect();
         Ok(grants)
+    }
+
+    pub fn create_quote(&self, quote: QuoteRecord) -> anyhow::Result<QuoteRecord> {
+        validate_snowflake("guild_id", &quote.guild_id)?;
+        validate_snowflake("added_by", &quote.added_by)?;
+        validate_snowflake("author_id", &quote.author_id)?;
+        let trimmed = quote.body.trim();
+        let len = trimmed.chars().count();
+        if len == 0 || len > 500 {
+            anyhow::bail!("Treść cytatu musi zawierać od 1 do 500 znaków");
+        }
+        let clean = QuoteRecord {
+            body: trimmed.to_string(),
+            ..quote
+        };
+        self.quotes.insert(clean.id, clean.clone());
+        Ok(clean)
+    }
+
+    pub fn get_random_quote(&self, guild_id: &str) -> anyhow::Result<Option<QuoteRecord>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let matches: Vec<QuoteRecord> = self
+            .quotes
+            .iter()
+            .filter(|e| e.guild_id == guild_id)
+            .map(|e| e.value().clone())
+            .collect();
+        if matches.is_empty() {
+            return Ok(None);
+        }
+        let rand_val =
+            u64::from_le_bytes(Uuid::new_v4().as_bytes()[0..8].try_into().unwrap()) as usize;
+        let idx = rand_val % matches.len();
+        Ok(Some(matches[idx].clone()))
+    }
+
+    pub fn list_quotes(&self, guild_id: &str, limit: usize) -> anyhow::Result<Vec<QuoteRecord>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let limit = limit.clamp(1, 100);
+        let mut matches: Vec<QuoteRecord> = self
+            .quotes
+            .iter()
+            .filter(|e| e.guild_id == guild_id)
+            .map(|e| e.value().clone())
+            .collect();
+        matches.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+        matches.truncate(limit);
+        Ok(matches)
+    }
+
+    pub fn delete_quote(&self, guild_id: &str, quote_id: Uuid) -> anyhow::Result<bool> {
+        validate_snowflake("guild_id", guild_id)?;
+        if let Some(entry) = self.quotes.get(&quote_id)
+            && entry.guild_id == guild_id
+        {
+            drop(entry);
+            self.quotes.remove(&quote_id);
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     pub fn record_starboard_entry(

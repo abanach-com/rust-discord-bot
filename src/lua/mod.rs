@@ -5,6 +5,7 @@ pub mod install_xml;
 mod model;
 mod moderation_cases;
 mod progression;
+pub mod quotes;
 mod reaction_roles;
 mod scheduler;
 pub mod starboard;
@@ -22,6 +23,7 @@ pub use model::{
 };
 pub use moderation_cases::ModerationCaseOperation;
 pub use progression::{ProgressionMetric, ProgressionOperation};
+pub use quotes::QuoteOperation;
 pub use reaction_roles::ReactionRoleOperation;
 pub use scheduler::{SchedulerOperation, SchedulerScope};
 pub use starboard::StarboardOperation;

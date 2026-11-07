@@ -21,15 +21,16 @@ use super::{
     MemberSearchRow, MemberSnapshot, ModerationAppeal, ModerationExecutionIntent,
     ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState, ModuleDraftConfig,
     PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric, ProgressionSeason,
-    ReactionRoleBinding, ReactionRoleGrant, RecordCompanionLeaseParams, RecruitmentApplication,
-    RecruitmentReview, RecruitmentRoleFulfillment, RecruitmentTrack, RedditSubscription,
-    ReleaseReactionRoleGrantOutcome, ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent,
-    ServerSnapshot, SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem,
-    StorePurchase, TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament,
-    TransitionApplicationParams, TupperError, TupperProfile, TwitchStreamSubscription,
-    UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WORK_JOBS, WorkClaimOutcome,
-    WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
-    parse_member_search_cursor, snowflake_created_at, validate_snowflake,
+    QuoteRecord, ReactionRoleBinding, ReactionRoleGrant, RecordCompanionLeaseParams,
+    RecruitmentApplication, RecruitmentReview, RecruitmentRoleFulfillment, RecruitmentTrack,
+    RedditSubscription, ReleaseReactionRoleGrantOutcome, ReputationGrantOutcome,
+    RetainedRecordNotice, ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry,
+    SteamLfgPost, StickyMessage, StoreItem, StorePurchase, TagRecord, TelegramBridge,
+    TelegramMessageMapping, TimedRoleGrant, Tournament, TransitionApplicationParams, TupperError,
+    TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
+    VkSubscription, WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
+    YouTubeChannelSubscription, level_for_xp, parse_member_search_cursor, snowflake_created_at,
+    validate_snowflake,
 };
 
 pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
@@ -3115,6 +3116,95 @@ impl PostgresStore {
         .await?;
 
         Ok(rows)
+    }
+
+    pub async fn create_quote(&self, quote: QuoteRecord) -> anyhow::Result<QuoteRecord> {
+        validate_snowflake("guild_id", &quote.guild_id)?;
+        validate_snowflake("added_by", &quote.added_by)?;
+        validate_snowflake("author_id", &quote.author_id)?;
+        let trimmed = quote.body.trim();
+        let len = trimmed.chars().count();
+        if len == 0 || len > 500 {
+            anyhow::bail!("Treść cytatu musi zawierać od 1 do 500 znaków");
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO guild_quotes (id, guild_id, added_by, author_id, body, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+        )
+        .bind(quote.id)
+        .bind(&quote.guild_id)
+        .bind(&quote.added_by)
+        .bind(&quote.author_id)
+        .bind(trimmed)
+        .bind(quote.created_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(QuoteRecord {
+            body: trimmed.to_string(),
+            ..quote
+        })
+    }
+
+    pub async fn get_random_quote(&self, guild_id: &str) -> anyhow::Result<Option<QuoteRecord>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let row = sqlx::query_as::<_, QuoteRecord>(
+            r#"
+            SELECT id, guild_id, added_by, author_id, body, created_at
+            FROM guild_quotes
+            WHERE guild_id = $1
+            ORDER BY RANDOM()
+            LIMIT 1
+            "#,
+        )
+        .bind(guild_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    pub async fn list_quotes(
+        &self,
+        guild_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<QuoteRecord>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let limit_i64 = limit.clamp(1, 100) as i64;
+        let rows = sqlx::query_as::<_, QuoteRecord>(
+            r#"
+            SELECT id, guild_id, added_by, author_id, body, created_at
+            FROM guild_quotes
+            WHERE guild_id = $1
+            ORDER BY created_at DESC, id DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(limit_i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn delete_quote(&self, guild_id: &str, quote_id: Uuid) -> anyhow::Result<bool> {
+        validate_snowflake("guild_id", guild_id)?;
+        let result = sqlx::query(
+            r#"
+            DELETE FROM guild_quotes
+            WHERE guild_id = $1 AND id = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(quote_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
     }
 
     pub async fn record_starboard_entry(
