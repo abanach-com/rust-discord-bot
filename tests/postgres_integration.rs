@@ -1224,7 +1224,7 @@ async fn test_postgres_integration_suite() {
         .unwrap();
 
     let (purchased_item, purchase, remaining_coins) = store
-        .purchase_store_item(&guild_id, &store_user, item.id)
+        .purchase_store_item(&guild_id, &store_user, item.id, Some("pg_idem_req_1"))
         .await
         .unwrap();
 
@@ -1234,6 +1234,37 @@ async fn test_postgres_integration_suite() {
     assert_eq!(purchase.role_id, Some("999000000000000001".to_string()));
     assert_eq!(purchase.fulfillment_status, "pending");
     assert!(purchase.fulfilled_at.is_none());
+
+    // Idempotency: exact same interaction_id returns identical purchase without re-debiting
+    let (purchased_retry, purchase_retry, coins_retry) = store
+        .purchase_store_item(&guild_id, &store_user, item.id, Some("pg_idem_req_1"))
+        .await
+        .unwrap();
+    assert_eq!(purchased_retry.id, item.id);
+    assert_eq!(purchase_retry.id, purchase.id);
+    assert_eq!(coins_retry, 600, "retry must not debit coins");
+
+    let progress_pg = store
+        .get_member_progress(&guild_id, &store_user)
+        .await
+        .unwrap();
+    assert_eq!(progress_pg.coins, 600);
+
+    let items_pg = store.list_store_items(&guild_id).await.unwrap();
+    let it_pg = items_pg.iter().find(|i| i.id == item.id).unwrap();
+    assert_eq!(it_pg.stock, Some(4), "retry must not decrement stock");
+
+    // Idempotency conflict: same key with different user fails
+    let conflict_pg = store
+        .purchase_store_item(&guild_id, "other_user_999", item.id, Some("pg_idem_req_1"))
+        .await;
+    assert!(conflict_pg.is_err(), "must reject conflict user");
+    assert!(
+        conflict_pg
+            .unwrap_err()
+            .to_string()
+            .contains("idempotency conflict")
+    );
 
     let now_pg = Utc::now();
     store

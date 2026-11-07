@@ -3297,6 +3297,54 @@ async fn test_economy_shop_buy_inventory_role_hierarchy_and_guild_isolation() {
         .unwrap();
     assert_eq!(progress_after_buy1.coins, 400);
 
+    // 3b. Retry exact same interaction_id -> returns same result without re-debiting
+    let buy_reply_retry = economy::execute(
+        &ctx,
+        &state,
+        "economy",
+        execution.clone(),
+        &EconomyOperation::Buy {
+            item: "xp_booster".to_string(),
+        },
+    )
+    .await
+    .unwrap()
+    .expect("buy reply retry");
+    assert!(buy_reply_retry.contains("Pomyślnie zakupiono"));
+    assert!(buy_reply_retry.contains("XP Booster"));
+    assert_eq!(
+        state
+            .storage
+            .get_member_progress("100", "111111111111111111")
+            .await
+            .unwrap()
+            .coins,
+        400,
+        "retry with same interaction_id must not debit coins again"
+    );
+
+    // 3c. Idempotency conflict: reusing interaction_id for another item must fail
+    let conflict_buy = economy::execute(
+        &ctx,
+        &state,
+        "economy",
+        execution.clone(),
+        &EconomyOperation::Buy {
+            item: "VIP Pass".to_string(),
+        },
+    )
+    .await;
+    assert!(
+        conflict_buy.is_err(),
+        "reusing interaction_id for different item must fail"
+    );
+    assert!(
+        conflict_buy
+            .unwrap_err()
+            .to_string()
+            .contains("idempotency conflict")
+    );
+
     // 4. /economy inventory after first buy -> contains XP Booster
     let inv_reply = economy::execute(
         &ctx,
@@ -3312,12 +3360,15 @@ async fn test_economy_shop_buy_inventory_role_hierarchy_and_guild_isolation() {
     assert!(inv_reply.contains("completed"));
 
     // 5. /economy buy item:vip_pass (by name, has role_id 301 and stock 2)
+    let mut execution_vip_1 = execution.clone();
+    execution_vip_1.interaction_id = Some("buy_int_vip_1".to_string());
+
     let baseline_modifications = mock.modifying_requests_count.load(Ordering::SeqCst);
     let buy_vip = economy::execute(
         &ctx,
         &state,
         "economy",
-        execution.clone(),
+        execution_vip_1.clone(),
         &EconomyOperation::Buy {
             item: "VIP Pass".to_string(),
         },
@@ -3334,17 +3385,50 @@ async fn test_economy_shop_buy_inventory_role_hierarchy_and_guild_isolation() {
         "Role delivery PUT request must be dispatched"
     );
 
+    // 5b. Retry VIP pass buy with same interaction_id -> no second HTTP PUT to Discord API
+    let modifications_after_first_vip = mock.modifying_requests_count.load(Ordering::SeqCst);
+    let buy_vip_retry = economy::execute(
+        &ctx,
+        &state,
+        "economy",
+        execution_vip_1.clone(),
+        &EconomyOperation::Buy {
+            item: "VIP Pass".to_string(),
+        },
+    )
+    .await
+    .unwrap()
+    .expect("buy vip retry");
+    assert!(buy_vip_retry.contains("Pomyślnie zakupiono"));
+    assert_eq!(
+        mock.modifying_requests_count.load(Ordering::SeqCst),
+        modifications_after_first_vip,
+        "Role delivery PUT request must not be dispatched again on retry"
+    );
+    assert_eq!(
+        state
+            .storage
+            .get_member_progress("100", "111111111111111111")
+            .await
+            .unwrap()
+            .coins,
+        200,
+        "Coins must not be debited on retry"
+    );
+
     // Stock decremented to 1
     let items_now = state.storage.list_store_items("100").await.unwrap();
     let vip_now = items_now.into_iter().find(|i| i.id == item_vip.id).unwrap();
     assert_eq!(vip_now.stock, Some(1));
 
     // 6. Cross-guild buy attempt -> rejected!
+    let mut execution_foreign = execution.clone();
+    execution_foreign.interaction_id = Some("buy_foreign_1".to_string());
     let cross_guild_buy = economy::execute(
         &ctx,
         &state,
         "economy",
-        execution.clone(),
+        execution_foreign,
         &EconomyOperation::Buy {
             item: item_foreign.id.to_string(),
         },
@@ -3387,11 +3471,13 @@ async fn test_economy_shop_buy_inventory_role_hierarchy_and_guild_isolation() {
     assert!(u2_buy.is_err(), "insufficient funds must be rejected");
 
     // 8. Stock depletion: buy remaining VIP Pass
+    let mut execution_vip_2 = execution.clone();
+    execution_vip_2.interaction_id = Some("buy_int_vip_2".to_string());
     let buy_vip_2 = economy::execute(
         &ctx,
         &state,
         "economy",
-        execution.clone(),
+        execution_vip_2,
         &EconomyOperation::Buy {
             item: "vip_pass".to_string(),
         },

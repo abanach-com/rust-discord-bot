@@ -216,10 +216,23 @@ pub async fn execute(
 
             let (item, purchase, remaining_coins) = state
                 .storage
-                .purchase_store_item(&guild_key, &actor_key, item.id)
+                .purchase_store_item(
+                    &guild_key,
+                    &actor_key,
+                    item.id,
+                    execution.interaction_id.as_deref(),
+                )
                 .await?;
 
-            let fulfillment_status = if let Some(role_id_str) = &item.role_id {
+            let fulfillment_status = if purchase.fulfillment_status == "completed" {
+                "completed".to_string()
+            } else if purchase.fulfillment_status == "failed" {
+                let reason = purchase
+                    .failure_reason
+                    .as_deref()
+                    .unwrap_or("błąd doręczenia roli");
+                format!("failed: {reason}")
+            } else if let Some(role_id_str) = &item.role_id {
                 let role_id_num = role_id_str
                     .parse::<u64>()
                     .map_err(|_| anyhow!("nieprawidłowy identyfikator roli w przedmiocie"))?;

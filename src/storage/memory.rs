@@ -13,22 +13,22 @@ use super::{
     AdjustMemberProgressParams, AiGuildBudget, AiKnowledgeDocument, AuditLogEntry, CardCollection,
     CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome, CommandPolicyRule, CommunityPoll,
     CompanionChannelLease, CompanionChannelMapping, CompanionMappingItem, CountingGame,
-    CrimeClaimOutcome, CustomAutomation, DailyClaimOutcome, DynamicVoiceRoom, EventRoster,
-    FaqEntry, FeedSubscription, GameAccountLink, GamingHubGameStatus, GitHubDevopsMapping,
-    GitLabSubscription, Giveaway, GuildModuleSettings, IntegrationConnection,
-    IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking, KickStreamSubscription,
-    LinkedAccount, MAX_COMPANION_MAPPINGS_PER_GUILD, McpToolAuthorization, MemberIdentityRecord,
-    MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
-    ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
-    ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
-    ProgressionSeason, ReactionRoleBinding, RecordCompanionLeaseParams, RedditSubscription,
-    ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent, ServerSnapshot,
-    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
-    TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError,
-    TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
-    VkSubscription, WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
-    YouTubeChannelSubscription, is_member_after_cursor, level_for_xp, parse_member_search_cursor,
-    snowflake_created_at, validate_snowflake,
+    CrimeClaimOutcome, CustomAutomation, DailyClaimOutcome, DynamicVoiceRoom,
+    EconomyPurchaseRequestRecord, EventRoster, FaqEntry, FeedSubscription, GameAccountLink,
+    GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway, GuildModuleSettings,
+    IntegrationConnection, IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking,
+    KickStreamSubscription, LinkedAccount, MAX_COMPANION_MAPPINGS_PER_GUILD, McpToolAuthorization,
+    MemberIdentityRecord, MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot,
+    ModerationAppeal, ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings,
+    ModeratorDutyState, ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage,
+    ProgressMetric, ProgressionSeason, ReactionRoleBinding, RecordCompanionLeaseParams,
+    RedditSubscription, ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent,
+    ServerSnapshot, SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem,
+    StorePurchase, TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament,
+    TupperError, TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams,
+    UserErasureReport, VkSubscription, WORK_JOBS, WorkClaimOutcome, WorkflowDefinition,
+    WorkflowRunExecution, XpAward, YouTubeChannelSubscription, is_member_after_cursor,
+    level_for_xp, parse_member_search_cursor, snowflake_created_at, validate_snowflake,
 };
 
 type ModuleKey = (String, String);
@@ -90,6 +90,8 @@ pub struct MemoryStore {
     economy_cooldowns: Arc<DashMap<(String, String, String), chrono::DateTime<Utc>>>,
 
     economy_idempotency: Arc<DashMap<(String, String), String>>,
+
+    economy_purchase_requests: Arc<DashMap<(String, String), EconomyPurchaseRequestRecord>>,
 
     progression_seasons: Arc<DashMap<Uuid, ProgressionSeason>>,
 
@@ -552,6 +554,11 @@ impl MemoryStore {
 
         self.economy_cooldowns
             .retain(|(g, u, _), _| !(g == guild_id && u == user_id));
+
+        let before_purchase_reqs = self.economy_purchase_requests.len();
+        self.economy_purchase_requests
+            .retain(|(g, _), r| !(g == guild_id && r.user_id == user_id));
+        related_erased += before_purchase_reqs.saturating_sub(self.economy_purchase_requests.len());
 
         let before_identities = self.identity_history.len();
         self.identity_history
@@ -2185,14 +2192,37 @@ impl MemoryStore {
 
     pub fn purchase_store_item(
         &self,
-
         guild_id: &str,
-
         user_id: &str,
-
         item_id: Uuid,
+        interaction_id: Option<&str>,
     ) -> anyhow::Result<(StoreItem, StorePurchase, i64)> {
         let _guard = self.progression_guard();
+
+        if let Some(int_id) = interaction_id {
+            let req_key = (guild_id.to_string(), int_id.to_string());
+            if let Some(existing) = self.economy_purchase_requests.get(&req_key) {
+                if existing.user_id != user_id || existing.item_id != item_id {
+                    return Err(anyhow::anyhow!(
+                        "idempotency conflict: interaction_id '{int_id}' was already used for a different purchase"
+                    ));
+                }
+
+                let purchase = self
+                    .store_purchases
+                    .get(&existing.purchase_id)
+                    .map(|p| p.clone())
+                    .ok_or_else(|| anyhow::anyhow!("referenced purchase not found"))?;
+
+                let item = self
+                    .store_items
+                    .get(&item_id)
+                    .map(|i| i.clone())
+                    .ok_or_else(|| anyhow::anyhow!("store item not found"))?;
+
+                return Ok((item, purchase, existing.balance_after));
+            }
+        }
 
         let mut item = self
             .store_items
@@ -2224,7 +2254,6 @@ impl MemoryStore {
         }
 
         // Decrement stock only after verifying coins balance
-
         if let Some(stock) = item.stock {
             item.stock = Some(stock - 1);
         }
@@ -2274,6 +2303,22 @@ impl MemoryStore {
         };
 
         self.store_purchases.insert(purchase.id, purchase.clone());
+
+        if let Some(int_id) = interaction_id {
+            let req_key = (guild_id.to_string(), int_id.to_string());
+            self.economy_purchase_requests.insert(
+                req_key,
+                EconomyPurchaseRequestRecord {
+                    guild_id: guild_id.to_string(),
+                    interaction_id: int_id.to_string(),
+                    user_id: user_id.to_string(),
+                    item_id,
+                    purchase_id: purchase.id,
+                    balance_after: remaining,
+                    created_at: now,
+                },
+            );
+        }
 
         Ok((cloned_item, purchase, remaining))
     }

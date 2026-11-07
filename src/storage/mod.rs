@@ -379,6 +379,17 @@ pub struct StorePurchase {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct EconomyPurchaseRequestRecord {
+    pub guild_id: String,
+    pub interaction_id: String,
+    pub user_id: String,
+    pub item_id: Uuid,
+    pub purchase_id: Uuid,
+    pub balance_after: i64,
+    pub created_at: DateTime<Utc>,
+}
+
 pub fn validate_snowflake(label: &str, id: &str) -> anyhow::Result<u64> {
     anyhow::ensure!(!id.is_empty(), "{label} cannot be empty");
     anyhow::ensure!(
@@ -2660,17 +2671,20 @@ impl Storage {
 
     pub async fn purchase_store_item(
         &self,
-
         guild_id: &str,
-
         user_id: &str,
-
         item_id: Uuid,
+        interaction_id: Option<&str>,
     ) -> anyhow::Result<(StoreItem, StorePurchase, i64)> {
         match self {
-            Self::Memory(store) => store.purchase_store_item(guild_id, user_id, item_id),
-
-            Self::Postgres(store) => store.purchase_store_item(guild_id, user_id, item_id).await,
+            Self::Memory(store) => {
+                store.purchase_store_item(guild_id, user_id, item_id, interaction_id)
+            }
+            Self::Postgres(store) => {
+                store
+                    .purchase_store_item(guild_id, user_id, item_id, interaction_id)
+                    .await
+            }
         }
     }
 
@@ -5448,7 +5462,7 @@ mod tests {
 
         let store = Storage::Memory(mem);
         let purchase_res = store
-            .purchase_store_item(guild_id, user_id, corrupt_id)
+            .purchase_store_item(guild_id, user_id, corrupt_id, None)
             .await;
         assert!(purchase_res.is_err());
         assert!(
@@ -5492,7 +5506,7 @@ mod tests {
             .unwrap();
 
         let (purchased_item, purchase, remaining) = store
-            .purchase_store_item(guild_id, user_id, item.id)
+            .purchase_store_item(guild_id, user_id, item.id, None)
             .await
             .unwrap();
 
@@ -5634,7 +5648,7 @@ mod tests {
 
         let store = Storage::Memory(mem);
         let res = store
-            .purchase_store_item(guild_id, user_id, bad_item_id)
+            .purchase_store_item(guild_id, user_id, bad_item_id, None)
             .await;
         assert!(res.is_err());
         assert!(
@@ -7966,5 +7980,107 @@ mod tests {
             .await
             .expect("second expired poll");
         assert!(second_expired_poll.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_purchase_store_item_idempotency_memory_store() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_id = "guild_idem_test";
+        let user_id = "user_idem_test";
+        let user_2 = "user_idem_other";
+
+        store
+            .adjust_member_progress(guild_id, user_id, 0, 500, 0)
+            .await
+            .unwrap();
+        store
+            .adjust_member_progress(guild_id, user_2, 0, 500, 0)
+            .await
+            .unwrap();
+
+        let item1 = store
+            .create_store_item(guild_id, "Potion", "Heals 50 HP", 100, None, Some(3))
+            .await
+            .unwrap();
+
+        let item2 = store
+            .create_store_item(guild_id, "Elixir", "Restores Mana", 150, None, Some(2))
+            .await
+            .unwrap();
+
+        // 1. First purchase with interaction_id "int_req_1"
+        let (purchased, purchase, balance) = store
+            .purchase_store_item(guild_id, user_id, item1.id, Some("int_req_1"))
+            .await
+            .unwrap();
+        assert_eq!(balance, 400);
+        assert_eq!(purchased.id, item1.id);
+        assert_eq!(purchase.price_paid, 100);
+
+        let items_after1 = store.list_store_items(guild_id).await.unwrap();
+        let i1 = items_after1.iter().find(|i| i.id == item1.id).unwrap();
+        assert_eq!(i1.stock, Some(2));
+
+        // 2. Retry with exact same (guild_id, interaction_id, user_id, item_id)
+        let (purchased_retry, purchase_retry, balance_retry) = store
+            .purchase_store_item(guild_id, user_id, item1.id, Some("int_req_1"))
+            .await
+            .unwrap();
+        assert_eq!(purchased_retry.id, item1.id);
+        assert_eq!(purchase_retry.id, purchase.id);
+        assert_eq!(balance_retry, 400, "balance must not debit again on retry");
+
+        // Verify balance in storage still 400 and stock still 2
+        let p_after_retry = store.get_member_progress(guild_id, user_id).await.unwrap();
+        assert_eq!(p_after_retry.coins, 400);
+        let items_after_retry = store.list_store_items(guild_id).await.unwrap();
+        let i1_retry = items_after_retry.iter().find(|i| i.id == item1.id).unwrap();
+        assert_eq!(i1_retry.stock, Some(2));
+
+        // 3. Conflict: same interaction_id but different item
+        let conflict_item = store
+            .purchase_store_item(guild_id, user_id, item2.id, Some("int_req_1"))
+            .await;
+        assert!(
+            conflict_item.is_err(),
+            "same key with different item must fail"
+        );
+        assert!(
+            conflict_item
+                .unwrap_err()
+                .to_string()
+                .contains("idempotency conflict")
+        );
+
+        // 4. Conflict: same interaction_id but different user
+        let conflict_user = store
+            .purchase_store_item(guild_id, user_2, item1.id, Some("int_req_1"))
+            .await;
+        assert!(
+            conflict_user.is_err(),
+            "same key with different user must fail"
+        );
+        assert!(
+            conflict_user
+                .unwrap_err()
+                .to_string()
+                .contains("idempotency conflict")
+        );
+
+        // 5. Different interaction_id succeeds
+        let (purchased2, purchase2, balance2) = store
+            .purchase_store_item(guild_id, user_id, item2.id, Some("int_req_2"))
+            .await
+            .unwrap();
+        assert_eq!(purchased2.id, item2.id);
+        assert_eq!(balance2, 250);
+        assert_ne!(purchase2.id, purchase.id);
+
+        // 6. Erasure GDPR cleans up purchase requests
+        let erasure = store
+            .erase_guild_user_data(guild_id, user_id)
+            .await
+            .unwrap();
+        assert!(erasure.related_records_erased > 0);
     }
 }

@@ -568,6 +568,17 @@ impl PostgresStore {
                 .unwrap_or(0);
         related_erased += deleted_economy_idempotency as usize;
 
+        let deleted_economy_purchases = sqlx::query(
+            "DELETE FROM economy_purchase_requests WHERE guild_id = $1 AND user_id = $2",
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map(|r| r.rows_affected())
+        .unwrap_or(0);
+        related_erased += deleted_economy_purchases as usize;
+
         tx.commit().await?;
 
         let retained_records = vec![
@@ -3158,26 +3169,67 @@ impl PostgresStore {
 
     pub async fn purchase_store_item(
         &self,
-
         guild_id: &str,
-
         user_id: &str,
-
         item_id: Uuid,
+        interaction_id: Option<&str>,
     ) -> anyhow::Result<(StoreItem, StorePurchase, i64)> {
         let mut tx = self.pool.begin().await?;
 
+        if let Some(int_id) = interaction_id {
+            let existing_req = sqlx::query_as::<_, (String, Uuid, Uuid, i64)>(
+                r#"
+                SELECT user_id, item_id, purchase_id, balance_after
+                FROM economy_purchase_requests
+                WHERE guild_id = $1 AND interaction_id = $2
+                FOR UPDATE
+                "#,
+            )
+            .bind(guild_id)
+            .bind(int_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            if let Some((existing_user, existing_item, purchase_id, balance_after)) = existing_req {
+                if existing_user != user_id || existing_item != item_id {
+                    return Err(anyhow::anyhow!(
+                        "idempotency conflict: interaction_id '{int_id}' was already used for a different purchase"
+                    ));
+                }
+
+                let item = sqlx::query_as::<_, StoreItem>(
+                    r#"
+                    SELECT id, guild_id, name, description, price, role_id, stock, created_at
+                    FROM store_items
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(item_id)
+                .fetch_one(&mut *tx)
+                .await?;
+
+                let purchase = sqlx::query_as::<_, StorePurchase>(
+                    r#"
+                    SELECT id, guild_id, user_id, item_id, price_paid, role_id, fulfillment_status, failure_reason, fulfilled_at, created_at
+                    FROM store_purchases
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(purchase_id)
+                .fetch_one(&mut *tx)
+                .await?;
+
+                tx.commit().await?;
+                return Ok((item, purchase, balance_after));
+            }
+        }
+
         let item = sqlx::query_as::<_, StoreItem>(
             r#"
-
             SELECT id, guild_id, name, description, price, role_id, stock, created_at
-
             FROM store_items
-
             WHERE id = $1
-
             FOR UPDATE
-
             "#,
         )
         .bind(item_id)
@@ -3259,6 +3311,36 @@ impl PostgresStore {
         .bind(now)
         .fetch_one(&mut *tx)
         .await?;
+
+        if let Some(int_id) = interaction_id {
+            let res = sqlx::query(
+                r#"
+                INSERT INTO economy_purchase_requests (guild_id, interaction_id, user_id, item_id, purchase_id, balance_after, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (guild_id, interaction_id) DO NOTHING
+                "#,
+            )
+            .bind(guild_id)
+            .bind(int_id)
+            .bind(user_id)
+            .bind(item_id)
+            .bind(purchase_id)
+            .bind(profile.coins)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+
+            if res.rows_affected() == 0 {
+                tx.rollback().await?;
+                return Box::pin(self.purchase_store_item(
+                    guild_id,
+                    user_id,
+                    item_id,
+                    Some(int_id),
+                ))
+                .await;
+            }
+        }
 
         tx.commit().await?;
 

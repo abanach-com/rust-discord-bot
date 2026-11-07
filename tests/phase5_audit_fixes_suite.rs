@@ -404,7 +404,7 @@ async fn test_phase5_audit_fixes_comprehensive_suite() {
     let poor_purchase = state
         .app
         .storage
-        .purchase_store_item(guild_a, "poor_user", item.id)
+        .purchase_store_item(guild_a, "poor_user", item.id, None)
         .await;
     assert!(poor_purchase.is_err(), "Purchase without coins must fail");
 

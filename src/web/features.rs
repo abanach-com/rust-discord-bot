@@ -1379,14 +1379,29 @@ pub async fn purchase_store_item(
 
     ensure_guild_member_access(&state, &session, &guild_id).await?;
 
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+
     let (item, purchase, remaining_balance) = state
         .app
         .storage
-        .purchase_store_item(&guild_id, &session.user.id, payload.item_id)
+        .purchase_store_item(
+            &guild_id,
+            &session.user.id,
+            payload.item_id,
+            idempotency_key,
+        )
         .await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
-    let (fulfillment_status, failure_reason) = if let Some(ref role_id) = item.role_id {
+    let (fulfillment_status, failure_reason) = if purchase.fulfillment_status == "completed" {
+        ("completed".to_string(), None)
+    } else if purchase.fulfillment_status == "failed" {
+        ("failed".to_string(), purchase.failure_reason.clone())
+    } else if let Some(ref role_id) = item.role_id {
         match state
             .app
             .deliver_store_role(&guild_id, &session.user.id, role_id)
