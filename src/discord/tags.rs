@@ -13,7 +13,7 @@ use crate::{
 
 #[allow(dead_code)]
 #[derive(Clone, Copy)]
-pub(super) struct TagExecutionContext {
+pub struct TagExecutionContext {
     pub guild_id: Option<GuildId>,
     pub channel_id: Option<ChannelId>,
     pub actor_id: Option<UserId>,
@@ -48,16 +48,45 @@ pub fn can_manage_tags(permissions: Permissions) -> bool {
         || permissions.contains(Permissions::MANAGE_MESSAGES)
 }
 
-pub(super) async fn execute_tag_action(
+pub fn validate_tag_execution(
+    module_id: &str,
+    execution: &TagExecutionContext,
+    operation: &TagOperation,
+) -> Result<GuildId> {
+    ensure!(
+        module_id == "tags",
+        "tag actions require the trusted tags module"
+    );
+
+    let guild_id = execution
+        .guild_id
+        .ok_or_else(|| anyhow!("Operacje na tagach są dostępne wyłącznie na serwerze"))?;
+
+    if matches!(
+        operation,
+        TagOperation::Create { .. } | TagOperation::Delete { .. }
+    ) {
+        ensure!(
+            execution.enforce_actor_permissions && execution.actor_id.is_some(),
+            "tag mutations require an interactive authorized actor"
+        );
+        ensure!(
+            can_manage_tags(execution.actor_permissions),
+            "Tworzenie i usuwanie tagów wymaga uprawnienia Zarządzanie wiadomościami lub Administrator."
+        );
+    }
+
+    Ok(guild_id)
+}
+
+pub async fn execute_tag_action(
     _ctx: &Context,
     state: &AppState,
     module_id: &str,
     execution: TagExecutionContext,
     operation: &TagOperation,
 ) -> Result<Option<String>> {
-    let guild_id = execution
-        .guild_id
-        .ok_or_else(|| anyhow!("Operacje na tagach są dostępne wyłącznie na serwerze"))?;
+    let guild_id = validate_tag_execution(module_id, &execution, operation)?;
     let guild_id_str = guild_id.get().to_string();
     let actor_id_str = execution.actor_id.map(|a| a.get().to_string());
 
@@ -77,13 +106,6 @@ pub(super) async fn execute_tag_action(
         }
 
         TagOperation::Create { name, content } => {
-            if execution.enforce_actor_permissions {
-                ensure!(
-                    can_manage_tags(execution.actor_permissions),
-                    "Tworzenie tagów wymaga uprawnienia Zarządzanie wiadomościami lub Administrator."
-                );
-            }
-
             let norm = normalize_tag_name(name);
             let tag_record = TagRecord {
                 name: norm.clone(),
@@ -119,13 +141,6 @@ pub(super) async fn execute_tag_action(
         }
 
         TagOperation::Delete { name } => {
-            if execution.enforce_actor_permissions {
-                ensure!(
-                    can_manage_tags(execution.actor_permissions),
-                    "Usuwanie tagów wymaga uprawnienia Zarządzanie wiadomościami lub Administrator."
-                );
-            }
-
             let norm = normalize_tag_name(name);
             let deleted = state
                 .storage
@@ -154,5 +169,149 @@ pub(super) async fn execute_tag_action(
                 Ok(Some(format!("Tag `{norm}` nie istnieje.")))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_can_manage_tags() {
+        assert!(can_manage_tags(Permissions::ADMINISTRATOR));
+        assert!(can_manage_tags(Permissions::MANAGE_MESSAGES));
+        assert!(can_manage_tags(Permissions::all()));
+        assert!(!can_manage_tags(Permissions::MANAGE_CHANNELS));
+        assert!(!can_manage_tags(Permissions::SEND_MESSAGES));
+        assert!(!can_manage_tags(Permissions::empty()));
+    }
+
+    #[test]
+    fn test_validate_tag_execution_untrusted_module() {
+        let execution = TagExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(200)),
+            Some(UserId::new(300)),
+            Permissions::MANAGE_MESSAGES,
+            Permissions::all(),
+            true,
+        );
+        let op = TagOperation::Get {
+            name: "test".to_string(),
+        };
+
+        let res = validate_tag_execution("community", &execution, &op);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("trusted tags module"));
+    }
+
+    #[test]
+    fn test_validate_tag_execution_create_delete_non_interactive_rejected() {
+        // Missing actor
+        let exec_no_actor = TagExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(200)),
+            None,
+            Permissions::MANAGE_MESSAGES,
+            Permissions::all(),
+            true,
+        );
+        let op_create = TagOperation::Create {
+            name: "rule1".to_string(),
+            content: "Be nice".to_string(),
+        };
+        let res = validate_tag_execution("tags", &exec_no_actor, &op_create);
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("interactive authorized actor")
+        );
+
+        // Event origin (enforce_actor_permissions = false)
+        let exec_event = TagExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(200)),
+            Some(UserId::new(300)),
+            Permissions::MANAGE_MESSAGES,
+            Permissions::all(),
+            false,
+        );
+        let op_delete = TagOperation::Delete {
+            name: "rule1".to_string(),
+        };
+        let res_del = validate_tag_execution("tags", &exec_event, &op_delete);
+        assert!(res_del.is_err());
+        assert!(
+            res_del
+                .unwrap_err()
+                .to_string()
+                .contains("interactive authorized actor")
+        );
+    }
+
+    #[test]
+    fn test_validate_tag_execution_missing_permission_rejected() {
+        let exec_low_perms = TagExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(200)),
+            Some(UserId::new(300)),
+            Permissions::SEND_MESSAGES,
+            Permissions::all(),
+            true,
+        );
+        let op = TagOperation::Create {
+            name: "info".to_string(),
+            content: "Some info".to_string(),
+        };
+        let res = validate_tag_execution("tags", &exec_low_perms, &op);
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("Zarządzanie wiadomościami lub Administrator")
+        );
+    }
+
+    #[test]
+    fn test_validate_tag_execution_get_allowed_without_actor_permission() {
+        // Get operation is read-only and does not require MANAGE_MESSAGES
+        let exec_reader = TagExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(200)),
+            Some(UserId::new(300)),
+            Permissions::empty(),
+            Permissions::all(),
+            true,
+        );
+        let op = TagOperation::Get {
+            name: "rules".to_string(),
+        };
+        let res = validate_tag_execution("tags", &exec_reader, &op);
+        assert_eq!(res.unwrap(), GuildId::new(100));
+    }
+
+    #[test]
+    fn test_validate_tag_execution_valid_mutations() {
+        let exec_admin = TagExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(200)),
+            Some(UserId::new(300)),
+            Permissions::MANAGE_MESSAGES,
+            Permissions::all(),
+            true,
+        );
+        let op_create = TagOperation::Create {
+            name: "rules".to_string(),
+            content: "No spam".to_string(),
+        };
+        let res_create = validate_tag_execution("tags", &exec_admin, &op_create);
+        assert_eq!(res_create.unwrap(), GuildId::new(100));
+
+        let op_del = TagOperation::Delete {
+            name: "rules".to_string(),
+        };
+        let res_del = validate_tag_execution("tags", &exec_admin, &op_del);
+        assert_eq!(res_del.unwrap(), GuildId::new(100));
     }
 }

@@ -135,6 +135,7 @@ for every returned action. Service-specific rules are additional gates.
 This bypasses the common interactive permission/rate-limit gate, not Discord's real bot permissions.
 It also does not grant a service's moderator predicate: moderation-case mutations still require it.
 An event can lack an actor or channel; operations requiring those values reject the missing context.
+Privileged service operations (`giveaway`, `tag` mutations `create`/`delete`, `ticket`, `progression adjust`) strictly mandate interactive command execution (`enforce_actor_permissions = true`), authenticated actor presence, and appropriate administrative/management permissions (`MANAGE_GUILD`, `MANAGE_MESSAGES`), failing closed if emitted from non-interactive event callbacks or untrusted module identities.
 
 **Known limitation:** [#110](https://github.com/abanach-com/rust-discord-bot/issues/110) remains relevant
 in this snapshot. The [target-channel resolver](../../src/discord/executor.rs#L1891-L1997) applies target

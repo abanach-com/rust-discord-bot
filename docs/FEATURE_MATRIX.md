@@ -259,7 +259,7 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 | Custom collectible cards | Implemented |
 | Achievements | Planned |
 
-### 7.1 Community, Giveaways & Platform Reliability Hardening (Issues #266, #267, #268, #269, #270, #271, #272, #273, #274)
+### 7.1 Community, Giveaways & Platform Reliability Hardening (Issues #266, #267, #268, #269, #270, #271, #272, #273, #274, #275)
 - **AutoMod Embed-Only Update Guard (Issue #266)**: Calculation of `content_changed` and `attachments_changed` flags during `MESSAGE_UPDATE` gateway handling prevents spurious re-moderation and repeat actions on link unfurls and embed-only updates.
 - **Custom Tags Persistence & ACL (Issue #267)**: End-to-end `/tag create/get/delete` execution pipeline backed by PostgreSQL `module_kv`, strongly-typed `TagOperation` and `LuaAction::Tag`, `MANAGE_MESSAGES`/`ADMINISTRATOR` privilege validation, sanitized mentions on read, and audit logging.
 - **Voice Companion Delayed Reconcile Race Safety (Issue #268)**: Reconciliation on delayed `GUILD_CREATE` checks live guild cache under per-user mutex locks, preventing stale gateway snapshots from revoking or granting permissions contrary to newer `VOICE_STATE_UPDATE` events.
@@ -269,6 +269,7 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 - **Giveaway Channel View Authorization (Issue #272)**: Replaced naive guild membership-only verification in `get_giveaway` and `join_giveaway` endpoints with `ensure_channel_view_access`, querying Discord channel permission bits (`VIEW_CHANNEL` or `ADMINISTRATOR`) to prevent unauthorized access or drawing entries into private/staff-only giveaway channels.
 - **Giveaway Module Configuration Enforcement & Self-Entry Policies (Issue #273)**: Enforced server module configuration across Lua and privileged Rust execution pipelines: respected `max_winners` limits (clamped 1..=20), `default_duration_minutes`, and configured `announcement_channel_id`. Added `created_by_user_id` tracking in PostgreSQL (`migrations/0039_giveaways_created_by.sql`) and MemoryStore, enforcing atomic `allow_self_entry` guards with backward-compatible grandfathering for legacy giveaways.
 - **Giveaway Privileged Service Boundary & Capability Guards (Issue #274)**: Hardened `giveaway::execute` with fail-closed capability verification: restricted execution exclusively to trusted module identity (`module_id == "giveaway"`), mandatory interactive user command origin (`enforce_actor_permissions && actor_id.is_some()`), and verified `MANAGE_GUILD` or `ADMINISTRATOR` privileges before any storage mutation or Discord HTTP dispatch.
+- **Custom Tag Mutation Capability & Permission Guards (Issue #275)**: Enforced capability boundary in `tags::execute_tag_action`: restricted tag operations exclusively to trusted module identity (`module_id == "tags"`), and enforced mandatory interactive user command origin (`enforce_actor_permissions && actor_id.is_some()`) along with `MANAGE_MESSAGES` or `ADMINISTRATOR` permissions for `Create` and `Delete` operations, preventing unauthorized tag mutations via event callbacks or foreign modules.
 
 ## 8. Levels and economy
 

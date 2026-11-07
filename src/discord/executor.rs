@@ -18,7 +18,10 @@ use serenity::{
     client::Context,
 };
 
-use crate::{AppState, lua::LuaAction};
+use crate::{
+    AppState,
+    lua::{LuaAction, TagOperation},
+};
 
 use super::{giveaway, moderation_cases, music, progression, scheduler, tags, tickets};
 
@@ -1536,6 +1539,10 @@ fn required_permission(action: &LuaAction) -> Option<Permissions> {
         LuaAction::DeleteMessage { .. } | LuaAction::Purge { .. } => {
             Some(Permissions::MANAGE_MESSAGES)
         }
+
+        LuaAction::Tag {
+            operation: TagOperation::Create { .. } | TagOperation::Delete { .. },
+        } => Some(Permissions::MANAGE_MESSAGES),
 
         LuaAction::TimeoutMember { .. } => Some(Permissions::MODERATE_MEMBERS),
 

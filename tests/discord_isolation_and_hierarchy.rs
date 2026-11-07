@@ -2054,3 +2054,115 @@ async fn test_voice_companion_delayed_guild_create_reconciliation_race_safe() {
 
     shard_manager.shutdown_all().await;
 }
+
+#[tokio::test]
+async fn test_tag_mutation_from_event_and_untrusted_module_strictly_denied() {
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state().await;
+    let guild_id = GuildId::new(100);
+    let guild_id_str = "100";
+    let initial_modifications = mock.modifying_requests_count.load(Ordering::SeqCst);
+
+    // 1. Tag Create from event (even with module_id = "tags") -> strictly denied, 0 storage mutations
+    let create_action = vec![LuaAction::Tag {
+        operation: rusty_discord_bot::lua::TagOperation::Create {
+            name: "event_exploit".to_string(),
+            content: "malicious tag".to_string(),
+        },
+    }];
+    let res = execute_event_actions(
+        &ctx,
+        &state,
+        "tags",
+        Some(guild_id),
+        Some(ChannelId::new(101)),
+        Some(UserId::new(555)),
+        &create_action,
+    )
+    .await;
+    assert!(
+        res.is_ok(),
+        "execute_event_actions handles failures gracefully"
+    );
+
+    let tag_check = state
+        .storage
+        .get_tag(guild_id_str, "event_exploit")
+        .await
+        .unwrap();
+    assert!(
+        tag_check.is_none(),
+        "Tag must NOT be created from an event callback"
+    );
+
+    // 2. Tag Create from untrusted module (e.g. "community") -> strictly denied
+    let res_untrusted = execute_event_actions(
+        &ctx,
+        &state,
+        "community",
+        Some(guild_id),
+        Some(ChannelId::new(101)),
+        Some(UserId::new(555)),
+        &create_action,
+    )
+    .await;
+    assert!(res_untrusted.is_ok());
+    assert!(
+        state
+            .storage
+            .get_tag(guild_id_str, "event_exploit")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // 3. Pre-seed a tag directly in storage, then attempt Tag Delete from event
+    state
+        .storage
+        .set_tag(
+            guild_id_str,
+            rusty_discord_bot::storage::TagRecord {
+                name: "legit_tag".to_string(),
+                content: "official content".to_string(),
+                author_id: "admin_1".to_string(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let delete_action = vec![LuaAction::Tag {
+        operation: rusty_discord_bot::lua::TagOperation::Delete {
+            name: "legit_tag".to_string(),
+        },
+    }];
+    let res_del = execute_event_actions(
+        &ctx,
+        &state,
+        "tags",
+        Some(guild_id),
+        Some(ChannelId::new(101)),
+        Some(UserId::new(555)),
+        &delete_action,
+    )
+    .await;
+    assert!(res_del.is_ok());
+
+    // Verify tag still exists in storage (not deleted)
+    let tag_still_there = state
+        .storage
+        .get_tag(guild_id_str, "legit_tag")
+        .await
+        .unwrap();
+    assert!(
+        tag_still_there.is_some(),
+        "Legitimate tag must NOT be deleted from event callback"
+    );
+
+    // Verify zero modifying HTTP requests were made to Discord
+    let after_modifications = mock.modifying_requests_count.load(Ordering::SeqCst);
+    assert_eq!(after_modifications, initial_modifications);
+
+    shard_manager.shutdown_all().await;
+}
