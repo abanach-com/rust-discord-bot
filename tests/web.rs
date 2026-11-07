@@ -10276,3 +10276,517 @@ async fn test_polls_channel_view_live_mode_and_cross_guild_suite() {
     assert_eq!(repeat_body["tallies_json"][0], 1);
     assert_eq!(repeat_body["tallies_json"][1], 0);
 }
+
+#[tokio::test]
+async fn test_giveaway_private_thread_membership_authorization_suite() {
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+
+    let guild_id = "777888999000111";
+    let private_thread_id = "120000000000000001"; // type 12 GUILD_PRIVATE_THREAD
+    let public_thread_id = "110000000000000001"; // type 11 GUILD_PUBLIC_THREAD
+    let text_channel_id = "100000000000000001"; // type 0 GUILD_TEXT
+
+    let member_in_thread_id = "111111111111111111";
+    let member_not_in_thread_id = "222222222222222222";
+    let thread_moderator_id = "333333333333333333";
+    let admin_id = "444444444444444444";
+    let member_error_id = "555555555555555555";
+
+    // 1. Mock Discord API
+    let discord_mock_app = axum::Router::new()
+        .route(
+            "/channels/{channel_id}",
+            get(
+                |axum::extract::Path(channel_id): axum::extract::Path<String>| async move {
+                    if channel_id == "120000000000000001" {
+                        axum::Json(serde_json::json!({
+                            "id": channel_id,
+                            "guild_id": "777888999000111",
+                            "type": 12
+                        }))
+                        .into_response()
+                    } else if channel_id == "110000000000000001" {
+                        axum::Json(serde_json::json!({
+                            "id": channel_id,
+                            "guild_id": "777888999000111",
+                            "type": 11
+                        }))
+                        .into_response()
+                    } else if channel_id == "100000000000000001" {
+                        axum::Json(serde_json::json!({
+                            "id": channel_id,
+                            "guild_id": "777888999000111",
+                            "type": 0
+                        }))
+                        .into_response()
+                    } else {
+                        (
+                            reqwest::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({
+                                "code": 10003,
+                                "message": "Unknown Channel"
+                            })),
+                        )
+                            .into_response()
+                    }
+                },
+            ),
+        )
+        .route(
+            "/channels/{channel_id}/permissions/member/{user_id}",
+            get(
+                |axum::extract::Path((_channel_id, user_id)): axum::extract::Path<(
+                    String,
+                    String,
+                )>| async move {
+                    if user_id == "111111111111111111"
+                        || user_id == "222222222222222222"
+                        || user_id == "555555555555555555"
+                    {
+                        // VIEW_CHANNEL is bit 1024 (0x400) - inherited from parent overwrites
+                        axum::Json(serde_json::json!({
+                            "permissions": "1024"
+                        }))
+                        .into_response()
+                    } else if user_id == "333333333333333333" {
+                        // MANAGE_THREADS is (1 << 34) = 17179869184 + VIEW_CHANNEL (1024)
+                        axum::Json(serde_json::json!({
+                            "permissions": "17179870208"
+                        }))
+                        .into_response()
+                    } else if user_id == "444444444444444444" {
+                        // ADMINISTRATOR is bit 8
+                        axum::Json(serde_json::json!({
+                            "permissions": "8"
+                        }))
+                        .into_response()
+                    } else {
+                        (
+                            reqwest::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({
+                                "code": 10003,
+                                "message": "Unknown Member"
+                            })),
+                        )
+                            .into_response()
+                    }
+                },
+            ),
+        )
+        .route(
+            "/channels/{channel_id}/thread-members/{user_id}",
+            get(
+                |axum::extract::Path((channel_id, user_id)): axum::extract::Path<(
+                    String,
+                    String,
+                )>| async move {
+                    if user_id == "111111111111111111" {
+                        axum::Json(serde_json::json!({
+                            "id": channel_id,
+                            "user_id": user_id,
+                            "join_timestamp": "2026-11-07T12:00:00+00:00",
+                            "flags": 0
+                        }))
+                        .into_response()
+                    } else if user_id == "555555555555555555" {
+                        (
+                            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                            axum::Json(serde_json::json!({
+                                "code": 500,
+                                "message": "Discord API upstream internal outage"
+                            })),
+                        )
+                            .into_response()
+                    } else {
+                        (
+                            reqwest::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({
+                                "code": 10003,
+                                "message": "Unknown Thread Member"
+                            })),
+                        )
+                            .into_response()
+                    }
+                },
+            ),
+        )
+        .route(
+            "/guilds/{guild_id}/members/{user_id}",
+            get(
+                |axum::extract::Path((_guild_id, user_id)): axum::extract::Path<(
+                    String,
+                    String,
+                )>| async move {
+                    axum::Json(serde_json::json!({
+                        "user": { "id": user_id },
+                        "roles": []
+                    }))
+                    .into_response()
+                },
+            ),
+        );
+
+    let discord_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind discord mock");
+    let discord_addr = discord_listener.local_addr().expect("discord mock addr");
+    tokio::spawn(async move {
+        axum::serve(discord_listener, discord_mock_app)
+            .await
+            .unwrap();
+    });
+
+    // 2. Configure app state in live mode
+    let mut config = test_config();
+    config.discord_token = "live_bot_token_thread_test_secret".to_string();
+    config.offline_mode = false;
+    config.discord_api_base_url = format!("http://{discord_addr}");
+
+    let app = AppState::bootstrap(config).await.expect("bootstrap");
+    let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
+    let web_state = WebState {
+        app,
+        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        permissions_cache,
+    };
+
+    // 3. Register user sessions
+    let make_session = |user_id: &str, username: &str, sess_id: &str, csrf: &str| {
+        (
+            sess_id.to_string(),
+            DashboardUser {
+                id: user_id.to_string(),
+                username: username.to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Test Guild".to_string(),
+                icon: None,
+                owner: user_id == admin_id,
+                permissions: if user_id == admin_id {
+                    "8".to_string()
+                } else {
+                    "0".to_string()
+                },
+            }],
+            csrf.to_string(),
+        )
+    };
+
+    let users = [
+        (
+            member_in_thread_id,
+            "member_in_thread",
+            "sess_in_thread",
+            "csrf_in_thread",
+        ),
+        (
+            member_not_in_thread_id,
+            "member_not_in_thread",
+            "sess_not_in_thread",
+            "csrf_not_in_thread",
+        ),
+        (
+            thread_moderator_id,
+            "thread_moderator",
+            "sess_mod",
+            "csrf_mod",
+        ),
+        (admin_id, "admin", "sess_admin", "csrf_admin"),
+        (member_error_id, "member_error", "sess_err", "csrf_err"),
+    ];
+
+    for (uid, uname, sid, csrf) in users {
+        let (s_id, d_user, d_guilds, s_csrf) = make_session(uid, uname, sid, csrf);
+        web_state
+            .app
+            .sessions
+            .save_session(
+                &s_id,
+                d_user,
+                d_guilds,
+                s_csrf,
+                Utc::now() + Duration::hours(1),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    // Set can_manage for admin
+    web_state.permissions_cache.insert(
+        (admin_id.to_string(), guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    // 4. Create active giveaways in storage for test channels
+    let expires = Utc::now() + Duration::hours(2);
+    let ga_private = web_state
+        .app
+        .storage
+        .create_giveaway(
+            guild_id,
+            private_thread_id,
+            "Private Thread Secret Prize",
+            1,
+            expires,
+        )
+        .await
+        .expect("create private thread giveaway");
+
+    let ga_public = web_state
+        .app
+        .storage
+        .create_giveaway(
+            guild_id,
+            public_thread_id,
+            "Public Thread Prize",
+            1,
+            expires,
+        )
+        .await
+        .expect("create public thread giveaway");
+
+    let ga_text = web_state
+        .app
+        .storage
+        .create_giveaway(guild_id, text_channel_id, "Text Channel Prize", 1, expires)
+        .await
+        .expect("create text channel giveaway");
+
+    // 5. Start web server
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind app");
+    let server_addr = listener.local_addr().expect("local addr");
+    let app_router = build_router(web_state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{server_addr}");
+
+    let cookie_in_thread = "rusty_discord_bot_session=sess_in_thread".to_string();
+    let cookie_not_in_thread = "rusty_discord_bot_session=sess_not_in_thread".to_string();
+    let cookie_mod = "rusty_discord_bot_session=sess_mod".to_string();
+    let cookie_admin = "rusty_discord_bot_session=sess_admin".to_string();
+    let cookie_err = "rusty_discord_bot_session=sess_err".to_string();
+
+    // --- TEST SCENARIO 1: member_not_in_thread has VIEW_CHANNEL from parent, but is NOT a thread member ---
+    // 1a. GET giveaway in private thread -> 403 Forbidden
+    let get_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}",
+            ga_private.id
+        ))
+        .header(COOKIE, &cookie_not_in_thread)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 1b. POST /join giveaway in private thread -> 403 Forbidden
+    let join_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}/join",
+            ga_private.id
+        ))
+        .header(COOKIE, &cookie_not_in_thread)
+        .header("x-csrf-token", "csrf_not_in_thread")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(join_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Verify 0 participants added in storage
+    let ga_check = web_state
+        .app
+        .storage
+        .get_giveaway(ga_private.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let participants = ga_check
+        .participants_json
+        .as_array()
+        .expect("participants array");
+    assert!(
+        participants.is_empty(),
+        "Participants must remain empty after forbidden join"
+    );
+
+    // 1c. POST /giveaways creating in private thread -> 403 Forbidden (not manager & not member)
+    let create_forbidden_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/giveaways"))
+        .header(COOKIE, &cookie_not_in_thread)
+        .header("x-csrf-token", "csrf_not_in_thread")
+        .json(&serde_json::json!({
+            "channel_id": private_thread_id,
+            "prize": "Hacked Prize",
+            "winners_count": 1,
+            "duration_minutes": 60
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        create_forbidden_resp.status(),
+        reqwest::StatusCode::FORBIDDEN
+    );
+
+    // 1d. Accessing public thread (type 11) and text channel (type 0) works with VIEW_CHANNEL alone
+    let get_pub_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}",
+            ga_public.id
+        ))
+        .header(COOKIE, &cookie_not_in_thread)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_pub_resp.status(), reqwest::StatusCode::OK);
+
+    let get_text_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}",
+            ga_text.id
+        ))
+        .header(COOKIE, &cookie_not_in_thread)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_text_resp.status(), reqwest::StatusCode::OK);
+
+    // --- TEST SCENARIO 2: member_in_thread is a verified thread member ---
+    // 2a. GET giveaway in private thread -> 200 OK
+    let get_ok_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}",
+            ga_private.id
+        ))
+        .header(COOKIE, &cookie_in_thread)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_ok_resp.status(), reqwest::StatusCode::OK);
+
+    // 2b. POST /join giveaway in private thread -> 200 OK (joined: true)
+    let join_ok_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}/join",
+            ga_private.id
+        ))
+        .header(COOKIE, &cookie_in_thread)
+        .header("x-csrf-token", "csrf_in_thread")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(join_ok_resp.status(), reqwest::StatusCode::OK);
+    let join_body: serde_json::Value = join_ok_resp.json().await.unwrap();
+    assert_eq!(join_body["joined"], true);
+
+    // Verify member_in_thread is registered in storage
+    let ga_check2 = web_state
+        .app
+        .storage
+        .get_giveaway(ga_private.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ga_check2.participants_json,
+        serde_json::json!([member_in_thread_id])
+    );
+
+    // --- TEST SCENARIO 3: thread_moderator has MANAGE_THREADS permission (bypasses thread-member requirement) ---
+    // 3a. GET giveaway in private thread -> 200 OK
+    let mod_get_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}",
+            ga_private.id
+        ))
+        .header(COOKIE, &cookie_mod)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mod_get_resp.status(), reqwest::StatusCode::OK);
+
+    // 3b. POST /join giveaway in private thread -> 200 OK
+    let mod_join_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}/join",
+            ga_private.id
+        ))
+        .header(COOKIE, &cookie_mod)
+        .header("x-csrf-token", "csrf_mod")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mod_join_resp.status(), reqwest::StatusCode::OK);
+
+    // --- TEST SCENARIO 4: admin has ADMINISTRATOR permission and can manage guild ---
+    // 4a. GET giveaway in private thread -> 200 OK
+    let admin_get_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}",
+            ga_private.id
+        ))
+        .header(COOKIE, &cookie_admin)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin_get_resp.status(), reqwest::StatusCode::OK);
+
+    // 4b. Admin creates a giveaway in private thread -> 200 OK
+    let admin_create_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/giveaways"))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", "csrf_admin")
+        .json(&serde_json::json!({
+            "channel_id": private_thread_id,
+            "prize": "Admin Created Thread Prize",
+            "winners_count": 1,
+            "duration_minutes": 60
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin_create_resp.status(), reqwest::StatusCode::OK);
+
+    // --- TEST SCENARIO 5: Fail-closed on Discord API error (500 from thread-members) ---
+    let err_get_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}",
+            ga_private.id
+        ))
+        .header(COOKIE, &cookie_err)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(err_get_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let err_join_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}/join",
+            ga_private.id
+        ))
+        .header(COOKIE, &cookie_err)
+        .header("x-csrf-token", "csrf_err")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(err_join_resp.status(), reqwest::StatusCode::FORBIDDEN);
+}

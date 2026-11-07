@@ -619,6 +619,41 @@ pub async fn ensure_channel_view_access(
         ));
     }
 
+    // Discord private threads (type 12) inherit parent overwrites, so VIEW_CHANNEL alone is not enough.
+    // Non-moderators must be explicit members of the private thread.
+    if channel_scope.channel_type == 12
+        && !perms.contains(Permissions::ADMINISTRATOR)
+        && !perms.contains(Permissions::MANAGE_THREADS)
+    {
+        let thread_member_url = format!(
+            "{base_url}/channels/{channel_id}/thread-members/{}",
+            session.user.id
+        );
+        let tm_resp = state
+            .app
+            .http_client
+            .get(&thread_member_url)
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("Bot {}", state.app.config.discord_token),
+            )
+            .send()
+            .await
+            .map_err(ApiError::upstream)?;
+
+        if tm_resp.status() == StatusCode::NOT_FOUND || tm_resp.status() == StatusCode::FORBIDDEN {
+            return Err(ApiError::forbidden(
+                "Brak dostępu do prywatnego wątku konkursu: wymagane członkostwo w wątku lub uprawnienie MANAGE_THREADS",
+            ));
+        }
+
+        if !tm_resp.status().is_success() {
+            return Err(ApiError::forbidden(
+                "Nie udało się zweryfikować członkostwa w prywatnym wątku w Discord API",
+            ));
+        }
+    }
+
     Ok(())
 }
 
