@@ -291,6 +291,16 @@ pub fn validate_track_fields(
     if target_role_id.is_some() && config.auto_role_on_accept && config.final_approvals == 0 {
         anyhow::bail!("Auto-role on accept requires final_approvals to be at least 1");
     }
+    if config.review_role_ids.len() > 20 {
+        anyhow::bail!("review_role_ids cannot contain more than 20 roles");
+    }
+    let mut seen = std::collections::HashSet::new();
+    for rid in &config.review_role_ids {
+        validate_snowflake("review_role_ids", rid)?;
+        if !seen.insert(rid) {
+            anyhow::bail!("review_role_ids cannot contain duplicate roles");
+        }
+    }
     Ok(())
 }
 
@@ -564,5 +574,67 @@ mod tests {
 
         // 2 distinct approvals (rev_1, rev_2)
         assert_eq!(count_distinct_approvals(&reviews), 2);
+    }
+
+    #[test]
+    fn test_validate_track_fields_review_roles() {
+        let mut cfg = RecruitmentTrackConfig {
+            review_role_ids: vec!["123456789012345678".to_string()],
+            ..Default::default()
+        };
+        assert!(
+            validate_track_fields(
+                "100000000000000001",
+                "valid-slug",
+                "Valid Track",
+                None,
+                &cfg
+            )
+            .is_ok()
+        );
+
+        // Duplicate roles
+        cfg.review_role_ids = vec![
+            "123456789012345678".to_string(),
+            "123456789012345678".to_string(),
+        ];
+        assert!(
+            validate_track_fields(
+                "100000000000000001",
+                "valid-slug",
+                "Valid Track",
+                None,
+                &cfg
+            )
+            .is_err()
+        );
+
+        // Invalid snowflake
+        cfg.review_role_ids = vec!["not_a_snowflake".to_string()];
+        assert!(
+            validate_track_fields(
+                "100000000000000001",
+                "valid-slug",
+                "Valid Track",
+                None,
+                &cfg
+            )
+            .is_err()
+        );
+
+        // > 20 roles
+        cfg.review_role_ids = (1..=21)
+            .map(|i| format!("1000000000000000{:02}", i))
+            .collect();
+        assert!(
+            validate_track_fields(
+                "100000000000000001",
+                "valid-slug",
+                "Valid Track",
+                None,
+                &cfg
+            )
+            .is_err()
+        );
     }
 }

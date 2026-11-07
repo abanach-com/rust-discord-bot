@@ -4819,6 +4819,209 @@ pub async fn list_recruitment_tracks(
     Ok(Json(json!({ "tracks": filtered })))
 }
 
+pub async fn fetch_current_member_role_ids(
+    state: &WebState,
+    guild_id: &str,
+    user_id: &str,
+) -> Result<Vec<String>, ApiError> {
+    if state.app.config.is_offline_mode() {
+        return Ok(Vec::new());
+    }
+
+    validate_snowflake("guild_id", guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    validate_snowflake("user_id", user_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let base_url = &state.app.config.discord_api_base_url;
+    let token = &state.app.config.discord_token;
+    let auth_header = format!("Bot {token}");
+    let member_url = format!("{base_url}/guilds/{guild_id}/members/{user_id}");
+
+    let resp = state
+        .app
+        .http_client
+        .get(&member_url)
+        .header(reqwest::header::AUTHORIZATION, &auth_header)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(ApiError::upstream)?;
+
+    if resp.status() == reqwest::StatusCode::NOT_FOUND
+        || resp.status() == reqwest::StatusCode::FORBIDDEN
+    {
+        return Err(ApiError::forbidden("You are not a member of this server."));
+    }
+
+    if !resp.status().is_success() {
+        tracing::warn!(
+            status = %resp.status(),
+            guild_id,
+            user_id,
+            "Discord API returned non-success when fetching member roles; failing closed"
+        );
+        return Err(ApiError::forbidden(
+            "Member roles could not be verified at this time.",
+        ));
+    }
+
+    let member: DiscordMemberItem = resp.json().await.map_err(ApiError::upstream)?;
+    Ok(member.roles)
+}
+
+pub async fn check_is_guild_owner(
+    state: &WebState,
+    session: &crate::web::auth::Session,
+    guild_id: &str,
+) -> Result<bool, ApiError> {
+    if state.app.config.is_offline_mode() {
+        return Ok(session.guilds.iter().any(|g| g.id == guild_id && g.owner));
+    }
+
+    let base_url = &state.app.config.discord_api_base_url;
+    let token = &state.app.config.discord_token;
+    let auth_header = format!("Bot {token}");
+    let guild_url = format!("{base_url}/guilds/{guild_id}");
+
+    let resp = state
+        .app
+        .http_client
+        .get(&guild_url)
+        .header(reqwest::header::AUTHORIZATION, &auth_header)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(ApiError::upstream)?;
+
+    if !resp.status().is_success() {
+        return Ok(false);
+    }
+
+    let details: Result<DiscordGuildDetails, _> = resp.json().await;
+    let is_owner = details
+        .ok()
+        .and_then(|g| g.owner_id)
+        .map(|oid| oid == session.user.id)
+        .unwrap_or(false);
+
+    Ok(is_owner)
+}
+
+pub async fn ensure_recruitment_reviewer_access(
+    state: &WebState,
+    session: &crate::web::auth::Session,
+    guild_id: &str,
+    track: &RecruitmentTrack,
+) -> Result<(), ApiError> {
+    if track.config.review_role_ids.is_empty() {
+        return ensure_guild_access(state, session, guild_id).await;
+    }
+
+    ensure_guild_member_access(state, session, guild_id).await?;
+
+    if check_is_guild_owner(state, session, guild_id).await? {
+        return Ok(());
+    }
+
+    let live_roles = fetch_current_member_role_ids(state, guild_id, &session.user.id).await?;
+    let eligible = live_roles.iter().any(|rid| {
+        track
+            .config
+            .review_role_ids
+            .iter()
+            .any(|allowed| allowed == rid)
+    });
+
+    if !eligible {
+        return Err(ApiError::forbidden(
+            "You are not assigned to review this recruitment track.",
+        ));
+    }
+
+    Ok(())
+}
+
+pub async fn count_eligible_approvals(
+    state: &WebState,
+    guild_id: &str,
+    track: &RecruitmentTrack,
+    reviews: &[RecruitmentReview],
+) -> Result<usize, ApiError> {
+    if track.config.review_role_ids.is_empty() {
+        return Ok(crate::recruitment::count_distinct_approvals(reviews));
+    }
+
+    let mut approved_reviewers = std::collections::HashSet::new();
+    for r in reviews {
+        if r.recommendation == "approve" {
+            approved_reviewers.insert(r.reviewer_user_id.clone());
+        }
+    }
+
+    if approved_reviewers.is_empty() {
+        return Ok(0);
+    }
+
+    let guild_owner_id = if state.app.config.is_offline_mode() {
+        None
+    } else {
+        let base_url = &state.app.config.discord_api_base_url;
+        let token = &state.app.config.discord_token;
+        let auth_header = format!("Bot {token}");
+        let guild_url = format!("{base_url}/guilds/{guild_id}");
+        let resp = state
+            .app
+            .http_client
+            .get(&guild_url)
+            .header(reqwest::header::AUTHORIZATION, &auth_header)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+            .map_err(ApiError::upstream)?;
+        if resp.status().is_success() {
+            let details: Result<DiscordGuildDetails, _> = resp.json().await;
+            details.ok().and_then(|g| g.owner_id)
+        } else {
+            None
+        }
+    };
+
+    let mut eligible_count = 0;
+    for reviewer_id in approved_reviewers {
+        if let Some(ref owner_id) = guild_owner_id
+            && &reviewer_id == owner_id
+        {
+            eligible_count += 1;
+            continue;
+        }
+
+        let roles_res = fetch_current_member_role_ids(state, guild_id, &reviewer_id).await;
+        match roles_res {
+            Ok(roles) => {
+                let has_role = roles.iter().any(|rid| {
+                    track
+                        .config
+                        .review_role_ids
+                        .iter()
+                        .any(|allowed| allowed == rid)
+                });
+                if has_role {
+                    eligible_count += 1;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    ?e,
+                    guild_id,
+                    reviewer_id,
+                    "Failed to fetch live roles for reviewer during approval counting; skipping reviewer"
+                );
+            }
+        }
+    }
+
+    Ok(eligible_count)
+}
+
 pub async fn upsert_recruitment_track(
     State(state): State<WebState>,
     Path(guild_id): Path<String>,
@@ -4829,6 +5032,49 @@ pub async fn upsert_recruitment_track(
     verify_csrf(&headers, &session)?;
     ensure_guild_access(&state, &session, &guild_id).await?;
     validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    crate::recruitment::validate_track_fields(
+        &guild_id,
+        &payload.slug,
+        &payload.name,
+        payload.target_role_id.as_deref(),
+        &payload.config,
+    )
+    .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    if !payload.config.review_role_ids.is_empty() && !state.app.config.is_offline_mode() {
+        let base_url = &state.app.config.discord_api_base_url;
+        let token = &state.app.config.discord_token;
+        let auth_header = format!("Bot {token}");
+        let roles_url = format!("{base_url}/guilds/{guild_id}/roles");
+        let roles_resp = state
+            .app
+            .http_client
+            .get(&roles_url)
+            .header(reqwest::header::AUTHORIZATION, &auth_header)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+            .map_err(ApiError::upstream)?;
+
+        if !roles_resp.status().is_success() {
+            return Err(ApiError::bad_request(
+                "Could not verify guild roles via Discord API.",
+            ));
+        }
+
+        let roles: Vec<DiscordRoleItem> = roles_resp.json().await.map_err(ApiError::upstream)?;
+        let existing_role_ids: std::collections::HashSet<&str> =
+            roles.iter().map(|r| r.id.as_str()).collect();
+
+        for review_role_id in &payload.config.review_role_ids {
+            if !existing_role_ids.contains(review_role_id.as_str()) {
+                return Err(ApiError::bad_request(format!(
+                    "Review role '{review_role_id}' does not exist on this server"
+                )));
+            }
+        }
+    }
 
     if let Some(ref role_id) = payload.target_role_id {
         if payload.config.auto_role_on_accept && payload.config.final_approvals == 0 {
@@ -4929,15 +5175,32 @@ pub async fn list_recruitment_applications(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
     let is_staff = ensure_guild_access(&state, &session, &guild_id)
         .await
         .is_ok();
-    if !is_staff {
-        ensure_guild_member_access(&state, &session, &guild_id).await?;
-    }
-    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
 
-    let is_mine = !is_staff || query.mine.unwrap_or(false);
+    let is_track_reviewer = if let Some(track_id) = query.track_id {
+        if let Ok(Some(track)) = state
+            .app
+            .storage
+            .get_recruitment_track(&guild_id, track_id)
+            .await
+        {
+            ensure_recruitment_reviewer_access(&state, &session, &guild_id, &track)
+                .await
+                .is_ok()
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let can_see_all = is_staff || is_track_reviewer;
+    let is_mine = !can_see_all || query.mine.unwrap_or(false);
     let applicant_filter = if is_mine {
         Some(session.user.id.as_str())
     } else {
@@ -4961,7 +5224,7 @@ pub async fn list_recruitment_applications(
     let total = apps.len();
     let apps_page: Vec<_> = apps.into_iter().skip(offset).take(limit).collect();
 
-    if is_mine && !is_staff {
+    if is_mine && !can_see_all {
         let views: Vec<_> = apps_page
             .into_iter()
             .map(|a| a.to_candidate_view())
@@ -4989,15 +5252,42 @@ pub async fn list_recruitment_applications(
         .await
         .map_err(|e| ApiError::internal(format!("Failed to load role fulfillment: {e}")))?;
 
-    let mut staff_views = Vec::with_capacity(apps_page.len());
+    let mut track_cache = std::collections::HashMap::new();
+    let mut views = Vec::with_capacity(apps_page.len());
     for app in apps_page {
-        let reviews = reviews_by_app.remove(&app.id).unwrap_or_default();
-        let fulfillment = fulfillments_by_app.remove(&app.id);
-        staff_views.push(app.to_staff_view(reviews, fulfillment));
+        let track = if let Some(t) = track_cache.get(&app.track_id) {
+            Some(t)
+        } else if let Ok(Some(t)) = state
+            .app
+            .storage
+            .get_recruitment_track(&guild_id, app.track_id)
+            .await
+        {
+            track_cache.insert(app.track_id, t);
+            track_cache.get(&app.track_id)
+        } else {
+            None
+        };
+
+        let can_view_staff = if let Some(tr) = track {
+            ensure_recruitment_reviewer_access(&state, &session, &guild_id, tr)
+                .await
+                .is_ok()
+        } else {
+            is_staff
+        };
+
+        if can_view_staff {
+            let reviews = reviews_by_app.remove(&app.id).unwrap_or_default();
+            let fulfillment = fulfillments_by_app.remove(&app.id);
+            views.push(json!(app.to_staff_view(reviews, fulfillment)));
+        } else if app.applicant_user_id == session.user.id {
+            views.push(json!(app.to_candidate_view()));
+        }
     }
 
     Ok(Json(json!({
-        "applications": staff_views,
+        "applications": views,
         "total": total,
         "limit": limit,
         "offset": offset,
@@ -5010,12 +5300,7 @@ pub async fn get_recruitment_application(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
-    let is_staff = ensure_guild_access(&state, &session, &guild_id)
-        .await
-        .is_ok();
-    if !is_staff {
-        ensure_guild_member_access(&state, &session, &guild_id).await?;
-    }
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
     validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     let app = state
@@ -5026,7 +5311,19 @@ pub async fn get_recruitment_application(
         .map_err(|e| ApiError::internal(e.to_string()))?
         .ok_or_else(|| ApiError::not_found("Recruitment application not found"))?;
 
-    if !is_staff {
+    let track = state
+        .app
+        .storage
+        .get_recruitment_track(&guild_id, app.track_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Recruitment track not found"))?;
+
+    let is_reviewer = ensure_recruitment_reviewer_access(&state, &session, &guild_id, &track)
+        .await
+        .is_ok();
+
+    if !is_reviewer {
         if app.applicant_user_id != session.user.id {
             return Err(ApiError::forbidden("Access denied to application"));
         }
@@ -5164,7 +5461,6 @@ pub async fn review_recruitment_application(
 ) -> Result<Json<Value>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
     verify_csrf(&headers, &session)?;
-    ensure_guild_access(&state, &session, &guild_id).await?;
     validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     let app = state
@@ -5174,6 +5470,16 @@ pub async fn review_recruitment_application(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
         .ok_or_else(|| ApiError::not_found("Recruitment application not found"))?;
+
+    let track = state
+        .app
+        .storage
+        .get_recruitment_track(&guild_id, app.track_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Associated recruitment track not found"))?;
+
+    ensure_recruitment_reviewer_access(&state, &session, &guild_id, &track).await?;
 
     if app.applicant_user_id == session.user.id {
         return Err(ApiError::forbidden(
@@ -5277,7 +5583,7 @@ pub async fn transition_recruitment_application(
             ));
         }
 
-        let approvals = crate::recruitment::count_distinct_approvals(&reviews);
+        let approvals = count_eligible_approvals(&state, &guild_id, &track, &reviews).await?;
         if approvals < track.config.final_approvals as usize {
             return Err(ApiError::bad_request(format!(
                 "Application requires at least {} distinct approvals before acceptance, but has {}",
