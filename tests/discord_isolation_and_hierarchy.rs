@@ -3528,5 +3528,60 @@ async fn test_economy_shop_buy_inventory_role_hierarchy_and_guild_isolation() {
         "rejected out of stock purchase must not debit balance"
     );
 
+    // 10. Issue #290 Defense-in-depth: Item with privileged role (AdminRole 1001) cannot deliver role
+    let item_admin_priv = state
+        .storage
+        .create_store_item(
+            "100",
+            "Admin Badge",
+            "Bypassed admin role item",
+            100,
+            Some("1001"),
+            Some(1),
+        )
+        .await
+        .unwrap();
+
+    let baseline_before_admin_buy = mock.modifying_requests_count.load(Ordering::SeqCst);
+    let mut execution_admin_buy = execution.clone();
+    execution_admin_buy.interaction_id = Some("buy_admin_exploit_1".to_string());
+    let buy_admin = economy::execute(
+        &ctx,
+        &state,
+        "economy",
+        execution_admin_buy,
+        &EconomyOperation::Buy {
+            item: item_admin_priv.id.to_string(),
+        },
+    )
+    .await
+    .unwrap()
+    .expect("buy admin reply");
+
+    assert!(buy_admin.contains("Nie udało się nadać roli"));
+
+    let purchases_user = state
+        .storage
+        .list_store_purchases("100", Some("111111111111111111"))
+        .await
+        .unwrap();
+    let admin_purchase = purchases_user
+        .iter()
+        .find(|p| p.item_id == item_admin_priv.id)
+        .expect("purchase record must exist");
+    assert_eq!(admin_purchase.fulfillment_status, "failed");
+    assert!(
+        admin_purchase
+            .failure_reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("uprawnienia administracyjne")
+    );
+    assert_eq!(
+        mock.modifying_requests_count.load(Ordering::SeqCst),
+        baseline_before_admin_buy,
+        "Privileged role must not be dispatched via PUT"
+    );
+
     shard_manager.shutdown_all().await;
 }

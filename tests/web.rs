@@ -9347,6 +9347,468 @@ async fn test_reaction_roles_web_api_and_isolation() {
 }
 
 #[tokio::test]
+async fn test_store_items_privilege_escalation_guard_suite() {
+    use axum::Json;
+    use axum::extract::Path;
+    use axum::response::IntoResponse;
+    use axum::routing::{get, put};
+    use reqwest::header::COOKIE;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let guild_a = "777888999000111";
+
+    let role_delivery_count = Arc::new(AtomicUsize::new(0));
+    let role_delivery_count_clone = role_delivery_count.clone();
+
+    // 1. Mock Discord API for store role verification and delivery
+    let discord_mock_app = axum::Router::new()
+        .route(
+            "/users/@me",
+            get(|| async move {
+                Json(serde_json::json!({
+                    "id": "999999999999999999"
+                }))
+                .into_response()
+            }),
+        )
+        .route(
+            "/guilds/{guild_id}",
+            get(|Path(gid): Path<String>| async move {
+                Json(serde_json::json!({
+                    "id": gid,
+                    "owner_id": "999000000000000000"
+                }))
+                .into_response()
+            }),
+        )
+        .route(
+            "/guilds/{guild_id}/roles",
+            get(|| async move {
+                Json(serde_json::json!([
+                    {
+                        "id": "1002",
+                        "name": "MemberRoleA",
+                        "permissions": "0",
+                        "position": 10,
+                        "managed": false
+                    },
+                    {
+                        "id": "1003",
+                        "name": "ModRole",
+                        "permissions": "268435456", // MANAGE_ROLES
+                        "position": 40,
+                        "managed": false
+                    },
+                    {
+                        "id": "1004",
+                        "name": "BotRole",
+                        "permissions": "268435456",
+                        "position": 60,
+                        "managed": false
+                    },
+                    {
+                        "id": "1005",
+                        "name": "AdminRole",
+                        "permissions": "8", // ADMINISTRATOR
+                        "position": 30,
+                        "managed": false
+                    },
+                    {
+                        "id": "1006",
+                        "name": "TooHighRole",
+                        "permissions": "0",
+                        "position": 50, // higher than actor's position 40
+                        "managed": false
+                    },
+                    {
+                        "id": "1007",
+                        "name": "ManagedIntegrationRole",
+                        "permissions": "0",
+                        "position": 15,
+                        "managed": true
+                    }
+                ]))
+                .into_response()
+            }),
+        )
+        .route(
+            "/guilds/{guild_id}/members/{user_id}",
+            get(|Path((_gid, user_id)): Path<(String, String)>| async move {
+                if user_id == "999999999999999999" {
+                    // Bot member: position 60
+                    Json(serde_json::json!({
+                        "user": { "id": user_id },
+                        "roles": ["1004"],
+                        "permissions": "268435456"
+                    }))
+                    .into_response()
+                } else if user_id == "111111111111111111" {
+                    // Admin A: position 40, MANAGE_GUILD | MANAGE_ROLES
+                    Json(serde_json::json!({
+                        "user": { "id": user_id },
+                        "roles": ["1003"],
+                        "permissions": "268435488"
+                    }))
+                    .into_response()
+                } else if user_id == "333333333333333333" {
+                    // Manager without MANAGE_ROLES: MANAGE_GUILD only (32)
+                    Json(serde_json::json!({
+                        "user": { "id": user_id },
+                        "roles": [],
+                        "permissions": "32"
+                    }))
+                    .into_response()
+                } else {
+                    // Ordinary member / buyer: 0 permissions
+                    Json(serde_json::json!({
+                        "user": { "id": user_id },
+                        "roles": [],
+                        "permissions": "0"
+                    }))
+                    .into_response()
+                }
+            }),
+        )
+        .route(
+            "/guilds/{guild_id}/members/{user_id}/roles/{role_id}",
+            put(move || {
+                let count = role_delivery_count_clone.clone();
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    axum::http::StatusCode::NO_CONTENT.into_response()
+                }
+            }),
+        );
+
+    let discord_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind discord mock");
+    let discord_addr = discord_listener.local_addr().expect("discord mock addr");
+    tokio::spawn(async move {
+        axum::serve(discord_listener, discord_mock_app)
+            .await
+            .unwrap();
+    });
+
+    // 2. Configure app state in live mode
+    let mut config = test_config();
+    config.discord_token = "live_bot_token_production_secret".to_string();
+    config.offline_mode = false;
+    config.discord_api_base_url = format!("http://{discord_addr}");
+
+    let app = AppState::bootstrap(config).await.expect("bootstrap");
+    let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
+    let web_state = WebState {
+        app,
+        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        permissions_cache,
+    };
+    web_state
+        .app
+        .is_gateway_ready
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind web listener");
+    let web_addr = web_listener.local_addr().expect("web addr");
+    let router = build_router(web_state.clone());
+    tokio::spawn(async move {
+        axum::serve(web_listener, router).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{web_addr}");
+
+    // 3. Setup sessions
+    // Admin A: has MANAGE_GUILD and MANAGE_ROLES
+    let admin_a_sess = "admin_a_sess_store";
+    let admin_a_csrf = "admin_a_csrf_store";
+    let admin_a_id = "111111111111111111";
+
+    web_state
+        .app
+        .sessions
+        .save_session(
+            admin_a_sess,
+            DashboardUser {
+                id: admin_a_id.to_owned(),
+                username: "admin_a".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_a.to_owned(),
+                name: "Guild A".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "268435488".to_owned(),
+            }],
+            admin_a_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    web_state.permissions_cache.insert(
+        (admin_a_id.to_owned(), guild_a.to_owned()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    // Manager user: has MANAGE_GUILD (32) but NOT MANAGE_ROLES (Issue #290 test)
+    let no_role_mgmt_sess = "no_role_mgmt_sess_store";
+    let no_role_mgmt_csrf = "no_role_mgmt_csrf_store";
+    let no_role_mgmt_id = "333333333333333333";
+
+    web_state
+        .app
+        .sessions
+        .save_session(
+            no_role_mgmt_sess,
+            DashboardUser {
+                id: no_role_mgmt_id.to_owned(),
+                username: "no_role_mgmt".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_a.to_owned(),
+                name: "Guild A".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "32".to_owned(),
+            }],
+            no_role_mgmt_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    web_state.permissions_cache.insert(
+        (no_role_mgmt_id.to_owned(), guild_a.to_owned()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    // Ordinary buyer user
+    let buyer_sess = "buyer_sess_store";
+    let buyer_csrf = "buyer_csrf_store";
+    let buyer_id = "444444444444444444";
+
+    web_state
+        .app
+        .sessions
+        .save_session(
+            buyer_sess,
+            DashboardUser {
+                id: buyer_id.to_owned(),
+                username: "buyer".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_a.to_owned(),
+                name: "Guild A".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_owned(),
+            }],
+            buyer_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Give buyer 1000 coins
+    web_state
+        .app
+        .storage
+        .adjust_member_progress(guild_a, buyer_id, 0, 1000, 0)
+        .await
+        .unwrap();
+
+    let cookie_admin = format!("rusty_discord_bot_session={admin_a_sess}");
+    let cookie_no_roles = format!("rusty_discord_bot_session={no_role_mgmt_sess}");
+    let cookie_buyer = format!("rusty_discord_bot_session={buyer_sess}");
+
+    // Check 1: User with MANAGE_GUILD but without MANAGE_ROLES tries to create role item -> 403 Forbidden!
+    let denied_no_roles = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/store/items"))
+        .header(COOKIE, &cookie_no_roles)
+        .header("x-csrf-token", no_role_mgmt_csrf)
+        .json(&serde_json::json!({
+            "name": "VIP Pass",
+            "description": "Exploit attempt",
+            "price": 100,
+            "role_id": "1002",
+            "stock": 5
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied_no_roles.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Check 2: User with MANAGE_GUILD can create items WITHOUT roles -> 200 OK!
+    let allowed_no_role_item = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/store/items"))
+        .header(COOKIE, &cookie_no_roles)
+        .header("x-csrf-token", no_role_mgmt_csrf)
+        .json(&serde_json::json!({
+            "name": "XP Booster",
+            "description": "Safe digital good",
+            "price": 50,
+            "role_id": null,
+            "stock": 10
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(allowed_no_role_item.status(), reqwest::StatusCode::OK);
+
+    // Check 3: Admin tries to create item with ADMINISTRATOR role (1005) -> 403 Forbidden!
+    let admin_role_item = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/store/items"))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_a_csrf)
+        .json(&serde_json::json!({
+            "name": "Admin Rights",
+            "description": "Privilege escalation attempt",
+            "price": 0,
+            "role_id": "1005",
+            "stock": 1
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin_role_item.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Check 4: Admin tries to create item with role higher than actor hierarchy (1006) -> 403 Forbidden!
+    let high_role_item = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/store/items"))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_a_csrf)
+        .json(&serde_json::json!({
+            "name": "Too High Role",
+            "description": "Hierarchy violation",
+            "price": 100,
+            "role_id": "1006",
+            "stock": 1
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(high_role_item.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Check 5: Admin tries to create item with managed role (1007) -> 400 Bad Request!
+    let managed_role_item = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/store/items"))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_a_csrf)
+        .json(&serde_json::json!({
+            "name": "Integration Role",
+            "description": "Managed role attempt",
+            "price": 100,
+            "role_id": "1007",
+            "stock": 1
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(managed_role_item.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Check 6: Admin creates legitimate role item (role 1002) -> 200 OK!
+    let legitimate_item_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/store/items"))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_a_csrf)
+        .json(&serde_json::json!({
+            "name": "Member Color",
+            "description": "Legitimate vanity role",
+            "price": 100,
+            "role_id": "1002",
+            "stock": 5
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(legitimate_item_resp.status(), reqwest::StatusCode::OK);
+    let legitimate_body: serde_json::Value = legitimate_item_resp.json().await.unwrap();
+    let legitimate_item_id = legitimate_body["id"].as_str().unwrap();
+
+    // Check 7: Buyer purchases legitimate role item -> completed, 1 HTTP PUT dispatched!
+    let initial_deliveries = role_delivery_count.load(Ordering::SeqCst);
+    let purchase_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/store/purchase"))
+        .header(COOKIE, &cookie_buyer)
+        .header("x-csrf-token", buyer_csrf)
+        .header("idempotency-key", "buyer_buy_1")
+        .json(&serde_json::json!({
+            "item_id": legitimate_item_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(purchase_resp.status(), reqwest::StatusCode::OK);
+    let purchase_body: serde_json::Value = purchase_resp.json().await.unwrap();
+    assert_eq!(purchase_body["fulfillment_status"], "completed");
+    assert!(purchase_body["failure_reason"].is_null());
+    assert_eq!(
+        role_delivery_count.load(Ordering::SeqCst),
+        initial_deliveries + 1
+    );
+
+    // Check 8: Defense-in-depth: Manually seed a store item with privileged role 1005 into storage
+    let privileged_item = web_state
+        .app
+        .storage
+        .create_store_item(
+            guild_a,
+            "Legacy Corrupt Admin Item",
+            "Bypassed validation row",
+            100,
+            Some("1005"),
+            Some(5),
+        )
+        .await
+        .unwrap();
+
+    let deliveries_before_exploit = role_delivery_count.load(Ordering::SeqCst);
+    let exploit_purchase_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/store/purchase"))
+        .header(COOKIE, &cookie_buyer)
+        .header("x-csrf-token", buyer_csrf)
+        .header("idempotency-key", "buyer_exploit_1")
+        .json(&serde_json::json!({
+            "item_id": privileged_item.id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(exploit_purchase_resp.status(), reqwest::StatusCode::OK);
+    let exploit_body: serde_json::Value = exploit_purchase_resp.json().await.unwrap();
+    assert_eq!(exploit_body["fulfillment_status"], "failed");
+    assert!(
+        exploit_body["failure_reason"]
+            .as_str()
+            .unwrap()
+            .contains("uprawnienia administracyjne")
+    );
+    assert_eq!(
+        role_delivery_count.load(Ordering::SeqCst),
+        deliveries_before_exploit,
+        "Privileged role must NEVER be delivered by bot!"
+    );
+}
+
+#[tokio::test]
 async fn test_polls_channel_view_live_mode_and_cross_guild_suite() {
     use axum::response::IntoResponse;
     use axum::routing::get;
