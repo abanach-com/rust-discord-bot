@@ -1747,6 +1747,21 @@ async fn test_postgres_integration_suite() {
         .expect("list pending revoke leases");
     assert_eq!(pending_leases.len(), 1);
 
+    // 12.5b. Targeted per-member lease retrieval (#261)
+    let member_leases = store
+        .list_member_companion_leases(companion_guild_id, companion_user_id)
+        .await
+        .expect("list member companion leases");
+    assert_eq!(member_leases.len(), 1);
+    assert_eq!(member_leases[0].user_id, companion_user_id);
+    assert_eq!(member_leases[0].status, "revoke_pending");
+
+    let empty_member_leases = store
+        .list_member_companion_leases(companion_guild_id, "999000000000000099")
+        .await
+        .expect("list member companion leases for unknown user");
+    assert!(empty_member_leases.is_empty());
+
     // 12.6. User erasure clears leases
     let erasure = store
         .erase_guild_user_data(companion_guild_id, companion_user_id)

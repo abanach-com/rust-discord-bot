@@ -3454,6 +3454,29 @@ impl PostgresStore {
         Ok(leases)
     }
 
+    pub async fn list_member_companion_leases(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Vec<CompanionChannelLease>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+        let leases = sqlx::query_as::<_, CompanionChannelLease>(
+            r#"
+            SELECT guild_id, voice_channel_id, text_channel_id, user_id, granted_at, generation,
+                   status, revoke_attempts, next_attempt_at, last_error, revoked_at, allow_bits, deny_bits
+            FROM companion_channel_leases
+            WHERE guild_id = $1 AND user_id = $2 AND status IN ('active', 'revoke_pending')
+            ORDER BY granted_at ASC
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(leases)
+    }
+
     pub async fn archive_progression_season(
         &self,
 

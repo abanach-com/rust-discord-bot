@@ -2518,6 +2518,27 @@ impl MemoryStore {
         Ok(list)
     }
 
+    pub fn list_member_companion_leases(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Vec<CompanionChannelLease>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+        let mut list: Vec<_> = self
+            .companion_leases
+            .iter()
+            .filter(|l| {
+                l.guild_id == guild_id
+                    && l.user_id == user_id
+                    && (l.status == "active" || l.status == "revoke_pending")
+            })
+            .map(|l| l.clone())
+            .collect();
+        list.sort_by_key(|l| l.granted_at);
+        Ok(list)
+    }
+
     pub fn list_policy_rules(&self, guild_id: &str) -> anyhow::Result<Vec<CommandPolicyRule>> {
         validate_snowflake("guild_id", guild_id)?;
         let mut list: Vec<_> = self

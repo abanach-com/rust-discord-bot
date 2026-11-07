@@ -681,6 +681,10 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Replaced permanent strong mutex retention in `USER_LOCKS` (`DashMap<(String, String), Arc<Mutex<()>>>`) with ephemeral weak references (`Weak<Mutex<()>>`).
   - Implemented safe reference upgrade in `get_user_lock`: concurrent operations for the same `(guild, user)` continue to share the exact same active `Mutex` instance without race conditions, while dropping locks when tasks complete.
   - Added background lock janitor `run_companion_lock_janitor` running every 5 minutes (and opportunistic sweep on guild reconciliation) using `prune_unused_user_locks` (`locks.retain(|_, weak| weak.strong_count() != 0)`), preventing unbounded RAM growth from inactive voice participants.
+- **Voice Companion Targeted Per-Member Lease Resolution & Index (#261)**:
+  - Eliminated O(N) full-guild lease scanning in `reconcile_companion_channel_access`: replaced duplicate guild-wide fetches (`list_active_companion_leases` + `list_pending_revoke_companion_leases`) with targeted per-member method `list_member_companion_leases(guild_id, user_id)`.
+  - Added additive migration `0038_companion_leases_user_status_index.sql` creating compound index `idx_companion_leases_guild_user_status` on `companion_channel_leases (guild_id, user_id, status)`.
+  - Implemented symmetrical support across both `MemoryStore` and `PostgresStore` with strict tenant isolation and snowflake validation, ensuring voice state updates fetch only relevant records without deserializing or iterating over unrelated guild members' leases.
 
 ## Delivery order
 

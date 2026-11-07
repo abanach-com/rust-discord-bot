@@ -161,21 +161,11 @@ pub async fn reconcile_companion_channel_access(
     let user_lock = get_user_lock(&guild_str, &user_str);
     let _guard = user_lock.lock().await;
 
-    // Check all currently active or pending leases for this user in this guild
-    let all_leases = state
+    // Retrieve active and pending revoke leases for this specific member via targeted query (#261)
+    let user_leases = state
         .storage
-        .list_active_companion_leases(&guild_str)
+        .list_member_companion_leases(&guild_str, &user_str)
         .await?;
-    let pending_leases = state
-        .storage
-        .list_pending_revoke_companion_leases(&guild_str)
-        .await?;
-
-    let user_leases: Vec<_> = all_leases
-        .into_iter()
-        .chain(pending_leases)
-        .filter(|l| l.user_id == user_str)
-        .collect();
 
     if let Some(target_voice_id) = new_voice {
         let voice_str = target_voice_id.get().to_string();

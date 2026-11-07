@@ -3439,6 +3439,17 @@ impl Storage {
         }
     }
 
+    pub async fn list_member_companion_leases(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Vec<CompanionChannelLease>> {
+        match self {
+            Self::Memory(store) => store.list_member_companion_leases(guild_id, user_id),
+            Self::Postgres(store) => store.list_member_companion_leases(guild_id, user_id).await,
+        }
+    }
+
     pub async fn archive_progression_season(
         &self,
 
@@ -6404,6 +6415,121 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_member_companion_leases_targeting_and_isolation() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_1 = "111000000000000001";
+        let guild_2 = "111000000000000002";
+        let user_a = "222000000000000001";
+        let user_b = "222000000000000002";
+        let user_c = "222000000000000003";
+
+        // User A in Guild 1: 1 active lease + 1 pending revoke lease
+        store
+            .record_companion_lease(RecordCompanionLeaseParams {
+                guild_id: guild_1,
+                voice_channel_id: "333000000000000001",
+                text_channel_id: "444000000000000001",
+                user_id: user_a,
+                generation: Uuid::new_v4(),
+                allow_bits: 0,
+                deny_bits: 0,
+            })
+            .await
+            .unwrap();
+
+        store
+            .record_companion_lease(RecordCompanionLeaseParams {
+                guild_id: guild_1,
+                voice_channel_id: "333000000000000001",
+                text_channel_id: "444000000000000002",
+                user_id: user_a,
+                generation: Uuid::new_v4(),
+                allow_bits: 0,
+                deny_bits: 0,
+            })
+            .await
+            .unwrap();
+        store
+            .mark_companion_lease_revoke_pending(guild_1, "444000000000000002", user_a)
+            .await
+            .unwrap();
+
+        // User B in Guild 1: 5 active leases
+        for i in 10..15 {
+            let text_chan = format!("4440000000000000{i}");
+            store
+                .record_companion_lease(RecordCompanionLeaseParams {
+                    guild_id: guild_1,
+                    voice_channel_id: "333000000000000001",
+                    text_channel_id: &text_chan,
+                    user_id: user_b,
+                    generation: Uuid::new_v4(),
+                    allow_bits: 0,
+                    deny_bits: 0,
+                })
+                .await
+                .unwrap();
+        }
+
+        // User A in Guild 2: 1 active lease
+        store
+            .record_companion_lease(RecordCompanionLeaseParams {
+                guild_id: guild_2,
+                voice_channel_id: "333000000000000002",
+                text_channel_id: "444000000000000099",
+                user_id: user_a,
+                generation: Uuid::new_v4(),
+                allow_bits: 0,
+                deny_bits: 0,
+            })
+            .await
+            .unwrap();
+
+        // Query User A in Guild 1: must return exactly 2 leases (1 active, 1 pending revoke)
+        let user_a_leases = store
+            .list_member_companion_leases(guild_1, user_a)
+            .await
+            .expect("list_member_companion_leases for user A");
+        assert_eq!(user_a_leases.len(), 2);
+        assert!(
+            user_a_leases
+                .iter()
+                .all(|l| l.user_id == user_a && l.guild_id == guild_1)
+        );
+        assert!(user_a_leases.iter().any(|l| l.status == "active"));
+        assert!(user_a_leases.iter().any(|l| l.status == "revoke_pending"));
+
+        // Query User B in Guild 1: must return exactly 5 leases for user B
+        let user_b_leases = store
+            .list_member_companion_leases(guild_1, user_b)
+            .await
+            .expect("list_member_companion_leases for user B");
+        assert_eq!(user_b_leases.len(), 5);
+        assert!(user_b_leases.iter().all(|l| l.user_id == user_b));
+
+        // Query User C (no leases): must return empty list without error
+        let user_c_leases = store
+            .list_member_companion_leases(guild_1, user_c)
+            .await
+            .expect("list_member_companion_leases for user C");
+        assert!(user_c_leases.is_empty());
+
+        // Snowflake validation
+        assert!(
+            store
+                .list_member_companion_leases("invalid", user_a)
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .list_member_companion_leases(guild_1, "not-a-snowflake")
+                .await
+                .is_err()
         );
     }
 
