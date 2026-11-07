@@ -2773,6 +2773,23 @@ impl Storage {
         }
     }
 
+    pub async fn list_reaction_role_grants_for_binding(
+        &self,
+        guild_id: &str,
+        binding_id: Uuid,
+    ) -> anyhow::Result<Vec<ReactionRoleGrant>> {
+        match self {
+            Self::Memory(store) => {
+                store.list_reaction_role_grants_for_binding(guild_id, binding_id)
+            }
+            Self::Postgres(store) => {
+                store
+                    .list_reaction_role_grants_for_binding(guild_id, binding_id)
+                    .await
+            }
+        }
+    }
+
     pub async fn create_quote(&self, quote: QuoteRecord) -> anyhow::Result<QuoteRecord> {
         match self {
             Self::Memory(store) => store.create_quote(quote),

@@ -182,6 +182,85 @@ pub async fn execute_reaction_role_action(
 
             let emoji_key = canonicalize_emoji(emoji);
 
+            // Sprawdzenie czy binding już istniał dla tej samej wiadomości i emoji z inną rolą
+            let existing = state
+                .storage
+                .get_reaction_role_binding(&guild_id_str, message_id, &emoji_key)
+                .await
+                .context("Błąd weryfikacji istniejącego mapowania reaction role")?;
+
+            if let Some(ref old_binding) = existing
+                && old_binding.role_id != *role_id
+            {
+                // Rola uległa zmianie: odwołaj starą rolę użytkownikom, którzy otrzymali ją z tego bindingu
+                let grants = state
+                    .storage
+                    .list_reaction_role_grants_for_binding(&guild_id_str, old_binding.id)
+                    .await
+                    .unwrap_or_default();
+
+                for grant in grants {
+                    let release = state
+                        .storage
+                        .release_reaction_role_grant(
+                            &guild_id_str,
+                            &grant.user_id,
+                            &grant.role_id,
+                            old_binding.id,
+                        )
+                        .await
+                        .unwrap_or(crate::storage::ReleaseReactionRoleGrantOutcome {
+                            grant_existed: false,
+                            granted_by_bot: false,
+                            remaining_active_sources: 0,
+                            should_revoke_role: false,
+                        });
+
+                    if release.should_revoke_role
+                        && let (Ok(uid), Ok(rid)) =
+                            (grant.user_id.parse::<u64>(), grant.role_id.parse::<u64>())
+                    {
+                        match ctx
+                            .http
+                            .remove_member_role(
+                                guild_id,
+                                UserId::new(uid),
+                                RoleId::new(rid),
+                                Some("Reaction role mapping updated to different role"),
+                            )
+                            .await
+                        {
+                            Ok(()) => {
+                                let _ = state
+                                    .storage
+                                    .record_audit(
+                                        Some(&guild_id_str),
+                                        Some(&grant.user_id),
+                                        module_id,
+                                        "reaction_role_revoked",
+                                        serde_json::json!({
+                                            "message_id": message_id,
+                                            "emoji": emoji_key,
+                                            "role_id": grant.role_id,
+                                            "reason": "binding_role_updated",
+                                        }),
+                                    )
+                                    .await;
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    ?err,
+                                    guild_id = %guild_id_str,
+                                    user_id = %grant.user_id,
+                                    role_id = %grant.role_id,
+                                    "failed to revoke reaction role upon mapping change"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
             let binding = ReactionRoleBinding {
                 id: Uuid::new_v4(),
                 guild_id: guild_id_str.clone(),
@@ -226,6 +305,82 @@ pub async fn execute_reaction_role_action(
                 .map_err(|e| anyhow!("Nieprawidłowe ID wiadomości: {e}"))?;
 
             let emoji_key = canonicalize_emoji(emoji);
+
+            // Przed usunięciem bindingu odwołaj role użytkownikom, którzy otrzymali je z tego bindingu
+            let existing = state
+                .storage
+                .get_reaction_role_binding(&guild_id_str, message_id, &emoji_key)
+                .await
+                .context("Błąd weryfikacji usuwanego mapowania reaction role")?;
+
+            if let Some(ref binding) = existing {
+                let grants = state
+                    .storage
+                    .list_reaction_role_grants_for_binding(&guild_id_str, binding.id)
+                    .await
+                    .unwrap_or_default();
+
+                for grant in grants {
+                    let release = state
+                        .storage
+                        .release_reaction_role_grant(
+                            &guild_id_str,
+                            &grant.user_id,
+                            &grant.role_id,
+                            binding.id,
+                        )
+                        .await
+                        .unwrap_or(crate::storage::ReleaseReactionRoleGrantOutcome {
+                            grant_existed: false,
+                            granted_by_bot: false,
+                            remaining_active_sources: 0,
+                            should_revoke_role: false,
+                        });
+
+                    if release.should_revoke_role
+                        && let (Ok(uid), Ok(rid)) =
+                            (grant.user_id.parse::<u64>(), grant.role_id.parse::<u64>())
+                    {
+                        match ctx
+                            .http
+                            .remove_member_role(
+                                guild_id,
+                                UserId::new(uid),
+                                RoleId::new(rid),
+                                Some("Reaction role binding removed"),
+                            )
+                            .await
+                        {
+                            Ok(()) => {
+                                let _ = state
+                                    .storage
+                                    .record_audit(
+                                        Some(&guild_id_str),
+                                        Some(&grant.user_id),
+                                        module_id,
+                                        "reaction_role_revoked",
+                                        serde_json::json!({
+                                            "message_id": message_id,
+                                            "emoji": emoji_key,
+                                            "role_id": grant.role_id,
+                                            "reason": "binding_deleted",
+                                        }),
+                                    )
+                                    .await;
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    ?err,
+                                    guild_id = %guild_id_str,
+                                    user_id = %grant.user_id,
+                                    role_id = %grant.role_id,
+                                    "failed to revoke reaction role upon binding deletion"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
 
             let deleted = state
                 .storage

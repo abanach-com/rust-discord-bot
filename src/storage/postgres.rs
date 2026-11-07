@@ -3146,6 +3146,28 @@ impl PostgresStore {
         Ok(rows)
     }
 
+    pub async fn list_reaction_role_grants_for_binding(
+        &self,
+        guild_id: &str,
+        binding_id: Uuid,
+    ) -> anyhow::Result<Vec<ReactionRoleGrant>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let rows = sqlx::query_as::<_, ReactionRoleGrant>(
+            r#"
+            SELECT id, guild_id, user_id, role_id, binding_id, granted_by_bot, created_at
+            FROM reaction_role_grants
+            WHERE guild_id = $1 AND binding_id = $2
+            ORDER BY created_at ASC
+            "#,
+        )
+        .bind(guild_id)
+        .bind(binding_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
     pub async fn create_quote(&self, quote: QuoteRecord) -> anyhow::Result<QuoteRecord> {
         validate_snowflake("guild_id", &quote.guild_id)?;
         validate_snowflake("added_by", &quote.added_by)?;

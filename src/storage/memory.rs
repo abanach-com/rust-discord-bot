@@ -2214,9 +2214,9 @@ impl MemoryStore {
     ) -> anyhow::Result<ReleaseReactionRoleGrantOutcome> {
         let key = (guild_id.to_owned(), user_id.to_owned(), binding_id);
         let removed = self.reaction_role_grants.remove(&key);
-        let (grant_existed, granted_by_bot) = match removed {
-            Some((_, g)) => (true, g.granted_by_bot),
-            None => (false, false),
+        let (grant_existed, granted_by_bot, target_role_id) = match removed {
+            Some((_, g)) => (true, g.granted_by_bot, g.role_id),
+            None => (false, false, role_id.to_string()),
         };
 
         let remaining_active_sources = self
@@ -2224,7 +2224,7 @@ impl MemoryStore {
             .iter()
             .filter(|e| {
                 let g = e.value();
-                g.guild_id == guild_id && g.user_id == user_id && g.role_id == role_id
+                g.guild_id == guild_id && g.user_id == user_id && g.role_id == target_role_id
             })
             .count();
 
@@ -2236,6 +2236,21 @@ impl MemoryStore {
             remaining_active_sources,
             should_revoke_role,
         })
+    }
+
+    pub fn list_reaction_role_grants_for_binding(
+        &self,
+        guild_id: &str,
+        binding_id: Uuid,
+    ) -> anyhow::Result<Vec<ReactionRoleGrant>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let matches: Vec<ReactionRoleGrant> = self
+            .reaction_role_grants
+            .iter()
+            .filter(|e| e.guild_id == guild_id && e.binding_id == binding_id)
+            .map(|e| e.value().clone())
+            .collect();
+        Ok(matches)
     }
 
     pub fn list_active_reaction_role_grants_for_user_role(

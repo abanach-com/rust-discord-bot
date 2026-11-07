@@ -7047,6 +7047,54 @@ pub async fn delete_reaction_role(
     ensure_manage_roles_access(&state, &session, &guild_id).await?;
     validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
 
+    let bindings = state
+        .app
+        .storage
+        .list_reaction_role_bindings(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    if let Some(binding) = bindings.into_iter().find(|b| b.id == binding_id) {
+        let grants = state
+            .app
+            .storage
+            .list_reaction_role_grants_for_binding(&guild_id, binding_id)
+            .await
+            .unwrap_or_default();
+
+        let http = serenity::http::Http::new(&state.app.config.discord_token);
+        for grant in grants {
+            let release = state
+                .app
+                .storage
+                .release_reaction_role_grant(&guild_id, &grant.user_id, &grant.role_id, binding.id)
+                .await
+                .unwrap_or(crate::storage::ReleaseReactionRoleGrantOutcome {
+                    grant_existed: false,
+                    granted_by_bot: false,
+                    remaining_active_sources: 0,
+                    should_revoke_role: false,
+                });
+
+            if release.should_revoke_role
+                && let (Ok(gid), Ok(uid), Ok(rid)) = (
+                    guild_id.parse::<u64>(),
+                    grant.user_id.parse::<u64>(),
+                    grant.role_id.parse::<u64>(),
+                )
+            {
+                let _ = http
+                    .remove_member_role(
+                        serenity::all::GuildId::new(gid),
+                        serenity::all::UserId::new(uid),
+                        serenity::all::RoleId::new(rid),
+                        Some("Reaction role binding deleted via dashboard"),
+                    )
+                    .await;
+            }
+        }
+    }
+
     let deleted = state
         .app
         .storage

@@ -553,6 +553,34 @@ async fn mock_discord_handler(
                     "managed": false,
                     "mentionable": false,
                     "flags": 0
+                },
+                {
+                    "id": "1005",
+                    "name": "MemberRole2",
+                    "position": 11,
+                    "permissions": "0",
+                    "color": 0,
+                    "colors": {
+                        "primary_color": 0
+                    },
+                    "hoist": false,
+                    "managed": false,
+                    "mentionable": false,
+                    "flags": 0
+                },
+                {
+                    "id": "1006",
+                    "name": "MemberRole3",
+                    "position": 12,
+                    "permissions": "0",
+                    "color": 0,
+                    "colors": {
+                        "primary_color": 0
+                    },
+                    "hoist": false,
+                    "managed": false,
+                    "mentionable": false,
+                    "flags": 0
                 }
 
             ]
@@ -5563,6 +5591,322 @@ async fn test_afk_storage_and_lifecycle_suite() {
             .await
             .unwrap()
             .is_none()
+    );
+
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn test_reaction_roles_binding_lifecycle_edit_and_deletion_suite() {
+    use axum::http::Method;
+    use rusty_discord_bot::discord::reaction_roles::{
+        ReactionRoleExecutionContext, execute_reaction_role_action, handle_reaction_role_event,
+    };
+    use rusty_discord_bot::lua::ReactionRoleOperation;
+    use serenity::all::Permissions;
+
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state().await;
+
+    let guild_id = GuildId::new(100);
+    let channel_id = ChannelId::new(101);
+    let admin_id = UserId::new(999999999999999999);
+    let user_id = UserId::new(777777777777777777);
+
+    // Enable reaction_roles module
+    state
+        .storage
+        .update_module_settings_with_audit(rusty_discord_bot::storage::UpdateModuleSettingsParams {
+            guild_id: "100",
+            module_id: "reaction_roles",
+            enabled: true,
+            config: serde_json::json!({}),
+            actor_id: Some("admin"),
+            audit_event: "module_enable",
+            audit_data: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+
+    // 1. Create binding: msg 900000000000000010, ⭐ -> role 1002
+    let _ = execute_reaction_role_action(
+        &ctx,
+        &state,
+        "reaction_roles",
+        ReactionRoleExecutionContext::new(
+            Some(guild_id),
+            Some(channel_id),
+            Some(admin_id),
+            Permissions::ADMINISTRATOR,
+            Permissions::ADMINISTRATOR,
+            true,
+        ),
+        &ReactionRoleOperation::Create {
+            message_id: "900000000000000010".to_string(),
+            emoji: "⭐".to_string(),
+            role_id: "1002".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    // 2. User reacts ⭐ -> receives role 1002
+    let reaction_add: serenity::all::Reaction = serde_json::from_value(serde_json::json!({
+        "channel_id": "101",
+        "message_id": "900000000000000010",
+        "guild_id": "100",
+        "user_id": user_id.get().to_string(),
+        "emoji": { "name": "⭐", "id": null },
+        "burst": false,
+        "type": 0
+    }))
+    .unwrap();
+
+    handle_reaction_role_event(&ctx, &state, &reaction_add, true)
+        .await
+        .unwrap();
+
+    // Verify grant recorded
+    let grants_1002 = state
+        .storage
+        .list_active_reaction_role_grants_for_user_role("100", &user_id.get().to_string(), "1002")
+        .await
+        .unwrap();
+    assert_eq!(grants_1002.len(), 1);
+    assert!(grants_1002[0].granted_by_bot);
+
+    // 3. Admin edits binding: msg 900000000000000010, ⭐ -> role 1005 (role change!)
+    let _ = execute_reaction_role_action(
+        &ctx,
+        &state,
+        "reaction_roles",
+        ReactionRoleExecutionContext::new(
+            Some(guild_id),
+            Some(channel_id),
+            Some(admin_id),
+            Permissions::ADMINISTRATOR,
+            Permissions::ADMINISTRATOR,
+            true,
+        ),
+        &ReactionRoleOperation::Create {
+            message_id: "900000000000000010".to_string(),
+            emoji: "⭐".to_string(),
+            role_id: "1005".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Verify old role 1002 grant was released upon role mapping change
+    let grants_1002_after_edit = state
+        .storage
+        .list_active_reaction_role_grants_for_user_role("100", &user_id.get().to_string(), "1002")
+        .await
+        .unwrap();
+    assert!(
+        grants_1002_after_edit.is_empty(),
+        "Grant for old role 1002 must be released"
+    );
+
+    // Verify remove_member_role was called for role 1002
+    let calls = mock.recorded_calls.lock().await.clone();
+    assert!(
+        calls.iter().any(|(m, p)| *m == Method::DELETE
+            && p.contains("/guilds/100/members/777777777777777777/roles/1002")),
+        "remove_member_role must be called for role 1002 upon mapping update"
+    );
+
+    // 4. User reacts ⭐ again -> receives new role 1005
+    handle_reaction_role_event(&ctx, &state, &reaction_add, true)
+        .await
+        .unwrap();
+
+    let grants_1005 = state
+        .storage
+        .list_active_reaction_role_grants_for_user_role("100", &user_id.get().to_string(), "1005")
+        .await
+        .unwrap();
+    assert_eq!(grants_1005.len(), 1);
+
+    // 5. Admin removes binding: msg 900000000000000010, ⭐
+    let _ = execute_reaction_role_action(
+        &ctx,
+        &state,
+        "reaction_roles",
+        ReactionRoleExecutionContext::new(
+            Some(guild_id),
+            Some(channel_id),
+            Some(admin_id),
+            Permissions::ADMINISTRATOR,
+            Permissions::ADMINISTRATOR,
+            true,
+        ),
+        &ReactionRoleOperation::Remove {
+            message_id: "900000000000000010".to_string(),
+            emoji: "⭐".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Verify binding is deleted from storage
+    let binding_after_del = state
+        .storage
+        .get_reaction_role_binding("100", "900000000000000010", "⭐")
+        .await
+        .unwrap();
+    assert!(binding_after_del.is_none());
+
+    // Verify role 1005 grant is gone
+    let grants_1005_after_del = state
+        .storage
+        .list_active_reaction_role_grants_for_user_role("100", &user_id.get().to_string(), "1005")
+        .await
+        .unwrap();
+    assert!(grants_1005_after_del.is_empty());
+
+    // Verify remove_member_role was called for role 1005
+    let calls_after = mock.recorded_calls.lock().await.clone();
+    assert!(
+        calls_after.iter().any(|(m, p)| *m == Method::DELETE
+            && p.contains("/guilds/100/members/777777777777777777/roles/1005")),
+        "remove_member_role must be called for role 1005 upon binding deletion"
+    );
+
+    // 6. Shared grant test: 2 bindings pointing to role 1006
+    let _ = execute_reaction_role_action(
+        &ctx,
+        &state,
+        "reaction_roles",
+        ReactionRoleExecutionContext::new(
+            Some(guild_id),
+            Some(channel_id),
+            Some(admin_id),
+            Permissions::ADMINISTRATOR,
+            Permissions::ADMINISTRATOR,
+            true,
+        ),
+        &ReactionRoleOperation::Create {
+            message_id: "900000000000000021".to_string(),
+            emoji: "🅰️".to_string(),
+            role_id: "1006".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let _ = execute_reaction_role_action(
+        &ctx,
+        &state,
+        "reaction_roles",
+        ReactionRoleExecutionContext::new(
+            Some(guild_id),
+            Some(channel_id),
+            Some(admin_id),
+            Permissions::ADMINISTRATOR,
+            Permissions::ADMINISTRATOR,
+            true,
+        ),
+        &ReactionRoleOperation::Create {
+            message_id: "900000000000000022".to_string(),
+            emoji: "🅱️".to_string(),
+            role_id: "1006".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    // User reacts to both
+    let reaction_a: serenity::all::Reaction = serde_json::from_value(serde_json::json!({
+        "channel_id": "101",
+        "message_id": "900000000000000021",
+        "guild_id": "100",
+        "user_id": user_id.get().to_string(),
+        "emoji": { "name": "🅰️", "id": null },
+        "burst": false,
+        "type": 0
+    }))
+    .unwrap();
+    let reaction_b: serenity::all::Reaction = serde_json::from_value(serde_json::json!({
+        "channel_id": "101",
+        "message_id": "900000000000000022",
+        "guild_id": "100",
+        "user_id": user_id.get().to_string(),
+        "emoji": { "name": "🅱️", "id": null },
+        "burst": false,
+        "type": 0
+    }))
+    .unwrap();
+
+    handle_reaction_role_event(&ctx, &state, &reaction_a, true)
+        .await
+        .unwrap();
+    handle_reaction_role_event(&ctx, &state, &reaction_b, true)
+        .await
+        .unwrap();
+
+    let grants_1006 = state
+        .storage
+        .list_active_reaction_role_grants_for_user_role("100", &user_id.get().to_string(), "1006")
+        .await
+        .unwrap();
+    assert_eq!(grants_1006.len(), 2);
+
+    // Remove binding A: role 1006 must NOT be revoked because binding B is still active
+    mock.recorded_calls.lock().await.clear();
+    let _ = execute_reaction_role_action(
+        &ctx,
+        &state,
+        "reaction_roles",
+        ReactionRoleExecutionContext::new(
+            Some(guild_id),
+            Some(channel_id),
+            Some(admin_id),
+            Permissions::ADMINISTRATOR,
+            Permissions::ADMINISTRATOR,
+            true,
+        ),
+        &ReactionRoleOperation::Remove {
+            message_id: "900000000000000021".to_string(),
+            emoji: "🅰️".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let calls_after_a = mock.recorded_calls.lock().await.clone();
+    assert!(
+        !calls_after_a.iter().any(|(m, p)| *m == Method::DELETE
+            && p.contains("/guilds/100/members/777777777777777777/roles/1006")),
+        "Role 1006 must NOT be revoked while binding B still grants it"
+    );
+
+    // Remove binding B: now role 1006 MUST be revoked because remaining_active_sources == 0
+    let _ = execute_reaction_role_action(
+        &ctx,
+        &state,
+        "reaction_roles",
+        ReactionRoleExecutionContext::new(
+            Some(guild_id),
+            Some(channel_id),
+            Some(admin_id),
+            Permissions::ADMINISTRATOR,
+            Permissions::ADMINISTRATOR,
+            true,
+        ),
+        &ReactionRoleOperation::Remove {
+            message_id: "900000000000000022".to_string(),
+            emoji: "🅱️".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let calls_after_b = mock.recorded_calls.lock().await.clone();
+    assert!(
+        calls_after_b.iter().any(|(m, p)| *m == Method::DELETE
+            && p.contains("/guilds/100/members/777777777777777777/roles/1006")),
+        "Role 1006 must be revoked when the last binding is removed"
     );
 
     shard_manager.shutdown_all().await;
