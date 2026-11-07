@@ -9087,3 +9087,472 @@ async fn test_reaction_roles_web_api_and_isolation() {
         0
     );
 }
+
+#[tokio::test]
+async fn test_polls_channel_view_live_mode_and_cross_guild_suite() {
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+
+    let guild_a = "777888999000111";
+    let guild_b = "888999000111222";
+
+    let channel_a = "111111111111111101"; // belongs to guild A (text)
+    let channel_b = "222222222222222201"; // belongs to guild B (text)
+    let channel_voice = "555555555555555501"; // voice channel (type 2, guild A)
+    let channel_fail = "999999999999999999"; // non-existent channel (404)
+
+    let admin_id = "100000000000000001";
+    let member_with_view_id = "200000000000000001";
+    let member_without_view_id = "300000000000000001";
+    let outsider_id = "400000000000000001";
+
+    // 1. Mock Discord API
+    let discord_mock_app = axum::Router::new()
+        .route(
+            "/channels/{channel_id}",
+            get(
+                |axum::extract::Path(cid): axum::extract::Path<String>| async move {
+                    match cid.as_str() {
+                        "111111111111111101" => axum::Json(serde_json::json!({
+                            "id": "111111111111111101",
+                            "guild_id": "777888999000111",
+                            "type": 0
+                        }))
+                        .into_response(),
+                        "222222222222222201" => axum::Json(serde_json::json!({
+                            "id": "222222222222222201",
+                            "guild_id": "888999000111222",
+                            "type": 0
+                        }))
+                        .into_response(),
+                        "555555555555555501" => axum::Json(serde_json::json!({
+                            "id": "555555555555555501",
+                            "guild_id": "777888999000111",
+                            "type": 2
+                        }))
+                        .into_response(),
+                        _ => (
+                            reqwest::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({
+                                "code": 10003,
+                                "message": "Unknown Channel"
+                            })),
+                        )
+                            .into_response(),
+                    }
+                },
+            ),
+        )
+        .route(
+            "/channels/{channel_id}/permissions/member/{user_id}",
+            get(
+                |axum::extract::Path((channel_id, user_id)): axum::extract::Path<(
+                    String,
+                    String,
+                )>| async move {
+                    if channel_id == "111111111111111101" {
+                        if user_id == "100000000000000001" || user_id == "200000000000000001" {
+                            // VIEW_CHANNEL is bit 1024 (0x400)
+                            axum::Json(serde_json::json!({
+                                "permissions": "1024"
+                            }))
+                            .into_response()
+                        } else if user_id == "300000000000000001" {
+                            // member without view: permissions = 0
+                            axum::Json(serde_json::json!({
+                                "permissions": "0"
+                            }))
+                            .into_response()
+                        } else {
+                            (
+                                reqwest::StatusCode::NOT_FOUND,
+                                axum::Json(serde_json::json!({
+                                    "code": 10007,
+                                    "message": "Unknown Member"
+                                })),
+                            )
+                                .into_response()
+                        }
+                    } else {
+                        (
+                            reqwest::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({
+                                "code": 10003,
+                                "message": "Unknown Channel"
+                            })),
+                        )
+                            .into_response()
+                    }
+                },
+            ),
+        )
+        .route(
+            "/guilds/{guild_id}/members/{user_id}",
+            get(
+                |axum::extract::Path((guild_id, user_id)): axum::extract::Path<(
+                    String,
+                    String,
+                )>| async move {
+                    let is_guild_a_member = guild_id == "777888999000111"
+                        && (user_id == "100000000000000001"
+                            || user_id == "200000000000000001"
+                            || user_id == "300000000000000001");
+                    let is_guild_b_member =
+                        guild_id == "888999000111222" && user_id == "400000000000000001";
+
+                    if is_guild_a_member || is_guild_b_member {
+                        axum::Json(serde_json::json!({
+                            "user": { "id": user_id },
+                            "roles": []
+                        }))
+                        .into_response()
+                    } else {
+                        (
+                            reqwest::StatusCode::NOT_FOUND,
+                            axum::Json(
+                                serde_json::json!({"code": 10007, "message": "Unknown Member"}),
+                            ),
+                        )
+                            .into_response()
+                    }
+                },
+            ),
+        );
+
+    let discord_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind discord mock");
+    let discord_addr = discord_listener.local_addr().expect("discord mock addr");
+    tokio::spawn(async move {
+        axum::serve(discord_listener, discord_mock_app)
+            .await
+            .unwrap();
+    });
+
+    // 2. Configure app state in live mode
+    let mut config = test_config();
+    config.discord_token = "live_bot_token_production_secret".to_string();
+    config.offline_mode = false;
+    config.discord_api_base_url = format!("http://{discord_addr}");
+
+    let app = AppState::bootstrap(config).await.expect("bootstrap");
+    let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
+    let web_state = WebState {
+        app,
+        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        permissions_cache,
+    };
+    web_state
+        .app
+        .is_gateway_ready
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind web listener");
+    let web_addr = web_listener.local_addr().expect("web addr");
+    let router = build_router(web_state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            web_listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{web_addr}");
+
+    // Set up sessions
+    let admin_session_id = "admin_poll_live_sess";
+    let admin_csrf = "admin_poll_live_csrf";
+    web_state
+        .app
+        .sessions
+        .save_session(
+            admin_session_id,
+            DashboardUser {
+                id: admin_id.to_owned(),
+                username: "admin".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_a.to_owned(),
+                name: "Guild A".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "32".to_owned(),
+            }],
+            admin_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    web_state.permissions_cache.insert(
+        (admin_id.to_owned(), guild_a.to_owned()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    let with_view_session_id = "with_view_poll_live_sess";
+    let with_view_csrf = "with_view_poll_live_csrf";
+    web_state
+        .app
+        .sessions
+        .save_session(
+            with_view_session_id,
+            DashboardUser {
+                id: member_with_view_id.to_owned(),
+                username: "member_with_view".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_a.to_owned(),
+                name: "Guild A".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_owned(),
+            }],
+            with_view_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let no_view_session_id = "no_view_poll_live_sess";
+    let no_view_csrf = "no_view_poll_live_csrf";
+    web_state
+        .app
+        .sessions
+        .save_session(
+            no_view_session_id,
+            DashboardUser {
+                id: member_without_view_id.to_owned(),
+                username: "member_no_view".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_a.to_owned(),
+                name: "Guild A".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_owned(),
+            }],
+            no_view_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let outsider_session_id = "outsider_poll_live_sess";
+    let outsider_csrf = "outsider_poll_live_csrf";
+    web_state
+        .app
+        .sessions
+        .save_session(
+            outsider_session_id,
+            DashboardUser {
+                id: outsider_id.to_owned(),
+                username: "outsider".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_b.to_owned(),
+                name: "Guild B".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_owned(),
+            }],
+            outsider_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let admin_cookie = format!("rusty_discord_bot_session={admin_session_id}");
+    let with_view_cookie = format!("rusty_discord_bot_session={with_view_session_id}");
+    let no_view_cookie = format!("rusty_discord_bot_session={no_view_session_id}");
+    let outsider_cookie = format!("rusty_discord_bot_session={outsider_session_id}");
+
+    // Test 1: create_poll with cross-guild channel (channel_b belongs to guild_b) -> 403 Forbidden
+    let cross_guild_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/polls"))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "channel_id": channel_b,
+            "question": "Cross-guild test?",
+            "options": ["Yes", "No"],
+            "duration_minutes": 60
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cross_guild_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Test 2: create_poll with voice channel -> 400 Bad Request
+    let voice_chan_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/polls"))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "channel_id": channel_voice,
+            "question": "Voice channel poll?",
+            "options": ["A", "B"],
+            "duration_minutes": 60
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(voice_chan_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Test 3: create_poll with non-existent channel -> 403 Forbidden
+    let missing_chan_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/polls"))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "channel_id": channel_fail,
+            "question": "Non-existent channel poll?",
+            "options": ["A", "B"],
+            "duration_minutes": 60
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing_chan_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Test 4: create_poll with valid text channel in guild_a -> 200 OK
+    let create_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/polls"))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "channel_id": channel_a,
+            "question": "Private channel confidential poll?",
+            "options": ["Feature A", "Feature B"],
+            "duration_minutes": 60
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), reqwest::StatusCode::OK);
+    let poll_data: rusty_discord_bot::storage::CommunityPoll = create_resp.json().await.unwrap();
+    let poll_id = poll_data.id;
+
+    // Test 5: member_without_view accesses GET /api/guilds/{guild_a}/polls/{poll_id} -> 403 Forbidden!
+    let get_no_view_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_a}/polls/{poll_id}"))
+        .header(COOKIE, &no_view_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_no_view_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Test 6: member_without_view attempts POST .../vote -> 403 Forbidden!
+    let vote_no_view_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/polls/{poll_id}/vote"
+        ))
+        .header(COOKIE, &no_view_cookie)
+        .header("x-csrf-token", no_view_csrf)
+        .json(&serde_json::json!({ "option_idx": 0 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(vote_no_view_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Verify tallies remain [0, 0] in storage
+    let stored_poll = web_state
+        .app
+        .storage
+        .get_community_poll(poll_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored_poll.tallies_json, serde_json::json!([0, 0]));
+
+    // Test 7: unauthenticated request -> 401 Unauthorized
+    let unauth_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_a}/polls/{poll_id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth_resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // Test 8: member of guild_b (outsider) -> 403 Forbidden
+    let outsider_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_a}/polls/{poll_id}"))
+        .header(COOKIE, &outsider_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(outsider_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Test 9: member_with_view accesses GET -> 200 OK with poll details
+    let get_with_view_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_a}/polls/{poll_id}"))
+        .header(COOKIE, &with_view_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_with_view_resp.status(), reqwest::StatusCode::OK);
+    let view_body: serde_json::Value = get_with_view_resp.json().await.unwrap();
+    assert_eq!(view_body["question"], "Private channel confidential poll?");
+
+    // Test 10: member_with_view votes without CSRF -> 403 Forbidden
+    let no_csrf_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/polls/{poll_id}/vote"
+        ))
+        .header(COOKIE, &with_view_cookie)
+        .json(&serde_json::json!({ "option_idx": 0 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_csrf_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Test 11: member_with_view votes with valid CSRF -> 200 OK
+    let vote_ok_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/polls/{poll_id}/vote"
+        ))
+        .header(COOKIE, &with_view_cookie)
+        .header("x-csrf-token", with_view_csrf)
+        .json(&serde_json::json!({ "option_idx": 0 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(vote_ok_resp.status(), reqwest::StatusCode::OK);
+    let updated_body: serde_json::Value = vote_ok_resp.json().await.unwrap();
+    assert_eq!(updated_body["tallies_json"][0], 1);
+    assert_eq!(updated_body["tallies_json"][1], 0);
+
+    // Test 12: idempotent voting: same option keeps tallies unchanged -> 200 OK
+    let repeat_vote_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/polls/{poll_id}/vote"
+        ))
+        .header(COOKIE, &with_view_cookie)
+        .header("x-csrf-token", with_view_csrf)
+        .json(&serde_json::json!({ "option_idx": 0 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(repeat_vote_resp.status(), reqwest::StatusCode::OK);
+    let repeat_body: serde_json::Value = repeat_vote_resp.json().await.unwrap();
+    assert_eq!(repeat_body["tallies_json"][0], 1);
+    assert_eq!(repeat_body["tallies_json"][1], 0);
+}

@@ -869,6 +869,8 @@ pub async fn create_poll(
 
     ensure_guild_access(&state, &session, &guild_id).await?;
 
+    ensure_channel_view_access(&state, &session, &guild_id, &payload.channel_id).await?;
+
     let expires = checked_expires_at(payload.duration_minutes.unwrap_or(1440))?;
 
     let poll = state
@@ -902,11 +904,14 @@ pub async fn get_poll(
         .get_community_poll(poll_id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
-        .ok_or_else(|| ApiError::not_found("Poll was not found."))?;
+        .ok_or_else(|| ApiError::not_found("Poll was not found in this guild."));
 
+    let poll = poll?;
     if poll.guild_id != guild_id {
         return Err(ApiError::not_found("Poll was not found in this guild."));
     }
+
+    ensure_channel_view_access(&state, &session, &guild_id, &poll.channel_id).await?;
 
     Ok(Json(poll))
 }
@@ -929,12 +934,27 @@ pub async fn vote_poll(
     let poll = state
         .app
         .storage
+        .get_community_poll(poll_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Poll was not found in this guild."));
+
+    let poll = poll?;
+    if poll.guild_id != guild_id {
+        return Err(ApiError::not_found("Poll was not found in this guild."));
+    }
+
+    ensure_channel_view_access(&state, &session, &guild_id, &poll.channel_id).await?;
+
+    let updated = state
+        .app
+        .storage
         .vote_community_poll(&guild_id, poll_id, &session.user.id, payload.option_idx)
         .await
         .map_err(|e| ApiError::bad_request(e.to_string()))?
         .ok_or_else(|| ApiError::not_found("Poll was not found in this guild."))?;
 
-    Ok(Json(poll))
+    Ok(Json(updated))
 }
 
 #[derive(Debug, Deserialize)]
