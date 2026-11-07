@@ -5541,6 +5541,11 @@ impl MemoryStore {
             &track.config,
         )?;
 
+        let _guard = self
+            .recruitment_lock
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Recruitment lock error: {e}"))?;
+
         if self
             .recruitment_tracks
             .iter()
@@ -5566,6 +5571,10 @@ impl MemoryStore {
 
     pub fn delete_recruitment_track(&self, guild_id: &str, track_id: Uuid) -> anyhow::Result<bool> {
         validate_snowflake("guild_id", guild_id)?;
+        let _guard = self
+            .recruitment_lock
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Recruitment lock error: {e}"))?;
         if let Some(existing) = self.recruitment_tracks.get(&track_id)
             && existing.guild_id == guild_id
         {

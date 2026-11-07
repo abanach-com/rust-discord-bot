@@ -13910,3 +13910,146 @@ async fn test_recruitment_n_plus_one_avoidance_and_approval_threshold_suite() {
         0
     );
 }
+
+#[tokio::test]
+async fn test_recruitment_track_concurrency_and_slug_uniqueness_suite() {
+    use rusty_discord_bot::recruitment::{RecruitmentTrack, RecruitmentTrackConfig};
+    use rusty_discord_bot::storage::MemoryStore;
+    use std::sync::Arc;
+    use tokio::sync::Barrier;
+
+    let store = Arc::new(MemoryStore::default());
+    let guild_id = "123456789012345678";
+    let slug = "helper-track";
+
+    // 1. Concurrency: 20 parallel tasks trying to create a new track with the same (guild_id, slug) but different UUIDs
+    let barrier = Arc::new(Barrier::new(20));
+    let mut tasks = Vec::new();
+
+    for _ in 0..20 {
+        let store = Arc::clone(&store);
+        let barrier = Arc::clone(&barrier);
+        let track = RecruitmentTrack {
+            id: uuid::Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            slug: slug.to_string(),
+            name: "Helper Track".to_string(),
+            enabled: true,
+            target_role_id: None,
+            version: 1,
+            config: sqlx::types::Json(RecruitmentTrackConfig::default()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store.upsert_recruitment_track(track)
+        }));
+    }
+
+    let mut successes = 0;
+    let mut failures = 0;
+    for task in tasks {
+        match task.await.unwrap() {
+            Ok(_) => successes += 1,
+            Err(e) => {
+                assert!(e.to_string().contains("already exists in this server"));
+                failures += 1;
+            }
+        }
+    }
+
+    assert_eq!(
+        successes, 1,
+        "Exactly one parallel insert of the same slug must succeed"
+    );
+    assert_eq!(
+        failures, 19,
+        "Remaining 19 parallel attempts must be rejected with conflict"
+    );
+
+    let tracks = store.list_recruitment_tracks(guild_id).unwrap();
+    assert_eq!(tracks.len(), 1, "Exactly 1 track must be stored");
+    let single_track = tracks[0].clone();
+    assert_eq!(single_track.slug, slug);
+
+    // 2. Concurrency: 20 parallel updates of the SAME track ID -> version must increment monotonically
+    let base_version = single_track.version;
+    let update_barrier = Arc::new(Barrier::new(20));
+    let mut update_tasks = Vec::new();
+
+    for i in 0..20 {
+        let store = Arc::clone(&store);
+        let update_barrier = Arc::clone(&update_barrier);
+        let mut track_to_update = single_track.clone();
+        track_to_update.name = format!("Helper Track Update {i}");
+
+        update_tasks.push(tokio::spawn(async move {
+            update_barrier.wait().await;
+            store.upsert_recruitment_track(track_to_update)
+        }));
+    }
+
+    for task in update_tasks {
+        assert!(
+            task.await.unwrap().is_ok(),
+            "All upserts of the same track ID must succeed"
+        );
+    }
+
+    let final_track = store
+        .get_recruitment_track(guild_id, single_track.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        final_track.version,
+        base_version + 20,
+        "Track version must be exactly incremented by 20 without lost updates"
+    );
+
+    // 3. Different guild can legally use the exact same slug
+    let other_guild_id = "987654321098765432";
+    let other_guild_track = RecruitmentTrack {
+        id: uuid::Uuid::new_v4(),
+        guild_id: other_guild_id.to_string(),
+        slug: slug.to_string(),
+        name: "Other Guild Helper".to_string(),
+        enabled: true,
+        target_role_id: None,
+        version: 1,
+        config: sqlx::types::Json(RecruitmentTrackConfig::default()),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    let other_res = store.upsert_recruitment_track(other_guild_track);
+    assert!(
+        other_res.is_ok(),
+        "Different guild with same slug must be allowed"
+    );
+
+    // 4. Cross-guild hijacking of an existing track ID is rejected
+    let hijack_track = RecruitmentTrack {
+        id: single_track.id,
+        guild_id: other_guild_id.to_string(),
+        slug: "hijack-slug".to_string(),
+        name: "Hijack Track".to_string(),
+        enabled: true,
+        target_role_id: None,
+        version: 1,
+        config: sqlx::types::Json(RecruitmentTrackConfig::default()),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    let hijack_res = store.upsert_recruitment_track(hijack_track);
+    assert!(
+        hijack_res.is_err(),
+        "Cross-guild update with existing track ID must be rejected"
+    );
+    assert!(
+        hijack_res
+            .unwrap_err()
+            .to_string()
+            .contains("belongs to another guild")
+    );
+}
