@@ -24,11 +24,11 @@ use super::{
     ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
     ProgressionSeason, QuoteRecord, ReactionRoleBinding, ReactionRoleGrant,
     RecordCompanionLeaseParams, RedditSubscription, ReleaseReactionRoleGrantOutcome,
-    ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent, ServerSnapshot,
-    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
-    TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError,
-    TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
-    VkSubscription, WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
+    ReputationGrantOutcome, ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry,
+    SteamLfgPost, StickyMessage, StoreItem, StorePurchase, TagRecord, TelegramBridge,
+    TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError, TupperProfile,
+    TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport, VkSubscription,
+    WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
     YouTubeChannelSubscription, is_member_after_cursor, level_for_xp, parse_member_search_cursor,
     snowflake_created_at, validate_birthday_date, validate_snowflake,
 };
@@ -655,19 +655,7 @@ impl MemoryStore {
             .retain(|_, grant| !(grant.guild_id == guild_id && grant.user_id == user_id));
         related_erased += before_rr.saturating_sub(self.reaction_role_grants.len());
 
-        let retained_records = vec![
-            RetainedRecordNotice {
-                entity: "Moderation cases".to_string(),
-                reason: "Server security, sanctions audit and anti-abuse accountability"
-                    .to_string(),
-                retention_policy: "365 days".to_string(),
-            },
-            RetainedRecordNotice {
-                entity: "Audit log entries".to_string(),
-                reason: "Administrative action audit trail and server governance".to_string(),
-                retention_policy: "45 days".to_string(),
-            },
-        ];
+        let retained_records = crate::privacy::build_default_retained_notices();
 
         UserErasureReport {
             user_id: user_id.to_string(),

@@ -1811,6 +1811,7 @@ pub async fn get_guild_privacy_summary(
             {"entity": "Ticket transcripts", "purpose": "Help desk processing", "retention": "90 days"},
             {"entity": "Audit event log", "purpose": "Permissions monitoring and transparency", "retention": "45 days"}
         ],
+        "datasets": crate::privacy::PRIVACY_DATASETS,
         "gdpr_rights": ["Right of access (Export)", "Right to be forgotten (Erasure)"]
     })))
 }

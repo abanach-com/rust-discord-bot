@@ -24,9 +24,9 @@ use super::{
     ProgressionSeason, QuoteRecord, ReactionRoleBinding, ReactionRoleGrant,
     RecordCompanionLeaseParams, RecruitmentApplication, RecruitmentReview,
     RecruitmentRoleFulfillment, RecruitmentTrack, RedditSubscription,
-    ReleaseReactionRoleGrantOutcome, ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent,
-    ServerSnapshot, SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem,
-    StorePurchase, TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament,
+    ReleaseReactionRoleGrantOutcome, ReputationGrantOutcome, ScheduledEvent, ServerSnapshot,
+    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
+    TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament,
     TransitionApplicationParams, TupperError, TupperProfile, TwitchStreamSubscription,
     UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WORK_JOBS, WorkClaimOutcome,
     WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
@@ -619,19 +619,7 @@ impl PostgresStore {
 
         tx.commit().await?;
 
-        let retained_records = vec![
-            RetainedRecordNotice {
-                entity: "Moderation cases".to_string(),
-                reason: "Server security, sanctions audit and anti-abuse accountability"
-                    .to_string(),
-                retention_policy: "365 days".to_string(),
-            },
-            RetainedRecordNotice {
-                entity: "Audit log entries".to_string(),
-                reason: "Administrative action audit trail and server governance".to_string(),
-                retention_policy: "45 days".to_string(),
-            },
-        ];
+        let retained_records = crate::privacy::build_default_retained_notices();
 
         Ok(UserErasureReport {
             user_id: user_id.to_string(),

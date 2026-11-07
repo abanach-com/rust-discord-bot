@@ -8,6 +8,7 @@ pub mod lua;
 pub mod metrics;
 pub mod moderation_cases;
 pub mod policy;
+pub mod privacy;
 pub mod rate_limit;
 pub mod recruitment;
 pub mod scheduler;
