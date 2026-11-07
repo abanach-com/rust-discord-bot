@@ -2995,6 +2995,69 @@ async fn test_postgres_integration_suite() {
         .await
         .unwrap();
 
+    // Issue #306: AFK storage lifecycle and privacy erasure in Postgres
+    let afk_pg_user = "999000000000000097";
+    let afk_other_user = "999000000000000098";
+    let afk_other_guild = "888000000000000099";
+
+    store
+        .set_afk(rusty_discord_bot::storage::AfkRecord {
+            guild_id: rr_guild.to_string(),
+            user_id: afk_pg_user.to_string(),
+            reason: "Postgres AFK reason".to_string(),
+            set_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    store
+        .set_afk(rusty_discord_bot::storage::AfkRecord {
+            guild_id: rr_guild.to_string(),
+            user_id: afk_other_user.to_string(),
+            reason: "Other user Postgres AFK".to_string(),
+            set_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    store
+        .set_afk(rusty_discord_bot::storage::AfkRecord {
+            guild_id: afk_other_guild.to_string(),
+            user_id: afk_pg_user.to_string(),
+            reason: "Other guild Postgres AFK".to_string(),
+            set_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    let afk_before = store.get_afk(rr_guild, afk_pg_user).await.unwrap();
+    assert!(afk_before.is_some());
+    assert_eq!(afk_before.unwrap().reason, "Postgres AFK reason");
+
+    let erase_afk_rep = store
+        .erase_guild_user_data(rr_guild, afk_pg_user)
+        .await
+        .unwrap();
+    assert!(erase_afk_rep.related_records_erased >= 1);
+
+    let afk_after_pg = store.get_afk(rr_guild, afk_pg_user).await.unwrap();
+    assert!(
+        afk_after_pg.is_none(),
+        "AFK record must be erased in Postgres"
+    );
+
+    let other_afk_pg = store.get_afk(rr_guild, afk_other_user).await.unwrap();
+    assert!(
+        other_afk_pg.is_some(),
+        "Other user AFK in same guild must remain intact in Postgres"
+    );
+
+    let other_guild_afk_pg = store.get_afk(afk_other_guild, afk_pg_user).await.unwrap();
+    assert!(
+        other_guild_afk_pg.is_some(),
+        "User AFK in other guild must remain intact in Postgres"
+    );
+
     // 30. Economy work & crime rewards, cooldowns and idempotency in Postgres (#278)
     let eco_guild = "777000000000000001";
     let eco_user = "888000000000000001";

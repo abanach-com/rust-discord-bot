@@ -1893,6 +1893,17 @@ pub async fn export_user_privacy_data(
         Vec::new()
     };
 
+    let afk = if let (Ok(_), Ok(_)) = (guild_id.parse::<u64>(), user_id.parse::<u64>()) {
+        state
+            .app
+            .storage
+            .get_afk(&guild_id, user_id)
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?
+    } else {
+        None
+    };
+
     Ok(Json(json!({
         "user_id": user_id,
         "guild_id": guild_id,
@@ -1902,6 +1913,7 @@ pub async fn export_user_privacy_data(
         "quotes": quotes,
         "birthday": birthday,
         "reaction_roles": reaction_roles,
+        "afk": afk,
     })))
 }
 

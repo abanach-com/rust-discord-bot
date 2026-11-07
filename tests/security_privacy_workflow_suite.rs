@@ -310,6 +310,44 @@ async fn test_security_privacy_workflow_suite() {
         .await
         .unwrap();
 
+    // Setup AFK records for privacy export & erasure testing (Issue #306)
+    state
+        .app
+        .storage
+        .set_afk(rusty_discord_bot::storage::AfkRecord {
+            guild_id: guild_id.to_string(),
+            user_id: user_id.to_string(),
+            reason: "Proszę nie przeszkadzać (test AFK)".to_string(),
+            set_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    // Isolated AFK records for other user and other guild
+    state
+        .app
+        .storage
+        .set_afk(rusty_discord_bot::storage::AfkRecord {
+            guild_id: guild_id.to_string(),
+            user_id: "888888888".to_string(),
+            reason: "Other user AFK".to_string(),
+            set_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    state
+        .app
+        .storage
+        .set_afk(rusty_discord_bot::storage::AfkRecord {
+            guild_id: "200".to_string(),
+            user_id: user_id.to_string(),
+            reason: "Other guild AFK".to_string(),
+            set_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
+
     // Verify export returns all 51 cases without truncation
     let export_initial = client
         .post(format!("{base_url}/api/guilds/{guild_id}/privacy/export"))
@@ -341,6 +379,12 @@ async fn test_security_privacy_workflow_suite() {
     );
     assert_eq!(initial_rr[0]["user_id"], user_id);
     assert_eq!(initial_rr[0]["role_id"], "1002");
+    assert_eq!(initial_json["afk"]["user_id"], user_id);
+    assert_eq!(
+        initial_json["afk"]["reason"],
+        "Proszę nie przeszkadzać (test AFK)"
+    );
+    assert!(!initial_json["afk"]["set_at"].is_null());
 
     // Issue #135: Storage failure injection must yield HTTP 500, not fake 200
     state.app.storage.inject_progression_failure(true);
@@ -449,6 +493,36 @@ async fn test_security_privacy_workflow_suite() {
         "User's grants in other guild must remain intact"
     );
 
+    // Verify storage no longer has AFK record for (guild_id, user_id)
+    let afk_after = state
+        .app
+        .storage
+        .get_afk(guild_id, user_id)
+        .await
+        .expect("check afk after erase");
+    assert!(
+        afk_after.is_none(),
+        "AFK record for (guild_id, user_id) must be erased"
+    );
+
+    let other_user_afk = state
+        .app
+        .storage
+        .get_afk(guild_id, "888888888")
+        .await
+        .expect("check other user afk")
+        .expect("other user afk must exist");
+    assert_eq!(other_user_afk.reason, "Other user AFK");
+
+    let other_guild_afk = state
+        .app
+        .storage
+        .get_afk("200", user_id)
+        .await
+        .expect("check other guild afk")
+        .expect("other guild afk must exist");
+    assert_eq!(other_guild_afk.reason, "Other guild AFK");
+
     // Verify export returns null for progression after genuine erasure
     let export_res = client
         .post(format!("{base_url}/api/guilds/{guild_id}/privacy/export"))
@@ -470,6 +544,10 @@ async fn test_security_privacy_workflow_suite() {
     assert!(
         rr_after.is_empty(),
         "Exported reaction roles must be empty after genuine erasure"
+    );
+    assert!(
+        export_json["afk"].is_null(),
+        "Exported afk must be null after genuine erasure"
     );
 
     // =========================================================================

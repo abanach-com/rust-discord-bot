@@ -43,3 +43,4 @@ Zarządzanie statusem nieobecności AFK, automatyczne powiadomienia przy wzmiank
 - Audytowane zdarzenia: `afk_set`, `afk_clear`, `afk_auto_clear`, `afk_notice_throttled`.
 - Metryki Prometheus: `afk_notifications_suppressed_total` (rejestruje zduszone powiadomienia floodu).
 - Usunięcie danych użytkownika w ramach RODO (`/privacy/delete`) automatycznie czyści status AFK.
+- Eksport danych użytkownika (`/privacy/export`) uwzględnia aktywny rekord AFK (`reason`, `set_at`).
