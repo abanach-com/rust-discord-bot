@@ -5135,3 +5135,186 @@ async fn test_birthdays_storage_and_execution_lifecycle_suite() {
 
     shard_manager.shutdown_all().await;
 }
+
+#[tokio::test]
+async fn test_quotes_and_birthdays_privacy_erasure_and_export_suite() {
+    use chrono::Utc;
+    use rusty_discord_bot::storage::{BirthdayRecord, QuoteRecord};
+    use uuid::Uuid;
+
+    let (_ctx, _mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state().await;
+
+    let guild_a = "100";
+    let guild_b = "200";
+    let user_u = "111111111111111111";
+    let user_v = "222222222222222222";
+
+    // 1. Create quotes in Guild A
+    // Q1: added by U, quoting V
+    let _q1 = state
+        .storage
+        .create_quote(QuoteRecord {
+            id: Uuid::new_v4(),
+            guild_id: guild_a.to_string(),
+            added_by: user_u.to_string(),
+            author_id: user_v.to_string(),
+            body: "Quote 1 by V, added by U".to_string(),
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    // Q2: added by V, quoting U
+    let _q2 = state
+        .storage
+        .create_quote(QuoteRecord {
+            id: Uuid::new_v4(),
+            guild_id: guild_a.to_string(),
+            added_by: user_v.to_string(),
+            author_id: user_u.to_string(),
+            body: "Quote 2 by U, added by V".to_string(),
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    // Q3: added by V, quoting V (unrelated to U)
+    let q3 = state
+        .storage
+        .create_quote(QuoteRecord {
+            id: Uuid::new_v4(),
+            guild_id: guild_a.to_string(),
+            added_by: user_v.to_string(),
+            author_id: user_v.to_string(),
+            body: "Quote 3 unrelated to U".to_string(),
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    // Q4: Guild B quote by U (tenant isolation)
+    let q4 = state
+        .storage
+        .create_quote(QuoteRecord {
+            id: Uuid::new_v4(),
+            guild_id: guild_b.to_string(),
+            added_by: user_u.to_string(),
+            author_id: user_u.to_string(),
+            body: "Quote 4 in Guild B".to_string(),
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    // 2. Set birthdays
+    let _b1 = state
+        .storage
+        .set_birthday(BirthdayRecord {
+            guild_id: guild_a.to_string(),
+            user_id: user_u.to_string(),
+            month: 7,
+            day: 10,
+            updated_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    let _b2 = state
+        .storage
+        .set_birthday(BirthdayRecord {
+            guild_id: guild_a.to_string(),
+            user_id: user_v.to_string(),
+            month: 8,
+            day: 20,
+            updated_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    let _b3 = state
+        .storage
+        .set_birthday(BirthdayRecord {
+            guild_id: guild_b.to_string(),
+            user_id: user_u.to_string(),
+            month: 7,
+            day: 10,
+            updated_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    // 3. Verify user quotes and birthdays exist before erasure
+    let u_quotes_before = state
+        .storage
+        .list_user_quotes(guild_a, user_u)
+        .await
+        .unwrap();
+    assert_eq!(u_quotes_before.len(), 2);
+    let u_birthday_before = state.storage.get_birthday(guild_a, user_u).await.unwrap();
+    assert!(u_birthday_before.is_some());
+
+    // 4. Perform erasure for user U in Guild A
+    let erasure_report = state
+        .storage
+        .erase_guild_user_data(guild_a, user_u)
+        .await
+        .expect("erase should succeed");
+
+    assert!(
+        erasure_report.related_records_erased >= 3,
+        "Erasure must erase at least 2 quotes and 1 birthday for user U"
+    );
+
+    // 5. Verify Guild A state after erasure
+    let u_quotes_after = state
+        .storage
+        .list_user_quotes(guild_a, user_u)
+        .await
+        .unwrap();
+    assert!(
+        u_quotes_after.is_empty(),
+        "User U quotes in Guild A must be completely erased"
+    );
+
+    let all_quotes_a = state.storage.list_quotes(guild_a, 10).await.unwrap();
+    assert_eq!(
+        all_quotes_a.len(),
+        1,
+        "Only unrelated quote Q3 must remain in Guild A"
+    );
+    assert_eq!(all_quotes_a[0].id, q3.id);
+
+    let u_b_after = state.storage.get_birthday(guild_a, user_u).await.unwrap();
+    assert!(
+        u_b_after.is_none(),
+        "User U birthday in Guild A must be erased"
+    );
+
+    let v_b_after = state.storage.get_birthday(guild_a, user_v).await.unwrap();
+    assert!(
+        v_b_after.is_some(),
+        "User V birthday in Guild A must remain intact"
+    );
+
+    // 6. Verify Guild B isolation (Q4 and B3 remain)
+    let b_quotes_after = state.storage.list_quotes(guild_b, 10).await.unwrap();
+    assert_eq!(b_quotes_after.len(), 1);
+    assert_eq!(b_quotes_after[0].id, q4.id);
+
+    let b_birthday_after = state.storage.get_birthday(guild_b, user_u).await.unwrap();
+    assert!(b_birthday_after.is_some());
+
+    // 7. Verify idempotency of erasure
+    let second_erasure = state
+        .storage
+        .erase_guild_user_data(guild_a, user_u)
+        .await
+        .expect("second erasure must succeed");
+    assert_eq!(
+        second_erasure.related_records_erased, 0,
+        "Idempotent erasure must report 0 additional records erased"
+    );
+
+    shard_manager.shutdown_all().await;
+}

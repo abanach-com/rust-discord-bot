@@ -1967,6 +1967,59 @@ async fn test_postgres_integration_suite() {
             .is_empty()
     );
 
+    // Issue #302: Quotes & birthdays user erasure in PostgreSQL
+    let quote_user = "999000000000000091";
+    let other_user = "999000000000000092";
+    let _ = store
+        .create_quote(rusty_discord_bot::storage::QuoteRecord {
+            id: Uuid::new_v4(),
+            guild_id: companion_guild_id.to_string(),
+            added_by: quote_user.to_string(),
+            author_id: other_user.to_string(),
+            body: "Quote 1 by other added by quote_user".to_string(),
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("create quote 1");
+    let _ = store
+        .create_quote(rusty_discord_bot::storage::QuoteRecord {
+            id: Uuid::new_v4(),
+            guild_id: companion_guild_id.to_string(),
+            added_by: other_user.to_string(),
+            author_id: quote_user.to_string(),
+            body: "Quote 2 by quote_user added by other".to_string(),
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("create quote 2");
+    let _ = store
+        .set_birthday(rusty_discord_bot::storage::BirthdayRecord {
+            guild_id: companion_guild_id.to_string(),
+            user_id: quote_user.to_string(),
+            month: 5,
+            day: 15,
+            updated_at: Utc::now(),
+        })
+        .await
+        .expect("set birthday");
+
+    let erase_res = store
+        .erase_guild_user_data(companion_guild_id, quote_user)
+        .await
+        .expect("erase quotes and birthdays");
+    assert!(erase_res.related_records_erased >= 3);
+
+    let quotes_left = store
+        .list_user_quotes(companion_guild_id, quote_user)
+        .await
+        .expect("list user quotes after erase");
+    assert!(quotes_left.is_empty());
+    let birthday_left = store
+        .get_birthday(companion_guild_id, quote_user)
+        .await
+        .expect("get birthday after erase");
+    assert!(birthday_left.is_none());
+
     // 12.8. Issue #262: Companion mapping enabled semantics & lease invalidation in PostgreSQL
     let dis_voice_id = "888000000000000088";
     let dis_text_id = "888000000000000089";

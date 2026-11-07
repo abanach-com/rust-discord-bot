@@ -627,6 +627,20 @@ impl MemoryStore {
             .retain(|(g, _), s| !(g == guild_id && s.owner_user_id == user_id));
         related_erased += before_forum_sessions.saturating_sub(self.help_forum_sessions.len());
 
+        let before_quotes = self.quotes.len();
+        self.quotes.retain(|_, q| {
+            !(q.guild_id == guild_id && (q.added_by == user_id || q.author_id == user_id))
+        });
+        related_erased += before_quotes.saturating_sub(self.quotes.len());
+
+        if self
+            .birthdays
+            .remove(&(guild_id.to_string(), user_id.to_string()))
+            .is_some()
+        {
+            related_erased += 1;
+        }
+
         let retained_records = vec![
             RetainedRecordNotice {
                 entity: "Moderation cases".to_string(),
@@ -2282,6 +2296,27 @@ impl MemoryStore {
                 .then_with(|| b.id.cmp(&a.id))
         });
         matches.truncate(limit);
+        Ok(matches)
+    }
+
+    pub fn list_user_quotes(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Vec<QuoteRecord>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+        let mut matches: Vec<QuoteRecord> = self
+            .quotes
+            .iter()
+            .filter(|e| e.guild_id == guild_id && (e.added_by == user_id || e.author_id == user_id))
+            .map(|e| e.value().clone())
+            .collect();
+        matches.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
         Ok(matches)
     }
 

@@ -580,6 +580,25 @@ impl PostgresStore {
         .unwrap_or(0);
         related_erased += deleted_economy_purchases as usize;
 
+        let deleted_quotes = sqlx::query(
+            "DELETE FROM guild_quotes WHERE guild_id = $1 AND (added_by = $2 OR author_id = $2)",
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        related_erased += deleted_quotes as usize;
+
+        let deleted_birthdays =
+            sqlx::query("DELETE FROM guild_birthdays WHERE guild_id = $1 AND user_id = $2")
+                .bind(guild_id)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+        related_erased += deleted_birthdays as usize;
+
         tx.commit().await?;
 
         let retained_records = vec![
@@ -3185,6 +3204,30 @@ impl PostgresStore {
         )
         .bind(guild_id)
         .bind(limit_i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn list_user_quotes(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Vec<QuoteRecord>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+
+        let rows = sqlx::query_as::<_, QuoteRecord>(
+            r#"
+            SELECT id, guild_id, added_by, author_id, body, created_at
+            FROM guild_quotes
+            WHERE guild_id = $1 AND (added_by = $2 OR author_id = $2)
+            ORDER BY created_at DESC, id DESC
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
         .fetch_all(&self.pool)
         .await?;
 

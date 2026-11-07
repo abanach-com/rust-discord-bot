@@ -2790,6 +2790,17 @@ impl Storage {
         }
     }
 
+    pub async fn list_user_quotes(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Vec<QuoteRecord>> {
+        match self {
+            Self::Memory(store) => store.list_user_quotes(guild_id, user_id),
+            Self::Postgres(store) => store.list_user_quotes(guild_id, user_id).await,
+        }
+    }
+
     pub async fn delete_quote(&self, guild_id: &str, quote_id: Uuid) -> anyhow::Result<bool> {
         match self {
             Self::Memory(store) => store.delete_quote(guild_id, quote_id),

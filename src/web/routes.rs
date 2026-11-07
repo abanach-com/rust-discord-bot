@@ -1859,12 +1859,37 @@ pub async fn export_user_privacy_data(
         Vec::new()
     };
 
+    let quotes = if let (Ok(_), Ok(_)) = (guild_id.parse::<u64>(), user_id.parse::<u64>()) {
+        state
+            .app
+            .storage
+            .list_user_quotes(&guild_id, user_id)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let birthday = if let (Ok(_), Ok(_)) = (guild_id.parse::<u64>(), user_id.parse::<u64>()) {
+        state
+            .app
+            .storage
+            .get_birthday(&guild_id, user_id)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+
     Ok(Json(json!({
         "user_id": user_id,
         "guild_id": guild_id,
         "exported_at": Utc::now(),
         "progression": profile,
-        "moderation_cases": cases
+        "moderation_cases": cases,
+        "quotes": quotes,
+        "birthday": birthday
     })))
 }
 
