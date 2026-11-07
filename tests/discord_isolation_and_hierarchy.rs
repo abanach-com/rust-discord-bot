@@ -492,6 +492,34 @@ async fn mock_discord_handler(
 
                     "flags": 0
 
+                },
+
+                {
+
+                    "id": "1003",
+
+                    "name": "SubordinateAdminRole",
+
+                    "position": 25,
+
+                    "permissions": "8", // Administrator, but position 25 < bot position 50
+
+                    "color": 0,
+
+                    "colors": {
+
+                        "primary_color": 0
+
+                    },
+
+                    "hoist": false,
+
+                    "managed": false,
+
+                    "mentionable": false,
+
+                    "flags": 0
+
                 }
 
             ]
@@ -3596,6 +3624,94 @@ async fn test_economy_shop_buy_inventory_role_hierarchy_and_guild_isolation() {
         mock.modifying_requests_count.load(Ordering::SeqCst),
         baseline_before_admin_buy,
         "Privileged role must not be dispatched via PUT"
+    );
+
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn test_event_autorole_privileged_defense_in_depth() {
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state_with_port(mock.port).await;
+
+    let guild_id = GuildId::new(100);
+    let target_user = "222222222222222222";
+
+    // 1. Attempt to execute event-based AddRole with privileged role (1003 has ADMINISTRATOR, position 25 < bot position 50)
+    // Even if configured in database, runtime defense-in-depth must reject granting privileged role
+    let privileged_action = vec![LuaAction::AddRole {
+        user_id: target_user.to_string(),
+        role_id: "1003".to_string(),
+        reason: Some("Compromised welcome autorole".to_string()),
+    }];
+
+    let baseline_requests = mock
+        .modifying_requests_count
+        .load(std::sync::atomic::Ordering::SeqCst);
+
+    let res_priv = rusty_discord_bot::discord::executor::execute_event_actions(
+        &ctx,
+        &state,
+        "welcome",
+        Some(guild_id),
+        None,
+        None,
+        &privileged_action,
+    )
+    .await;
+    assert!(
+        res_priv.is_ok(),
+        "execute_event_actions handles action denial gracefully"
+    );
+
+    // Verify modifying requests were blocked (0 PUT requests sent to Discord)
+    assert_eq!(
+        mock.modifying_requests_count
+            .load(std::sync::atomic::Ordering::SeqCst),
+        baseline_requests,
+        "No PUT request must be dispatched for privileged role"
+    );
+
+    // Verify structured audit log entry 'action_denied' recorded the refusal
+    let audit_logs = state.storage.list_audit_events("100", 10).await.unwrap();
+    let denied_entry = audit_logs
+        .iter()
+        .find(|a| a.event == "action_denied")
+        .expect("action_denied audit event must be logged");
+    let audit_data_str = serde_json::to_string(&denied_entry.data).unwrap();
+    assert!(
+        audit_data_str.contains("event-based automation cannot grant privileged role"),
+        "Audit log must describe privileged role refusal: {audit_data_str}"
+    );
+
+    // 2. Event-based AddRole with normal unprivileged role (1002 has 0 permissions) -> succeeds
+    let unprivileged_action = vec![LuaAction::AddRole {
+        user_id: target_user.to_string(),
+        role_id: "1002".to_string(),
+        reason: Some("Legitimate welcome autorole".to_string()),
+    }];
+
+    let res_unpriv = rusty_discord_bot::discord::executor::execute_event_actions(
+        &ctx,
+        &state,
+        "welcome",
+        Some(guild_id),
+        None,
+        None,
+        &unprivileged_action,
+    )
+    .await;
+
+    assert!(
+        res_unpriv.is_ok(),
+        "Event-driven AddRole must succeed on unprivileged role: {:?}",
+        res_unpriv.err()
+    );
+    assert!(
+        mock.modifying_requests_count
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > baseline_requests,
+        "Role delivery PUT request must be dispatched for unprivileged role"
     );
 
     shard_manager.shutdown_all().await;

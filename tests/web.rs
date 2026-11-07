@@ -10814,3 +10814,496 @@ async fn test_giveaway_private_thread_membership_authorization_suite() {
         .unwrap();
     assert_eq!(err_join_resp.status(), reqwest::StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn test_module_autorole_privilege_escalation_guard_suite() {
+    use axum::Json;
+    use axum::extract::Path;
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+    use reqwest::header::COOKIE;
+
+    let guild_a = "777888999000111";
+
+    // 1. Mock Discord API for module autorole verification
+    let discord_mock_app = axum::Router::new()
+        .route(
+            "/users/@me",
+            get(|| async move {
+                Json(serde_json::json!({
+                    "id": "999999999999999999"
+                }))
+                .into_response()
+            }),
+        )
+        .route(
+            "/guilds/{guild_id}",
+            get(|Path(gid): Path<String>| async move {
+                Json(serde_json::json!({
+                    "id": gid,
+                    "owner_id": "999000000000000000"
+                }))
+                .into_response()
+            }),
+        )
+        .route(
+            "/guilds/{guild_id}/roles",
+            get(|| async move {
+                Json(serde_json::json!([
+                    {
+                        "id": "1001",
+                        "name": "QuarantineRole",
+                        "permissions": "0",
+                        "position": 5,
+                        "managed": false
+                    },
+                    {
+                        "id": "1002",
+                        "name": "MemberRoleA",
+                        "permissions": "0",
+                        "position": 10,
+                        "managed": false
+                    },
+                    {
+                        "id": "1003",
+                        "name": "ModRole",
+                        "permissions": "268435456", // MANAGE_ROLES
+                        "position": 40,
+                        "managed": false
+                    },
+                    {
+                        "id": "1004",
+                        "name": "BotRole",
+                        "permissions": "268435456",
+                        "position": 60,
+                        "managed": false
+                    },
+                    {
+                        "id": "1005",
+                        "name": "AdminRole",
+                        "permissions": "8", // ADMINISTRATOR
+                        "position": 30,
+                        "managed": false
+                    },
+                    {
+                        "id": "1006",
+                        "name": "TooHighRole",
+                        "permissions": "0",
+                        "position": 50, // higher than actor's position 40
+                        "managed": false
+                    },
+                    {
+                        "id": "1007",
+                        "name": "ManagedIntegrationRole",
+                        "permissions": "0",
+                        "position": 15,
+                        "managed": true
+                    },
+                    {
+                        "id": "1008",
+                        "name": "BanRole",
+                        "permissions": "4", // BAN_MEMBERS
+                        "position": 20,
+                        "managed": false
+                    }
+                ]))
+                .into_response()
+            }),
+        )
+        .route(
+            "/guilds/{guild_id}/members/{user_id}",
+            get(|Path((_gid, user_id)): Path<(String, String)>| async move {
+                if user_id == "999999999999999999" {
+                    // Bot member: position 60
+                    Json(serde_json::json!({
+                        "user": { "id": user_id },
+                        "roles": ["1004"],
+                        "permissions": "268435456"
+                    }))
+                    .into_response()
+                } else if user_id == "111111111111111111" {
+                    // Admin A: position 40, MANAGE_GUILD | MANAGE_ROLES
+                    Json(serde_json::json!({
+                        "user": { "id": user_id },
+                        "roles": ["1003"],
+                        "permissions": "268435488"
+                    }))
+                    .into_response()
+                } else if user_id == "333333333333333333" {
+                    // Manager without MANAGE_ROLES: MANAGE_GUILD only (32)
+                    Json(serde_json::json!({
+                        "user": { "id": user_id },
+                        "roles": [],
+                        "permissions": "32"
+                    }))
+                    .into_response()
+                } else {
+                    Json(serde_json::json!({
+                        "user": { "id": user_id },
+                        "roles": [],
+                        "permissions": "0"
+                    }))
+                    .into_response()
+                }
+            }),
+        );
+
+    let discord_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind discord mock");
+    let discord_addr = discord_listener.local_addr().expect("discord mock addr");
+    tokio::spawn(async move {
+        axum::serve(discord_listener, discord_mock_app)
+            .await
+            .unwrap();
+    });
+
+    let mut config = test_config();
+    config.discord_token = "live_bot_token_autorole_test_secret".to_string();
+    config.offline_mode = false;
+    config.discord_api_base_url = format!("http://{discord_addr}");
+
+    let app = AppState::bootstrap(config).await.expect("bootstrap");
+    let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
+    let web_state = WebState {
+        app,
+        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        permissions_cache,
+    };
+
+    let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind web listener");
+    let web_addr = web_listener.local_addr().expect("web addr");
+    let router = build_router(web_state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            web_listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{web_addr}");
+
+    let admin_session = "admin_autorole_sess";
+    let admin_csrf = "admin_autorole_csrf";
+    let admin_id = "111111111111111111";
+
+    web_state
+        .app
+        .sessions
+        .save_session(
+            admin_session,
+            DashboardUser {
+                id: admin_id.to_owned(),
+                username: "admin_a".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_a.to_owned(),
+                name: "Guild A".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "268435488".to_owned(), // MANAGE_GUILD | MANAGE_ROLES
+            }],
+            admin_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    web_state.permissions_cache.insert(
+        (admin_id.to_owned(), guild_a.to_owned()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    let no_roles_session = "no_roles_autorole_sess";
+    let no_roles_csrf = "no_roles_autorole_csrf";
+    let no_roles_id = "333333333333333333";
+
+    web_state
+        .app
+        .sessions
+        .save_session(
+            no_roles_session,
+            DashboardUser {
+                id: no_roles_id.to_owned(),
+                username: "manager_without_roles".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_a.to_owned(),
+                name: "Guild A".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "32".to_owned(), // MANAGE_GUILD only
+            }],
+            no_roles_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    web_state.permissions_cache.insert(
+        (no_roles_id.to_owned(), guild_a.to_owned()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    let cookie_admin = format!("rusty_discord_bot_session={admin_session}");
+    let cookie_no_roles = format!("rusty_discord_bot_session={no_roles_session}");
+
+    // Test 1: User with MANAGE_GUILD but without MANAGE_ROLES attempts to configure auto_roles in welcome -> 403 Forbidden
+    let no_role_welcome_resp = client
+        .put(format!("{base_url}/api/guilds/{guild_a}/modules/welcome"))
+        .header(COOKIE, &cookie_no_roles)
+        .header("x-csrf-token", no_roles_csrf)
+        .json(&serde_json::json!({
+            "enabled": true,
+            "config": {
+                "channel_id": null,
+                "message": "Welcome {user}!",
+                "dm_welcome": false,
+                "auto_roles": ["1002"]
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        no_role_welcome_resp.status(),
+        reqwest::StatusCode::FORBIDDEN
+    );
+
+    // Test 2: User with MANAGE_GUILD but without MANAGE_ROLES attempts to configure quarantine_role_id in join_guard -> 403 Forbidden
+    let no_role_jg_resp = client
+        .put(format!(
+            "{base_url}/api/guilds/{guild_a}/modules/join_guard"
+        ))
+        .header(COOKIE, &cookie_no_roles)
+        .header("x-csrf-token", no_roles_csrf)
+        .json(&serde_json::json!({
+            "enabled": true,
+            "config": {
+                "alert_channel_id": null,
+                "join_log_channel_id": null,
+                "minimum_account_age_hours": 24,
+                "action_on_raid": "alert",
+                "quarantine_role_id": "1001"
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_role_jg_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Test 3: User with MANAGE_GUILD without MANAGE_ROLES can safely configure welcome module with empty auto_roles -> 200 OK
+    let safe_welcome_resp = client
+        .put(format!("{base_url}/api/guilds/{guild_a}/modules/welcome"))
+        .header(COOKIE, &cookie_no_roles)
+        .header("x-csrf-token", no_roles_csrf)
+        .json(&serde_json::json!({
+            "enabled": true,
+            "config": {
+                "channel_id": null,
+                "message": "Welcome {user} safe!",
+                "dm_welcome": false,
+                "auto_roles": []
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(safe_welcome_resp.status(), reqwest::StatusCode::OK);
+
+    // Test 4: User with MANAGE_GUILD without MANAGE_ROLES can safely configure join_guard without quarantine_role_id -> 200 OK
+    let safe_jg_resp = client
+        .put(format!(
+            "{base_url}/api/guilds/{guild_a}/modules/join_guard"
+        ))
+        .header(COOKIE, &cookie_no_roles)
+        .header("x-csrf-token", no_roles_csrf)
+        .json(&serde_json::json!({
+            "enabled": true,
+            "config": {
+                "alert_channel_id": null,
+                "join_log_channel_id": null,
+                "minimum_account_age_hours": 24,
+                "action_on_raid": "alert"
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(safe_jg_resp.status(), reqwest::StatusCode::OK);
+
+    // Test 5: Admin attempts to configure auto_roles with privileged ADMINISTRATOR role (1005) -> 403 Forbidden
+    let admin_role_resp = client
+        .put(format!("{base_url}/api/guilds/{guild_a}/modules/welcome"))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "enabled": true,
+            "config": {
+                "channel_id": null,
+                "message": "Welcome {user}!",
+                "dm_welcome": false,
+                "auto_roles": ["1005"]
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin_role_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Test 6: Admin attempts to configure join_guard quarantine_role_id with MANAGE_ROLES role (1003) -> 403 Forbidden
+    let jg_mod_role_resp = client
+        .put(format!(
+            "{base_url}/api/guilds/{guild_a}/modules/join_guard"
+        ))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "enabled": true,
+            "config": {
+                "alert_channel_id": null,
+                "join_log_channel_id": null,
+                "minimum_account_age_hours": 24,
+                "action_on_raid": "alert",
+                "quarantine_role_id": "1003"
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(jg_mod_role_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Test 7: Admin attempts to configure auto_roles with BAN_MEMBERS role (1008) -> 403 Forbidden
+    let ban_role_resp = client
+        .put(format!("{base_url}/api/guilds/{guild_a}/modules/welcome"))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "enabled": true,
+            "config": {
+                "channel_id": null,
+                "message": "Welcome {user}!",
+                "dm_welcome": false,
+                "auto_roles": ["1008"]
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ban_role_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Test 8: Admin attempts to configure auto_roles with managed integration role (1007) -> 400 Bad Request
+    let managed_role_resp = client
+        .put(format!("{base_url}/api/guilds/{guild_a}/modules/welcome"))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "enabled": true,
+            "config": {
+                "channel_id": null,
+                "message": "Welcome {user}!",
+                "dm_welcome": false,
+                "auto_roles": ["1007"]
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(managed_role_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Test 9: Admin attempts to configure auto_roles with role higher than actor (1006) -> 403 Forbidden
+    let too_high_role_resp = client
+        .put(format!("{base_url}/api/guilds/{guild_a}/modules/welcome"))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "enabled": true,
+            "config": {
+                "channel_id": null,
+                "message": "Welcome {user}!",
+                "dm_welcome": false,
+                "auto_roles": ["1006"]
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(too_high_role_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Test 10: Admin attempts to configure auto_roles with non-existent role (9999) -> 400 Bad Request
+    let non_existent_resp = client
+        .put(format!("{base_url}/api/guilds/{guild_a}/modules/welcome"))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "enabled": true,
+            "config": {
+                "channel_id": null,
+                "message": "Welcome {user}!",
+                "dm_welcome": false,
+                "auto_roles": ["9999"]
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(non_existent_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Test 11: Admin configures legitimate unprivileged role (1002) in auto_roles -> 200 OK
+    let legit_welcome_resp = client
+        .put(format!("{base_url}/api/guilds/{guild_a}/modules/welcome"))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "enabled": true,
+            "config": {
+                "channel_id": null,
+                "message": "Welcome {user}!",
+                "dm_welcome": false,
+                "auto_roles": ["1002"]
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(legit_welcome_resp.status(), reqwest::StatusCode::OK);
+
+    // Test 12: Admin configures legitimate unprivileged role (1001) in quarantine_role_id -> 200 OK
+    let legit_jg_resp = client
+        .put(format!(
+            "{base_url}/api/guilds/{guild_a}/modules/join_guard"
+        ))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "enabled": true,
+            "config": {
+                "alert_channel_id": null,
+                "join_log_channel_id": null,
+                "minimum_account_age_hours": 24,
+                "action_on_raid": "alert",
+                "quarantine_role_id": "1001"
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(legit_jg_resp.status(), reqwest::StatusCode::OK);
+}

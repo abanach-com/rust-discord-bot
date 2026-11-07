@@ -965,7 +965,13 @@ async fn execute_action(
 
                 ensure_role_hierarchy(ctx, guild_id, origin.actor_id, role_id).await?;
             } else {
-                ensure_role_hierarchy(ctx, guild_id, None, role_id).await?;
+                let role = ensure_role_hierarchy_with_role(ctx, guild_id, None, role_id).await?;
+                if crate::discord::reaction_roles::is_privileged_role_permissions(role.permissions)
+                {
+                    return Err(anyhow!(
+                        "event-based automation cannot grant privileged role (permissions contain administrative rights)"
+                    ));
+                }
             }
 
             let member = guild_id.member(&ctx.http, user_id).await?;
@@ -1832,7 +1838,7 @@ pub async fn ensure_member_hierarchy(
     Ok(())
 }
 
-pub async fn ensure_role_hierarchy(
+pub async fn ensure_role_hierarchy_with_role(
     ctx: &Context,
 
     guild_id: GuildId,
@@ -1840,7 +1846,7 @@ pub async fn ensure_role_hierarchy(
     actor_id: Option<UserId>,
 
     role_id: RoleId,
-) -> Result<()> {
+) -> Result<Role> {
     let guild = guild_id.to_partial_guild(&ctx.http).await?;
 
     let role = guild
@@ -1888,7 +1894,21 @@ pub async fn ensure_role_hierarchy(
         }
     }
 
-    Ok(())
+    Ok(role.clone())
+}
+
+pub async fn ensure_role_hierarchy(
+    ctx: &Context,
+
+    guild_id: GuildId,
+
+    actor_id: Option<UserId>,
+
+    role_id: RoleId,
+) -> Result<()> {
+    ensure_role_hierarchy_with_role(ctx, guild_id, actor_id, role_id)
+        .await
+        .map(|_| ())
 }
 
 fn member_rank(member: &Member, roles: &HashMap<RoleId, Role>) -> (u16, u64) {

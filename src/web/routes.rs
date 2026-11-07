@@ -488,6 +488,40 @@ pub async fn update_guild_module(
         ));
     }
 
+    let configured_roles: Vec<&str> = match module_id.as_str() {
+        "welcome" => payload
+            .config
+            .get("auto_roles")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .collect(),
+        "join_guard" => payload
+            .config
+            .get("quarantine_role_id")
+            .and_then(|v| v.as_str())
+            .into_iter()
+            .filter(|s| !s.trim().is_empty())
+            .collect(),
+        _ => vec![],
+    };
+
+    if !configured_roles.is_empty() {
+        crate::web::auth::ensure_manage_roles_access(&state, &session, &guild_id).await?;
+        for role_id in configured_roles {
+            crate::web::features::validate_assignable_role(
+                &state,
+                &session,
+                &guild_id,
+                role_id,
+                "do automatycznego nadawania",
+            )
+            .await?;
+        }
+    }
+
     let settings = state
         .app
         .storage

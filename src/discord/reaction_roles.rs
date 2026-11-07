@@ -92,7 +92,8 @@ pub fn is_privileged_role_permissions(permissions: Permissions) -> bool {
             | Permissions::MANAGE_WEBHOOKS
             | Permissions::MANAGE_GUILD_EXPRESSIONS
             | Permissions::VIEW_AUDIT_LOG
-            | Permissions::MENTION_EVERYONE,
+            | Permissions::MENTION_EVERYONE
+            | Permissions::MODERATE_MEMBERS,
     )
 }
 

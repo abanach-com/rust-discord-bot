@@ -6134,11 +6134,12 @@ pub async fn verify_reaction_role_setup(
     Ok(())
 }
 
-pub async fn validate_assignable_store_role(
+pub async fn validate_assignable_role(
     state: &WebState,
     session: &crate::web::auth::Session,
     guild_id: &str,
     role_id: &str,
+    context_desc: &str,
 ) -> Result<(), ApiError> {
     ensure_manage_roles_access(state, session, guild_id).await?;
 
@@ -6175,54 +6176,58 @@ pub async fn validate_assignable_store_role(
         .ok_or_else(|| ApiError::bad_request("Wskazana rola nie istnieje na tym serwerze."))?;
 
     if target_role.managed {
-        return Err(ApiError::bad_request(
-            "Role zarządzane przez integracje nie mogą być sprzedawane w sklepie.",
-        ));
+        return Err(ApiError::bad_request(format!(
+            "Role zarządzane przez integracje nie mogą być używane {context_desc}."
+        )));
     }
 
     let role_perms_bits = target_role.permissions.parse::<u64>().unwrap_or(0);
     let role_perms = serenity::all::Permissions::from_bits_truncate(role_perms_bits);
     if crate::discord::reaction_roles::is_privileged_role_permissions(role_perms) {
-        return Err(ApiError::forbidden(
-            "Rola posiada uprawnienia administracyjne i nie może być sprzedawana w sklepie.",
-        ));
+        return Err(ApiError::forbidden(format!(
+            "Rola posiada uprawnienia administracyjne i nie może być używana {context_desc}."
+        )));
     }
 
     // 2. Sprawdź pozycję bota
-    let bot_id =
-        crate::web::routes::resolve_bot_user_id(&state.app.http_client, base_url, token).await;
+    let bot_id = crate::web::routes::resolve_bot_user_id(&state.app.http_client, base_url, token)
+        .await
+        .ok_or_else(|| {
+            ApiError::forbidden("Nie udało się zweryfikować tożsamości bota w Discord API.")
+        })?;
     let roles_map: std::collections::HashMap<&str, &DiscordRoleItem> =
         roles.iter().map(|r| (r.id.as_str(), r)).collect();
 
-    if let Some(bot_id) = bot_id {
-        let bot_url = format!("{base_url}/guilds/{guild_id}/members/{bot_id}");
-        let bot_resp = state
-            .app
-            .http_client
-            .get(&bot_url)
-            .header(reqwest::header::AUTHORIZATION, &auth_header)
-            .timeout(std::time::Duration::from_secs(5))
-            .send()
-            .await
-            .map_err(ApiError::upstream)?;
+    let bot_url = format!("{base_url}/guilds/{guild_id}/members/{bot_id}");
+    let bot_resp = state
+        .app
+        .http_client
+        .get(&bot_url)
+        .header(reqwest::header::AUTHORIZATION, &auth_header)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(ApiError::upstream)?;
 
-        if bot_resp.status().is_success() {
-            let bot_member: DiscordMemberItem =
-                bot_resp.json().await.map_err(ApiError::upstream)?;
-            let bot_highest = bot_member
-                .roles
-                .iter()
-                .filter_map(|rid| roles_map.get(rid.as_str()))
-                .map(|r| r.position)
-                .max()
-                .unwrap_or(0);
+    if !bot_resp.status().is_success() {
+        return Err(ApiError::forbidden(
+            "Nie udało się zweryfikować uprawnień bota w Discord API.",
+        ));
+    }
 
-            if bot_highest <= target_role.position {
-                return Err(ApiError::forbidden(
-                    "Najwyższa rola bota musi znajdować się nad konfigurowaną rolą.",
-                ));
-            }
-        }
+    let bot_member: DiscordMemberItem = bot_resp.json().await.map_err(ApiError::upstream)?;
+    let bot_highest = bot_member
+        .roles
+        .iter()
+        .filter_map(|rid| roles_map.get(rid.as_str()))
+        .map(|r| r.position)
+        .max()
+        .unwrap_or(0);
+
+    if bot_highest <= target_role.position {
+        return Err(ApiError::forbidden(
+            "Najwyższa rola bota musi znajdować się nad konfigurowaną rolą.",
+        ));
     }
 
     // 3. Sprawdź pozycję aktora (chyba że jest właścicielem)
@@ -6260,26 +6265,39 @@ pub async fn validate_assignable_store_role(
             .await
             .map_err(ApiError::upstream)?;
 
-        if actor_resp.status().is_success() {
-            let actor_member: DiscordMemberItem =
-                actor_resp.json().await.map_err(ApiError::upstream)?;
-            let actor_highest = actor_member
-                .roles
-                .iter()
-                .filter_map(|rid| roles_map.get(rid.as_str()))
-                .map(|r| r.position)
-                .max()
-                .unwrap_or(0);
+        if !actor_resp.status().is_success() {
+            return Err(ApiError::forbidden(
+                "Nie udało się zweryfikować ról członka w Discord API.",
+            ));
+        }
 
-            if actor_highest <= target_role.position {
-                return Err(ApiError::forbidden(
-                    "Twoja najwyższa rola musi znajdować się nad konfigurowaną rolą.",
-                ));
-            }
+        let actor_member: DiscordMemberItem =
+            actor_resp.json().await.map_err(ApiError::upstream)?;
+        let actor_highest = actor_member
+            .roles
+            .iter()
+            .filter_map(|rid| roles_map.get(rid.as_str()))
+            .map(|r| r.position)
+            .max()
+            .unwrap_or(0);
+
+        if actor_highest <= target_role.position {
+            return Err(ApiError::forbidden(
+                "Twoja najwyższa rola musi znajdować się nad konfigurowaną rolą.",
+            ));
         }
     }
 
     Ok(())
+}
+
+pub async fn validate_assignable_store_role(
+    state: &WebState,
+    session: &crate::web::auth::Session,
+    guild_id: &str,
+    role_id: &str,
+) -> Result<(), ApiError> {
+    validate_assignable_role(state, session, guild_id, role_id, "w sklepie").await
 }
 
 pub async fn verify_store_role_delivery_safety(
