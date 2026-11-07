@@ -2313,9 +2313,16 @@ impl Storage {
         }
     }
 
+    pub async fn finish_giveaway(&self, giveaway_id: Uuid) -> anyhow::Result<Vec<String>> {
+        match self {
+            Self::Memory(store) => store.finish_giveaway(giveaway_id),
+            Self::Postgres(store) => store.finish_giveaway(giveaway_id).await,
+        }
+    }
+
     pub async fn reroll_giveaway(&self, giveaway_id: Uuid) -> anyhow::Result<Vec<String>> {
         match self {
-            Self::Memory(store) => Ok(store.reroll_giveaway(giveaway_id)),
+            Self::Memory(store) => store.reroll_giveaway(giveaway_id),
 
             Self::Postgres(store) => store.reroll_giveaway(giveaway_id).await,
         }
@@ -7600,5 +7607,85 @@ mod tests {
         assert_eq!(leases_after.len(), 1);
         assert_eq!(leases_after[0].status, "revoke_pending");
         assert!(leases_after[0].next_attempt_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_giveaway_finish_and_reroll_storage_lifecycle() {
+        let store = Storage::memory();
+        let guild_id = "test_guild_giveaway";
+
+        // 1. Create giveaway
+        let ga = store
+            .create_giveaway(
+                guild_id,
+                "chan_1",
+                "Grand Prize",
+                1,
+                Utc::now() + chrono::Duration::hours(1),
+            )
+            .await
+            .expect("create giveaway");
+        assert!(!ga.ended);
+
+        // 2. Reroll before finish must fail (Issue #265)
+        let early_reroll = store.reroll_giveaway(ga.id).await;
+        assert!(early_reroll.is_err());
+        assert!(
+            early_reroll
+                .unwrap_err()
+                .to_string()
+                .contains("Giveaway is still active")
+        );
+
+        // 3. Add participants
+        assert!(store.join_giveaway(ga.id, "user_alpha").await.unwrap());
+        assert!(store.join_giveaway(ga.id, "user_beta").await.unwrap());
+
+        // 4. Finish giveaway
+        let winners = store.finish_giveaway(ga.id).await.expect("finish giveaway");
+        assert_eq!(winners.len(), 1);
+        let first_winner = winners[0].clone();
+        assert!(first_winner == "user_alpha" || first_winner == "user_beta");
+
+        let ga_ended = store.get_giveaway(ga.id).await.unwrap().unwrap();
+        assert!(ga_ended.ended);
+
+        // 5. Finish again is idempotent
+        let winners_again = store
+            .finish_giveaway(ga.id)
+            .await
+            .expect("finish giveaway again");
+        assert_eq!(winners_again, vec![first_winner.clone()]);
+
+        // 6. Reroll on finished giveaway replaces previous winner
+        let rerolled = store
+            .reroll_giveaway(ga.id)
+            .await
+            .expect("reroll finished giveaway");
+        assert_eq!(rerolled.len(), 1);
+        assert_ne!(rerolled[0], first_winner);
+
+        // 7. Giveaway with no participants
+        let empty_ga = store
+            .create_giveaway(
+                guild_id,
+                "chan_1",
+                "Empty Prize",
+                1,
+                Utc::now() + chrono::Duration::hours(1),
+            )
+            .await
+            .unwrap();
+        let empty_winners = store.finish_giveaway(empty_ga.id).await.unwrap();
+        assert!(empty_winners.is_empty());
+
+        let empty_reroll = store.reroll_giveaway(empty_ga.id).await;
+        assert!(empty_reroll.is_err());
+        assert!(
+            empty_reroll
+                .unwrap_err()
+                .to_string()
+                .contains("has no participants")
+        );
     }
 }

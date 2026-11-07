@@ -20,7 +20,7 @@ use serenity::{
 
 use crate::{AppState, lua::LuaAction};
 
-use super::{moderation_cases, music, progression, scheduler, tickets};
+use super::{giveaway, moderation_cases, music, progression, scheduler, tickets};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 
@@ -537,6 +537,10 @@ fn action_rate_limit_scope(action: &LuaAction) -> Option<&'static str> {
             operation: crate::lua::MusicOperation::Play,
             ..
         } => Some("music_play"),
+
+        LuaAction::Giveaway {
+            operation: crate::lua::GiveawayOperation::Start { .. },
+        } => Some("giveaway_start"),
 
         LuaAction::BanMember { .. }
         | LuaAction::KickMember { .. }
@@ -1381,6 +1385,24 @@ async fn execute_action(
                 state,
                 module_id,
                 moderation_cases::ModerationExecutionContext::new(
+                    origin.guild_id,
+                    origin.channel_id,
+                    origin.actor_id,
+                    origin.actor_permissions,
+                    origin.app_permissions,
+                    origin.enforce_actor_permissions,
+                ),
+                operation,
+            )
+            .await
+        }
+
+        LuaAction::Giveaway { operation } => {
+            giveaway::execute(
+                ctx,
+                state,
+                module_id,
+                giveaway::GiveawayExecutionContext::new(
                     origin.guild_id,
                     origin.channel_id,
                     origin.actor_id,

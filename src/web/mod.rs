@@ -280,6 +280,10 @@ pub fn build_router(state: WebState) -> Router {
             post(features::join_giveaway),
         )
         .route(
+            "/api/guilds/{guild_id}/giveaways/{giveaway_id}/end",
+            post(features::end_giveaway),
+        )
+        .route(
             "/api/guilds/{guild_id}/giveaways/{giveaway_id}/reroll",
             post(features::reroll_giveaway),
         )

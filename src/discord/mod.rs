@@ -5,6 +5,7 @@ pub mod delete_queue;
 pub use delete_queue::{DeleteCoordinator, DeleteOutcome, DeleteRequest};
 pub mod events;
 pub mod executor;
+pub mod giveaway;
 pub mod handler;
 pub use handler::Handler;
 pub mod moderation_cases;

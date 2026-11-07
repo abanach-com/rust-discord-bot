@@ -696,6 +696,15 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Extracted `reconcile_guild_companion_channels_with_voice_states` allowing reconciliation against an authoritative, reliable `HashMap<UserId, VoiceState>` snapshot.
   - Shifted startup companion reconciliation from premature `READY` event handler (where guilds are initially unavailable in Serenity cache) to `guild_create`, running only when full guild payload and voice states are reliably populated.
   - Added comprehensive verification in `tests/discord_isolation_and_hierarchy.rs` (`test_voice_companion_ready_empty_cache_defers_reconciliation_without_revocation`) verifying zero HTTP mutations, active lease preservation upon cache absence, and proper cleanup once an authoritative empty voice state arrives.
+- **Giveaway Lua -> Rust Typed Action Pipeline (#264)**:
+  - Replaced mock text replies in `scripts/giveaway/module.lua` with typed declarative actions `LuaAction::Giveaway { operation: GiveawayOperation }` covering `/giveaway start`, `/giveaway end`, and `/giveaway reroll`.
+  - Added robust validation in `GiveawayOperation::validate()` enforcing bounded prizes (1..=256 chars), duration limits (1..=10080 minutes), winner limits (1..=20), snowflake validation, and strict UUID parsing for target giveaways.
+  - Implemented privileged host executor in `src/discord/giveaway.rs` with guild context enforcement, `MANAGE_GUILD` / `ADMINISTRATOR` RBAC checks, durable database mutation via storage layer, channel announcement posting, and structured audit trail generation.
+- **Giveaway Lifecycle Separation & Premature Reroll Guard (#265)**:
+  - Separated first conclusion / winner selection (`finish_giveaway`, `POST /api/guilds/{guild_id}/giveaways/{giveaway_id}/end`) from rerolling (`reroll_giveaway`, `POST .../reroll`).
+  - Added strict lifecycle state guard in `reroll_giveaway`: rejects premature reroll attempts on active (`ended = false`) giveaways across storage (`ensure!(ga.ended)`) and web API (HTTP 409 Conflict) without mutating `ended` or winners state, preserving ongoing participant entry (`join_giveaway`).
+  - Ensured idempotent conclusion: `finish_giveaway` returns existing winners on repeated invocations without re-drawing.
+  - Enforced winner replacement semantics in `reroll_giveaway`: prefers non-winning participants to replace prior winners and strictly rejects drawings without participants with HTTP 400 Bad Request, preventing false-positive `rerolled: true` reports.
 
 ## Delivery order
 

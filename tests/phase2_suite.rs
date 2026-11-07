@@ -558,7 +558,31 @@ async fn test_phase2_community_operations_and_media_suite() {
         .unwrap();
     assert_eq!(join_ga_resp.status(), reqwest::StatusCode::OK);
 
-    // Reroll giveaway
+    // Reroll on active giveaway must be rejected with 409 CONFLICT (Issue #265)
+    let reroll_conflict_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{ga_id}/reroll"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reroll_conflict_resp.status(), reqwest::StatusCode::CONFLICT);
+
+    // End giveaway explicitly
+    let end_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{ga_id}/end"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(end_resp.status(), reqwest::StatusCode::OK);
+
+    // Reroll concluded giveaway
     let reroll_resp = client
         .post(format!(
             "{base_url}/api/guilds/{guild_id}/giveaways/{ga_id}/reroll"

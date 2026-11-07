@@ -1567,12 +1567,26 @@ impl MemoryStore {
         }
     }
 
-    pub fn reroll_giveaway(&self, giveaway_id: Uuid) -> Vec<String> {
+    pub fn finish_giveaway(&self, giveaway_id: Uuid) -> anyhow::Result<Vec<String>> {
         let mut ga = match self.giveaways.get_mut(&giveaway_id) {
             Some(g) => g,
-
-            None => return Vec::new(),
+            None => anyhow::bail!("Giveaway was not found"),
         };
+
+        if ga.ended {
+            let existing: Vec<String> = ga
+                .winners_json
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_owned()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            return Ok(existing);
+        }
+
+        ga.ended = true;
 
         let participants: Vec<String> = ga
             .participants_json
@@ -1585,41 +1599,112 @@ impl MemoryStore {
             .unwrap_or_default();
 
         if participants.is_empty() {
-            return Vec::new();
+            ga.winners_json = serde_json::json!([]);
+            return Ok(Vec::new());
         }
 
         let count = (ga.winners_count as usize).min(participants.len());
-
         let mut pool = participants.clone();
-
         let mut winners = Vec::with_capacity(count);
 
         for i in 0..count {
             let remaining = pool.len() - i;
-
             let offset = if remaining <= 1 {
                 0
             } else {
                 let uuid = uuid::Uuid::new_v4();
-
                 let rand_val =
                     u64::from_le_bytes(uuid.as_bytes()[0..8].try_into().unwrap()) as usize;
-
                 rand_val % remaining
             };
-
             let j = i + offset;
-
             pool.swap(i, j);
-
             winners.push(pool[i].clone());
         }
 
         ga.winners_json = serde_json::json!(winners);
+        Ok(winners)
+    }
 
-        ga.ended = true;
+    pub fn reroll_giveaway(&self, giveaway_id: Uuid) -> anyhow::Result<Vec<String>> {
+        let mut ga = match self.giveaways.get_mut(&giveaway_id) {
+            Some(g) => g,
+            None => anyhow::bail!("Giveaway was not found"),
+        };
 
-        winners
+        anyhow::ensure!(
+            ga.ended,
+            "Giveaway is still active; finish it before reroll"
+        );
+
+        let participants: Vec<String> = ga
+            .participants_json
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_owned()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        anyhow::ensure!(
+            !participants.is_empty(),
+            "Giveaway has no participants to reroll"
+        );
+
+        let previous_winners: std::collections::HashSet<String> = ga
+            .winners_json
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_owned()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let count = (ga.winners_count as usize).min(participants.len());
+
+        let mut non_winners: Vec<String> = participants
+            .iter()
+            .filter(|p| !previous_winners.contains(*p))
+            .cloned()
+            .collect();
+
+        let shuffle = |items: &mut [String]| {
+            let len = items.len();
+            for i in 0..len {
+                let remaining = len - i;
+                if remaining > 1 {
+                    let uuid = uuid::Uuid::new_v4();
+                    let rand_val =
+                        u64::from_le_bytes(uuid.as_bytes()[0..8].try_into().unwrap()) as usize;
+                    let offset = rand_val % remaining;
+                    items.swap(i, i + offset);
+                }
+            }
+        };
+
+        shuffle(&mut non_winners);
+
+        let mut winners = Vec::with_capacity(count);
+        for item in non_winners.into_iter().take(count) {
+            winners.push(item);
+        }
+
+        if winners.len() < count {
+            let mut remaining_pool: Vec<String> = participants
+                .iter()
+                .filter(|p| !winners.contains(*p))
+                .cloned()
+                .collect();
+            shuffle(&mut remaining_pool);
+            for item in remaining_pool.into_iter().take(count - winners.len()) {
+                winners.push(item);
+            }
+        }
+
+        ga.winners_json = serde_json::json!(winners);
+        Ok(winners)
     }
 
     pub fn record_starboard_entry(

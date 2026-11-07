@@ -123,58 +123,42 @@ return {
             local duration = opts.duration_minutes or 60
             local winners = opts.winners or 1
 
-            local text = string.format(
-                "🎉 **NOWY KONKURS (GIVEAWAY)!** 🎉\n\n" ..
-                "🎁 **Nagroda:** %s\n" ..
-                "👥 **Number of winners:** %d\n" ..
-                "⏳ **Czas trwania:** %d min\n" ..
-                "Host: <@%s>\n\n" ..
-                "React with 🎉 to enter!",
-                prize, winners, duration, ctx.user_id
-            )
-
             return {
                 {
-                    type = "reply",
-                    content = "Your giveaway was created and announced successfully!",
-                    ephemeral = true,
-                },
-                {
-                    type = "send_message",
-                    channel_id = ctx.channel_id,
-                    content = text,
-                },
-                {
-                    type = "audit",
-                    event = "giveaway_start",
-                    data = {
-                        host_id = ctx.user_id,
+                    type = "giveaway",
+                    operation = {
+                        operation = "start",
                         prize = prize,
                         duration_minutes = duration,
                         winners = winners,
+                        channel_id = ctx.channel_id,
                     },
                 },
             }
         end
 
         if sub == "reroll" then
-            local gid = opts.giveaway_id or "gw-1"
+            local gid = opts.giveaway_id or ""
             return {
                 {
-                    type = "reply",
-                    content = string.format("🎲 Reroll for giveaway `%s` is complete! A new winner has been selected.", gid),
-                    ephemeral = false,
+                    type = "giveaway",
+                    operation = {
+                        operation = "reroll",
+                        giveaway_id = gid,
+                    },
                 },
             }
         end
 
         if sub == "end" then
-            local gid = opts.giveaway_id or "gw-1"
+            local gid = opts.giveaway_id or ""
             return {
                 {
-                    type = "reply",
-                    content = string.format("🏁 Giveaway `%s` has been ended by the organizer.", gid),
-                    ephemeral = false,
+                    type = "giveaway",
+                    operation = {
+                        operation = "end",
+                        giveaway_id = gid,
+                    },
                 },
             }
         end

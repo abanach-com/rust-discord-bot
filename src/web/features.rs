@@ -1058,6 +1058,41 @@ pub async fn join_giveaway(
     Ok(Json(json!({"joined": joined})))
 }
 
+pub async fn end_giveaway(
+    State(state): State<WebState>,
+    Path((guild_id, giveaway_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+
+    let ga = state
+        .app
+        .storage
+        .get_giveaway(giveaway_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Giveaway was not found in this guild."))?;
+
+    if ga.guild_id != guild_id {
+        return Err(ApiError::not_found("Giveaway was not found in this guild."));
+    }
+
+    let winners = state
+        .app
+        .storage
+        .finish_giveaway(giveaway_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(json!({
+        "giveaway_id": giveaway_id,
+        "winners": winners,
+        "ended": true
+    })))
+}
+
 pub async fn reroll_giveaway(
     State(state): State<WebState>,
 
@@ -1081,6 +1116,23 @@ pub async fn reroll_giveaway(
 
     if ga.guild_id != guild_id {
         return Err(ApiError::not_found("Giveaway was not found in this guild."));
+    }
+
+    if !ga.ended {
+        return Err(ApiError::conflict(
+            "Giveaway is still active; finish it before reroll.",
+        ));
+    }
+
+    let participants_empty = ga
+        .participants_json
+        .as_array()
+        .map(|arr| arr.is_empty())
+        .unwrap_or(true);
+    if participants_empty {
+        return Err(ApiError::bad_request(
+            "Giveaway has no participants to reroll.",
+        ));
     }
 
     let winners = state

@@ -7574,3 +7574,261 @@ async fn test_metrics_endpoint_bearer_token_session_cookie_and_ip_authorization(
         .expect("send bad session check");
     assert_eq!(bad_session_res.status(), reqwest::StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn test_giveaways_end_and_reroll_lifecycle_and_conflict() {
+    let (state, _) = test_web_state().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let guild_id = "555666777888999000";
+    let base_url = format!("http://{addr}");
+    let client = reqwest::Client::new();
+
+    // Setup admin session with MANAGE_GUILD (0x20)
+    let admin_session_id = "admin_giveaway_session";
+    let admin_csrf = "admin_csrf_token_xyz";
+    let admin_user = DashboardUser {
+        id: "admin_123".to_owned(),
+        username: "admin_user".to_owned(),
+        global_name: None,
+        avatar: None,
+    };
+    let admin_guilds = vec![DashboardGuild {
+        id: guild_id.to_owned(),
+        name: "Test Guild".to_owned(),
+        icon: None,
+        owner: false,
+        permissions: "32".to_owned(), // MANAGE_GUILD
+    }];
+    state
+        .app
+        .sessions
+        .save_session(
+            admin_session_id,
+            admin_user,
+            admin_guilds,
+            admin_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .expect("save admin session");
+    let admin_cookie = format!("rusty_discord_bot_session={admin_session_id}");
+
+    // Setup regular member session (permissions = "0")
+    let member_session_id = "member_giveaway_session";
+    let member_csrf = "member_csrf_token_xyz";
+    let member_user = DashboardUser {
+        id: "member_456".to_owned(),
+        username: "regular_member".to_owned(),
+        global_name: None,
+        avatar: None,
+    };
+    let member_guilds = vec![DashboardGuild {
+        id: guild_id.to_owned(),
+        name: "Test Guild".to_owned(),
+        icon: None,
+        owner: false,
+        permissions: "0".to_owned(),
+    }];
+    state
+        .app
+        .sessions
+        .save_session(
+            member_session_id,
+            member_user,
+            member_guilds,
+            member_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .expect("save member session");
+    let member_cookie = format!("rusty_discord_bot_session={member_session_id}");
+
+    // Create an active giveaway with 1 winner and 2 participants
+    let giveaway = state
+        .app
+        .storage
+        .create_giveaway(
+            guild_id,
+            "channel_123",
+            "VIP Subscription",
+            1,
+            Utc::now() + Duration::hours(2),
+        )
+        .await
+        .expect("create giveaway");
+    let ga_id = giveaway.id;
+
+    assert!(
+        state
+            .app
+            .storage
+            .join_giveaway(ga_id, "participant_A")
+            .await
+            .unwrap()
+    );
+    assert!(
+        state
+            .app
+            .storage
+            .join_giveaway(ga_id, "participant_B")
+            .await
+            .unwrap()
+    );
+
+    // 1. Calling /reroll before giveaway is ended must return 409 Conflict
+    let reroll_conflict_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{ga_id}/reroll"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", admin_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reroll_conflict_resp.status(), reqwest::StatusCode::CONFLICT);
+
+    // Verify storage state was NOT mutated to ended
+    let ga_check = state
+        .app
+        .storage
+        .get_giveaway(ga_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!ga_check.ended);
+    assert_eq!(ga_check.winners_json.as_array().unwrap().len(), 0);
+
+    // 2. Joining active giveaway after rejected reroll must still work
+    let join_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{ga_id}/join"
+        ))
+        .header(COOKIE, &member_cookie)
+        .header("x-csrf-token", member_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(join_resp.status(), reqwest::StatusCode::OK);
+    let join_json: serde_json::Value = join_resp.json().await.unwrap();
+    assert_eq!(join_json["joined"], true);
+
+    // 3. Regular member cannot end giveaway -> 403 Forbidden
+    let member_end_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{ga_id}/end"
+        ))
+        .header(COOKIE, &member_cookie)
+        .header("x-csrf-token", member_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(member_end_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 4. Admin ending giveaway explicitly via POST /end -> 200 OK
+    let end_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{ga_id}/end"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", admin_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(end_resp.status(), reqwest::StatusCode::OK);
+    let end_json: serde_json::Value = end_resp.json().await.unwrap();
+    assert_eq!(end_json["ended"], true);
+    let winners = end_json["winners"].as_array().unwrap();
+    assert_eq!(winners.len(), 1);
+    let first_winner = winners[0].as_str().unwrap().to_owned();
+
+    // 5. Calling /end again is idempotent and returns the same winners
+    let retry_end_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{ga_id}/end"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", admin_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(retry_end_resp.status(), reqwest::StatusCode::OK);
+    let retry_json: serde_json::Value = retry_end_resp.json().await.unwrap();
+    assert_eq!(retry_json["winners"][0].as_str().unwrap(), first_winner);
+
+    // 6. Calling /reroll on concluded giveaway selects an alternative winner (replacement semantics)
+    let reroll_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{ga_id}/reroll"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", admin_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reroll_resp.status(), reqwest::StatusCode::OK);
+    let reroll_json: serde_json::Value = reroll_resp.json().await.unwrap();
+    assert_eq!(reroll_json["rerolled"], true);
+    let rerolled_winner = reroll_json["winners"][0].as_str().unwrap().to_owned();
+    assert_ne!(rerolled_winner, first_winner);
+
+    // 7. Giveaway without participants: reroll must return 400 Bad Request
+    let empty_ga = state
+        .app
+        .storage
+        .create_giveaway(
+            guild_id,
+            "channel_123",
+            "Empty Giveaway",
+            1,
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    state
+        .app
+        .storage
+        .finish_giveaway(empty_ga.id)
+        .await
+        .unwrap();
+
+    let reroll_empty_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}/reroll",
+            empty_ga.id
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", admin_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reroll_empty_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 8. Other guild isolation -> 403 Forbidden
+    let other_guild_end = client
+        .post(format!(
+            "{base_url}/api/guilds/999888777666/giveaways/{ga_id}/end"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", admin_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(other_guild_end.status(), reqwest::StatusCode::FORBIDDEN);
+}

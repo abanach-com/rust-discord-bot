@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use rusty_discord_bot::lua::{
-    LuaAction, LuaEngine, LuaExecutionContext, LuaLimits, ProgressionOperation,
+    GiveawayOperation, LuaAction, LuaEngine, LuaExecutionContext, LuaLimits, ProgressionOperation,
 };
 use serde_json::json;
 
@@ -135,13 +135,13 @@ async fn test_economy_subcommands_and_progression_actions() {
 async fn test_giveaway_subcommands_no_accidental_start() {
     let eng = engine();
 
-    // /giveaway end should never start a new giveaway
+    // /giveaway end should emit GiveawayOperation::End, never start a new giveaway
     let actions = eng
         .execute_command(
             "giveaway",
             "giveaway",
             context(json!({
-                "end": { "giveaway_id": "gw-999" }
+                "end": { "giveaway_id": "00000000-0000-0000-0000-000000000999" }
             })),
         )
         .await
@@ -151,15 +151,20 @@ async fn test_giveaway_subcommands_no_accidental_start() {
             .iter()
             .any(|a| matches!(a, LuaAction::Audit { event, .. } if event == "giveaway_start"))
     );
-    assert!(actions.iter().any(|a| matches!(a, LuaAction::Reply { content, .. } if content.contains("gw-999") && content.contains("ended"))));
+    assert!(actions.iter().any(|a| matches!(
+        a,
+        LuaAction::Giveaway {
+            operation: GiveawayOperation::End { giveaway_id }
+        } if giveaway_id == "00000000-0000-0000-0000-000000000999"
+    )));
 
-    // /giveaway reroll
+    // /giveaway reroll should emit GiveawayOperation::Reroll, never start a new giveaway
     let actions = eng
         .execute_command(
             "giveaway",
             "giveaway",
             context(json!({
-                "reroll": { "giveaway_id": "gw-888" }
+                "reroll": { "giveaway_id": "00000000-0000-0000-0000-000000000888" }
             })),
         )
         .await
@@ -169,7 +174,39 @@ async fn test_giveaway_subcommands_no_accidental_start() {
             .iter()
             .any(|a| matches!(a, LuaAction::Audit { event, .. } if event == "giveaway_start"))
     );
-    assert!(actions.iter().any(|a| matches!(a, LuaAction::Reply { content, .. } if content.contains("gw-888") && content.contains("Reroll"))));
+    assert!(actions.iter().any(|a| matches!(
+        a,
+        LuaAction::Giveaway {
+            operation: GiveawayOperation::Reroll { giveaway_id }
+        } if giveaway_id == "00000000-0000-0000-0000-000000000888"
+    )));
+
+    // /giveaway start should emit GiveawayOperation::Start
+    let actions = eng
+        .execute_command(
+            "giveaway",
+            "giveaway",
+            context(json!({
+                "start": {
+                    "prize": "Discord Nitro",
+                    "duration_minutes": 120,
+                    "winners": 2
+                }
+            })),
+        )
+        .await
+        .expect("giveaway start should succeed");
+    assert!(actions.iter().any(|a| matches!(
+        a,
+        LuaAction::Giveaway {
+            operation: GiveawayOperation::Start {
+                prize,
+                duration_minutes: 120,
+                winners: 2,
+                ..
+            }
+        } if prize == "Discord Nitro"
+    )));
 
     // Missing subcommand
     let actions = eng
