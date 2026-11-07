@@ -2231,6 +2231,7 @@ impl MemoryStore {
             text_channel_id: text_channel_id.to_string(),
             allow_send_messages,
             allow_read_history,
+            enabled: true,
         };
         let mut results = self.batch_upsert_companion_mappings(guild_id, &[item])?;
         results
@@ -2312,7 +2313,7 @@ impl MemoryStore {
                 allow_send_messages: item.allow_send_messages,
                 allow_read_history: item.allow_read_history,
                 created_at,
-                enabled: true,
+                enabled: item.enabled,
             };
 
             self.companion_mappings.insert(mapping.id, mapping.clone());
@@ -2321,8 +2322,19 @@ impl MemoryStore {
                 (id, created_at, item.text_channel_id.clone()),
             );
 
-            // Issue #175: Invalidate any active/pending leases for this voice channel that target an old text channel
-            if let Some(old_text) = old_text_opt
+            // Invalidate leases if mapping disabled or if text channel changed (Issues #175, #262)
+            if !item.enabled {
+                for mut lease_entry in self.companion_leases.iter_mut() {
+                    let lease = lease_entry.value_mut();
+                    if lease.guild_id == guild_id
+                        && lease.voice_channel_id == item.voice_channel_id
+                        && (lease.status == "active" || lease.status == "revoke_pending")
+                    {
+                        lease.status = "revoke_pending".to_string();
+                        lease.next_attempt_at = Some(now);
+                    }
+                }
+            } else if let Some(old_text) = old_text_opt
                 && old_text != item.text_channel_id
             {
                 for mut lease_entry in self.companion_leases.iter_mut() {

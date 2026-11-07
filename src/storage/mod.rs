@@ -591,6 +591,30 @@ pub struct CompanionMappingItem {
     pub allow_send_messages: bool,
     #[serde(default = "default_true_field")]
     pub allow_read_history: bool,
+    #[serde(default = "default_true_field")]
+    pub enabled: bool,
+}
+
+impl CompanionMappingItem {
+    pub fn new(
+        voice_channel_id: impl Into<String>,
+        text_channel_id: impl Into<String>,
+        allow_send_messages: bool,
+        allow_read_history: bool,
+    ) -> Self {
+        Self {
+            voice_channel_id: voice_channel_id.into(),
+            text_channel_id: text_channel_id.into(),
+            allow_send_messages,
+            allow_read_history,
+            enabled: true,
+        }
+    }
+
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
 }
 
 fn default_true_field() -> bool {
@@ -7075,6 +7099,7 @@ mod tests {
                 text_channel_id: format!("2000000000000000{:02}", i),
                 allow_send_messages: true,
                 allow_read_history: true,
+                enabled: true,
             });
         }
         let res_over = store
@@ -7094,12 +7119,14 @@ mod tests {
                 text_channel_id: "200000000000000099".to_string(),
                 allow_send_messages: true,
                 allow_read_history: true,
+                enabled: true,
             },
             CompanionMappingItem {
                 voice_channel_id: "100000000000000088".to_string(),
                 text_channel_id: "100000000000000088".to_string(), // invalid: same
                 allow_send_messages: true,
                 allow_read_history: true,
+                enabled: true,
             },
         ];
         let res_mixed = store
@@ -7129,6 +7156,7 @@ mod tests {
             text_channel_id: "200000000000000099".to_string(),
             allow_send_messages: false,
             allow_read_history: true,
+            enabled: true,
         }];
         let res_update = store
             .batch_upsert_companion_mappings(guild_id, &update_item)
@@ -7146,6 +7174,7 @@ mod tests {
             text_channel_id: "200000000000000051".to_string(),
             allow_send_messages: true,
             allow_read_history: true,
+            enabled: true,
         }];
         let res_51st = store
             .batch_upsert_companion_mappings(guild_id, &new_item)
@@ -7163,12 +7192,14 @@ mod tests {
                 text_channel_id: "200000000000000077".to_string(),
                 allow_send_messages: true,
                 allow_read_history: true,
+                enabled: true,
             },
             CompanionMappingItem {
                 voice_channel_id: "100000000000000077".to_string(),
                 text_channel_id: "200000000000000078".to_string(),
                 allow_send_messages: true,
                 allow_read_history: true,
+                enabled: true,
             },
         ];
         let res_dup = store
@@ -7190,6 +7221,7 @@ mod tests {
                 text_channel_id: format!("20000000000000{:04}", i),
                 allow_send_messages: true,
                 allow_read_history: true,
+                enabled: true,
             });
         }
         let res_dup_51 = store
@@ -7481,5 +7513,92 @@ mod tests {
             .await
             .expect("count active after prune");
         assert_eq!(active_after, 3);
+    }
+
+    #[tokio::test]
+    async fn test_companion_mapping_enabled_semantics_and_lease_invalidation() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_id = "888000000000000001";
+        let voice_active = "888000000000000010";
+        let text_active = "888000000000000011";
+        let voice_disabled = "888000000000000020";
+        let text_disabled = "888000000000000021";
+        let user_id = "999000000000000001";
+
+        // 1. Insert two mappings: one enabled, one disabled
+        let items = vec![
+            CompanionMappingItem::new(voice_active, text_active, true, true),
+            CompanionMappingItem::new(voice_disabled, text_disabled, true, true)
+                .with_enabled(false),
+        ];
+
+        let saved = store
+            .batch_upsert_companion_mappings(guild_id, &items)
+            .await
+            .expect("batch upsert companion mappings");
+        assert_eq!(saved.len(), 2);
+
+        // 2. list_companion_mappings returns both mappings with their respective enabled flag
+        let list = store
+            .list_companion_mappings(guild_id)
+            .await
+            .expect("list companion mappings");
+        let active_map = list
+            .iter()
+            .find(|m| m.voice_channel_id == voice_active)
+            .unwrap();
+        assert!(active_map.enabled);
+        let disabled_map = list
+            .iter()
+            .find(|m| m.voice_channel_id == voice_disabled)
+            .unwrap();
+        assert!(!disabled_map.enabled);
+
+        // 3. get_companion_mapping_by_voice preserves model enabled field
+        let by_voice_disabled = store
+            .get_companion_mapping_by_voice(guild_id, voice_disabled)
+            .await
+            .expect("get companion mapping")
+            .expect("mapping exists");
+        assert!(!by_voice_disabled.enabled);
+
+        // 4. Create active lease for voice_active
+        let generation_id = Uuid::new_v4();
+        store
+            .record_companion_lease(RecordCompanionLeaseParams {
+                guild_id,
+                voice_channel_id: voice_active,
+                text_channel_id: text_active,
+                user_id,
+                generation: generation_id,
+                allow_bits: 1024,
+                deny_bits: 0,
+            })
+            .await
+            .expect("record companion lease");
+
+        let leases_before = store
+            .list_member_companion_leases(guild_id, user_id)
+            .await
+            .expect("list member leases");
+        assert_eq!(leases_before.len(), 1);
+        assert_eq!(leases_before[0].status, "active");
+
+        // 5. Deactivate mapping (enabled -> false) must automatically mark active lease as revoke_pending (#262)
+        let disable_item = vec![
+            CompanionMappingItem::new(voice_active, text_active, true, true).with_enabled(false),
+        ];
+        store
+            .batch_upsert_companion_mappings(guild_id, &disable_item)
+            .await
+            .expect("disable active mapping");
+
+        let leases_after = store
+            .list_member_companion_leases(guild_id, user_id)
+            .await
+            .expect("list member leases after disable");
+        assert_eq!(leases_after.len(), 1);
+        assert_eq!(leases_after[0].status, "revoke_pending");
+        assert!(leases_after[0].next_attempt_at.is_some());
     }
 }

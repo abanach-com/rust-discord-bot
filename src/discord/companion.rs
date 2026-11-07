@@ -172,7 +172,8 @@ pub async fn reconcile_companion_channel_access(
         let target_mapping = state
             .storage
             .get_companion_mapping_by_voice(&guild_str, &voice_str)
-            .await?;
+            .await?
+            .filter(|m| m.enabled);
 
         // 1. Revoke any leases that belong to channels other than the new mapped companion channel
         for lease in &user_leases {
@@ -221,6 +222,17 @@ pub async fn grant_companion_access(
     mapping: &CompanionChannelMapping,
     user_id: UserId,
 ) -> Result<()> {
+    if !mapping.enabled {
+        tracing::warn!(
+            guild_id = %mapping.guild_id,
+            voice_channel_id = %mapping.voice_channel_id,
+            text_channel_id = %mapping.text_channel_id,
+            user_id = %user_id,
+            "Companion mapping is disabled, refusing to grant access"
+        );
+        return Ok(());
+    }
+
     let target_channel_num = mapping.text_channel_id.parse::<u64>()?;
     let target_channel_id = ChannelId::new(target_channel_num);
     let user_str = user_id.get().to_string();
@@ -558,11 +570,14 @@ pub async fn reconcile_guild_companion_channels(
         }
     }
 
-    // 3. For all users currently in voice, ensure active lease if mapped
+    // 3. For all users currently in voice, ensure active lease if mapped and enabled
     for (user_id, voice_state) in current_voice_states {
         if let Some(voice_channel_id) = voice_state.channel_id {
             let voice_str = voice_channel_id.get().to_string();
-            if let Some(mapping) = mappings.iter().find(|m| m.voice_channel_id == voice_str) {
+            if let Some(mapping) = mappings
+                .iter()
+                .find(|m| m.enabled && m.voice_channel_id == voice_str)
+            {
                 let user_str = user_id.get().to_string();
                 let existing = state
                     .storage

@@ -685,6 +685,12 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Eliminated O(N) full-guild lease scanning in `reconcile_companion_channel_access`: replaced duplicate guild-wide fetches (`list_active_companion_leases` + `list_pending_revoke_companion_leases`) with targeted per-member method `list_member_companion_leases(guild_id, user_id)`.
   - Added additive migration `0038_companion_leases_user_status_index.sql` creating compound index `idx_companion_leases_guild_user_status` on `companion_channel_leases (guild_id, user_id, status)`.
   - Implemented symmetrical support across both `MemoryStore` and `PostgresStore` with strict tenant isolation and snowflake validation, ensuring voice state updates fetch only relevant records without deserializing or iterating over unrelated guild members' leases.
+- **Voice Companion Runtime Enforcement of Mapping Enabled Semantics (#262)**:
+  - Fixed security loophole in `reconcile_companion_channel_access`: resolved target mapping is explicitly filtered with `.filter(|m| m.enabled)`, preventing unauthorized permission grants for disabled mappings and properly revoking (`keep = false`) existing leases if a mapping was operational-disabled.
+  - Implemented defense-in-depth in `grant_companion_access`: immediately short-circuits with structured warning if `!mapping.enabled`, preventing accidental permission overwrite creation on Discord and lease persistence.
+  - Resolved phase 3 discrepancy in `reconcile_guild_companion_channels`: target mapping lookup now strictly enforces `m.enabled && m.voice_channel_id == voice_str`, preventing reconciliation from immediately re-granting leases revoked in phase 2.
+  - Enhanced `CompanionMappingItem` and `UpsertCompanionMappingPayload` with `enabled: bool` across `PostgresStore` and `MemoryStore`: deactivating a mapping (`enabled = false`) atomically transitions all associated active leases to `revoke_pending` with immediate retry schedule (`next_attempt_at = NOW()`).
+  - Added comprehensive test coverage: unit tests in `src/storage/mod.rs`, PostgreSQL integration tests in `tests/postgres_integration.rs`, and mock Discord HTTP event tests in `tests/discord_isolation_and_hierarchy.rs`.
 
 ## Delivery order
 

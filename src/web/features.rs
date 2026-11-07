@@ -3022,6 +3022,8 @@ pub struct UpsertCompanionMappingPayload {
     pub allow_send_messages: bool,
     #[serde(default = "default_true")]
     pub allow_read_history: bool,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     pub mappings: Option<Vec<CompanionMappingItem>>,
 }
 
@@ -3079,6 +3081,7 @@ pub async fn upsert_companion_mapping(
             text_channel_id: t,
             allow_send_messages: payload.allow_send_messages,
             allow_read_history: payload.allow_read_history,
+            enabled: payload.enabled,
         }]
     } else {
         return Err(ApiError::bad_request(

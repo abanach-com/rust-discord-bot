@@ -3102,6 +3102,7 @@ impl PostgresStore {
             text_channel_id: text_channel_id.to_string(),
             allow_send_messages,
             allow_read_history,
+            enabled: true,
         };
         let mut results = self
             .batch_upsert_companion_mappings(guild_id, &[item])
@@ -3174,13 +3175,13 @@ impl PostgresStore {
                     id, guild_id, voice_channel_id, text_channel_id,
                     allow_send_messages, allow_read_history, enabled, created_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, true, $7)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 ON CONFLICT (guild_id, voice_channel_id)
                 DO UPDATE SET
                     text_channel_id = EXCLUDED.text_channel_id,
                     allow_send_messages = EXCLUDED.allow_send_messages,
                     allow_read_history = EXCLUDED.allow_read_history,
-                    enabled = true
+                    enabled = EXCLUDED.enabled
                 RETURNING id, guild_id, voice_channel_id, text_channel_id, allow_send_messages, allow_read_history, enabled, created_at
                 "#,
             )
@@ -3190,25 +3191,42 @@ impl PostgresStore {
             .bind(&item.text_channel_id)
             .bind(item.allow_send_messages)
             .bind(item.allow_read_history)
+            .bind(item.enabled)
             .bind(now)
             .fetch_one(&mut *tx)
             .await?;
 
-            sqlx::query(
-                r#"
-                UPDATE companion_channel_leases
-                SET status = 'revoke_pending', next_attempt_at = NOW()
-                WHERE guild_id = $1
-                  AND voice_channel_id = $2
-                  AND text_channel_id <> $3
-                  AND status IN ('active', 'revoke_pending')
-                "#,
-            )
-            .bind(guild_id)
-            .bind(&item.voice_channel_id)
-            .bind(&item.text_channel_id)
-            .execute(&mut *tx)
-            .await?;
+            if !item.enabled {
+                sqlx::query(
+                    r#"
+                    UPDATE companion_channel_leases
+                    SET status = 'revoke_pending', next_attempt_at = NOW()
+                    WHERE guild_id = $1
+                      AND voice_channel_id = $2
+                      AND status IN ('active', 'revoke_pending')
+                    "#,
+                )
+                .bind(guild_id)
+                .bind(&item.voice_channel_id)
+                .execute(&mut *tx)
+                .await?;
+            } else {
+                sqlx::query(
+                    r#"
+                    UPDATE companion_channel_leases
+                    SET status = 'revoke_pending', next_attempt_at = NOW()
+                    WHERE guild_id = $1
+                      AND voice_channel_id = $2
+                      AND text_channel_id <> $3
+                      AND status IN ('active', 'revoke_pending')
+                    "#,
+                )
+                .bind(guild_id)
+                .bind(&item.voice_channel_id)
+                .bind(&item.text_channel_id)
+                .execute(&mut *tx)
+                .await?;
+            }
 
             saved.push(mapping);
         }

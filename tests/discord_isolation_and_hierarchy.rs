@@ -1446,3 +1446,169 @@ async fn test_action_policy_denial_blocks_executor_without_discord_http_call() {
 
     shard_manager.shutdown_all().await;
 }
+
+#[tokio::test]
+async fn test_voice_companion_disabled_mapping_never_grants_and_revokes_active_lease() {
+    use rusty_discord_bot::discord::companion::{
+        grant_companion_access, reconcile_companion_channel_access,
+        reconcile_guild_companion_channels,
+    };
+    use rusty_discord_bot::storage::{CompanionMappingItem, RecordCompanionLeaseParams};
+
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state().await;
+
+    let guild_id = GuildId::new(100);
+    let voice_ch = ChannelId::new(105);
+    let _text_ch = ChannelId::new(101); // text channel 101 exists in mock
+    let user_id = UserId::new(222222222222222222);
+
+    let guild_str = "100";
+    let voice_str = "105";
+    let text_str = "101";
+    let user_str = "222222222222222222";
+
+    // 1. Create a companion mapping with enabled = false (#262)
+    let item = CompanionMappingItem::new(voice_str, text_str, true, true).with_enabled(false);
+    state
+        .storage
+        .batch_upsert_companion_mappings(guild_str, &[item])
+        .await
+        .expect("batch upsert disabled companion mapping");
+
+    let mapping = state
+        .storage
+        .get_companion_mapping_by_voice(guild_str, voice_str)
+        .await
+        .expect("lookup mapping")
+        .expect("mapping exists");
+    assert!(!mapping.enabled, "mapping must have enabled=false in model");
+
+    // 2. Direct grant_companion_access must refuse disabled mapping (defense-in-depth)
+    let initial_modifications = mock.modifying_requests_count.load(Ordering::SeqCst);
+    grant_companion_access(&ctx, &state, &mapping, user_id)
+        .await
+        .expect("grant_companion_access on disabled mapping returns Ok safely");
+
+    assert_eq!(
+        mock.modifying_requests_count.load(Ordering::SeqCst),
+        initial_modifications,
+        "grant_companion_access must NOT make HTTP requests for disabled mapping"
+    );
+    let no_lease = state
+        .storage
+        .get_companion_lease(guild_str, text_str, user_str)
+        .await
+        .expect("lease lookup");
+    assert!(
+        no_lease.is_none(),
+        "No lease should be created for disabled mapping"
+    );
+
+    // 3. User enters voice channel: reconcile_companion_channel_access without lease must NOT grant access
+    reconcile_companion_channel_access(&ctx, &state, guild_id, user_id, None, Some(voice_ch))
+        .await
+        .expect("reconcile voice access");
+
+    assert_eq!(
+        mock.modifying_requests_count.load(Ordering::SeqCst),
+        initial_modifications,
+        "Voice event with disabled mapping must NOT make HTTP requests to Discord"
+    );
+    let still_no_lease = state
+        .storage
+        .get_companion_lease(guild_str, text_str, user_str)
+        .await
+        .expect("lease lookup");
+    assert!(still_no_lease.is_none());
+
+    // 4. User has an active lease (e.g. from before the mapping was disabled):
+    // Voice event must NOT keep the lease; it must revoke it.
+    let generation_id = uuid::Uuid::new_v4();
+    state
+        .storage
+        .record_companion_lease(RecordCompanionLeaseParams {
+            guild_id: guild_str,
+            voice_channel_id: voice_str,
+            text_channel_id: text_str,
+            user_id: user_str,
+            generation: generation_id,
+            allow_bits: 1024,
+            deny_bits: 0,
+        })
+        .await
+        .expect("seed active lease");
+
+    let seeded_lease = state
+        .storage
+        .get_companion_lease(guild_str, text_str, user_str)
+        .await
+        .expect("lease lookup")
+        .expect("seeded lease exists");
+    assert_eq!(seeded_lease.status, "active");
+
+    // Reconcile user voice event on the same disabled voice channel:
+    // Should trigger revoke instead of keeping the lease!
+    reconcile_companion_channel_access(
+        &ctx,
+        &state,
+        guild_id,
+        user_id,
+        Some(voice_ch),
+        Some(voice_ch),
+    )
+    .await
+    .expect("reconcile voice access with existing lease");
+
+    let lease_after_voice = state
+        .storage
+        .get_companion_lease(guild_str, text_str, user_str)
+        .await
+        .expect("lease lookup");
+    // Since mock Discord handler returns 200 OK for delete_permission, lease is deleted from storage
+    assert!(
+        lease_after_voice.is_none(),
+        "Active lease for disabled mapping must be revoked and removed on voice event"
+    );
+
+    // 5. Guild reconcile with disabled mapping must revoke in Phase 2 and NOT re-grant in Phase 3
+    state
+        .storage
+        .record_companion_lease(RecordCompanionLeaseParams {
+            guild_id: guild_str,
+            voice_channel_id: voice_str,
+            text_channel_id: text_str,
+            user_id: user_str,
+            generation: uuid::Uuid::new_v4(),
+            allow_bits: 1024,
+            deny_bits: 0,
+        })
+        .await
+        .expect("seed active lease for guild reconcile");
+
+    let summary = reconcile_guild_companion_channels(&ctx, &state, guild_id)
+        .await
+        .expect("reconcile guild companion channels");
+
+    assert_eq!(
+        summary.revoked, 1,
+        "Phase 2 must revoke active lease of disabled mapping"
+    );
+    assert_eq!(
+        summary.granted, 0,
+        "Phase 3 must NOT re-grant access for disabled mapping"
+    );
+    assert_eq!(
+        summary.active_leases, 0,
+        "No active leases should remain for disabled mapping"
+    );
+
+    let final_lease = state
+        .storage
+        .get_companion_lease(guild_str, text_str, user_str)
+        .await
+        .expect("lease lookup");
+    assert!(final_lease.is_none());
+
+    shard_manager.shutdown_all().await;
+}

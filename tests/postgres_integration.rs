@@ -1788,6 +1788,81 @@ async fn test_postgres_integration_suite() {
             .is_empty()
     );
 
+    // 12.8. Issue #262: Companion mapping enabled semantics & lease invalidation in PostgreSQL
+    let dis_voice_id = "888000000000000088";
+    let dis_text_id = "888000000000000089";
+    let dis_user_id = "999000000000000088";
+
+    // Batch upsert an active mapping
+    let active_item = vec![rusty_discord_bot::storage::CompanionMappingItem::new(
+        dis_voice_id,
+        dis_text_id,
+        true,
+        true,
+    )];
+    let saved_active = store
+        .batch_upsert_companion_mappings(companion_guild_id, &active_item)
+        .await
+        .expect("batch upsert active mapping");
+    assert!(saved_active[0].enabled);
+
+    // Record an active lease
+    let gen_dis = Uuid::new_v4();
+    store
+        .record_companion_lease(rusty_discord_bot::storage::RecordCompanionLeaseParams {
+            guild_id: companion_guild_id,
+            voice_channel_id: dis_voice_id,
+            text_channel_id: dis_text_id,
+            user_id: dis_user_id,
+            generation: gen_dis,
+            allow_bits: 1024,
+            deny_bits: 0,
+        })
+        .await
+        .expect("record active lease");
+
+    // Verify lease is active
+    let member_leases_before = store
+        .list_member_companion_leases(companion_guild_id, dis_user_id)
+        .await
+        .expect("list member leases");
+    assert_eq!(member_leases_before.len(), 1);
+    assert_eq!(member_leases_before[0].status, "active");
+
+    // Upsert mapping with enabled: false -> must mark active lease as revoke_pending (#262)
+    let disabled_item = vec![
+        rusty_discord_bot::storage::CompanionMappingItem::new(
+            dis_voice_id,
+            dis_text_id,
+            true,
+            true,
+        )
+        .with_enabled(false),
+    ];
+    let saved_disabled = store
+        .batch_upsert_companion_mappings(companion_guild_id, &disabled_item)
+        .await
+        .expect("batch upsert disabled mapping");
+    assert!(!saved_disabled[0].enabled);
+
+    let member_leases_after = store
+        .list_member_companion_leases(companion_guild_id, dis_user_id)
+        .await
+        .expect("list member leases after disable");
+    assert_eq!(member_leases_after.len(), 1);
+    assert_eq!(member_leases_after[0].status, "revoke_pending");
+    assert!(member_leases_after[0].next_attempt_at.is_some());
+
+    // Clean up test mapping and lease
+    store
+        .delete_companion_mapping(companion_guild_id, saved_disabled[0].id)
+        .await
+        .expect("cleanup disabled mapping");
+    store
+        .delete_companion_lease(companion_guild_id, dis_text_id, dis_user_id)
+        .await
+        .expect("cleanup lease");
+
     // ==========================================
     // 13. Member Intelligence Snapshot Departure (#167)
     // ==========================================
