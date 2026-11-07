@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use rusty_discord_bot::lua::{
     GiveawayOperation, LuaAction, LuaEngine, LuaExecutionContext, LuaLimits, ProgressionOperation,
-    TagOperation,
+    ReactionRoleOperation, TagOperation,
 };
 use serde_json::json;
 
@@ -498,22 +498,67 @@ async fn test_reaction_roles_subcommands() {
         .execute_command(
             "reaction_roles",
             "reactionrole",
-            context(json!({ "create": { "emoji": "🎉", "role": "12345" } })),
+            context(json!({
+                "create": {
+                    "message_id": "123456789012345678",
+                    "emoji": "🎉",
+                    "role": "123456789012345679"
+                }
+            })),
         )
         .await
         .expect("reaction_roles create should succeed");
-    assert!(actions.iter().any(|a| matches!(a, LuaAction::Reply { .. })));
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            LuaAction::ReactionRole {
+                operation: ReactionRoleOperation::Create {
+                    message_id,
+                    emoji,
+                    role_id
+                }
+            } if message_id == "123456789012345678" && emoji == "🎉" && role_id == "123456789012345679"
+        )),
+        "expected LuaAction::ReactionRole with Create operation"
+    );
 
     // /reactionrole remove
     let actions = eng
         .execute_command(
             "reaction_roles",
             "reactionrole",
-            context(json!({ "remove": { "emoji": "🎉" } })),
+            context(json!({
+                "remove": {
+                    "message_id": "123456789012345678",
+                    "emoji": "🎉"
+                }
+            })),
         )
         .await
         .expect("reaction_roles remove should succeed");
-    assert!(actions.iter().any(|a| matches!(a, LuaAction::Reply { .. })));
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            LuaAction::ReactionRole {
+                operation: ReactionRoleOperation::Remove {
+                    message_id,
+                    emoji
+                }
+            } if message_id == "123456789012345678" && emoji == "🎉"
+        )),
+        "expected LuaAction::ReactionRole with Remove operation"
+    );
+
+    // Missing options in create returns reply with error, not fake success
+    let actions = eng
+        .execute_command(
+            "reaction_roles",
+            "reactionrole",
+            context(json!({ "create": { "emoji": "🎉" } })),
+        )
+        .await
+        .expect("reaction_roles create with missing options should handle safely");
+    assert!(actions.iter().any(|a| matches!(a, LuaAction::Reply { content, .. } if content.contains("Missing required parameters"))));
 
     // Missing subcommand
     let actions = eng

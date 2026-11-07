@@ -22,9 +22,9 @@ use crate::storage::{
     CustomAutomation, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink,
     Giveaway, HelpForumConfig, InviteTracking, MAX_COMPANION_MAPPINGS_PER_GUILD,
     ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState, ProgressionSeason,
-    RecruitmentApplication, RecruitmentReview, RecruitmentTrack, RecruitmentTrackConfig,
-    RecurringSchedule, ScheduledEvent, ServerSnapshot, StickyMessage, StoreItem, SubmittedAnswer,
-    TupperProfile, validate_snowflake,
+    ReactionRoleBinding, RecruitmentApplication, RecruitmentReview, RecruitmentTrack,
+    RecruitmentTrackConfig, RecurringSchedule, ScheduledEvent, ServerSnapshot, StickyMessage,
+    StoreItem, SubmittedAnswer, TupperProfile, validate_snowflake,
 };
 
 use super::{
@@ -5842,6 +5842,136 @@ pub async fn flush_asset_analytics_endpoint(
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(Json(json!({ "flushed": true, "items_flushed": count })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateReactionRolePayload {
+    pub channel_id: Option<String>,
+    pub message_id: String,
+    pub emoji: String,
+    pub role_id: String,
+}
+
+pub async fn list_reaction_roles(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let bindings = state
+        .app
+        .storage
+        .list_reaction_role_bindings(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(json!({ "reaction_roles": bindings })))
+}
+
+pub async fn create_reaction_role(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateReactionRolePayload>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    validate_snowflake("message_id", &payload.message_id)
+        .map_err(|e| ApiError::bad_request(format!("Invalid message_id: {e}")))?;
+    validate_snowflake("role_id", &payload.role_id)
+        .map_err(|e| ApiError::bad_request(format!("Invalid role_id: {e}")))?;
+
+    if let Some(channel_id) = &payload.channel_id {
+        ensure_channel_view_access(&state, &session, &guild_id, channel_id).await?;
+    }
+
+    let emoji_key = crate::discord::reaction_roles::canonicalize_emoji(&payload.emoji);
+    if emoji_key.is_empty() || emoji_key.len() > 128 {
+        return Err(ApiError::bad_request("Invalid emoji format"));
+    }
+
+    let binding = ReactionRoleBinding {
+        id: Uuid::new_v4(),
+        guild_id: guild_id.clone(),
+        channel_id: payload.channel_id,
+        message_id: payload.message_id.clone(),
+        emoji_key: emoji_key.clone(),
+        role_id: payload.role_id.clone(),
+        created_by: Some(session.user.id.clone()),
+        created_at: Utc::now(),
+    };
+
+    let saved = state
+        .app
+        .storage
+        .upsert_reaction_role_binding(binding)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let _ = state
+        .app
+        .storage
+        .record_audit(
+            Some(&guild_id),
+            Some(&session.user.id),
+            "reaction_roles",
+            "reaction_role_create",
+            json!({
+                "message_id": payload.message_id,
+                "emoji": emoji_key,
+                "role_id": payload.role_id,
+                "source": "web_dashboard"
+            }),
+        )
+        .await;
+
+    Ok(Json(json!({ "status": "created", "reaction_role": saved })))
+}
+
+pub async fn delete_reaction_role(
+    State(state): State<WebState>,
+    Path((guild_id, binding_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let deleted = state
+        .app
+        .storage
+        .delete_reaction_role_binding_by_id(&guild_id, binding_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    if !deleted {
+        return Err(ApiError::not_found(
+            "Reaction role binding not found on this server.",
+        ));
+    }
+
+    let _ = state
+        .app
+        .storage
+        .record_audit(
+            Some(&guild_id),
+            Some(&session.user.id),
+            "reaction_roles",
+            "reaction_role_remove",
+            json!({
+                "binding_id": binding_id,
+                "source": "web_dashboard"
+            }),
+        )
+        .await;
+
+    Ok(Json(json!({ "status": "deleted" })))
 }
 
 #[cfg(test)]

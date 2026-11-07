@@ -77,7 +77,7 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 | Temporary roles | Implemented |
 | Role persistence after rejoin | Implemented |
 | Self-role buttons and select menus | Planned |
-| Reaction roles | Planned |
+| Reaction roles | Implemented |
 | Scheduled role assignment | Planned |
 | Role synchronization across guilds | Planned |
 | Nickname policies | Planned |
@@ -271,6 +271,7 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 - **Giveaway Privileged Service Boundary & Capability Guards (Issue #274)**: Hardened `giveaway::execute` with fail-closed capability verification: restricted execution exclusively to trusted module identity (`module_id == "giveaway"`), mandatory interactive user command origin (`enforce_actor_permissions && actor_id.is_some()`), and verified `MANAGE_GUILD` or `ADMINISTRATOR` privileges before any storage mutation or Discord HTTP dispatch.
 - **Custom Tag Mutation Capability & Permission Guards (Issue #275)**: Enforced capability boundary in `tags::execute_tag_action`: restricted tag operations exclusively to trusted module identity (`module_id == "tags"`), and enforced mandatory interactive user command origin (`enforce_actor_permissions && actor_id.is_some()`) along with `MANAGE_MESSAGES` or `ADMINISTRATOR` permissions for `Create` and `Delete` operations, preventing unauthorized tag mutations via event callbacks or foreign modules.
 - **Giveaway Cross-Guild Channel Tenant Isolation & Worker Delivery Quarantine (Issue #276)**: Enforced strict channel tenant isolation in `ensure_channel_view_access` via cached `GET /channels/{channel_id}` verification against origin `guild_id` and rejected non-message channels (categories, voice channels). Hardened `run_giveaway_worker`, `/end`, and `/reroll` with defense-in-depth channel tenancy checks, quarantining cross-guild attempts with `giveaway_cross_guild_blocked` audit records while preventing unauthenticated cross-guild announcement publication.
+- **Reaction Roles Persistence, Role Hierarchy & Gateway Reactions (Issue #277)**: Replaced mock responses with end-to-end `/reactionrole create/remove` pipeline backed by `reaction_role_bindings` PostgreSQL migration `0040_reaction_roles.sql` and `MemoryStore`, strongly-typed `ReactionRoleOperation` and `LuaAction::ReactionRole`. Enforces actor and bot `MANAGE_ROLES` permission validation and Discord role hierarchy verification (`ensure_role_hierarchy`). Implemented Gateway `reaction_add` and `reaction_remove` event listeners that safely grant and revoke mapped roles with bot loop prevention and audit logging (`reaction_role_granted`, `reaction_role_revoked`, `reaction_role_grant_failed`). Added REST API (`/api/guilds/{guild_id}/reaction-roles`) with session, CSRF, and channel tenant isolation.
 
 ## 8. Levels and economy
 

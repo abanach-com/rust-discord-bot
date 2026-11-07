@@ -20,14 +20,15 @@ use super::{
     MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
     ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
     ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
-    ProgressionSeason, RecordCompanionLeaseParams, RecruitmentApplication, RecruitmentReview,
-    RecruitmentRoleFulfillment, RecruitmentTrack, RedditSubscription, ReputationGrantOutcome,
-    RetainedRecordNotice, ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry,
-    SteamLfgPost, StickyMessage, StoreItem, StorePurchase, TagRecord, TelegramBridge,
-    TelegramMessageMapping, TimedRoleGrant, Tournament, TransitionApplicationParams, TupperError,
-    TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
-    VkSubscription, WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription,
-    level_for_xp, parse_member_search_cursor, snowflake_created_at, validate_snowflake,
+    ProgressionSeason, ReactionRoleBinding, RecordCompanionLeaseParams, RecruitmentApplication,
+    RecruitmentReview, RecruitmentRoleFulfillment, RecruitmentTrack, RedditSubscription,
+    ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent, ServerSnapshot,
+    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
+    TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament,
+    TransitionApplicationParams, TupperError, TupperProfile, TwitchStreamSubscription,
+    UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WorkflowDefinition,
+    WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
+    parse_member_search_cursor, snowflake_created_at, validate_snowflake,
 };
 
 pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
@@ -2566,6 +2567,117 @@ impl PostgresStore {
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn upsert_reaction_role_binding(
+        &self,
+        binding: ReactionRoleBinding,
+    ) -> anyhow::Result<ReactionRoleBinding> {
+        let row = sqlx::query_as::<_, ReactionRoleBinding>(
+            r#"
+            INSERT INTO reaction_role_bindings (id, guild_id, channel_id, message_id, emoji_key, role_id, created_by, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (guild_id, message_id, emoji_key)
+            DO UPDATE SET
+                role_id = EXCLUDED.role_id,
+                channel_id = COALESCE(EXCLUDED.channel_id, reaction_role_bindings.channel_id),
+                created_by = EXCLUDED.created_by
+            RETURNING id, guild_id, channel_id, message_id, emoji_key, role_id, created_by, created_at
+            "#,
+        )
+        .bind(binding.id)
+        .bind(&binding.guild_id)
+        .bind(&binding.channel_id)
+        .bind(&binding.message_id)
+        .bind(&binding.emoji_key)
+        .bind(&binding.role_id)
+        .bind(&binding.created_by)
+        .bind(binding.created_at)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    pub async fn get_reaction_role_binding(
+        &self,
+        guild_id: &str,
+        message_id: &str,
+        emoji_key: &str,
+    ) -> anyhow::Result<Option<ReactionRoleBinding>> {
+        let row = sqlx::query_as::<_, ReactionRoleBinding>(
+            r#"
+            SELECT id, guild_id, channel_id, message_id, emoji_key, role_id, created_by, created_at
+            FROM reaction_role_bindings
+            WHERE guild_id = $1 AND message_id = $2 AND emoji_key = $3
+            "#,
+        )
+        .bind(guild_id)
+        .bind(message_id)
+        .bind(emoji_key)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    pub async fn delete_reaction_role_binding(
+        &self,
+        guild_id: &str,
+        message_id: &str,
+        emoji_key: &str,
+    ) -> anyhow::Result<bool> {
+        let res = sqlx::query(
+            r#"
+            DELETE FROM reaction_role_bindings
+            WHERE guild_id = $1 AND message_id = $2 AND emoji_key = $3
+            "#,
+        )
+        .bind(guild_id)
+        .bind(message_id)
+        .bind(emoji_key)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn delete_reaction_role_binding_by_id(
+        &self,
+        guild_id: &str,
+        binding_id: Uuid,
+    ) -> anyhow::Result<bool> {
+        let res = sqlx::query(
+            r#"
+            DELETE FROM reaction_role_bindings
+            WHERE guild_id = $1 AND id = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(binding_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn list_reaction_role_bindings(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<ReactionRoleBinding>> {
+        let rows = sqlx::query_as::<_, ReactionRoleBinding>(
+            r#"
+            SELECT id, guild_id, channel_id, message_id, emoji_key, role_id, created_by, created_at
+            FROM reaction_role_bindings
+            WHERE guild_id = $1
+            ORDER BY created_at ASC
+            "#,
+        )
+        .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
     }
 
     pub async fn record_starboard_entry(

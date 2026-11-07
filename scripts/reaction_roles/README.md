@@ -10,6 +10,10 @@ Silnik: **rusty-discord-bot (Rust + Lua 5.4)**
 ## 📌 Opis
 Interaktywny wybór ról poprzez reakcje pod wiadomościami na serwerze.
 
+### Komendy
+- `/reactionrole create message_id:<id> emoji:<emoji> role:<role>` — Tworzy mapowanie reakcji na wiadomość do roli. Wymaga uprawnienia `MANAGE_ROLES` oraz roli bota i administratora wyższej w hierarchii niż nadawana rola.
+- `/reactionrole remove message_id:<id> emoji:<emoji>` — Usuwa przypisane mapowanie roli za reakcję.
+
 ---
 
 ## 📂 Zawartość folderu

@@ -4,6 +4,7 @@ pub mod install_xml;
 mod model;
 mod moderation_cases;
 mod progression;
+mod reaction_roles;
 mod scheduler;
 mod tags;
 mod tickets;
@@ -18,6 +19,7 @@ pub use model::{
 };
 pub use moderation_cases::ModerationCaseOperation;
 pub use progression::{ProgressionMetric, ProgressionOperation};
+pub use reaction_roles::ReactionRoleOperation;
 pub use scheduler::{SchedulerOperation, SchedulerScope};
 pub use tags::{TagOperation, normalize_tag_name, validate_tag_name};
 pub use tickets::{

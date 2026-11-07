@@ -103,21 +103,51 @@ return {
         end
 
         if sub == "create" then
+            local message_id = tostring(opts.message_id or "")
+            local emoji = tostring(opts.emoji or "")
+            local role = tostring(opts.role or "")
+            if message_id == "" or emoji == "" or role == "" then
+                return {
+                    {
+                        type = "reply",
+                        content = "Missing required parameters (message_id, emoji, role).",
+                        ephemeral = true,
+                    },
+                }
+            end
             return {
                 {
-                    type = "reply",
-                    content = t("modules.reaction_roles.created", { emoji = opts.emoji or "⭐", role = opts.role or "0" }, ctx),
-                    ephemeral = true,
+                    type = "reaction_role",
+                    operation = {
+                        operation = "create",
+                        message_id = message_id,
+                        emoji = emoji,
+                        role_id = role,
+                    },
                 },
             }
         end
 
         if sub == "remove" then
+            local message_id = tostring(opts.message_id or "")
+            local emoji = tostring(opts.emoji or "")
+            if message_id == "" or emoji == "" then
+                return {
+                    {
+                        type = "reply",
+                        content = "Missing required parameters (message_id, emoji).",
+                        ephemeral = true,
+                    },
+                }
+            end
             return {
                 {
-                    type = "reply",
-                    content = t("modules.reaction_roles.removed", { emoji = opts.emoji or "⭐" }, ctx),
-                    ephemeral = true,
+                    type = "reaction_role",
+                    operation = {
+                        operation = "remove",
+                        message_id = message_id,
+                        emoji = emoji,
+                    },
                 },
             }
         end

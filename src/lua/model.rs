@@ -5,8 +5,8 @@ use serde_json::Value;
 
 use super::{
     giveaway::GiveawayOperation, moderation_cases::ModerationCaseOperation,
-    progression::ProgressionOperation, scheduler::SchedulerOperation, tags::TagOperation,
-    tickets::TicketOperation,
+    progression::ProgressionOperation, reaction_roles::ReactionRoleOperation,
+    scheduler::SchedulerOperation, tags::TagOperation, tickets::TicketOperation,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -315,6 +315,9 @@ pub enum LuaAction {
     Tag {
         operation: TagOperation,
     },
+    ReactionRole {
+        operation: ReactionRoleOperation,
+    },
     PublishSubmission {
         channel_id: String,
         content: String,
@@ -352,6 +355,7 @@ impl LuaAction {
             Self::ModerationCase { .. } => "moderation_case",
             Self::Giveaway { .. } => "giveaway",
             Self::Tag { .. } => "tag",
+            Self::ReactionRole { .. } => "reaction_role",
             Self::PublishSubmission { .. } => "publish_submission",
             Self::Audit { .. } => "audit",
         }
@@ -482,6 +486,7 @@ impl LuaAction {
             Self::ModerationCase { operation } => operation.validate(),
             Self::Giveaway { operation } => operation.validate(),
             Self::Tag { operation } => operation.validate(),
+            Self::ReactionRole { operation } => operation.validate(),
             Self::PublishSubmission {
                 channel_id,
                 content,

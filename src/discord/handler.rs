@@ -10,7 +10,7 @@ use serenity::{
     all::{
         ChannelId, CommandDataOption, CommandDataOptionValue, CommandInteraction, GuildChannel,
         GuildId, Interaction, Member, Message, MessageId, MessageUpdateEvent, PartialGuildChannel,
-        Permissions, Ready, User, UserId, VoiceState,
+        Permissions, Reaction, Ready, User, UserId, VoiceState,
     },
     async_trait,
     builder::{CreateAllowedMentions, CreateInteractionResponse, CreateInteractionResponseMessage},
@@ -1059,6 +1059,42 @@ impl EventHandler for Handler {
             None,
         )
         .await;
+    }
+
+    async fn reaction_add(&self, ctx: Context, add_reaction: Reaction) {
+        self.state
+            .metrics
+            .discord_events_total
+            .fetch_add(1, Ordering::Relaxed);
+
+        if let Err(err) = super::reaction_roles::handle_reaction_role_event(
+            &ctx,
+            &self.state,
+            &add_reaction,
+            true,
+        )
+        .await
+        {
+            tracing::warn!(?err, "failed to handle reaction_add for reaction roles");
+        }
+    }
+
+    async fn reaction_remove(&self, ctx: Context, removed_reaction: Reaction) {
+        self.state
+            .metrics
+            .discord_events_total
+            .fetch_add(1, Ordering::Relaxed);
+
+        if let Err(err) = super::reaction_roles::handle_reaction_role_event(
+            &ctx,
+            &self.state,
+            &removed_reaction,
+            false,
+        )
+        .await
+        {
+            tracing::warn!(?err, "failed to handle reaction_remove for reaction roles");
+        }
     }
 
     async fn voice_state_update(&self, ctx: Context, old: Option<VoiceState>, new: VoiceState) {

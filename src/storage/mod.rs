@@ -309,6 +309,18 @@ pub struct TagRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::FromRow)]
+pub struct ReactionRoleBinding {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub channel_id: Option<String>,
+    pub message_id: String,
+    pub emoji_key: String,
+    pub role_id: String,
+    pub created_by: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct StarboardEntry {
     pub guild_id: String,
@@ -2401,6 +2413,75 @@ impl Storage {
         match self {
             Self::Memory(store) => store.delete_tag(guild_id, name),
             Self::Postgres(store) => store.delete_tag(guild_id, name).await,
+        }
+    }
+
+    pub async fn upsert_reaction_role_binding(
+        &self,
+        binding: ReactionRoleBinding,
+    ) -> anyhow::Result<ReactionRoleBinding> {
+        match self {
+            Self::Memory(store) => store.upsert_reaction_role_binding(binding),
+            Self::Postgres(store) => store.upsert_reaction_role_binding(binding).await,
+        }
+    }
+
+    pub async fn get_reaction_role_binding(
+        &self,
+        guild_id: &str,
+        message_id: &str,
+        emoji_key: &str,
+    ) -> anyhow::Result<Option<ReactionRoleBinding>> {
+        match self {
+            Self::Memory(store) => store.get_reaction_role_binding(guild_id, message_id, emoji_key),
+            Self::Postgres(store) => {
+                store
+                    .get_reaction_role_binding(guild_id, message_id, emoji_key)
+                    .await
+            }
+        }
+    }
+
+    pub async fn delete_reaction_role_binding(
+        &self,
+        guild_id: &str,
+        message_id: &str,
+        emoji_key: &str,
+    ) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => {
+                store.delete_reaction_role_binding(guild_id, message_id, emoji_key)
+            }
+            Self::Postgres(store) => {
+                store
+                    .delete_reaction_role_binding(guild_id, message_id, emoji_key)
+                    .await
+            }
+        }
+    }
+
+    pub async fn delete_reaction_role_binding_by_id(
+        &self,
+        guild_id: &str,
+        binding_id: Uuid,
+    ) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => store.delete_reaction_role_binding_by_id(guild_id, binding_id),
+            Self::Postgres(store) => {
+                store
+                    .delete_reaction_role_binding_by_id(guild_id, binding_id)
+                    .await
+            }
+        }
+    }
+
+    pub async fn list_reaction_role_bindings(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<ReactionRoleBinding>> {
+        match self {
+            Self::Memory(store) => store.list_reaction_role_bindings(guild_id),
+            Self::Postgres(store) => store.list_reaction_role_bindings(guild_id).await,
         }
     }
 

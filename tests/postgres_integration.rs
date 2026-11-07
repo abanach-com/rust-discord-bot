@@ -2457,4 +2457,67 @@ async fn test_postgres_integration_suite() {
         .await
         .expect("verify replay in pg");
     assert!(!replay_ver);
+
+    // 29. Reaction Roles bindings in PostgreSQL (Issue #277)
+    let rr_guild = "pg_guild_rr_1";
+    let rr_msg = "900000000000000001";
+    let rr_emoji = "🎉";
+    let rr_role = "1002";
+
+    let rr_binding = rusty_discord_bot::storage::ReactionRoleBinding {
+        id: Uuid::new_v4(),
+        guild_id: rr_guild.to_string(),
+        channel_id: Some("101".to_string()),
+        message_id: rr_msg.to_string(),
+        emoji_key: rr_emoji.to_string(),
+        role_id: rr_role.to_string(),
+        created_by: Some("pg_admin".to_string()),
+        created_at: Utc::now(),
+    };
+
+    let rr_created = store
+        .upsert_reaction_role_binding(rr_binding.clone())
+        .await
+        .expect("upsert reaction role binding in pg");
+    assert_eq!(rr_created.role_id, rr_role);
+
+    let rr_read = store
+        .get_reaction_role_binding(rr_guild, rr_msg, rr_emoji)
+        .await
+        .expect("get reaction role binding in pg");
+    assert!(rr_read.is_some());
+    assert_eq!(rr_read.unwrap().role_id, rr_role);
+
+    let rr_list = store
+        .list_reaction_role_bindings(rr_guild)
+        .await
+        .expect("list reaction role bindings in pg");
+    assert_eq!(rr_list.len(), 1);
+
+    // Upsert update
+    let mut rr_updated = rr_binding.clone();
+    rr_updated.role_id = "1005".to_string();
+    store
+        .upsert_reaction_role_binding(rr_updated)
+        .await
+        .expect("update reaction role binding in pg");
+
+    let rr_read_updated = store
+        .get_reaction_role_binding(rr_guild, rr_msg, rr_emoji)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rr_read_updated.role_id, "1005");
+
+    let rr_del = store
+        .delete_reaction_role_binding(rr_guild, rr_msg, rr_emoji)
+        .await
+        .expect("delete reaction role binding in pg");
+    assert!(rr_del);
+
+    let rr_del_re = store
+        .delete_reaction_role_binding(rr_guild, rr_msg, rr_emoji)
+        .await
+        .expect("delete reaction role binding second time in pg");
+    assert!(!rr_del_re);
 }

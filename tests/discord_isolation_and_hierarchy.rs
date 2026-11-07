@@ -663,7 +663,7 @@ async fn start_mock_discord_environment()
         let _ = client.start().await;
     });
 
-    let ctx = tokio::time::timeout(std::time::Duration::from_secs(5), ready_rx)
+    let ctx = tokio::time::timeout(std::time::Duration::from_secs(15), ready_rx)
         .await
         .expect("timed out waiting for gateway ready")
         .expect("channel rx");
@@ -2344,6 +2344,579 @@ async fn test_giveaway_worker_cross_guild_channel_blocked_and_quarantined() {
     assert!(
         cross_guild_posts2.is_empty(),
         "Subsequent cycles must not produce messages"
+    );
+
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn test_reaction_roles_storage_crud_and_guild_isolation() {
+    let state = create_test_state().await;
+    let guild_a = "100";
+    let guild_b = "200";
+    let msg_id = "900000000000000001";
+    let role_a = "1001";
+    let role_b = "1002";
+    let emoji = "🎉";
+
+    // 1. Create binding in Guild A
+    let binding_a = rusty_discord_bot::storage::ReactionRoleBinding {
+        id: uuid::Uuid::new_v4(),
+        guild_id: guild_a.to_string(),
+        channel_id: Some("101".to_string()),
+        message_id: msg_id.to_string(),
+        emoji_key: emoji.to_string(),
+        role_id: role_a.to_string(),
+        created_by: Some("admin_a".to_string()),
+        created_at: chrono::Utc::now(),
+    };
+    state
+        .storage
+        .upsert_reaction_role_binding(binding_a)
+        .await
+        .expect("upsert guild a binding");
+
+    // Verify Guild A can read it
+    let read_a = state
+        .storage
+        .get_reaction_role_binding(guild_a, msg_id, emoji)
+        .await
+        .unwrap();
+    assert!(read_a.is_some());
+    assert_eq!(read_a.unwrap().role_id, role_a);
+
+    // Verify Guild B cannot read Guild A's binding (tenant isolation)
+    let read_b_initial = state
+        .storage
+        .get_reaction_role_binding(guild_b, msg_id, emoji)
+        .await
+        .unwrap();
+    assert!(read_b_initial.is_none());
+
+    // 2. Create binding in Guild B with same msg_id and emoji, but different role
+    let binding_b = rusty_discord_bot::storage::ReactionRoleBinding {
+        id: uuid::Uuid::new_v4(),
+        guild_id: guild_b.to_string(),
+        channel_id: Some("201".to_string()),
+        message_id: msg_id.to_string(),
+        emoji_key: emoji.to_string(),
+        role_id: role_b.to_string(),
+        created_by: Some("admin_b".to_string()),
+        created_at: chrono::Utc::now(),
+    };
+    state
+        .storage
+        .upsert_reaction_role_binding(binding_b.clone())
+        .await
+        .expect("upsert guild b binding");
+
+    // Verify both guilds are strictly isolated
+    let read_a2 = state
+        .storage
+        .get_reaction_role_binding(guild_a, msg_id, emoji)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read_a2.role_id, role_a);
+
+    let read_b2 = state
+        .storage
+        .get_reaction_role_binding(guild_b, msg_id, emoji)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read_b2.role_id, role_b);
+
+    // 3. Upsert update (idempotency): change Guild A's role to 1005
+    let binding_a_updated = rusty_discord_bot::storage::ReactionRoleBinding {
+        id: uuid::Uuid::new_v4(),
+        guild_id: guild_a.to_string(),
+        channel_id: Some("101".to_string()),
+        message_id: msg_id.to_string(),
+        emoji_key: emoji.to_string(),
+        role_id: "1005".to_string(),
+        created_by: Some("admin_a".to_string()),
+        created_at: chrono::Utc::now(),
+    };
+    state
+        .storage
+        .upsert_reaction_role_binding(binding_a_updated)
+        .await
+        .expect("upsert update");
+
+    let read_a_updated = state
+        .storage
+        .get_reaction_role_binding(guild_a, msg_id, emoji)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read_a_updated.role_id, "1005");
+
+    // 4. Custom emoji canonicalization
+    let custom_emoji_raw = "<:my_emoji:123456789012345678>";
+    let canonical =
+        rusty_discord_bot::discord::reaction_roles::canonicalize_emoji(custom_emoji_raw);
+    assert_eq!(canonical, "123456789012345678");
+
+    let binding_custom = rusty_discord_bot::storage::ReactionRoleBinding {
+        id: uuid::Uuid::new_v4(),
+        guild_id: guild_a.to_string(),
+        channel_id: Some("101".to_string()),
+        message_id: msg_id.to_string(),
+        emoji_key: canonical.clone(),
+        role_id: "1002".to_string(),
+        created_by: Some("admin_a".to_string()),
+        created_at: chrono::Utc::now(),
+    };
+    state
+        .storage
+        .upsert_reaction_role_binding(binding_custom)
+        .await
+        .unwrap();
+
+    let read_custom = state
+        .storage
+        .get_reaction_role_binding(guild_a, msg_id, &canonical)
+        .await
+        .unwrap();
+    assert!(read_custom.is_some());
+
+    // 5. Listing bindings
+    let list_a = state
+        .storage
+        .list_reaction_role_bindings(guild_a)
+        .await
+        .unwrap();
+    assert_eq!(list_a.len(), 2);
+
+    let list_b = state
+        .storage
+        .list_reaction_role_bindings(guild_b)
+        .await
+        .unwrap();
+    assert_eq!(list_b.len(), 1);
+
+    // 6. Delete from Guild A
+    let del_a = state
+        .storage
+        .delete_reaction_role_binding(guild_a, msg_id, emoji)
+        .await
+        .unwrap();
+    assert!(del_a);
+
+    // Guild A binding is gone, Guild B binding is still intact
+    assert!(
+        state
+            .storage
+            .get_reaction_role_binding(guild_a, msg_id, emoji)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        state
+            .storage
+            .get_reaction_role_binding(guild_b, msg_id, emoji)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // Delete by id on Guild B
+    let del_b_id = state
+        .storage
+        .delete_reaction_role_binding_by_id(guild_b, binding_b.id)
+        .await
+        .unwrap();
+    assert!(del_b_id);
+    assert!(
+        state
+            .storage
+            .list_reaction_role_bindings(guild_b)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn test_reaction_roles_executor_permissions_and_hierarchy() {
+    use serenity::all::Permissions;
+
+    let (ctx, _mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state().await;
+    let guild_id = GuildId::new(100);
+
+    // 1. Untrusted module executing ReactionRole -> Err
+    let op_create = rusty_discord_bot::lua::ReactionRoleOperation::Create {
+        message_id: "900000000000000001".to_string(),
+        emoji: "🎉".to_string(),
+        role_id: "1002".to_string(),
+    };
+    let execution_valid =
+        rusty_discord_bot::discord::reaction_roles::ReactionRoleExecutionContext::new(
+            Some(guild_id),
+            Some(ChannelId::new(101)),
+            Some(UserId::new(111111111111111111)), // Owner / Admin
+            Permissions::MANAGE_ROLES,
+            Permissions::MANAGE_ROLES,
+            true,
+        );
+
+    let untrusted_res = rusty_discord_bot::discord::reaction_roles::execute_reaction_role_action(
+        &ctx,
+        &state,
+        "untrusted_module",
+        execution_valid,
+        &op_create,
+    )
+    .await;
+    assert!(untrusted_res.is_err());
+    assert!(
+        untrusted_res
+            .unwrap_err()
+            .to_string()
+            .contains("reaction_role actions require the trusted reaction_roles module")
+    );
+
+    // 2. Non-interactive actor / event execution -> Err
+    let execution_non_interactive =
+        rusty_discord_bot::discord::reaction_roles::ReactionRoleExecutionContext::new(
+            Some(guild_id),
+            Some(ChannelId::new(101)),
+            Some(UserId::new(111111111111111111)),
+            Permissions::MANAGE_ROLES,
+            Permissions::MANAGE_ROLES,
+            false, // not interactive
+        );
+    let non_interactive_res =
+        rusty_discord_bot::discord::reaction_roles::execute_reaction_role_action(
+            &ctx,
+            &state,
+            "reaction_roles",
+            execution_non_interactive,
+            &op_create,
+        )
+        .await;
+    assert!(non_interactive_res.is_err());
+    assert!(
+        non_interactive_res
+            .unwrap_err()
+            .to_string()
+            .contains("reaction_role mutations require an interactive authorized actor")
+    );
+
+    // 3. Actor lacking MANAGE_ROLES -> Err
+    let execution_no_perms =
+        rusty_discord_bot::discord::reaction_roles::ReactionRoleExecutionContext::new(
+            Some(guild_id),
+            Some(ChannelId::new(101)),
+            Some(UserId::new(222222222222222222)),
+            Permissions::SEND_MESSAGES, // Missing MANAGE_ROLES
+            Permissions::MANAGE_ROLES,
+            true,
+        );
+    let no_perms_res = rusty_discord_bot::discord::reaction_roles::execute_reaction_role_action(
+        &ctx,
+        &state,
+        "reaction_roles",
+        execution_no_perms,
+        &op_create,
+    )
+    .await;
+    assert!(no_perms_res.is_err());
+    assert!(
+        no_perms_res
+            .unwrap_err()
+            .to_string()
+            .contains("wymaga uprawnienia Zarządzanie rolami lub Administrator")
+    );
+
+    // 4. Role hierarchy check: non-existent or higher role than bot
+    let op_create_invalid_role = rusty_discord_bot::lua::ReactionRoleOperation::Create {
+        message_id: "900000000000000001".to_string(),
+        emoji: "🎉".to_string(),
+        role_id: "999999999999999999".to_string(), // non-existent role
+    };
+    let invalid_role_res =
+        rusty_discord_bot::discord::reaction_roles::execute_reaction_role_action(
+            &ctx,
+            &state,
+            "reaction_roles",
+            execution_valid,
+            &op_create_invalid_role,
+        )
+        .await;
+    assert!(invalid_role_res.is_err());
+    assert!(
+        invalid_role_res
+            .unwrap_err()
+            .to_string()
+            .contains("role does not exist on this server")
+    );
+
+    // 5. Valid create with proper actor permissions and role hierarchy (Role 1002 is rank 10, bot is rank 50)
+    let valid_res = rusty_discord_bot::discord::reaction_roles::execute_reaction_role_action(
+        &ctx,
+        &state,
+        "reaction_roles",
+        execution_valid,
+        &op_create,
+    )
+    .await;
+    assert!(valid_res.is_ok());
+    let reply = valid_res.unwrap().unwrap();
+    assert!(reply.contains("Skonfigurowano rolę za reakcję"));
+
+    // Verify stored
+    let stored = state
+        .storage
+        .get_reaction_role_binding("100", "900000000000000001", "🎉")
+        .await
+        .unwrap();
+    assert!(stored.is_some());
+    assert_eq!(stored.unwrap().role_id, "1002");
+
+    // Verify audit log emitted
+    let audit_events = state.storage.list_audit_events("100", 10).await.unwrap();
+    let has_audit = audit_events
+        .iter()
+        .any(|e| e.event == "reaction_role_create");
+    assert!(has_audit, "reaction_role_create audit log must be recorded");
+
+    // 6. Valid remove
+    let op_remove = rusty_discord_bot::lua::ReactionRoleOperation::Remove {
+        message_id: "900000000000000001".to_string(),
+        emoji: "🎉".to_string(),
+    };
+    let remove_res = rusty_discord_bot::discord::reaction_roles::execute_reaction_role_action(
+        &ctx,
+        &state,
+        "reaction_roles",
+        execution_valid,
+        &op_remove,
+    )
+    .await;
+    assert!(remove_res.is_ok());
+    let remove_reply = remove_res.unwrap().unwrap();
+    assert!(remove_reply.contains("Usunięto powiązanie roli"));
+
+    // Verify deleted
+    assert!(
+        state
+            .storage
+            .get_reaction_role_binding("100", "900000000000000001", "🎉")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Verify remove audit
+    let audit_events2 = state.storage.list_audit_events("100", 10).await.unwrap();
+    let has_remove_audit = audit_events2
+        .iter()
+        .any(|e| e.event == "reaction_role_remove");
+    assert!(
+        has_remove_audit,
+        "reaction_role_remove audit log must be recorded"
+    );
+
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn test_reaction_roles_gateway_reaction_events() {
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state().await;
+
+    // Seed binding in storage: Message 900000000000000001 + emoji "🎉" -> Role 1002
+    let binding = rusty_discord_bot::storage::ReactionRoleBinding {
+        id: uuid::Uuid::new_v4(),
+        guild_id: "100".to_string(),
+        channel_id: Some("101".to_string()),
+        message_id: "900000000000000001".to_string(),
+        emoji_key: "🎉".to_string(),
+        role_id: "1002".to_string(),
+        created_by: Some("admin".to_string()),
+        created_at: chrono::Utc::now(),
+    };
+    state
+        .storage
+        .upsert_reaction_role_binding(binding)
+        .await
+        .unwrap();
+
+    let baseline_modifications = mock.modifying_requests_count.load(Ordering::SeqCst);
+
+    // 1. User reacts with "🎉" -> role 1002 added!
+    let reaction_user: serenity::all::Reaction = serde_json::from_value(serde_json::json!({
+        "channel_id": "101",
+        "message_id": "900000000000000001",
+        "guild_id": "100",
+        "user_id": "222222222222222222", // non-bot user
+        "emoji": {
+            "name": "🎉",
+            "id": null
+        },
+        "burst": false,
+        "type": 0
+    }))
+    .unwrap();
+
+    rusty_discord_bot::discord::reaction_roles::handle_reaction_role_event(
+        &ctx,
+        &state,
+        &reaction_user,
+        true,
+    )
+    .await
+    .unwrap();
+
+    let mods_after_add = mock.modifying_requests_count.load(Ordering::SeqCst);
+    assert!(
+        mods_after_add > baseline_modifications,
+        "Role add HTTP request must be sent to Discord"
+    );
+
+    let calls = mock.recorded_calls.lock().await.clone();
+    let role_add_call = calls.iter().find(|(m, p)| {
+        *m == Method::PUT && p.contains("/guilds/100/members/222222222222222222/roles/1002")
+    });
+    assert!(
+        role_add_call.is_some(),
+        "Expected PUT /guilds/100/members/222222222222222222/roles/1002 call"
+    );
+
+    // Verify audit log
+    let audits = state.storage.list_audit_events("100", 10).await.unwrap();
+    assert!(
+        audits.iter().any(|a| a.event == "reaction_role_granted"),
+        "reaction_role_granted audit log must be recorded"
+    );
+
+    // 2. User removes reaction "🎉" -> role 1002 removed!
+    let baseline_before_remove = mock.modifying_requests_count.load(Ordering::SeqCst);
+    rusty_discord_bot::discord::reaction_roles::handle_reaction_role_event(
+        &ctx,
+        &state,
+        &reaction_user,
+        false,
+    )
+    .await
+    .unwrap();
+
+    let mods_after_remove = mock.modifying_requests_count.load(Ordering::SeqCst);
+    assert!(
+        mods_after_remove > baseline_before_remove,
+        "Role remove HTTP request must be sent to Discord"
+    );
+
+    let calls_rem = mock.recorded_calls.lock().await.clone();
+    let role_rem_call = calls_rem.iter().find(|(m, p)| {
+        *m == Method::DELETE && p.contains("/guilds/100/members/222222222222222222/roles/1002")
+    });
+    assert!(
+        role_rem_call.is_some(),
+        "Expected DELETE /guilds/100/members/222222222222222222/roles/1002 call"
+    );
+
+    // Verify audit log
+    let audits_rem = state.storage.list_audit_events("100", 10).await.unwrap();
+    assert!(
+        audits_rem
+            .iter()
+            .any(|a| a.event == "reaction_role_revoked"),
+        "reaction_role_revoked audit log must be recorded"
+    );
+
+    // 3. Bot user reacts -> ignored (prevent bot loops)
+    let baseline_bot = mock.modifying_requests_count.load(Ordering::SeqCst);
+    let reaction_bot: serenity::all::Reaction = serde_json::from_value(serde_json::json!({
+        "channel_id": "101",
+        "message_id": "900000000000000001",
+        "guild_id": "100",
+        "user_id": "999999999999999999", // Bot's own ID
+        "emoji": {
+            "name": "🎉",
+            "id": null
+        },
+        "burst": false,
+        "type": 0
+    }))
+    .unwrap();
+
+    rusty_discord_bot::discord::reaction_roles::handle_reaction_role_event(
+        &ctx,
+        &state,
+        &reaction_bot,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        mock.modifying_requests_count.load(Ordering::SeqCst),
+        baseline_bot,
+        "Bot reaction must be ignored"
+    );
+
+    // 4. Unmapped emoji -> ignored
+    let baseline_unmapped = mock.modifying_requests_count.load(Ordering::SeqCst);
+    let reaction_unmapped: serenity::all::Reaction = serde_json::from_value(serde_json::json!({
+        "channel_id": "101",
+        "message_id": "900000000000000001",
+        "guild_id": "100",
+        "user_id": "222222222222222222",
+        "emoji": {
+            "name": "⭐", // unmapped emoji
+            "id": null
+        },
+        "burst": false,
+        "type": 0
+    }))
+    .unwrap();
+
+    rusty_discord_bot::discord::reaction_roles::handle_reaction_role_event(
+        &ctx,
+        &state,
+        &reaction_unmapped,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        mock.modifying_requests_count.load(Ordering::SeqCst),
+        baseline_unmapped,
+        "Unmapped emoji reaction must be ignored"
+    );
+
+    // 5. Disabled module -> ignored
+    state
+        .storage
+        .update_module_settings_with_audit(rusty_discord_bot::storage::UpdateModuleSettingsParams {
+            guild_id: "100",
+            module_id: "reaction_roles",
+            enabled: false,
+            config: serde_json::json!({}),
+            actor_id: Some("admin"),
+            audit_event: "module_disable",
+            audit_data: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+
+    let baseline_disabled = mock.modifying_requests_count.load(Ordering::SeqCst);
+    rusty_discord_bot::discord::reaction_roles::handle_reaction_role_event(
+        &ctx,
+        &state,
+        &reaction_user,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        mock.modifying_requests_count.load(Ordering::SeqCst),
+        baseline_disabled,
+        "Reaction role event must be ignored when module is disabled"
     );
 
     shard_manager.shutdown_all().await;

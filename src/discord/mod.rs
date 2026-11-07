@@ -11,6 +11,7 @@ pub use handler::Handler;
 pub mod moderation_cases;
 pub mod music;
 pub mod progression;
+pub mod reaction_roles;
 pub mod scheduler;
 pub mod tags;
 pub mod tickets;

@@ -698,6 +698,14 @@ pub fn build_router(state: WebState) -> Router {
             "/api/guilds/{guild_id}/marketplace/installed",
             get(integrations::list_installed_guild_plugins),
         )
+        .route(
+            "/api/guilds/{guild_id}/reaction-roles",
+            get(features::list_reaction_roles).post(features::create_reaction_role),
+        )
+        .route(
+            "/api/guilds/{guild_id}/reaction-roles/{binding_id}",
+            delete(features::delete_reaction_role),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn_with_state(
             state.clone(),

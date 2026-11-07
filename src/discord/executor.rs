@@ -23,7 +23,9 @@ use crate::{
     lua::{LuaAction, TagOperation},
 };
 
-use super::{giveaway, moderation_cases, music, progression, scheduler, tags, tickets};
+use super::{
+    giveaway, moderation_cases, music, progression, reaction_roles, scheduler, tags, tickets,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 
@@ -548,6 +550,8 @@ fn action_rate_limit_scope(action: &LuaAction) -> Option<&'static str> {
         LuaAction::Tag {
             operation: crate::lua::TagOperation::Create { .. },
         } => Some("tag_create"),
+
+        LuaAction::ReactionRole { .. } => Some("reaction_role"),
 
         LuaAction::BanMember { .. }
         | LuaAction::KickMember { .. }
@@ -1440,6 +1444,24 @@ async fn execute_action(
             .await
         }
 
+        LuaAction::ReactionRole { operation } => {
+            reaction_roles::execute_reaction_role_action(
+                ctx,
+                state,
+                module_id,
+                reaction_roles::ReactionRoleExecutionContext::new(
+                    origin.guild_id,
+                    origin.channel_id,
+                    origin.actor_id,
+                    origin.actor_permissions,
+                    origin.app_permissions,
+                    origin.enforce_actor_permissions,
+                ),
+                operation,
+            )
+            .await
+        }
+
         LuaAction::PublishSubmission {
             channel_id,
             content,
@@ -1550,7 +1572,9 @@ fn required_permission(action: &LuaAction) -> Option<Permissions> {
 
         LuaAction::BanMember { .. } => Some(Permissions::BAN_MEMBERS),
 
-        LuaAction::AddRole { .. } | LuaAction::RemoveRole { .. } => Some(Permissions::MANAGE_ROLES),
+        LuaAction::AddRole { .. }
+        | LuaAction::RemoveRole { .. }
+        | LuaAction::ReactionRole { .. } => Some(Permissions::MANAGE_ROLES),
 
         _ => None,
     }
@@ -1782,7 +1806,7 @@ pub async fn ensure_member_hierarchy(
     Ok(())
 }
 
-async fn ensure_role_hierarchy(
+pub async fn ensure_role_hierarchy(
     ctx: &Context,
 
     guild_id: GuildId,

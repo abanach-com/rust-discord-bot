@@ -8748,3 +8748,342 @@ async fn test_giveaway_cross_guild_channel_isolation_live_mode() {
         .unwrap();
     assert_eq!(a_target_b_resp.status(), reqwest::StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn test_reaction_roles_web_api_and_isolation() {
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+
+    let guild_a = "777888999000111";
+    let guild_b = "888999000111222";
+    let channel_a = "111111111111111101"; // belongs to guild A
+    let channel_b = "222222222222222201"; // belongs to guild B
+
+    // 1. Mock Discord API for channel view verification
+    let discord_mock_app = axum::Router::new()
+        .route(
+            "/channels/{channel_id}",
+            get(
+                |axum::extract::Path(cid): axum::extract::Path<String>| async move {
+                    match cid.as_str() {
+                        "111111111111111101" => axum::Json(serde_json::json!({
+                            "id": "111111111111111101",
+                            "guild_id": "777888999000111",
+                            "type": 0
+                        }))
+                        .into_response(),
+                        "222222222222222201" => axum::Json(serde_json::json!({
+                            "id": "222222222222222201",
+                            "guild_id": "888999000111222",
+                            "type": 0
+                        }))
+                        .into_response(),
+                        _ => (
+                            axum::http::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({"message": "Not Found"})),
+                        )
+                            .into_response(),
+                    }
+                },
+            ),
+        )
+        .route(
+            "/guilds/{guild_id}/members/{user_id}",
+            get(
+                |axum::extract::Path((_guild_id, user_id)): axum::extract::Path<(
+                    String,
+                    String,
+                )>| async move {
+                    axum::Json(serde_json::json!({
+                        "user": { "id": user_id },
+                        "roles": []
+                    }))
+                    .into_response()
+                },
+            ),
+        )
+        .route(
+            "/channels/{channel_id}/permissions/member/{user_id}",
+            get(
+                |axum::extract::Path((_channel_id, _user_id)): axum::extract::Path<(
+                    String,
+                    String,
+                )>| async move {
+                    axum::Json(serde_json::json!({
+                        "permissions": "1024"
+                    }))
+                    .into_response()
+                },
+            ),
+        );
+
+    let discord_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind discord mock");
+    let discord_addr = discord_listener.local_addr().expect("discord mock addr");
+    tokio::spawn(async move {
+        axum::serve(discord_listener, discord_mock_app)
+            .await
+            .unwrap();
+    });
+
+    // 2. Configure app state in live mode
+    let mut config = test_config();
+    config.discord_token = "live_bot_token_production_secret".to_string();
+    config.offline_mode = false;
+    config.discord_api_base_url = format!("http://{discord_addr}");
+
+    let app = AppState::bootstrap(config).await.expect("bootstrap");
+    let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
+    let web_state = WebState {
+        app,
+        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        permissions_cache,
+    };
+    web_state
+        .app
+        .is_gateway_ready
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind web listener");
+    let web_addr = web_listener.local_addr().expect("web addr");
+    let router = build_router(web_state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            web_listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{web_addr}");
+
+    // Sessions for Admin A and Admin B
+    let admin_a_sess = "admin_a_sess_token_rr";
+    let admin_a_csrf = "admin_a_csrf_token_rr";
+    let admin_a_id = "111111111111111111";
+
+    web_state
+        .app
+        .sessions
+        .save_session(
+            admin_a_sess,
+            DashboardUser {
+                id: admin_a_id.to_owned(),
+                username: "admin_a".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![
+                DashboardGuild {
+                    id: guild_a.to_owned(),
+                    name: "Guild A".to_owned(),
+                    icon: None,
+                    owner: false,
+                    permissions: "32".to_owned(), // MANAGE_GUILD
+                },
+                DashboardGuild {
+                    id: guild_b.to_owned(),
+                    name: "Guild B".to_owned(),
+                    icon: None,
+                    owner: false,
+                    permissions: "0".to_owned(),
+                },
+            ],
+            admin_a_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    web_state.permissions_cache.insert(
+        (admin_a_id.to_owned(), guild_a.to_owned()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    let admin_b_sess = "admin_b_sess_token_rr";
+    let admin_b_csrf = "admin_b_csrf_token_rr";
+    let admin_b_id = "222222222222222222";
+
+    web_state
+        .app
+        .sessions
+        .save_session(
+            admin_b_sess,
+            DashboardUser {
+                id: admin_b_id.to_owned(),
+                username: "admin_b".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![
+                DashboardGuild {
+                    id: guild_b.to_owned(),
+                    name: "Guild B".to_owned(),
+                    icon: None,
+                    owner: false,
+                    permissions: "32".to_owned(), // MANAGE_GUILD
+                },
+                DashboardGuild {
+                    id: guild_a.to_owned(),
+                    name: "Guild A".to_owned(),
+                    icon: None,
+                    owner: false,
+                    permissions: "0".to_owned(),
+                },
+            ],
+            admin_b_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    web_state.permissions_cache.insert(
+        (admin_b_id.to_owned(), guild_b.to_owned()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    let cookie_a = format!("rusty_discord_bot_session={admin_a_sess}");
+    let cookie_b = format!("rusty_discord_bot_session={admin_b_sess}");
+
+    // 1. Initial list for Guild A is empty
+    let list_a_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_a}/reaction-roles"))
+        .header(COOKIE, &cookie_a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_a_resp.status(), reqwest::StatusCode::OK);
+    let list_a_body: serde_json::Value = list_a_resp.json().await.unwrap();
+    assert_eq!(list_a_body["reaction_roles"].as_array().unwrap().len(), 0);
+
+    // 2. Admin A creates reaction role in Guild A -> 200 OK
+    let create_a_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/reaction-roles"))
+        .header(COOKIE, &cookie_a)
+        .header("x-csrf-token", admin_a_csrf)
+        .json(&serde_json::json!({
+            "channel_id": channel_a,
+            "message_id": "900000000000000001",
+            "emoji": "🎉",
+            "role_id": "1002"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_a_resp.status(), reqwest::StatusCode::OK);
+    let created_a: serde_json::Value = create_a_resp.json().await.unwrap();
+    assert_eq!(created_a["status"], "created");
+    let binding_a_id = created_a["reaction_role"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 3. Admin A attempts without CSRF -> 403 Forbidden
+    let no_csrf_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/reaction-roles"))
+        .header(COOKIE, &cookie_a)
+        .json(&serde_json::json!({
+            "channel_id": channel_a,
+            "message_id": "900000000000000002",
+            "emoji": "⭐",
+            "role_id": "1002"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_csrf_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 4. Admin A attempts cross-guild channel (channel_b in Guild A) -> 403 Forbidden
+    let cross_ch_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/reaction-roles"))
+        .header(COOKIE, &cookie_a)
+        .header("x-csrf-token", admin_a_csrf)
+        .json(&serde_json::json!({
+            "channel_id": channel_b, // belongs to Guild B!
+            "message_id": "900000000000000003",
+            "emoji": "⭐",
+            "role_id": "1002"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cross_ch_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 5. Admin B creates reaction role in Guild B -> 200 OK
+    let create_b_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_b}/reaction-roles"))
+        .header(COOKIE, &cookie_b)
+        .header("x-csrf-token", admin_b_csrf)
+        .json(&serde_json::json!({
+            "channel_id": channel_b,
+            "message_id": "900000000000000001",
+            "emoji": "🎉",
+            "role_id": "1001"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_b_resp.status(), reqwest::StatusCode::OK);
+
+    // 6. Multi-tenant isolation: Admin B cannot view Guild A's reaction roles -> 403 Forbidden
+    let b_view_a_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_a}/reaction-roles"))
+        .header(COOKIE, &cookie_b)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(b_view_a_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 7. Multi-tenant isolation: Admin B cannot delete Guild A's binding from Guild B -> 404 Not Found
+    let b_del_a_resp = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_b}/reaction-roles/{binding_a_id}"
+        ))
+        .header(COOKIE, &cookie_b)
+        .header("x-csrf-token", admin_b_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(b_del_a_resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // 8. Admin A deletes binding in Guild A -> 200 OK
+    let del_a_resp = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_a}/reaction-roles/{binding_a_id}"
+        ))
+        .header(COOKIE, &cookie_a)
+        .header("x-csrf-token", admin_a_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del_a_resp.status(), reqwest::StatusCode::OK);
+
+    // 9. Verify Guild A's list is empty again
+    let list_a_after = client
+        .get(format!("{base_url}/api/guilds/{guild_a}/reaction-roles"))
+        .header(COOKIE, &cookie_a)
+        .send()
+        .await
+        .unwrap();
+    let list_a_after_body: serde_json::Value = list_a_after.json().await.unwrap();
+    assert_eq!(
+        list_a_after_body["reaction_roles"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+}

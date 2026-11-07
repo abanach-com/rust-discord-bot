@@ -21,12 +21,12 @@ use super::{
     MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
     ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
     ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
-    ProgressionSeason, RecordCompanionLeaseParams, RedditSubscription, ReputationGrantOutcome,
-    RetainedRecordNotice, ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry,
-    SteamLfgPost, StickyMessage, StoreItem, StorePurchase, TagRecord, TelegramBridge,
-    TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError, TupperProfile,
-    TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport, VkSubscription,
-    WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription,
+    ProgressionSeason, ReactionRoleBinding, RecordCompanionLeaseParams, RedditSubscription,
+    ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent, ServerSnapshot,
+    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
+    TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError,
+    TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
+    VkSubscription, WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription,
     is_member_after_cursor, level_for_xp, parse_member_search_cursor, snowflake_created_at,
     validate_snowflake,
 };
@@ -220,6 +220,7 @@ pub struct MemoryStore {
 
     asset_analytics_failure_injected: Arc<std::sync::atomic::AtomicBool>,
     tags: Arc<DashMap<(String, String), TagRecord>>,
+    reaction_roles: Arc<DashMap<(String, String, String), ReactionRoleBinding>>,
 }
 
 impl MemoryStore {
@@ -1780,6 +1781,105 @@ impl MemoryStore {
     pub fn delete_tag(&self, guild_id: &str, name: &str) -> anyhow::Result<bool> {
         let key = (guild_id.to_owned(), name.to_lowercase());
         Ok(self.tags.remove(&key).is_some())
+    }
+
+    pub fn upsert_reaction_role_binding(
+        &self,
+        binding: ReactionRoleBinding,
+    ) -> anyhow::Result<ReactionRoleBinding> {
+        let key = (
+            binding.guild_id.clone(),
+            binding.message_id.clone(),
+            binding.emoji_key.clone(),
+        );
+        self.reaction_roles.insert(key, binding.clone());
+        Ok(binding)
+    }
+
+    pub fn get_reaction_role_binding(
+        &self,
+        guild_id: &str,
+        message_id: &str,
+        emoji_key: &str,
+    ) -> anyhow::Result<Option<ReactionRoleBinding>> {
+        let key = (
+            guild_id.to_owned(),
+            message_id.to_owned(),
+            emoji_key.to_owned(),
+        );
+        if let Some(entry) = self.reaction_roles.get(&key) {
+            return Ok(Some(entry.value().clone()));
+        }
+        for entry in self.reaction_roles.iter() {
+            let b = entry.value();
+            if b.guild_id == guild_id && b.message_id == message_id && b.emoji_key == emoji_key {
+                return Ok(Some(b.clone()));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn delete_reaction_role_binding(
+        &self,
+        guild_id: &str,
+        message_id: &str,
+        emoji_key: &str,
+    ) -> anyhow::Result<bool> {
+        let key = (
+            guild_id.to_owned(),
+            message_id.to_owned(),
+            emoji_key.to_owned(),
+        );
+        if self.reaction_roles.remove(&key).is_some() {
+            return Ok(true);
+        }
+        let mut to_remove = None;
+        for entry in self.reaction_roles.iter() {
+            let b = entry.value();
+            if b.guild_id == guild_id && b.message_id == message_id && b.emoji_key == emoji_key {
+                to_remove = Some(entry.key().clone());
+                break;
+            }
+        }
+        if let Some(k) = to_remove {
+            Ok(self.reaction_roles.remove(&k).is_some())
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub fn delete_reaction_role_binding_by_id(
+        &self,
+        guild_id: &str,
+        binding_id: Uuid,
+    ) -> anyhow::Result<bool> {
+        let mut to_remove = None;
+        for entry in self.reaction_roles.iter() {
+            let b = entry.value();
+            if b.guild_id == guild_id && b.id == binding_id {
+                to_remove = Some(entry.key().clone());
+                break;
+            }
+        }
+        if let Some(k) = to_remove {
+            Ok(self.reaction_roles.remove(&k).is_some())
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub fn list_reaction_role_bindings(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<ReactionRoleBinding>> {
+        let mut list: Vec<ReactionRoleBinding> = self
+            .reaction_roles
+            .iter()
+            .filter(|e| e.guild_id == guild_id)
+            .map(|e| e.value().clone())
+            .collect();
+        list.sort_by_key(|a| a.created_at);
+        Ok(list)
     }
 
     pub fn record_starboard_entry(
