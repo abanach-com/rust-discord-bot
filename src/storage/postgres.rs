@@ -748,15 +748,16 @@ impl PostgresStore {
         let mut transaction = self.pool.begin().await?;
 
         if let Some(id) = interaction_id {
-            let row: Option<(String,)> = sqlx::query_as(
-                "SELECT outcome_json FROM economy_idempotency WHERE guild_id = $1 AND interaction_id = $2"
+            let row: Option<(String, String)> = sqlx::query_as(
+                "SELECT user_id, outcome_json FROM economy_idempotency WHERE guild_id = $1 AND interaction_id = $2"
             )
             .bind(guild_id)
             .bind(id)
             .fetch_optional(&mut *transaction)
             .await?;
 
-            if let Some((json_str,)) = row
+            if let Some((entry_user_id, json_str)) = row
+                && entry_user_id == user_id
                 && let Ok(outcome) = serde_json::from_str::<WorkClaimOutcome>(&json_str)
             {
                 ensure_profile(&mut transaction, guild_id, user_id).await?;
@@ -875,15 +876,16 @@ impl PostgresStore {
         let mut transaction = self.pool.begin().await?;
 
         if let Some(id) = interaction_id {
-            let row: Option<(String,)> = sqlx::query_as(
-                "SELECT outcome_json FROM economy_idempotency WHERE guild_id = $1 AND interaction_id = $2"
+            let row: Option<(String, String)> = sqlx::query_as(
+                "SELECT user_id, outcome_json FROM economy_idempotency WHERE guild_id = $1 AND interaction_id = $2"
             )
             .bind(guild_id)
             .bind(id)
             .fetch_optional(&mut *transaction)
             .await?;
 
-            if let Some((json_str,)) = row
+            if let Some((entry_user_id, json_str)) = row
+                && entry_user_id == user_id
                 && let Ok(outcome) = serde_json::from_str::<CrimeClaimOutcome>(&json_str)
             {
                 ensure_profile(&mut transaction, guild_id, user_id).await?;

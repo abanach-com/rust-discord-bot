@@ -390,6 +390,13 @@ pub struct EconomyPurchaseRequestRecord {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EconomyIdempotencyEntry {
+    pub user_id: String,
+    pub created_at: DateTime<Utc>,
+    pub outcome_json: String,
+}
+
 pub fn validate_snowflake(label: &str, id: &str) -> anyhow::Result<u64> {
     anyhow::ensure!(!id.is_empty(), "{label} cannot be empty");
     anyhow::ensure!(
@@ -8082,5 +8089,121 @@ mod tests {
             .await
             .unwrap();
         assert!(erasure.related_records_erased > 0);
+    }
+
+    #[tokio::test]
+    async fn test_memory_store_economy_idempotency_erasure_and_user_binding() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_id = "guild_erase_idem_test";
+        let user_a = "user_a_idem";
+        let user_b = "user_b_idem";
+
+        // 1. User A claims work and crime
+        let work_a = store
+            .claim_work_reward(
+                guild_id,
+                user_a,
+                Some("int_work_a"),
+                100,
+                100,
+                60,
+                Some(0.5),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(work_a, WorkClaimOutcome::Claimed { .. }));
+
+        let crime_a = store
+            .claim_crime_reward(
+                guild_id,
+                user_a,
+                Some("int_crime_a"),
+                200,
+                200,
+                1.0,
+                1.0,
+                60,
+                Some(0.1),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(crime_a, CrimeClaimOutcome::Success { .. }));
+
+        // 2. User B claims work
+        let work_b = store
+            .claim_work_reward(
+                guild_id,
+                user_b,
+                Some("int_work_b"),
+                100,
+                100,
+                60,
+                Some(0.5),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(work_b, WorkClaimOutcome::Claimed { .. }));
+
+        // 3. Replay with same interaction_id by User A returns AlreadyProcessed
+        let replay_a = store
+            .claim_work_reward(
+                guild_id,
+                user_a,
+                Some("int_work_a"),
+                100,
+                100,
+                60,
+                Some(0.5),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            replay_a,
+            WorkClaimOutcome::AlreadyProcessed { .. }
+        ));
+
+        // 4. Replay with User A's interaction_id by User B does NOT return User A's claim
+        let cross_replay = store
+            .claim_work_reward(
+                guild_id,
+                user_b,
+                Some("int_work_a"),
+                100,
+                100,
+                60,
+                Some(0.5),
+            )
+            .await
+            .unwrap();
+        // Since int_work_a belongs to User A, User B hits cooldown (or new claim, not AlreadyProcessed)
+        assert!(!matches!(
+            cross_replay,
+            WorkClaimOutcome::AlreadyProcessed { .. }
+        ));
+
+        // 5. Erase User A
+        let erasure_a = store.erase_guild_user_data(guild_id, user_a).await.unwrap();
+        assert!(
+            erasure_a.related_records_erased >= 2,
+            "must erase economy_idempotency entries for User A"
+        );
+
+        if let Storage::Memory(ref mem) = store {
+            assert!(
+                !mem.economy_idempotency
+                    .contains_key(&(guild_id.to_string(), "int_work_a".to_string())),
+                "User A's work idempotency entry must be deleted"
+            );
+            assert!(
+                !mem.economy_idempotency
+                    .contains_key(&(guild_id.to_string(), "int_crime_a".to_string())),
+                "User A's crime idempotency entry must be deleted"
+            );
+            assert!(
+                mem.economy_idempotency
+                    .contains_key(&(guild_id.to_string(), "int_work_b".to_string())),
+                "User B's idempotency entry must be preserved"
+            );
+        }
     }
 }

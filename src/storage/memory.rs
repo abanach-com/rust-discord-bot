@@ -14,21 +14,22 @@ use super::{
     CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome, CommandPolicyRule, CommunityPoll,
     CompanionChannelLease, CompanionChannelMapping, CompanionMappingItem, CountingGame,
     CrimeClaimOutcome, CustomAutomation, DailyClaimOutcome, DynamicVoiceRoom,
-    EconomyPurchaseRequestRecord, EventRoster, FaqEntry, FeedSubscription, GameAccountLink,
-    GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway, GuildModuleSettings,
-    IntegrationConnection, IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking,
-    KickStreamSubscription, LinkedAccount, MAX_COMPANION_MAPPINGS_PER_GUILD, McpToolAuthorization,
-    MemberIdentityRecord, MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot,
-    ModerationAppeal, ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings,
-    ModeratorDutyState, ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage,
-    ProgressMetric, ProgressionSeason, ReactionRoleBinding, RecordCompanionLeaseParams,
-    RedditSubscription, ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent,
-    ServerSnapshot, SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem,
-    StorePurchase, TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament,
-    TupperError, TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams,
-    UserErasureReport, VkSubscription, WORK_JOBS, WorkClaimOutcome, WorkflowDefinition,
-    WorkflowRunExecution, XpAward, YouTubeChannelSubscription, is_member_after_cursor,
-    level_for_xp, parse_member_search_cursor, snowflake_created_at, validate_snowflake,
+    EconomyIdempotencyEntry, EconomyPurchaseRequestRecord, EventRoster, FaqEntry, FeedSubscription,
+    GameAccountLink, GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway,
+    GuildModuleSettings, IntegrationConnection, IntegrationDeliveryLog,
+    IntegrationWebhookSubscription, InviteTracking, KickStreamSubscription, LinkedAccount,
+    MAX_COMPANION_MAPPINGS_PER_GUILD, McpToolAuthorization, MemberIdentityRecord, MemberProgress,
+    MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
+    ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
+    ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
+    ProgressionSeason, ReactionRoleBinding, RecordCompanionLeaseParams, RedditSubscription,
+    ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent, ServerSnapshot,
+    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
+    TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError,
+    TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
+    VkSubscription, WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
+    YouTubeChannelSubscription, is_member_after_cursor, level_for_xp, parse_member_search_cursor,
+    snowflake_created_at, validate_snowflake,
 };
 
 type ModuleKey = (String, String);
@@ -89,7 +90,7 @@ pub struct MemoryStore {
 
     economy_cooldowns: Arc<DashMap<(String, String, String), chrono::DateTime<Utc>>>,
 
-    economy_idempotency: Arc<DashMap<(String, String), String>>,
+    pub(crate) economy_idempotency: Arc<DashMap<(String, String), EconomyIdempotencyEntry>>,
 
     economy_purchase_requests: Arc<DashMap<(String, String), EconomyPurchaseRequestRecord>>,
 
@@ -555,6 +556,11 @@ impl MemoryStore {
         self.economy_cooldowns
             .retain(|(g, u, _), _| !(g == guild_id && u == user_id));
 
+        let before_idempotency = self.economy_idempotency.len();
+        self.economy_idempotency
+            .retain(|(g, _), entry| !(g == guild_id && entry.user_id == user_id));
+        related_erased += before_idempotency.saturating_sub(self.economy_idempotency.len());
+
         let before_purchase_reqs = self.economy_purchase_requests.len();
         self.economy_purchase_requests
             .retain(|(g, _), r| !(g == guild_id && r.user_id == user_id));
@@ -775,10 +781,11 @@ impl MemoryStore {
         let now = Utc::now();
 
         if let Some(id) = interaction_id
-            && let Some(cached) = self
+            && let Some(entry) = self
                 .economy_idempotency
                 .get(&(guild_id.to_string(), id.to_string()))
-            && let Ok(outcome) = serde_json::from_str::<WorkClaimOutcome>(&cached)
+            && entry.user_id == user_id
+            && let Ok(outcome) = serde_json::from_str::<WorkClaimOutcome>(&entry.outcome_json)
         {
             let profile = self.profile(guild_id, user_id, now);
             return match outcome {
@@ -840,8 +847,14 @@ impl MemoryStore {
         if let Some(id) = interaction_id
             && let Ok(serialized) = serde_json::to_string(&outcome)
         {
-            self.economy_idempotency
-                .insert((guild_id.to_string(), id.to_string()), serialized);
+            self.economy_idempotency.insert(
+                (guild_id.to_string(), id.to_string()),
+                EconomyIdempotencyEntry {
+                    user_id: user_id.to_string(),
+                    created_at: now,
+                    outcome_json: serialized,
+                },
+            );
         }
 
         outcome
@@ -864,10 +877,11 @@ impl MemoryStore {
         let now = Utc::now();
 
         if let Some(id) = interaction_id
-            && let Some(cached) = self
+            && let Some(entry) = self
                 .economy_idempotency
                 .get(&(guild_id.to_string(), id.to_string()))
-            && let Ok(outcome) = serde_json::from_str::<CrimeClaimOutcome>(&cached)
+            && entry.user_id == user_id
+            && let Ok(outcome) = serde_json::from_str::<CrimeClaimOutcome>(&entry.outcome_json)
         {
             let profile = self.profile(guild_id, user_id, now);
             return match outcome {
@@ -946,8 +960,14 @@ impl MemoryStore {
         if let Some(id) = interaction_id
             && let Ok(serialized) = serde_json::to_string(&outcome)
         {
-            self.economy_idempotency
-                .insert((guild_id.to_string(), id.to_string()), serialized);
+            self.economy_idempotency.insert(
+                (guild_id.to_string(), id.to_string()),
+                EconomyIdempotencyEntry {
+                    user_id: user_id.to_string(),
+                    created_at: now,
+                    outcome_json: serialized,
+                },
+            );
         }
 
         outcome
