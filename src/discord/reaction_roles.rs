@@ -384,15 +384,15 @@ pub async fn handle_reaction_role_event(
         }
 
         // Determine whether user possessed this role before reaction
-        let member = if let Some(ref m) = reaction.member {
-            Some(m.clone())
-        } else {
-            ctx.http.get_member(guild_id, user_id).await.ok()
+        let member = match reaction.member.as_ref() {
+            Some(member) => member.clone(),
+            None => ctx
+                .http
+                .get_member(guild_id, user_id)
+                .await
+                .context("cannot determine reaction role member state")?,
         };
-        let member_has_role = member
-            .as_ref()
-            .map(|m| m.roles.contains(&role_id))
-            .unwrap_or(false);
+        let member_has_role = member.roles.contains(&role_id);
 
         // Check active reaction role grants for this user and role
         let existing_grants = state
@@ -403,7 +403,7 @@ pub async fn handle_reaction_role_event(
                 &binding.role_id,
             )
             .await
-            .unwrap_or_default();
+            .context("cannot determine prior reaction role grants")?;
         let has_prior_bot_grant = existing_grants.iter().any(|g| g.granted_by_bot);
 
         // If member already has the role without prior reaction role bot grant, it was granted by moderator/external source

@@ -3361,6 +3361,64 @@ async fn test_reaction_roles_provenance_and_shared_grants_lifecycle_suite() {
         "DELETE role must be sent once the final reaction role binding is removed"
     );
 
+    // =========================================================================
+    // CASE C: Fail-closed on member resolution error (Issue #301)
+    // Unknown member 888888888888888888 returns error from get_member
+    // Must NOT record grant as granted_by_bot=true and must NOT mutate roles
+    // =========================================================================
+    let reaction_unknown_member: serenity::all::Reaction =
+        serde_json::from_value(serde_json::json!({
+            "channel_id": "101",
+            "message_id": "900000000000000001",
+            "guild_id": "100",
+            "user_id": "888888888888888888",
+            "emoji": { "name": "🎉", "id": null },
+            "burst": false,
+            "type": 0
+        }))
+        .unwrap();
+
+    let baseline_unknown = mock.recorded_calls.lock().await.len();
+    let res_unknown = rusty_discord_bot::discord::reaction_roles::handle_reaction_role_event(
+        &ctx,
+        &state,
+        &reaction_unknown_member,
+        true,
+    )
+    .await;
+
+    assert!(
+        res_unknown.is_err(),
+        "Must fail closed when member state cannot be determined"
+    );
+    assert!(
+        res_unknown
+            .unwrap_err()
+            .to_string()
+            .contains("cannot determine reaction role member state")
+    );
+
+    // Verify: No grants recorded for this unknown member
+    let grants_unknown = state
+        .storage
+        .list_active_reaction_role_grants_for_user_role("100", "888888888888888888", "1002")
+        .await
+        .unwrap();
+    assert!(
+        grants_unknown.is_empty(),
+        "No grant must be recorded when member resolution fails"
+    );
+
+    // Verify: No PUT sent to Discord for role 1002
+    let calls_unknown = mock.recorded_calls.lock().await.clone();
+    let put_unknown = calls_unknown[baseline_unknown..].iter().any(|(m, p)| {
+        *m == Method::PUT && p.contains("/guilds/100/members/888888888888888888/roles/1002")
+    });
+    assert!(
+        !put_unknown,
+        "No PUT role must be sent when member state resolution fails"
+    );
+
     shard_manager.shutdown_all().await;
 }
 
