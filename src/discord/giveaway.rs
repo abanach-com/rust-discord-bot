@@ -11,7 +11,7 @@ use super::executor::{ActionOrigin, ChannelPurpose, resolve_and_validate_channel
 use crate::{AppState, lua::GiveawayOperation};
 
 #[derive(Clone, Copy)]
-pub(super) struct GiveawayExecutionContext {
+pub struct GiveawayExecutionContext {
     pub guild_id: Option<GuildId>,
     pub channel_id: Option<ChannelId>,
     pub actor_id: Option<UserId>,
@@ -58,22 +58,36 @@ fn format_winners(winners: &[String]) -> String {
     }
 }
 
-pub(super) async fn execute(
+pub fn validate_giveaway_execution(
+    module_id: &str,
+    execution: &GiveawayExecutionContext,
+) -> Result<GuildId> {
+    ensure!(
+        module_id == "giveaway",
+        "giveaway operations are reserved for the trusted giveaway module"
+    );
+    ensure!(
+        execution.enforce_actor_permissions && execution.actor_id.is_some(),
+        "giveaway operations require an interactive user command"
+    );
+    ensure!(
+        can_manage_giveaways(execution.actor_permissions),
+        "giveaway operations require Manage Server or Administrator permissions."
+    );
+
+    execution
+        .guild_id
+        .ok_or_else(|| anyhow!("Giveaway operations operate exclusively within a server"))
+}
+
+pub async fn execute(
     ctx: &Context,
     state: &AppState,
     module_id: &str,
     execution: GiveawayExecutionContext,
     operation: &GiveawayOperation,
 ) -> Result<Option<String>> {
-    let guild_id = execution
-        .guild_id
-        .ok_or_else(|| anyhow!("Giveaway operations operate exclusively within a server"))?;
-
-    if execution.enforce_actor_permissions && !can_manage_giveaways(execution.actor_permissions) {
-        return Err(anyhow!(
-            "Giveaway operations require Manage Server or Administrator permissions."
-        ));
-    }
+    let guild_id = validate_giveaway_execution(module_id, &execution)?;
 
     let guild_id_str = guild_id.get().to_string();
     let actor_id_str = execution.actor_id.map(|id| id.get().to_string());
@@ -99,6 +113,38 @@ pub(super) async fn execute(
                 "Giveaway winners count must be between 1 and 20"
             );
 
+            let giveaway_settings = state
+                .storage
+                .get_module_settings(&guild_id_str, "giveaway")
+                .await
+                .ok()
+                .flatten();
+            let module_config = giveaway_settings
+                .as_ref()
+                .map(|s| &s.config)
+                .unwrap_or(&serde_json::Value::Null);
+
+            let configured_max_winners = module_config
+                .get("max_winners")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(10)
+                .clamp(1, 20) as i32;
+
+            ensure!(
+                *winners <= configured_max_winners,
+                "Liczba zwycięzców ({winners}) przekracza maksymalny limit skonfigurowany dla serwera ({configured_max_winners})"
+            );
+
+            let configured_channel = module_config
+                .get("announcement_channel_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty());
+
+            let effective_channel_id = match channel_id {
+                Some(c) if !c.trim().is_empty() => Some(c.as_str()),
+                _ => configured_channel,
+            };
+
             let origin = ActionOrigin {
                 guild_id: execution.guild_id,
                 channel_id: execution.channel_id,
@@ -112,7 +158,7 @@ pub(super) async fn execute(
             let target_channel = resolve_and_validate_channel(
                 ctx,
                 &origin,
-                channel_id.as_deref(),
+                effective_channel_id,
                 ChannelPurpose::SendMessage,
             )
             .await?;
@@ -165,6 +211,7 @@ pub(super) async fn execute(
                     prize,
                     *winners,
                     expires_at,
+                    actor_id_str.as_deref(),
                 )
                 .await
                 .context("Failed to create giveaway in database")?;
@@ -425,5 +472,110 @@ pub async fn run_giveaway_worker(http: std::sync::Arc<serenity::http::Http>, sta
                 tracing::error!(?err, "Error checking expired giveaways in worker");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_can_manage_giveaways() {
+        assert!(can_manage_giveaways(Permissions::ADMINISTRATOR));
+        assert!(can_manage_giveaways(Permissions::MANAGE_GUILD));
+        assert!(can_manage_giveaways(Permissions::all()));
+        assert!(!can_manage_giveaways(Permissions::MANAGE_CHANNELS));
+        assert!(!can_manage_giveaways(Permissions::SEND_MESSAGES));
+        assert!(!can_manage_giveaways(Permissions::empty()));
+    }
+
+    #[test]
+    fn test_validate_giveaway_execution_untrusted_module() {
+        let execution = GiveawayExecutionContext::new(
+            Some(GuildId::new(123)),
+            Some(ChannelId::new(456)),
+            Some(UserId::new(789)),
+            Permissions::MANAGE_GUILD,
+            Permissions::all(),
+            true,
+        );
+
+        let res = validate_giveaway_execution("community", &execution);
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("trusted giveaway module")
+        );
+    }
+
+    #[test]
+    fn test_validate_giveaway_execution_non_command_or_missing_actor() {
+        // Missing actor
+        let exec_no_actor = GiveawayExecutionContext::new(
+            Some(GuildId::new(123)),
+            Some(ChannelId::new(456)),
+            None,
+            Permissions::MANAGE_GUILD,
+            Permissions::all(),
+            true,
+        );
+        let res = validate_giveaway_execution("giveaway", &exec_no_actor);
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("interactive user command")
+        );
+
+        // Event / background (enforce_actor_permissions = false)
+        let exec_event = GiveawayExecutionContext::new(
+            Some(GuildId::new(123)),
+            Some(ChannelId::new(456)),
+            Some(UserId::new(789)),
+            Permissions::MANAGE_GUILD,
+            Permissions::all(),
+            false,
+        );
+        let res2 = validate_giveaway_execution("giveaway", &exec_event);
+        assert!(res2.is_err());
+        assert!(
+            res2.unwrap_err()
+                .to_string()
+                .contains("interactive user command")
+        );
+    }
+
+    #[test]
+    fn test_validate_giveaway_execution_missing_permission() {
+        let exec_low_perms = GiveawayExecutionContext::new(
+            Some(GuildId::new(123)),
+            Some(ChannelId::new(456)),
+            Some(UserId::new(789)),
+            Permissions::SEND_MESSAGES,
+            Permissions::all(),
+            true,
+        );
+        let res = validate_giveaway_execution("giveaway", &exec_low_perms);
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("Manage Server or Administrator")
+        );
+    }
+
+    #[test]
+    fn test_validate_giveaway_execution_valid() {
+        let valid_exec = GiveawayExecutionContext::new(
+            Some(GuildId::new(123)),
+            Some(ChannelId::new(456)),
+            Some(UserId::new(789)),
+            Permissions::MANAGE_GUILD,
+            Permissions::all(),
+            true,
+        );
+        let res = validate_giveaway_execution("giveaway", &valid_exec);
+        assert_eq!(res.unwrap(), GuildId::new(123));
     }
 }

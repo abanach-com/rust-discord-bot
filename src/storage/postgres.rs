@@ -2118,10 +2118,12 @@ impl PostgresStore {
             prize,
             winners_count,
             expires_at,
+            None,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_giveaway_with_id(
         &self,
         id: Uuid,
@@ -2130,6 +2132,7 @@ impl PostgresStore {
         prize: &str,
         winners_count: i32,
         expires_at: DateTime<Utc>,
+        created_by_user_id: Option<&str>,
     ) -> anyhow::Result<Giveaway> {
         let empty_json = serde_json::json!([]);
 
@@ -2139,11 +2142,11 @@ impl PostgresStore {
 
             r#"
 
-            INSERT INTO giveaways (id, guild_id, channel_id, prize, winners_count, participants_json, winners_json, ended, expires_at, created_at)
+            INSERT INTO giveaways (id, guild_id, channel_id, prize, winners_count, participants_json, winners_json, ended, expires_at, created_at, created_by_user_id)
 
-            VALUES ($1, $2, $3, $4, $5, $6, $6, false, $7, $8)
+            VALUES ($1, $2, $3, $4, $5, $6, $6, false, $7, $8, $9)
 
-            RETURNING id, guild_id, channel_id, prize, winners_count, participants_json, winners_json, ended, expires_at, created_at
+            RETURNING id, guild_id, channel_id, prize, winners_count, participants_json, winners_json, ended, expires_at, created_at, created_by_user_id
 
             "#,
 
@@ -2165,6 +2168,8 @@ impl PostgresStore {
 
         .bind(now)
 
+        .bind(created_by_user_id)
+
         .fetch_one(&self.pool)
 
         .await?;
@@ -2177,7 +2182,7 @@ impl PostgresStore {
 
             r#"
 
-            SELECT id, guild_id, channel_id, prize, winners_count, participants_json, winners_json, ended, expires_at, created_at
+            SELECT id, guild_id, channel_id, prize, winners_count, participants_json, winners_json, ended, expires_at, created_at, created_by_user_id
 
             FROM giveaways
 
@@ -2203,7 +2208,7 @@ impl PostgresStore {
 
             r#"
 
-            SELECT id, guild_id, channel_id, prize, winners_count, participants_json, winners_json, ended, expires_at, created_at
+            SELECT id, guild_id, channel_id, prize, winners_count, participants_json, winners_json, ended, expires_at, created_at, created_by_user_id
 
             FROM giveaways
 
@@ -2226,6 +2231,18 @@ impl PostgresStore {
 
             _ => return Ok(false),
         };
+
+        let allow_self_entry = self
+            .get_module_settings(&ga.guild_id, "giveaway")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.config.get("allow_self_entry").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
+
+        if !allow_self_entry && ga.created_by_user_id.as_deref() == Some(user_id) {
+            return Ok(false);
+        }
 
         let list = match ga.participants_json.as_array_mut() {
             Some(l) => l,
@@ -2267,7 +2284,7 @@ impl PostgresStore {
 
         let ga = sqlx::query_as::<_, Giveaway>(
             r#"
-            SELECT id, guild_id, channel_id, prize, winners_count, participants_json, winners_json, ended, expires_at, created_at
+            SELECT id, guild_id, channel_id, prize, winners_count, participants_json, winners_json, ended, expires_at, created_at, created_by_user_id
             FROM giveaways
             WHERE id = $1
             FOR UPDATE
@@ -2364,7 +2381,7 @@ impl PostgresStore {
 
         let ga = sqlx::query_as::<_, Giveaway>(
             r#"
-            SELECT id, guild_id, channel_id, prize, winners_count, participants_json, winners_json, ended, expires_at, created_at
+            SELECT id, guild_id, channel_id, prize, winners_count, participants_json, winners_json, ended, expires_at, created_at, created_by_user_id
             FROM giveaways
             WHERE id = $1
             FOR UPDATE

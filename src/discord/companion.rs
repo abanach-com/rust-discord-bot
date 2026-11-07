@@ -724,8 +724,15 @@ mod tests {
         drop(held_locks);
 
         // Pruning now cleans up the remaining 5
-        let pruned_remaining = prune_unused_user_locks();
-        assert!(pruned_remaining >= 5);
+        let _ = prune_unused_user_locks();
+        if let Some(locks) = USER_LOCKS.get() {
+            for i in 0..5 {
+                assert!(
+                    !locks.contains_key(&("guild_active".to_string(), format!("user_{i}"))),
+                    "unreferenced user lock must be pruned from map"
+                );
+            }
+        }
     }
 
     #[tokio::test]

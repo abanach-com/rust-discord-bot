@@ -12,6 +12,7 @@ use axum::{
 use chrono::{DateTime, Duration, Utc};
 use dashmap::DashMap;
 use serde::Deserialize;
+use serenity::all::Permissions;
 use url::Url;
 use uuid::Uuid;
 
@@ -474,6 +475,75 @@ pub async fn ensure_guild_member_access(
             ))
         }
     }
+}
+
+pub async fn ensure_channel_view_access(
+    state: &WebState,
+    session: &Session,
+    guild_id: &str,
+    channel_id: &str,
+) -> Result<(), ApiError> {
+    ensure_guild_member_access(state, session, guild_id).await?;
+
+    if state.app.config.is_offline_mode() {
+        return Ok(());
+    }
+
+    crate::storage::validate_snowflake("channel_id", channel_id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let base_url = &state.app.config.discord_api_base_url;
+    let perm_url = format!(
+        "{base_url}/channels/{channel_id}/permissions/member/{}",
+        session.user.id
+    );
+    let response = state
+        .app
+        .http_client
+        .get(&perm_url)
+        .header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bot {}", state.app.config.discord_token),
+        )
+        .send()
+        .await
+        .map_err(ApiError::upstream)?;
+
+    if response.status() == StatusCode::FORBIDDEN || response.status() == StatusCode::NOT_FOUND {
+        return Err(ApiError::forbidden(
+            "Brak dostępu do kanału konkursu: wymagane uprawnienie VIEW_CHANNEL",
+        ));
+    }
+
+    if !response.status().is_success() {
+        return Err(ApiError::forbidden(
+            "Nie udało się zweryfikować uprawnień kanału konkursu w Discord API",
+        ));
+    }
+
+    #[derive(Deserialize)]
+    struct EffectiveChannelPermissions {
+        permissions: String,
+    }
+
+    let body = response
+        .json::<EffectiveChannelPermissions>()
+        .await
+        .map_err(ApiError::upstream)?;
+
+    let bits = body
+        .permissions
+        .parse::<u64>()
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let perms = Permissions::from_bits_truncate(bits);
+    if !perms.contains(Permissions::VIEW_CHANNEL) && !perms.contains(Permissions::ADMINISTRATOR) {
+        return Err(ApiError::forbidden(
+            "Kanał konkursu wymaga uprawnienia VIEW_CHANNEL",
+        ));
+    }
+
+    Ok(())
 }
 
 pub async fn revalidate_guild_permission(

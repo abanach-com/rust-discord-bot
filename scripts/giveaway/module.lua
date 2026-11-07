@@ -47,7 +47,7 @@ return {
                                 type = "integer",
                                 name = "duration_minutes",
                                 description = "Czas trwania w minutach.",
-                                required = true,
+                                required = false,
                                 min_value = 1,
                                 max_value = 10080,
                             },
@@ -119,9 +119,31 @@ return {
         end
 
         if sub == "start" then
-            local prize = opts.prize or "Awesome Prize"
-            local duration = opts.duration_minutes or 60
+            local cfg = ctx.config or {}
+            local configured_cap = math.floor(tonumber(cfg.max_winners) or 10)
+            local cap = math.min(20, math.max(1, configured_cap))
             local winners = opts.winners or 1
+
+            if winners > cap then
+                return {
+                    {
+                        type = "reply",
+                        content = string.format("Liczba zwycięzców nie może przekraczać limitu serwera (%d).", cap),
+                        ephemeral = true,
+                    },
+                }
+            end
+
+            local default_duration = math.floor(tonumber(cfg.default_duration_minutes) or 60)
+            local duration = opts.duration_minutes or default_duration
+            if duration < 1 then duration = 60 end
+
+            local target_chan = cfg.announcement_channel_id
+            if not target_chan or target_chan == "" then
+                target_chan = ctx.channel_id
+            end
+
+            local prize = opts.prize or "Awesome Prize"
 
             return {
                 {
@@ -131,7 +153,7 @@ return {
                         prize = prize,
                         duration_minutes = duration,
                         winners = winners,
-                        channel_id = ctx.channel_id,
+                        channel_id = target_chan,
                     },
                 },
             }

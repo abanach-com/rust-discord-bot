@@ -7832,3 +7832,473 @@ async fn test_giveaways_end_and_reroll_lifecycle_and_conflict() {
         .unwrap();
     assert_eq!(other_guild_end.status(), reqwest::StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn test_giveaway_self_entry_and_creator_policy() {
+    let (state, _perms_cache) = test_web_state().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let guild_id = "guild_ga_self_100";
+    let creator_user_id = "creator_user_200";
+    let regular_user_id = "regular_user_300";
+
+    let creator_session_id = "creator_session_token";
+    let creator_csrf = "creator_csrf";
+    state
+        .app
+        .sessions
+        .save_session(
+            creator_session_id,
+            DashboardUser {
+                id: creator_user_id.to_owned(),
+                username: "creator".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_owned(),
+                name: "GA Guild".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "32".to_owned(),
+            }],
+            creator_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .expect("save creator session");
+
+    let regular_session_id = "regular_session_token";
+    let regular_csrf = "regular_csrf";
+    state
+        .app
+        .sessions
+        .save_session(
+            regular_session_id,
+            DashboardUser {
+                id: regular_user_id.to_owned(),
+                username: "regular".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_owned(),
+                name: "GA Guild".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_owned(),
+            }],
+            regular_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .expect("save regular session");
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let creator_cookie = format!("rusty_discord_bot_session={creator_session_id}");
+    let regular_cookie = format!("rusty_discord_bot_session={regular_session_id}");
+
+    // 1. Create giveaway with creator_user_id
+    let ga = state
+        .app
+        .storage
+        .create_giveaway_with_id(
+            uuid::Uuid::new_v4(),
+            guild_id,
+            "111222333444555",
+            "Self Entry Nitro",
+            1,
+            Utc::now() + Duration::hours(2),
+            Some(creator_user_id),
+        )
+        .await
+        .expect("create giveaway with creator");
+
+    // 2. Default allow_self_entry is false -> creator joining returns joined: false
+    let creator_join_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}/join",
+            ga.id
+        ))
+        .header(COOKIE, &creator_cookie)
+        .header("x-csrf-token", creator_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(creator_join_resp.status(), reqwest::StatusCode::OK);
+    let creator_join_json: serde_json::Value = creator_join_resp.json().await.unwrap();
+    assert_eq!(creator_join_json["joined"], false);
+
+    // 3. Regular member joining returns joined: true
+    let regular_join_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}/join",
+            ga.id
+        ))
+        .header(COOKIE, &regular_cookie)
+        .header("x-csrf-token", regular_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(regular_join_resp.status(), reqwest::StatusCode::OK);
+    let regular_join_json: serde_json::Value = regular_join_resp.json().await.unwrap();
+    assert_eq!(regular_join_json["joined"], true);
+
+    // 4. Update module settings to allow_self_entry = true
+    state
+        .app
+        .storage
+        .set_module_settings(
+            guild_id,
+            "giveaway",
+            true,
+            serde_json::json!({
+                "allow_self_entry": true
+            }),
+        )
+        .await
+        .expect("update module settings");
+
+    // Create another giveaway where creator now can enter
+    let ga2 = state
+        .app
+        .storage
+        .create_giveaway_with_id(
+            uuid::Uuid::new_v4(),
+            guild_id,
+            "111222333444555",
+            "Self Entry Allowed Nitro",
+            1,
+            Utc::now() + Duration::hours(2),
+            Some(creator_user_id),
+        )
+        .await
+        .expect("create giveaway 2");
+
+    let creator_join2_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}/join",
+            ga2.id
+        ))
+        .header(COOKIE, &creator_cookie)
+        .header("x-csrf-token", creator_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(creator_join2_resp.status(), reqwest::StatusCode::OK);
+    let creator_join2_json: serde_json::Value = creator_join2_resp.json().await.unwrap();
+    assert_eq!(creator_join2_json["joined"], true);
+
+    // 5. Grandfathering: legacy giveaway with created_by_user_id = None allows joining
+    let ga_legacy = state
+        .app
+        .storage
+        .create_giveaway_with_id(
+            uuid::Uuid::new_v4(),
+            guild_id,
+            "111222333444555",
+            "Legacy Giveaway",
+            1,
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .expect("create legacy giveaway");
+
+    let creator_join_legacy = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}/join",
+            ga_legacy.id
+        ))
+        .header(COOKIE, &creator_cookie)
+        .header("x-csrf-token", creator_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(creator_join_legacy.status(), reqwest::StatusCode::OK);
+    let legacy_json: serde_json::Value = creator_join_legacy.json().await.unwrap();
+    assert_eq!(legacy_json["joined"], true);
+}
+
+#[tokio::test]
+async fn test_giveaway_max_winners_and_channel_view_live_mode() {
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+
+    // 1. Mock Discord API
+    let discord_mock_app = axum::Router::new()
+        .route(
+            "/channels/{channel_id}/permissions/member/{user_id}",
+            get(
+                |axum::extract::Path((_channel_id, user_id)): axum::extract::Path<(
+                    String,
+                    String,
+                )>| async move {
+                    if user_id == "111111111111111111" {
+                        // VIEW_CHANNEL is bit 1024 (0x400)
+                        axum::Json(serde_json::json!({
+                            "permissions": "1024"
+                        }))
+                        .into_response()
+                    } else if user_id == "222222222222222222" {
+                        axum::Json(serde_json::json!({
+                            "permissions": "0"
+                        }))
+                        .into_response()
+                    } else {
+                        (
+                            reqwest::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({
+                                "code": 10003,
+                                "message": "Unknown Channel"
+                            })),
+                        )
+                            .into_response()
+                    }
+                },
+            ),
+        )
+        .route(
+            "/guilds/{guild_id}/members/{user_id}",
+            get(
+                |axum::extract::Path((_guild_id, user_id)): axum::extract::Path<(
+                    String,
+                    String,
+                )>| async move {
+                    if user_id == "999999999999999999" {
+                        (
+                            reqwest::StatusCode::NOT_FOUND,
+                            axum::Json(
+                                serde_json::json!({"code": 10007, "message": "Unknown Member"}),
+                            ),
+                        )
+                            .into_response()
+                    } else {
+                        axum::Json(serde_json::json!({
+                            "user": { "id": user_id },
+                            "roles": []
+                        }))
+                        .into_response()
+                    }
+                },
+            ),
+        );
+
+    let discord_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind discord mock");
+    let discord_addr = discord_listener.local_addr().expect("discord mock addr");
+    tokio::spawn(async move {
+        axum::serve(discord_listener, discord_mock_app)
+            .await
+            .unwrap();
+    });
+
+    // 2. Configure app state in live mode
+    let mut config = test_config();
+    config.discord_token = "live_bot_token_production_secret".to_string();
+    config.offline_mode = false;
+    config.discord_api_base_url = format!("http://{discord_addr}");
+
+    let app = AppState::bootstrap(config).await.expect("bootstrap");
+    let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
+    let web_state = WebState {
+        app,
+        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        permissions_cache,
+    };
+    web_state
+        .app
+        .is_gateway_ready
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind web listener");
+    let web_addr = web_listener.local_addr().expect("web addr");
+    let router = build_router(web_state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            web_listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{web_addr}");
+    let guild_id = "777888999000111";
+    let channel_id = "555666777888999";
+
+    // Set max_winners = 3 in module settings
+    web_state
+        .app
+        .storage
+        .set_module_settings(
+            guild_id,
+            "giveaway",
+            true,
+            serde_json::json!({
+                "max_winners": 3
+            }),
+        )
+        .await
+        .unwrap();
+
+    let admin_session_id = "admin_live_sess";
+    let admin_csrf = "admin_live_csrf";
+    web_state
+        .app
+        .sessions
+        .save_session(
+            admin_session_id,
+            DashboardUser {
+                id: "111111111111111111".to_owned(),
+                username: "admin".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_owned(),
+                name: "Live GA Guild".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "32".to_owned(),
+            }],
+            admin_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    web_state.permissions_cache.insert(
+        ("111111111111111111".to_owned(), guild_id.to_owned()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    let no_view_session_id = "no_view_live_sess";
+    let no_view_csrf = "no_view_live_csrf";
+    web_state
+        .app
+        .sessions
+        .save_session(
+            no_view_session_id,
+            DashboardUser {
+                id: "222222222222222222".to_owned(),
+                username: "noview".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_owned(),
+                name: "Live GA Guild".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_owned(),
+            }],
+            no_view_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let admin_cookie = format!("rusty_discord_bot_session={admin_session_id}");
+    let no_view_cookie = format!("rusty_discord_bot_session={no_view_session_id}");
+
+    // Test 1: POST /api/guilds/{guild_id}/giveaways with winners_count = 5 exceeds max_winners (3) -> 400 Bad Request
+    let over_limit_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/giveaways"))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "channel_id": channel_id,
+            "prize": "Too many winners",
+            "winners_count": 5,
+            "duration_minutes": 60
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(over_limit_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Test 2: POST /api/guilds/{guild_id}/giveaways with winners_count = 2 succeeds
+    let create_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/giveaways"))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "channel_id": channel_id,
+            "prize": "Legit Nitro",
+            "winners_count": 2,
+            "duration_minutes": 60
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), reqwest::StatusCode::OK);
+    let create_ga: rusty_discord_bot::storage::Giveaway = create_resp.json().await.unwrap();
+    assert_eq!(
+        create_ga.created_by_user_id.as_deref(),
+        Some("111111111111111111")
+    );
+
+    // Test 3: user_without_view accessing GET /api/guilds/{guild_id}/giveaways/{id} -> 403 Forbidden
+    let get_forbidden_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}",
+            create_ga.id
+        ))
+        .header(COOKIE, &no_view_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_forbidden_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Test 4: user_without_view attempting POST .../join -> 403 Forbidden
+    let join_forbidden_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}/join",
+            create_ga.id
+        ))
+        .header(COOKIE, &no_view_cookie)
+        .header("x-csrf-token", no_view_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(join_forbidden_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Test 5: user_with_view accessing GET -> 200 OK
+    let get_ok_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/giveaways/{}",
+            create_ga.id
+        ))
+        .header(COOKIE, &admin_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_ok_resp.status(), reqwest::StatusCode::OK);
+}

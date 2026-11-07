@@ -29,7 +29,10 @@ use crate::storage::{
 
 use super::{
     WebState,
-    auth::{authenticate, ensure_guild_access, ensure_guild_member_access, verify_csrf},
+    auth::{
+        authenticate, ensure_channel_view_access, ensure_guild_access, ensure_guild_member_access,
+        verify_csrf,
+    },
     routes::ApiError,
 };
 
@@ -975,17 +978,45 @@ pub async fn create_giveaway(
         return Err(ApiError::bad_request("winners_count must be positive"));
     }
 
+    let giveaway_settings = state
+        .app
+        .storage
+        .get_module_settings(&guild_id, "giveaway")
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let module_config = giveaway_settings
+        .as_ref()
+        .map(|s| &s.config)
+        .unwrap_or(&Value::Null);
+
+    let configured_max_winners = module_config
+        .get("max_winners")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(10)
+        .clamp(1, 20) as i32;
+
+    if payload.winners_count > configured_max_winners {
+        return Err(ApiError::bad_request(format!(
+            "winners_count ({}) exceeds maximum configured limit of {configured_max_winners}",
+            payload.winners_count
+        )));
+    }
+
+    ensure_channel_view_access(&state, &session, &guild_id, &payload.channel_id).await?;
+
     let expires = checked_expires_at(payload.duration_minutes)?;
 
     let ga = state
         .app
         .storage
-        .create_giveaway(
+        .create_giveaway_with_id(
+            Uuid::new_v4(),
             &guild_id,
             &payload.channel_id,
             &payload.prize,
             payload.winners_count,
             expires,
+            Some(&session.user.id),
         )
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
@@ -1016,6 +1047,8 @@ pub async fn get_giveaway(
         return Err(ApiError::not_found("Giveaway was not found in this guild."));
     }
 
+    ensure_channel_view_access(&state, &session, &guild_id, &ga.channel_id).await?;
+
     Ok(Json(ga))
 }
 
@@ -1043,6 +1076,8 @@ pub async fn join_giveaway(
     if ga.guild_id != guild_id {
         return Err(ApiError::not_found("Giveaway was not found in this guild."));
     }
+
+    ensure_channel_view_access(&state, &session, &guild_id, &ga.channel_id).await?;
 
     if ga.ended || Utc::now() >= ga.expires_at {
         return Ok(Json(json!({"joined": false})));

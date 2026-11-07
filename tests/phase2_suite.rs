@@ -488,6 +488,20 @@ async fn test_phase2_community_operations_and_media_suite() {
     assert_eq!(vote_body["tallies_json"][1], 1);
 
     // Giveaway create & join
+    state
+        .app
+        .storage
+        .set_module_settings(
+            guild_id,
+            "giveaway",
+            true,
+            serde_json::json!({
+                "allow_self_entry": true
+            }),
+        )
+        .await
+        .unwrap();
+
     let ga_req = serde_json::json!({
         "channel_id": "chan_events",
         "prize": "Discord Nitro 1 Month",

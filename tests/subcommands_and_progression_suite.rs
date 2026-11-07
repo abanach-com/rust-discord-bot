@@ -21,6 +21,13 @@ fn engine() -> LuaEngine {
 }
 
 fn context(options: serde_json::Value) -> LuaExecutionContext {
+    context_with_config(options, json!({}))
+}
+
+fn context_with_config(
+    options: serde_json::Value,
+    config: serde_json::Value,
+) -> LuaExecutionContext {
     LuaExecutionContext {
         guild_id: Some("111111111111111111".to_owned()),
         channel_id: "222222222222222222".to_owned(),
@@ -30,7 +37,7 @@ fn context(options: serde_json::Value) -> LuaExecutionContext {
         member_permissions: "0".to_owned(),
         locale: "en".to_owned(),
         options,
-        config: json!({}),
+        config,
     }
 }
 
@@ -220,6 +227,67 @@ async fn test_giveaway_subcommands_no_accidental_start() {
             .any(|a| matches!(a, LuaAction::Audit { event, .. } if event == "giveaway_start"))
     );
     assert!(actions.iter().any(|a| matches!(a, LuaAction::Reply { content, .. } if content.contains("Unsupported or missing subcommand."))));
+}
+
+#[tokio::test]
+async fn test_giveaway_module_config_enforcement() {
+    let eng = engine();
+
+    // 1. Configured max_winners = 2; attempting 5 winners should return ephemeral reply rejection
+    let actions = eng
+        .execute_command(
+            "giveaway",
+            "giveaway",
+            context_with_config(
+                json!({
+                    "start": {
+                        "prize": "Nitro",
+                        "winners": 5
+                    }
+                }),
+                json!({
+                    "max_winners": 2
+                }),
+            ),
+        )
+        .await
+        .expect("giveaway start execution");
+    assert_eq!(actions.len(), 1);
+    assert!(actions.iter().any(|a| matches!(
+        a,
+        LuaAction::Reply { content, ephemeral: true } if content.contains("Liczba zwycięzców nie może przekraczać limitu serwera (2)")
+    )));
+
+    // 2. Default duration and announcement channel configured
+    let actions = eng
+        .execute_command(
+            "giveaway",
+            "giveaway",
+            context_with_config(
+                json!({
+                    "start": {
+                        "prize": "Server Merch"
+                    }
+                }),
+                json!({
+                    "default_duration_minutes": 180,
+                    "announcement_channel_id": "888888888888888888"
+                }),
+            ),
+        )
+        .await
+        .expect("giveaway start execution");
+    assert!(actions.iter().any(|a| matches!(
+        a,
+        LuaAction::Giveaway {
+            operation: GiveawayOperation::Start {
+                prize,
+                duration_minutes: 180,
+                winners: 1,
+                channel_id: Some(ch)
+            }
+        } if prize == "Server Merch" && ch == "888888888888888888"
+    )));
 }
 
 #[tokio::test]

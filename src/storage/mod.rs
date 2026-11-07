@@ -296,6 +296,8 @@ pub struct Giveaway {
     pub expires_at: DateTime<Utc>,
 
     pub created_at: DateTime<Utc>,
+
+    pub created_by_user_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -2306,6 +2308,7 @@ impl Storage {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_giveaway_with_id(
         &self,
         id: Uuid,
@@ -2314,6 +2317,7 @@ impl Storage {
         prize: &str,
         winners_count: i32,
         expires_at: DateTime<Utc>,
+        created_by_user_id: Option<&str>,
     ) -> anyhow::Result<Giveaway> {
         match self {
             Self::Memory(store) => Ok(store.create_giveaway_with_id(
@@ -2323,6 +2327,7 @@ impl Storage {
                 prize,
                 winners_count,
                 expires_at,
+                created_by_user_id,
             )),
             Self::Postgres(store) => {
                 store
@@ -2333,6 +2338,7 @@ impl Storage {
                         prize,
                         winners_count,
                         expires_at,
+                        created_by_user_id,
                     )
                     .await
             }

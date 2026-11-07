@@ -1515,9 +1515,11 @@ impl MemoryStore {
             prize,
             winners_count,
             expires_at,
+            None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_giveaway_with_id(
         &self,
         id: Uuid,
@@ -1526,6 +1528,7 @@ impl MemoryStore {
         prize: &str,
         winners_count: i32,
         expires_at: chrono::DateTime<Utc>,
+        created_by_user_id: Option<&str>,
     ) -> Giveaway {
         let giveaway = Giveaway {
             id,
@@ -1547,6 +1550,8 @@ impl MemoryStore {
             expires_at,
 
             created_at: Utc::now(),
+
+            created_by_user_id: created_by_user_id.map(|s| s.to_owned()),
         };
 
         self.giveaways.insert(id, giveaway.clone());
@@ -1566,6 +1571,15 @@ impl MemoryStore {
         };
 
         if ga.ended || chrono::Utc::now() >= ga.expires_at {
+            return false;
+        }
+
+        let allow_self_entry = self
+            .get_module_settings(&ga.guild_id, "giveaway")
+            .and_then(|s| s.config.get("allow_self_entry").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
+
+        if !allow_self_entry && ga.created_by_user_id.as_deref() == Some(user_id) {
             return false;
         }
 

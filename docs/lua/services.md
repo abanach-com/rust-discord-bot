@@ -36,6 +36,7 @@ Acceptance by the Lua deserializer does not grant access to the service. The exe
 | `progression` | Exactly `progression` | Guild and actor | `adjust` additionally needs an interactive command and `MANAGE_GUILD`/administrator |
 | `scheduler` | Exactly `scheduler` | Interactive command, guild and actor | Staff permission for recurring jobs, explicit destination and cross-owner administration |
 | `ticket` | Exactly `tickets` | Interactive command, guild, channel and actor | Staff/creator/participant rules and policy checks per operation |
+| `giveaway` | Exactly `giveaway` | Interactive command, guild and actor | Staff permission (`MANAGE_GUILD`/administrator), channel destination and configured `max_winners` limits |
 | `moderation_case` | No reserved module ID | Guild and actor | Moderator permission, subject visibility, and action-specific permissions |
 | `audit` | No reserved module ID | Available callback context | Event name and data shape validation |
 
@@ -65,4 +66,4 @@ Prefer a single service operation for a business operation that the service alre
 
 ## Further reading
 
-The field contracts are in [progression](progression.md), [scheduler](scheduler.md), [tickets](tickets.md), and [moderation cases](moderation-cases.md). Executor checks are in [progression.rs](../../src/discord/progression.rs), [scheduler.rs](../../src/discord/scheduler.rs), [tickets.rs](../../src/discord/tickets.rs), and [moderation_cases.rs](../../src/discord/moderation_cases.rs).
+The field contracts are in [progression](progression.md), [scheduler](scheduler.md), [tickets](tickets.md), and [moderation cases](moderation-cases.md). Executor checks are in [progression.rs](../../src/discord/progression.rs), [scheduler.rs](../../src/discord/scheduler.rs), [tickets.rs](../../src/discord/tickets.rs), [giveaway.rs](../../src/discord/giveaway.rs), and [moderation_cases.rs](../../src/discord/moderation_cases.rs).
