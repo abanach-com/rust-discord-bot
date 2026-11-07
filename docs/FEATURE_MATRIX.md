@@ -677,6 +677,10 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Implemented Prometheus telemetry counters: `scheduler_expired_lease_cleanup_errors_total` (tracking database errors during lease terminalization) and `scheduler_expired_lease_terminalized_total` (tracking expired processing leases transitioned to terminal `failed` status after exhausting `max_attempts`).
   - Preserved guild-isolation and non-blocking worker polling (#60): failures during stale lease terminalization log errors and increment metrics while allowing `claim_due` to continue claiming active due jobs without halting cross-guild work.
   - Symmetrical parity between `MemorySchedulerStore` and `PostgresSchedulerStore`: both stores expose `finalize_expired_leases` and propagate telemetry metrics, unblocking user quotas once expired attempts are terminalized.
+- **Voice Companion Bounded Lock Lifecycle & Weak Reference Janitor (#260)**:
+  - Replaced permanent strong mutex retention in `USER_LOCKS` (`DashMap<(String, String), Arc<Mutex<()>>>`) with ephemeral weak references (`Weak<Mutex<()>>`).
+  - Implemented safe reference upgrade in `get_user_lock`: concurrent operations for the same `(guild, user)` continue to share the exact same active `Mutex` instance without race conditions, while dropping locks when tasks complete.
+  - Added background lock janitor `run_companion_lock_janitor` running every 5 minutes (and opportunistic sweep on guild reconciliation) using `prune_unused_user_locks` (`locks.retain(|_, weak| weak.strong_count() != 0)`), preventing unbounded RAM growth from inactive voice participants.
 
 ## Delivery order
 

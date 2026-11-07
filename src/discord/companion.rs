@@ -1,7 +1,8 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Weak};
 
 use anyhow::{Result, bail};
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use serde::{Deserialize, Serialize};
 use serenity::all::{
     Channel, ChannelId, ChannelType, Context, GuildChannel, GuildId, PermissionOverwrite,
@@ -13,16 +14,65 @@ use uuid::Uuid;
 use crate::state::AppState;
 use crate::storage::CompanionChannelMapping;
 
-type UserLockMap = DashMap<(String, String), Arc<Mutex<()>>>;
+type UserLockMap = DashMap<(String, String), Weak<Mutex<()>>>;
 
-static USER_LOCKS: std::sync::OnceLock<UserLockMap> = std::sync::OnceLock::new();
+static USER_LOCKS: OnceLock<UserLockMap> = OnceLock::new();
 
 pub fn get_user_lock(guild_id: &str, user_id: &str) -> Arc<Mutex<()>> {
     let locks = USER_LOCKS.get_or_init(DashMap::new);
-    locks
-        .entry((guild_id.to_string(), user_id.to_string()))
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone()
+    match locks.entry((guild_id.to_owned(), user_id.to_owned())) {
+        Entry::Occupied(mut entry) => {
+            if let Some(lock) = entry.get().upgrade() {
+                lock
+            } else {
+                let lock = Arc::new(Mutex::new(()));
+                entry.insert(Arc::downgrade(&lock));
+                lock
+            }
+        }
+        Entry::Vacant(entry) => {
+            let lock = Arc::new(Mutex::new(()));
+            entry.insert(Arc::downgrade(&lock));
+            lock
+        }
+    }
+}
+
+pub fn prune_unused_user_locks() -> usize {
+    if let Some(locks) = USER_LOCKS.get() {
+        let before = locks.len();
+        locks.retain(|_, weak| weak.strong_count() != 0);
+        before.saturating_sub(locks.len())
+    } else {
+        0
+    }
+}
+
+pub fn user_locks_len() -> usize {
+    USER_LOCKS.get().map(|m| m.len()).unwrap_or(0)
+}
+
+/// Janitor loop that periodically purges unreferenced voice companion locks from RAM.
+pub async fn run_companion_lock_janitor(
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+    interval: std::time::Duration,
+) {
+    let mut timer = tokio::time::interval(interval);
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.recv() => {
+                break;
+            }
+            _ = timer.tick() => {
+                let pruned = prune_unused_user_locks();
+                if pruned > 0 {
+                    tracing::debug!(pruned, "pruned unreferenced companion user locks from memory");
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -547,6 +597,8 @@ pub async fn reconcile_guild_companion_channels(
         .await?
         .len();
 
+    prune_unused_user_locks();
+
     Ok(ReconciliationSummary {
         guild_id: guild_str,
         revoked: revoked_count,
@@ -554,4 +606,90 @@ pub async fn reconcile_guild_companion_channels(
         active_leases: remaining_leases,
         pending_retries,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_user_locks_share_mutex_while_active() {
+        let lock1 = get_user_lock("guild_test_1", "user_test_1");
+        let lock2 = get_user_lock("guild_test_1", "user_test_1");
+        assert!(
+            Arc::ptr_eq(&lock1, &lock2),
+            "concurrent callers for the same (guild, user) must share the identical Mutex"
+        );
+
+        let lock_diff_user = get_user_lock("guild_test_1", "user_test_2");
+        let lock_diff_guild = get_user_lock("guild_test_2", "user_test_1");
+        assert!(!Arc::ptr_eq(&lock1, &lock_diff_user));
+        assert!(!Arc::ptr_eq(&lock1, &lock_diff_guild));
+    }
+
+    #[tokio::test]
+    async fn test_user_locks_pruning_cleans_dead_weak_refs_without_affecting_active_locks() {
+        // Clear any remnants
+        prune_unused_user_locks();
+
+        // 1. Create 50 ephemeral locks that are dropped immediately
+        for i in 0..50 {
+            let _ = get_user_lock("guild_ephemeral", &format!("user_{i}"));
+        }
+
+        // 2. Create 5 active locks that we retain strong Arc references to
+        let mut held_locks = Vec::new();
+        for i in 0..5 {
+            held_locks.push(get_user_lock("guild_active", &format!("user_{i}")));
+        }
+
+        // Before prune, all 55 entries are in DashMap
+        assert!(user_locks_len() >= 55);
+
+        // Run pruning: only active locks (strong_count > 0) are preserved
+        let pruned = prune_unused_user_locks();
+        assert!(pruned >= 50);
+
+        // Active locks must still be valid and match held pointers
+        for (i, held) in held_locks.iter().enumerate() {
+            let reacquired = get_user_lock("guild_active", &format!("user_{i}"));
+            assert!(
+                Arc::ptr_eq(held, &reacquired),
+                "held lock for active user must remain identical"
+            );
+        }
+
+        // Drop held locks
+        drop(held_locks);
+
+        // Pruning now cleans up the remaining 5
+        let pruned_remaining = prune_unused_user_locks();
+        assert!(pruned_remaining >= 5);
+    }
+
+    #[tokio::test]
+    async fn test_user_lock_serializes_critical_section() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let counter = Arc::new(AtomicU32::new(0));
+        let mut handles = Vec::new();
+
+        for _ in 0..10 {
+            let counter = counter.clone();
+            handles.push(tokio::spawn(async move {
+                let lock = get_user_lock("guild_concurrent", "user_concurrent");
+                let _guard = lock.lock().await;
+
+                let val = counter.load(Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                counter.store(val + 1, Ordering::SeqCst);
+            }));
+        }
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        assert_eq!(counter.load(Ordering::SeqCst), 10);
+    }
 }
