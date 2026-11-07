@@ -8,7 +8,7 @@ use std::{sync::Arc, time::Duration as StdDuration};
 use anyhow::{Context as _, Result, anyhow};
 use chrono::{Duration, Utc};
 use serenity::{
-    all::{ChannelId, UserId},
+    all::{ChannelId, GuildId, UserId},
     builder::{CreateAllowedMentions, CreateMessage},
     http::Http,
 };
@@ -510,6 +510,19 @@ async fn process_single_job(
 async fn deliver_job(http: &Http, job: &ScheduledJob) -> Result<()> {
     let channel_id = ChannelId::new(parse_snowflake(&job.channel_id)?);
     let creator_id = UserId::new(parse_snowflake(&job.creator_user_id)?);
+
+    let guild_id = GuildId::new(parse_snowflake(&job.guild_id)?);
+    crate::discord::scheduler::ensure_scheduled_delivery_access(
+        http, guild_id, creator_id, channel_id,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "authorization check failed for scheduled job {} in guild {}",
+            job.id, job.guild_id
+        )
+    })?;
+
     let (content, allowed_mentions) = if job.mention_creator {
         (
             format!("<@{}> {}", creator_id.get(), job.content),

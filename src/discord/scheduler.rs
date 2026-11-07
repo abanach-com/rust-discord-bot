@@ -1,11 +1,13 @@
 use anyhow::{Context as _, Result, anyhow};
 
 use serenity::{
-    all::{ChannelId, GuildId, Permissions, UserId},
+    all::{
+        Channel, ChannelId, ChannelType, GuildId, PermissionOverwriteType, Permissions, RoleId,
+        UserId,
+    },
     client::Context,
+    http::Http,
 };
-
-use super::executor::{ActionOrigin, ChannelPurpose, resolve_and_validate_channel};
 
 use crate::{
     AppState,
@@ -18,20 +20,20 @@ use crate::{
 
 #[derive(Clone, Copy)]
 
-pub(super) struct SchedulerExecutionContext {
-    guild_id: Option<GuildId>,
+pub struct SchedulerExecutionContext {
+    pub guild_id: Option<GuildId>,
 
-    channel_id: Option<ChannelId>,
+    pub channel_id: Option<ChannelId>,
 
-    actor_id: Option<UserId>,
+    pub actor_id: Option<UserId>,
 
-    actor_permissions: Permissions,
+    pub actor_permissions: Permissions,
 
-    command_context: bool,
+    pub command_context: bool,
 }
 
 impl SchedulerExecutionContext {
-    pub(super) const fn new(
+    pub const fn new(
         guild_id: Option<GuildId>,
 
         channel_id: Option<ChannelId>,
@@ -56,7 +58,7 @@ impl SchedulerExecutionContext {
     }
 }
 
-pub(super) async fn execute(
+pub async fn execute(
     ctx: &Context,
 
     state: &AppState,
@@ -129,14 +131,22 @@ pub(super) async fn execute(
                 Some(channel_id) => {
                     let channel_id = ChannelId::new(parse_snowflake(channel_id)?);
 
-                    ensure_channel_belongs_to_guild(ctx, channel_id, guild_id).await?;
+                    ensure_scheduled_delivery_access(&ctx.http, guild_id, actor_id, channel_id)
+                        .await?;
 
                     channel_id
                 }
 
-                None => execution
-                    .channel_id
-                    .ok_or_else(|| anyhow!("missing destination channel"))?,
+                None => {
+                    let channel_id = execution
+                        .channel_id
+                        .ok_or_else(|| anyhow!("missing destination channel"))?;
+
+                    ensure_scheduled_delivery_access(&ctx.http, guild_id, actor_id, channel_id)
+                        .await?;
+
+                    channel_id
+                }
             };
 
             let repeat_every_seconds = repeat
@@ -347,32 +357,206 @@ async fn mutate_job(
     }
 }
 
-async fn ensure_channel_belongs_to_guild(
-    ctx: &Context,
+pub fn calculate_effective_channel_permissions(
+    guild: &serenity::model::guild::PartialGuild,
+    member_roles: &[RoleId],
+    user_id: UserId,
+    channel: &serenity::model::channel::GuildChannel,
+) -> Permissions {
+    if guild.owner_id == user_id {
+        return Permissions::all();
+    }
 
-    channel_id: ChannelId,
+    let mut base_permissions = Permissions::empty();
+    let everyone_role_id = RoleId::new(guild.id.get());
+    if let Some(everyone_role) = guild.roles.get(&everyone_role_id) {
+        base_permissions |= everyone_role.permissions;
+    }
+    for role_id in member_roles {
+        if let Some(role) = guild.roles.get(role_id) {
+            base_permissions |= role.permissions;
+        }
+    }
 
-    expected_guild_id: GuildId,
+    if base_permissions.contains(Permissions::ADMINISTRATOR) {
+        return Permissions::all();
+    }
+
+    let mut perms = base_permissions;
+
+    for overwrite in &channel.permission_overwrites {
+        if let PermissionOverwriteType::Role(r) = overwrite.kind
+            && r == everyone_role_id
+        {
+            perms.remove(overwrite.deny);
+            perms.insert(overwrite.allow);
+        }
+    }
+
+    let mut role_deny = Permissions::empty();
+    let mut role_allow = Permissions::empty();
+    for overwrite in &channel.permission_overwrites {
+        if let PermissionOverwriteType::Role(r) = overwrite.kind
+            && r != everyone_role_id
+            && member_roles.contains(&r)
+        {
+            role_deny.insert(overwrite.deny);
+            role_allow.insert(overwrite.allow);
+        }
+    }
+    perms.remove(role_deny);
+    perms.insert(role_allow);
+
+    for overwrite in &channel.permission_overwrites {
+        if let PermissionOverwriteType::Member(u) = overwrite.kind
+            && u == user_id
+        {
+            perms.remove(overwrite.deny);
+            perms.insert(overwrite.allow);
+        }
+    }
+
+    perms
+}
+
+pub async fn ensure_scheduled_delivery_access(
+    http: &Http,
+    guild_id: GuildId,
+    actor_id: UserId,
+    target_channel_id: ChannelId,
 ) -> Result<()> {
-    let origin = ActionOrigin {
-        guild_id: Some(expected_guild_id),
+    let channel = target_channel_id
+        .to_channel(http)
+        .await
+        .with_context(|| format!("cannot read data for channel {target_channel_id}"))?;
 
-        channel_id: Some(channel_id),
-
-        actor_id: None,
-
-        actor_permissions: Permissions::empty(),
-
-        actor_roles: Vec::new(),
-
-        app_permissions: Permissions::all(),
-
-        enforce_actor_permissions: false,
-
-        interaction_id: None,
+    let Channel::Guild(guild_channel) = channel else {
+        anyhow::bail!("destination channel must be a guild channel");
     };
 
-    resolve_and_validate_channel(ctx, &origin, None, ChannelPurpose::SendMessage).await?;
+    if guild_channel.guild_id != guild_id {
+        anyhow::bail!(
+            "target channel {target_channel_id} belongs to a different server {}",
+            guild_channel.guild_id
+        );
+    }
+
+    if guild_channel.kind == ChannelType::Category {
+        anyhow::bail!("channel categories cannot be the target of messages");
+    }
+
+    let is_thread = matches!(
+        guild_channel.kind,
+        ChannelType::PublicThread | ChannelType::PrivateThread | ChannelType::NewsThread
+    );
+
+    let parent_channel = if is_thread {
+        if let Some(parent_id) = guild_channel.parent_id {
+            let parent = parent_id.to_channel(http).await.with_context(|| {
+                format!("cannot read parent channel {parent_id} for thread {target_channel_id}")
+            })?;
+            match parent {
+                Channel::Guild(p) => Some(p),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let overwrite_channel = parent_channel.as_ref().unwrap_or(&guild_channel);
+
+    let guild = guild_id
+        .to_partial_guild(http)
+        .await
+        .with_context(|| format!("cannot fetch guild data for {guild_id}"))?;
+
+    // 1. Verify creator permissions in destination channel
+    let member = guild_id
+        .member(http, actor_id)
+        .await
+        .with_context(|| format!("cannot fetch member {actor_id} in guild {guild_id}"))?;
+
+    let creator_perms =
+        calculate_effective_channel_permissions(&guild, &member.roles, actor_id, overwrite_channel);
+
+    if !creator_perms.contains(Permissions::VIEW_CHANNEL) {
+        anyhow::bail!("creator lacks VIEW_CHANNEL permission in channel {target_channel_id}");
+    }
+
+    if is_thread {
+        if !creator_perms.contains(Permissions::SEND_MESSAGES_IN_THREADS) {
+            anyhow::bail!(
+                "creator lacks SEND_MESSAGES_IN_THREADS permission in thread {target_channel_id}"
+            );
+        }
+    } else if !creator_perms.contains(Permissions::SEND_MESSAGES) {
+        anyhow::bail!("creator lacks SEND_MESSAGES permission in channel {target_channel_id}");
+    }
+
+    if guild_channel.kind == ChannelType::PrivateThread
+        && !creator_perms.contains(Permissions::ADMINISTRATOR)
+        && !creator_perms.contains(Permissions::MANAGE_THREADS)
+    {
+        let thread_members = http
+            .get_channel_thread_members(target_channel_id)
+            .await
+            .with_context(|| {
+                format!("cannot fetch thread members for private thread {target_channel_id}")
+            })?;
+        if !thread_members.iter().any(|tm| tm.user_id == actor_id) {
+            anyhow::bail!("creator is not a member of the private thread {target_channel_id}");
+        }
+    }
+
+    // 2. Verify bot permissions in destination channel
+    let bot_user = http
+        .get_current_user()
+        .await
+        .context("cannot fetch current bot user")?;
+
+    let bot_member = guild_id
+        .member(http, bot_user.id)
+        .await
+        .with_context(|| format!("cannot fetch bot member in guild {guild_id}"))?;
+
+    let bot_perms = calculate_effective_channel_permissions(
+        &guild,
+        &bot_member.roles,
+        bot_user.id,
+        overwrite_channel,
+    );
+
+    if !bot_perms.contains(Permissions::VIEW_CHANNEL) {
+        anyhow::bail!("bot lacks VIEW_CHANNEL permission in channel {target_channel_id}");
+    }
+
+    if is_thread {
+        if !bot_perms.contains(Permissions::SEND_MESSAGES_IN_THREADS) {
+            anyhow::bail!(
+                "bot lacks SEND_MESSAGES_IN_THREADS permission in thread {target_channel_id}"
+            );
+        }
+    } else if !bot_perms.contains(Permissions::SEND_MESSAGES) {
+        anyhow::bail!("bot lacks SEND_MESSAGES permission in channel {target_channel_id}");
+    }
+
+    if guild_channel.kind == ChannelType::PrivateThread
+        && !bot_perms.contains(Permissions::ADMINISTRATOR)
+        && !bot_perms.contains(Permissions::MANAGE_THREADS)
+    {
+        let thread_members = http
+            .get_channel_thread_members(target_channel_id)
+            .await
+            .with_context(|| {
+                format!("cannot fetch thread members for private thread {target_channel_id}")
+            })?;
+        if !thread_members.iter().any(|tm| tm.user_id == bot_user.id) {
+            anyhow::bail!("bot is not a member of the private thread {target_channel_id}");
+        }
+    }
 
     Ok(())
 }

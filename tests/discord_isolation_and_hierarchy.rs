@@ -230,102 +230,148 @@ async fn mock_discord_handler(
         .into_response();
     }
 
-    // Channel queries: GET /api/v10/channels/{channel_id}
+    // Thread members queries: GET /api/v10/channels/{channel_id}/thread-members
+    if method == Method::GET && path.contains("/thread-members") {
+        return Json(json!([
+            {
+                "id": "105",
+                "user_id": "999999999999999999", // Bot only
+                "join_timestamp": "2026-01-01T00:00:00Z",
+                "flags": 0
+            }
+        ]))
+        .into_response();
+    }
 
+    // Channel queries: GET /api/v10/channels/{channel_id}
     if method == Method::GET && path.starts_with("/api/v10/channels/") {
         let channel_id = path.trim_start_matches("/api/v10/channels/");
 
         return match channel_id {
             "101" => Json(json!({
-
                 "id": "101",
-
                 "guild_id": "100",
-
                 "type": 0, // GuildText
-
                 "name": "general",
-
                 "position": 0
-
             }))
             .into_response(),
 
             "102" => Json(json!({
-
                 "id": "102",
-
                 "guild_id": "100",
-
                 "type": 0, // GuildText
-
                 "name": "read-only-channel",
-
                 "position": 1,
-
                 "permission_overwrites": [
-
                     {
-
                         "id": "111111111111111111",
-
                         "type": 1,
-
                         "allow": "0",
-
                         "deny": "2048"
-
                     }
-
                 ]
+            }))
+            .into_response(),
 
+            "103" => Json(json!({
+                "id": "103",
+                "guild_id": "100",
+                "type": 0, // GuildText
+                "name": "hidden-private",
+                "position": 2,
+                "permission_overwrites": [
+                    {
+                        "id": "100", // @everyone role
+                        "type": 0,
+                        "allow": "0",
+                        "deny": "1024" // VIEW_CHANNEL
+                    }
+                ]
+            }))
+            .into_response(),
+
+            "104" => Json(json!({
+                "id": "104",
+                "guild_id": "100",
+                "type": 0, // GuildText
+                "name": "visible-no-send",
+                "position": 3,
+                "permission_overwrites": [
+                    {
+                        "id": "333333333333333333", // Member
+                        "type": 1,
+                        "allow": "1024", // VIEW_CHANNEL
+                        "deny": "2048" // SEND_MESSAGES
+                    }
+                ]
+            }))
+            .into_response(),
+
+            "105" => Json(json!({
+                "id": "105",
+                "guild_id": "100",
+                "type": 12, // PrivateThread
+                "name": "private-thread",
+                "position": 4,
+                "parent_id": "101",
+                "permission_overwrites": []
+            }))
+            .into_response(),
+
+            "106" => Json(json!({
+                "id": "106",
+                "guild_id": "100",
+                "type": 11, // PublicThread
+                "name": "public-thread-no-thread-send",
+                "position": 5,
+                "parent_id": "107",
+                "permission_overwrites": []
+            }))
+            .into_response(),
+
+            "107" => Json(json!({
+                "id": "107",
+                "guild_id": "100",
+                "type": 0, // GuildText
+                "name": "thread-parent",
+                "position": 6,
+                "permission_overwrites": [
+                    {
+                        "id": "333333333333333333", // Member
+                        "type": 1,
+                        "allow": "1024", // VIEW_CHANNEL
+                        "deny": "274877906944" // SEND_MESSAGES_IN_THREADS = 1 << 38
+                    }
+                ]
             }))
             .into_response(),
 
             "201" => Json(json!({
-
                 "id": "201",
-
                 "guild_id": "200", // Foreign guild
-
                 "type": 0,
-
                 "name": "other-guild-text",
-
                 "position": 0
-
             }))
             .into_response(),
 
             "301" => Json(json!({
-
                 "id": "301",
-
                 "type": 1, // DM
-
                 "recipients": [{
-
                     "id": "555555555555555555",
-
                     "username": "testuser"
-
                 }]
-
             }))
             .into_response(),
 
             "401" => Json(json!({
-
                 "id": "401",
-
                 "guild_id": "100",
-
                 "type": 4, // Category
-
                 "name": "MY CATEGORY",
-
                 "position": 0
-
             }))
             .into_response(),
 
@@ -439,87 +485,74 @@ async fn mock_discord_handler(
             "roles": [
 
                 {
-
+                    "id": "100",
+                    "name": "@everyone",
+                    "position": 0,
+                    "permissions": "274877910016", // VIEW_CHANNEL | SEND_MESSAGES | SEND_MESSAGES_IN_THREADS
+                    "color": 0,
+                    "colors": {
+                        "primary_color": 0
+                    },
+                    "hoist": false,
+                    "managed": false,
+                    "mentionable": false,
+                    "flags": 0
+                },
+                {
                     "id": "1001",
-
                     "name": "AdminRole",
-
                     "position": 50,
-
                     "permissions": "8", // Administrator
-
                     "color": 0,
-
                     "colors": {
-
                         "primary_color": 0
-
                     },
-
                     "hoist": false,
-
                     "managed": false,
-
                     "mentionable": false,
-
                     "flags": 0
-
                 },
-
                 {
-
                     "id": "1002",
-
                     "name": "MemberRole",
-
                     "position": 10,
-
                     "permissions": "0",
-
                     "color": 0,
-
                     "colors": {
-
                         "primary_color": 0
-
                     },
-
                     "hoist": false,
-
                     "managed": false,
-
                     "mentionable": false,
-
                     "flags": 0
-
                 },
-
                 {
-
                     "id": "1003",
-
                     "name": "SubordinateAdminRole",
-
                     "position": 25,
-
                     "permissions": "8", // Administrator, but position 25 < bot position 50
-
                     "color": 0,
-
                     "colors": {
-
                         "primary_color": 0
-
                     },
-
                     "hoist": false,
-
                     "managed": false,
-
                     "mentionable": false,
-
                     "flags": 0
-
+                },
+                {
+                    "id": "1004",
+                    "name": "ManagerRole",
+                    "position": 30,
+                    "permissions": "32", // MANAGE_GUILD
+                    "color": 0,
+                    "colors": {
+                        "primary_color": 0
+                    },
+                    "hoist": false,
+                    "managed": false,
+                    "mentionable": false,
+                    "flags": 0
                 }
 
             ]
@@ -593,6 +626,17 @@ async fn mock_discord_handler(
 
                 "pending": false
 
+            })).into_response(),
+
+            // Guild Manager member with MANAGE_GUILD
+            "333333333333333333" => Json(json!({
+                "user": { "id": "333333333333333333", "username": "GuildManager", "avatar": null, "bot": false },
+                "roles": ["1004"],
+                "joined_at": "2026-01-01T00:00:00Z",
+                "deaf": false,
+                "mute": false,
+                "flags": 0,
+                "pending": false
             })).into_response(),
 
             _ => (StatusCode::NOT_FOUND, Json(json!({"message": "Unknown Member", "code": 10007}))).into_response(),
@@ -3712,6 +3756,325 @@ async fn test_event_autorole_privileged_defense_in_depth() {
             .load(std::sync::atomic::Ordering::SeqCst)
             > baseline_requests,
         "Role delivery PUT request must be dispatched for unprivileged role"
+    );
+
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn test_scheduler_destination_channel_authorization_suite() {
+    use serenity::all::Permissions;
+
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state_with_port(mock.port).await;
+
+    let guild_id = GuildId::new(100);
+    let manager_id = UserId::new(333333333333333333); // Member with MANAGE_GUILD
+
+    let make_exec_ctx = |actor_perms: Permissions| {
+        rusty_discord_bot::discord::scheduler::SchedulerExecutionContext::new(
+            Some(guild_id),
+            Some(ChannelId::new(101)),
+            Some(manager_id),
+            actor_perms,
+            true,
+        )
+    };
+
+    let baseline_requests = mock.modifying_requests_count.load(Ordering::SeqCst);
+
+    // 1. Manager with MANAGE_GUILD attempts to schedule message in channel 103 (hidden-private with deny VIEW_CHANNEL)
+    let op_hidden_channel = rusty_discord_bot::lua::SchedulerOperation::Create {
+        when: "15m".to_string(),
+        content: "Exploit attempt in hidden channel".to_string(),
+        channel_id: Some("103".to_string()),
+        repeat: Some("1h".to_string()),
+        repeat_count: None,
+        mention_creator: false,
+        max_jobs: 10,
+        minimum_delay_seconds: 60,
+        maximum_delay_seconds: 86400,
+    };
+
+    let res_hidden = rusty_discord_bot::discord::scheduler::execute(
+        &ctx,
+        &state,
+        "scheduler",
+        make_exec_ctx(Permissions::MANAGE_GUILD),
+        &op_hidden_channel,
+    )
+    .await;
+
+    assert!(
+        res_hidden.is_err(),
+        "Must reject scheduling to channel without VIEW_CHANNEL"
+    );
+    let err_str = res_hidden.unwrap_err().to_string();
+    assert!(
+        err_str.contains("VIEW_CHANNEL"),
+        "Error must mention VIEW_CHANNEL: {err_str}"
+    );
+
+    // Verify 0 jobs stored in scheduler
+    let jobs_guild = state
+        .scheduler
+        .list_jobs("100", "333333333333333333", true, 50)
+        .await
+        .unwrap();
+    assert!(
+        jobs_guild.is_empty(),
+        "0 jobs must be created on authorization denial"
+    );
+
+    // 2. Manager attempts to schedule in channel 104 (visible, but deny SEND_MESSAGES)
+    let op_no_send = rusty_discord_bot::lua::SchedulerOperation::Create {
+        when: "15m".to_string(),
+        content: "Exploit attempt in read-only channel".to_string(),
+        channel_id: Some("104".to_string()),
+        repeat: Some("1h".to_string()),
+        repeat_count: None,
+        mention_creator: false,
+        max_jobs: 10,
+        minimum_delay_seconds: 60,
+        maximum_delay_seconds: 86400,
+    };
+
+    let res_no_send = rusty_discord_bot::discord::scheduler::execute(
+        &ctx,
+        &state,
+        "scheduler",
+        make_exec_ctx(Permissions::MANAGE_GUILD),
+        &op_no_send,
+    )
+    .await;
+
+    assert!(
+        res_no_send.is_err(),
+        "Must reject scheduling to channel without SEND_MESSAGES"
+    );
+    let err_no_send_str = res_no_send.unwrap_err().to_string();
+    assert!(
+        err_no_send_str.contains("SEND_MESSAGES"),
+        "Error must mention SEND_MESSAGES: {err_no_send_str}"
+    );
+    assert!(
+        state
+            .scheduler
+            .list_jobs("100", "333333333333333333", true, 50)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // 3. Manager attempts to schedule in channel 201 (cross-guild channel)
+    let op_cross_guild = rusty_discord_bot::lua::SchedulerOperation::Create {
+        when: "15m".to_string(),
+        content: "Exploit attempt cross-guild".to_string(),
+        channel_id: Some("201".to_string()),
+        repeat: None,
+        repeat_count: None,
+        mention_creator: false,
+        max_jobs: 10,
+        minimum_delay_seconds: 60,
+        maximum_delay_seconds: 86400,
+    };
+
+    let res_cross = rusty_discord_bot::discord::scheduler::execute(
+        &ctx,
+        &state,
+        "scheduler",
+        make_exec_ctx(Permissions::MANAGE_GUILD),
+        &op_cross_guild,
+    )
+    .await;
+
+    assert!(
+        res_cross.is_err(),
+        "Must reject scheduling to cross-guild channel"
+    );
+    assert!(
+        res_cross
+            .unwrap_err()
+            .to_string()
+            .contains("different server")
+    );
+    assert!(
+        state
+            .scheduler
+            .list_jobs("100", "333333333333333333", true, 50)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // 4. Manager attempts to schedule in channel 105 (private thread where manager is not a member)
+    let op_private_thread = rusty_discord_bot::lua::SchedulerOperation::Create {
+        when: "15m".to_string(),
+        content: "Exploit attempt in private thread".to_string(),
+        channel_id: Some("105".to_string()),
+        repeat: None,
+        repeat_count: None,
+        mention_creator: false,
+        max_jobs: 10,
+        minimum_delay_seconds: 60,
+        maximum_delay_seconds: 86400,
+    };
+
+    let res_thread = rusty_discord_bot::discord::scheduler::execute(
+        &ctx,
+        &state,
+        "scheduler",
+        make_exec_ctx(Permissions::MANAGE_GUILD),
+        &op_private_thread,
+    )
+    .await;
+
+    assert!(
+        res_thread.is_err(),
+        "Must reject scheduling in private thread without membership"
+    );
+    assert!(
+        res_thread
+            .unwrap_err()
+            .to_string()
+            .contains("private thread")
+    );
+    assert!(
+        state
+            .scheduler
+            .list_jobs("100", "333333333333333333", true, 50)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // 5. Manager attempts to schedule in channel 106 (thread where parent denies SEND_MESSAGES_IN_THREADS)
+    let op_thread_deny = rusty_discord_bot::lua::SchedulerOperation::Create {
+        when: "15m".to_string(),
+        content: "Exploit attempt in thread without thread send perm".to_string(),
+        channel_id: Some("106".to_string()),
+        repeat: None,
+        repeat_count: None,
+        mention_creator: false,
+        max_jobs: 10,
+        minimum_delay_seconds: 60,
+        maximum_delay_seconds: 86400,
+    };
+
+    let res_thread_deny = rusty_discord_bot::discord::scheduler::execute(
+        &ctx,
+        &state,
+        "scheduler",
+        make_exec_ctx(Permissions::MANAGE_GUILD),
+        &op_thread_deny,
+    )
+    .await;
+
+    assert!(
+        res_thread_deny.is_err(),
+        "Must reject scheduling in thread when parent denies thread messages"
+    );
+    assert!(
+        res_thread_deny
+            .unwrap_err()
+            .to_string()
+            .contains("SEND_MESSAGES_IN_THREADS")
+    );
+    assert!(
+        state
+            .scheduler
+            .list_jobs("100", "333333333333333333", true, 50)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // 6. Legitimate schedule in visible channel 101 with all permissions -> succeeds!
+    let op_legit = rusty_discord_bot::lua::SchedulerOperation::Create {
+        when: "15m".to_string(),
+        content: "Legitimate scheduled message".to_string(),
+        channel_id: Some("101".to_string()),
+        repeat: Some("1h".to_string()),
+        repeat_count: Some(5),
+        mention_creator: true,
+        max_jobs: 10,
+        minimum_delay_seconds: 60,
+        maximum_delay_seconds: 86400,
+    };
+
+    let res_legit = rusty_discord_bot::discord::scheduler::execute(
+        &ctx,
+        &state,
+        "scheduler",
+        make_exec_ctx(Permissions::MANAGE_GUILD),
+        &op_legit,
+    )
+    .await;
+
+    assert!(
+        res_legit.is_ok(),
+        "Legitimate schedule must succeed: {:?}",
+        res_legit.err()
+    );
+    let jobs_after_legit = state
+        .scheduler
+        .list_jobs("100", "333333333333333333", true, 50)
+        .await
+        .unwrap();
+    assert_eq!(jobs_after_legit.len(), 1, "Exactly 1 job must be created");
+
+    // 7. Normal /remind in current channel without explicit channel_id -> succeeds!
+    let op_remind = rusty_discord_bot::lua::SchedulerOperation::Create {
+        when: "20m".to_string(),
+        content: "Personal reminder in current channel".to_string(),
+        channel_id: None,
+        repeat: None,
+        repeat_count: None,
+        mention_creator: true,
+        max_jobs: 10,
+        minimum_delay_seconds: 60,
+        maximum_delay_seconds: 86400,
+    };
+
+    let res_remind = rusty_discord_bot::discord::scheduler::execute(
+        &ctx,
+        &state,
+        "scheduler",
+        make_exec_ctx(Permissions::empty()), // Regular user command without MANAGE_GUILD
+        &op_remind,
+    )
+    .await;
+
+    assert!(
+        res_remind.is_ok(),
+        "Remind in current channel must succeed: {:?}",
+        res_remind.err()
+    );
+    let jobs_after_remind = state
+        .scheduler
+        .list_jobs("100", "333333333333333333", true, 50)
+        .await
+        .unwrap();
+    assert_eq!(jobs_after_remind.len(), 2, "2 jobs now in scheduler");
+
+    // 8. Runtime delivery live-check (ensure_scheduled_delivery_access) fails closed if permission is revoked
+    let check_revoked = rusty_discord_bot::discord::scheduler::ensure_scheduled_delivery_access(
+        &ctx.http,
+        guild_id,
+        manager_id,
+        ChannelId::new(104), // Channel where user has no SEND_MESSAGES
+    )
+    .await;
+    assert!(
+        check_revoked.is_err(),
+        "Runtime delivery check must fail closed when permissions revoked"
+    );
+
+    // Verify no modifying requests were dispatched to Discord
+    assert_eq!(
+        mock.modifying_requests_count.load(Ordering::SeqCst),
+        baseline_requests,
+        "No PUT/POST message requests dispatched during denied scheduler creations"
     );
 
     shard_manager.shutdown_all().await;
