@@ -13161,3 +13161,230 @@ async fn test_store_purchase_concurrent_fulfillment_race_suite() {
         "No additional Discord PUT should occur on completed purchase retry"
     );
 }
+
+#[tokio::test]
+async fn test_economy_store_purchase_idempotency_validation_and_rate_limit_suite() {
+    let guild_id = "888000888000888000";
+    let buyer_id = "777000777000777000";
+
+    let mut config = test_config();
+    config.offline_mode = true;
+
+    let app = AppState::bootstrap(config).await.expect("bootstrap");
+    let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
+    let web_state = WebState {
+        app,
+        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        permissions_cache,
+    };
+
+    let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind web listener");
+    let web_addr = web_listener.local_addr().expect("web addr");
+    let router = build_router(web_state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            web_listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{web_addr}");
+
+    let buyer_session = "buyer_val_sess";
+    let buyer_csrf = "buyer_val_csrf";
+
+    web_state
+        .app
+        .sessions
+        .save_session(
+            buyer_session,
+            DashboardUser {
+                id: buyer_id.to_owned(),
+                username: "val_buyer".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_owned(),
+                name: "Guild Val".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_owned(),
+            }],
+            buyer_csrf.to_owned(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let cookie_buyer = format!("rusty_discord_bot_session={buyer_session}");
+
+    // Give buyer 100,000 coins so balance is never exhausted during rate limit tests
+    web_state
+        .app
+        .storage
+        .adjust_member_progress(guild_id, buyer_id, 0, 100_000, 0)
+        .await
+        .unwrap();
+
+    let item = web_state
+        .app
+        .storage
+        .create_store_item(
+            guild_id,
+            "Validation Candy",
+            "Sweet candy",
+            10,
+            None,
+            Some(100),
+        )
+        .await
+        .unwrap();
+
+    // 1. Empty idempotency key -> 400 Bad Request
+    let resp_empty = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/store/purchase"))
+        .header(COOKIE, &cookie_buyer)
+        .header("x-csrf-token", buyer_csrf)
+        .header("idempotency-key", "")
+        .json(&serde_json::json!({ "item_id": item.id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_empty.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body_empty: serde_json::Value = resp_empty.json().await.unwrap();
+    assert!(
+        body_empty["error"]
+            .as_str()
+            .unwrap()
+            .contains("idempotency-key header cannot be empty")
+    );
+
+    // 2. Whitespace idempotency key -> 400 Bad Request
+    let resp_ws = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/store/purchase"))
+        .header(COOKIE, &cookie_buyer)
+        .header("x-csrf-token", buyer_csrf)
+        .header("idempotency-key", "   ")
+        .json(&serde_json::json!({ "item_id": item.id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_ws.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body_ws: serde_json::Value = resp_ws.json().await.unwrap();
+    assert!(
+        body_ws["error"]
+            .as_str()
+            .unwrap()
+            .contains("idempotency-key header cannot be empty")
+    );
+
+    // 3. Overly long key (> 128 chars) -> 400 Bad Request
+    let long_key = "k".repeat(129);
+    let resp_long = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/store/purchase"))
+        .header(COOKIE, &cookie_buyer)
+        .header("x-csrf-token", buyer_csrf)
+        .header("idempotency-key", &long_key)
+        .json(&serde_json::json!({ "item_id": item.id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_long.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body_long: serde_json::Value = resp_long.json().await.unwrap();
+    assert!(
+        body_long["error"]
+            .as_str()
+            .unwrap()
+            .contains("exceeds maximum length of 128 characters")
+    );
+
+    // 4. Invalid characters (spaces / control characters) -> 400 Bad Request
+    let resp_invalid_chars = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/store/purchase"))
+        .header(COOKIE, &cookie_buyer)
+        .header("x-csrf-token", buyer_csrf)
+        .header("idempotency-key", "my key with spaces")
+        .json(&serde_json::json!({ "item_id": item.id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp_invalid_chars.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+    let body_invalid: serde_json::Value = resp_invalid_chars.json().await.unwrap();
+    assert!(
+        body_invalid["error"]
+            .as_str()
+            .unwrap()
+            .contains("contains invalid characters")
+    );
+
+    // 5. Valid key -> 200 OK and idempotent retry
+    let valid_key = "valid_client_order_001";
+    let resp_valid = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/store/purchase"))
+        .header(COOKIE, &cookie_buyer)
+        .header("x-csrf-token", buyer_csrf)
+        .header("idempotency-key", valid_key)
+        .json(&serde_json::json!({ "item_id": item.id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_valid.status(), reqwest::StatusCode::OK);
+    let body_valid: serde_json::Value = resp_valid.json().await.unwrap();
+    let purchase_id = body_valid["purchase_id"].as_str().unwrap().to_string();
+    assert_eq!(body_valid["remaining_coins"], 99_990);
+
+    // Retry with exact same valid key returns cached purchase without re-debiting
+    let resp_retry = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/store/purchase"))
+        .header(COOKIE, &cookie_buyer)
+        .header("x-csrf-token", buyer_csrf)
+        .header("idempotency-key", valid_key)
+        .json(&serde_json::json!({ "item_id": item.id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_retry.status(), reqwest::StatusCode::OK);
+    let body_retry: serde_json::Value = resp_retry.json().await.unwrap();
+    assert_eq!(body_retry["purchase_id"], purchase_id);
+    assert_eq!(body_retry["remaining_coins"], 99_990);
+
+    // 6. Test Rate Limiting on store purchase (quota is 30 per 60s)
+    let mut rate_limited = false;
+    for i in 0..35 {
+        let key = format!("rate_test_key_{i}");
+        let r = client
+            .post(format!("{base_url}/api/guilds/{guild_id}/store/purchase"))
+            .header(COOKIE, &cookie_buyer)
+            .header("x-csrf-token", buyer_csrf)
+            .header("idempotency-key", &key)
+            .json(&serde_json::json!({ "item_id": item.id }))
+            .send()
+            .await
+            .unwrap();
+        if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            rate_limited = true;
+            let b: serde_json::Value = r.json().await.unwrap();
+            assert!(
+                b["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Store purchases are too frequent")
+            );
+            break;
+        }
+    }
+    assert!(
+        rate_limited,
+        "Rapid purchase flooding must trigger 429 Too Many Requests"
+    );
+}

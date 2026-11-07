@@ -18,6 +18,7 @@ pub struct Metrics {
     pub lua_commands_overloaded_total: AtomicU64,
     pub scheduler_expired_lease_cleanup_errors_total: AtomicU64,
     pub scheduler_expired_lease_terminalized_total: AtomicU64,
+    pub economy_idempotency_pruned_total: AtomicU64,
 }
 
 impl Default for Metrics {
@@ -38,6 +39,7 @@ impl Default for Metrics {
             lua_commands_overloaded_total: AtomicU64::new(0),
             scheduler_expired_lease_cleanup_errors_total: AtomicU64::new(0),
             scheduler_expired_lease_terminalized_total: AtomicU64::new(0),
+            economy_idempotency_pruned_total: AtomicU64::new(0),
         }
     }
 }
@@ -121,7 +123,11 @@ impl Metrics {
              # HELP rusty_discord_bot_scheduler_expired_lease_terminalized_total Total number of expired processing leases terminalized to failed after exceeding max attempts\n\
              # TYPE rusty_discord_bot_scheduler_expired_lease_terminalized_total counter\n\
              rusty_discord_bot_scheduler_expired_lease_terminalized_total {15}\n\
-             zuckerbot_scheduler_expired_lease_terminalized_total {15}\n",
+             zuckerbot_scheduler_expired_lease_terminalized_total {15}\n\
+             # HELP rusty_discord_bot_economy_idempotency_pruned_total Total number of expired economy purchase requests and idempotency keys pruned\n\
+             # TYPE rusty_discord_bot_economy_idempotency_pruned_total counter\n\
+             rusty_discord_bot_economy_idempotency_pruned_total {16}\n\
+             zuckerbot_economy_idempotency_pruned_total {16}\n",
             self.uptime_seconds(),
             self.discord_events_total.load(Ordering::Relaxed),
             self.lua_commands_total.load(Ordering::Relaxed),
@@ -140,6 +146,8 @@ impl Metrics {
             self.scheduler_expired_lease_cleanup_errors_total
                 .load(Ordering::Relaxed),
             self.scheduler_expired_lease_terminalized_total
+                .load(Ordering::Relaxed),
+            self.economy_idempotency_pruned_total
                 .load(Ordering::Relaxed),
         )
     }
@@ -169,6 +177,9 @@ mod tests {
         metrics
             .scheduler_expired_lease_terminalized_total
             .store(8, Ordering::Relaxed);
+        metrics
+            .economy_idempotency_pruned_total
+            .store(42, Ordering::Relaxed);
 
         let rendered = metrics.render_prometheus(3, 2);
         assert!(rendered.contains("zuckerbot_discord_events_total 15"));
@@ -179,6 +190,8 @@ mod tests {
         assert!(rendered.contains("zuckerbot_lua_commands_overloaded_total 1"));
         assert!(rendered.contains("zuckerbot_scheduler_expired_lease_cleanup_errors_total 3"));
         assert!(rendered.contains("zuckerbot_scheduler_expired_lease_terminalized_total 8"));
+        assert!(rendered.contains("zuckerbot_economy_idempotency_pruned_total 42"));
+        assert!(rendered.contains("rusty_discord_bot_economy_idempotency_pruned_total 42"));
         assert!(rendered.contains("zuckerbot_active_sessions 3"));
         assert!(rendered.contains("zuckerbot_uptime_seconds"));
     }

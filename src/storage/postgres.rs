@@ -3438,6 +3438,82 @@ impl PostgresStore {
         Ok(())
     }
 
+    pub async fn prune_economy_purchase_requests(
+        &self,
+        cutoff: DateTime<Utc>,
+        limit: usize,
+    ) -> anyhow::Result<u64> {
+        let chunk_limit = (limit as i64).clamp(1, 5000);
+        let mut total_deleted = 0u64;
+        loop {
+            let res = sqlx::query(
+                r#"
+                WITH old_keys AS (
+                    SELECT guild_id, interaction_id
+                    FROM economy_purchase_requests
+                    WHERE created_at < $1
+                    ORDER BY created_at
+                    LIMIT $2
+                    FOR UPDATE SKIP LOCKED
+                )
+                DELETE FROM economy_purchase_requests
+                USING old_keys
+                WHERE economy_purchase_requests.guild_id = old_keys.guild_id
+                  AND economy_purchase_requests.interaction_id = old_keys.interaction_id
+                "#,
+            )
+            .bind(cutoff)
+            .bind(chunk_limit)
+            .execute(&self.pool)
+            .await?;
+
+            let affected = res.rows_affected();
+            total_deleted += affected;
+            if (affected as usize) < (chunk_limit as usize) || total_deleted >= (limit as u64) {
+                break;
+            }
+        }
+        Ok(total_deleted)
+    }
+
+    pub async fn prune_economy_idempotency(
+        &self,
+        cutoff: DateTime<Utc>,
+        limit: usize,
+    ) -> anyhow::Result<u64> {
+        let chunk_limit = (limit as i64).clamp(1, 5000);
+        let mut total_deleted = 0u64;
+        loop {
+            let res = sqlx::query(
+                r#"
+                WITH old_keys AS (
+                    SELECT guild_id, interaction_id
+                    FROM economy_idempotency
+                    WHERE created_at < $1
+                    ORDER BY created_at
+                    LIMIT $2
+                    FOR UPDATE SKIP LOCKED
+                )
+                DELETE FROM economy_idempotency
+                USING old_keys
+                WHERE economy_idempotency.guild_id = old_keys.guild_id
+                  AND economy_idempotency.interaction_id = old_keys.interaction_id
+                "#,
+            )
+            .bind(cutoff)
+            .bind(chunk_limit)
+            .execute(&self.pool)
+            .await?;
+
+            let affected = res.rows_affected();
+            total_deleted += affected;
+            if (affected as usize) < (chunk_limit as usize) || total_deleted >= (limit as u64) {
+                break;
+            }
+        }
+        Ok(total_deleted)
+    }
+
     pub async fn record_member_identity_change(
         &self,
         guild_id: &str,

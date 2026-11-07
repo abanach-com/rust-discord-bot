@@ -1349,6 +1349,95 @@ async fn test_postgres_integration_suite() {
     assert_eq!(p_check.fulfillment_status, "completed");
     assert!(p_check.failure_reason.is_none());
 
+    // 20c. Test Issue #292: Retention pruning of economy_purchase_requests & economy_idempotency with SKIP LOCKED
+    // Pruning with past cutoff does not delete active idempotency keys
+    let past_cutoff = Utc::now() - Duration::hours(1);
+    let past_pruned = store
+        .prune_economy_purchase_requests(past_cutoff, 500)
+        .await
+        .unwrap();
+    assert_eq!(
+        past_pruned, 0,
+        "past cutoff must not prune active purchase requests"
+    );
+
+    // Idempotency key still functional prior to expiration
+    let (_, retry_before_expire, _) = store
+        .purchase_store_item(&guild_id, &store_user, item.id, Some("pg_idem_req_1"))
+        .await
+        .unwrap();
+    assert_eq!(retry_before_expire.id, purchase.id);
+
+    // Prune with future cutoff: auxiliary deduplication keys are reclaimed
+    let future_cutoff = Utc::now() + Duration::hours(25);
+    let pruned_purchases = store
+        .prune_economy_purchase_requests(future_cutoff, 500)
+        .await
+        .unwrap();
+    assert!(
+        pruned_purchases >= 1,
+        "must prune expired economy_purchase_requests"
+    );
+
+    // Core business data is strictly preserved: purchases, balance, stock remain intact
+    let purchases_still_present = store
+        .list_store_purchases(&guild_id, Some(&store_user))
+        .await
+        .unwrap();
+    assert!(
+        purchases_still_present.iter().any(|p| p.id == purchase.id),
+        "store_purchases records must NEVER be deleted by idempotency janitor"
+    );
+
+    // Test concurrent janitors with SKIP LOCKED: multiple concurrent prune workers execute cleanly without deadlocks
+    let mut prune_handles = Vec::new();
+    for _ in 0..5 {
+        let store_c = store.clone();
+        prune_handles.push(tokio::spawn(async move {
+            store_c
+                .prune_economy_purchase_requests(Utc::now() + Duration::hours(50), 500)
+                .await
+        }));
+    }
+    for h in prune_handles {
+        let res = h.await.unwrap();
+        assert!(
+            res.is_ok(),
+            "concurrent prune with SKIP LOCKED must succeed without errors"
+        );
+    }
+
+    // Test economy_idempotency (work/crime) pruning
+    let _ = store
+        .claim_work_reward(
+            &guild_id,
+            &store_user,
+            Some("pg_work_idem_1"),
+            50,
+            50,
+            60,
+            Some(0.5),
+        )
+        .await
+        .unwrap();
+    let past_idem_pruned = store
+        .prune_economy_idempotency(past_cutoff, 500)
+        .await
+        .unwrap();
+    assert_eq!(
+        past_idem_pruned, 0,
+        "past cutoff must not prune work idempotency"
+    );
+
+    let future_idem_pruned = store
+        .prune_economy_idempotency(future_cutoff, 500)
+        .await
+        .unwrap();
+    assert!(
+        future_idem_pruned >= 1,
+        "future cutoff must prune expired work idempotency keys"
+    );
+
     // 21. Test Member Intelligence in PostgreSQL
     use rusty_discord_bot::storage::{MemberSearchFilter, UpsertMemberSnapshotParams};
 

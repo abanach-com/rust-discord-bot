@@ -58,6 +58,8 @@ impl Default for RateLimiter {
             "admin:update_module".to_string(),
             RateLimitQuota::new(10, 60),
         );
+        // Store purchase: 30 purchases per minute per user
+        policies.insert("store:purchase".to_string(), RateLimitQuota::new(30, 60));
 
         Self {
             policies,

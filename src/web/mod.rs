@@ -71,12 +71,37 @@ pub async fn serve_with_shutdown(
                 .prune_transcripts(ticket_cutoff, 1000)
                 .await
                 .unwrap_or(0);
+            let economy_cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
+            let pruned_purchase_reqs = cleanup_state
+                .app
+                .storage
+                .prune_economy_purchase_requests(economy_cutoff, 500)
+                .await
+                .unwrap_or(0);
+            let pruned_economy_idem = cleanup_state
+                .app
+                .storage
+                .prune_economy_idempotency(economy_cutoff, 500)
+                .await
+                .unwrap_or(0);
+            if pruned_purchase_reqs > 0 || pruned_economy_idem > 0 {
+                cleanup_state
+                    .app
+                    .metrics
+                    .economy_idempotency_pruned_total
+                    .fetch_add(
+                        pruned_purchase_reqs + pruned_economy_idem,
+                        Ordering::Relaxed,
+                    );
+            }
             if states > 0
                 || sessions > 0
                 || perms > 0
                 || pruned_lfg > 0
                 || pruned_audit > 0
                 || pruned_transcripts > 0
+                || pruned_purchase_reqs > 0
+                || pruned_economy_idem > 0
             {
                 tracing::debug!(
                     states,
@@ -85,7 +110,9 @@ pub async fn serve_with_shutdown(
                     pruned_lfg,
                     pruned_audit,
                     pruned_transcripts,
-                    "pruned stale OAuth states, expired sessions, permissions, Steam LFG posts, audit events, and ticket transcripts"
+                    pruned_purchase_reqs,
+                    pruned_economy_idem,
+                    "pruned stale OAuth states, expired sessions, permissions, Steam LFG posts, audit events, ticket transcripts, and economy idempotency"
                 );
             }
         }

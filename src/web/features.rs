@@ -1380,11 +1380,47 @@ pub async fn purchase_store_item(
 
     ensure_guild_member_access(&state, &session, &guild_id).await?;
 
-    let idempotency_key = headers
-        .get("idempotency-key")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty());
+    let decision =
+        state
+            .app
+            .rate_limiter
+            .check_action("store:purchase", &session.user.id, Some(&guild_id));
+    if !decision.allowed {
+        state
+            .app
+            .metrics
+            .rate_limit_throttled_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return Err(ApiError::too_many_requests(format!(
+            "Store purchases are too frequent. Please wait {} s.",
+            decision.reset_after.as_secs().max(1)
+        )));
+    }
+
+    let idempotency_key = if let Some(raw_header) = headers.get("idempotency-key") {
+        let key_str = raw_header
+            .to_str()
+            .map_err(|_| ApiError::bad_request("idempotency-key header must be valid ASCII"))?;
+        let trimmed = key_str.trim();
+        if trimmed.is_empty() {
+            return Err(ApiError::bad_request(
+                "idempotency-key header cannot be empty",
+            ));
+        }
+        if trimmed.len() > 128 {
+            return Err(ApiError::bad_request(
+                "idempotency-key header exceeds maximum length of 128 characters",
+            ));
+        }
+        if !trimmed.bytes().all(|b| (0x21..=0x7E).contains(&b)) {
+            return Err(ApiError::bad_request(
+                "idempotency-key header contains invalid characters; must be printable ASCII without spaces",
+            ));
+        }
+        Some(format!("web:{trimmed}"))
+    } else {
+        None
+    };
 
     let (item, purchase, remaining_balance) = state
         .app
@@ -1393,7 +1429,7 @@ pub async fn purchase_store_item(
             &guild_id,
             &session.user.id,
             payload.item_id,
-            idempotency_key,
+            idempotency_key.as_deref(),
         )
         .await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;

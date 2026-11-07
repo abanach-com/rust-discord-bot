@@ -457,6 +457,63 @@ pub async fn run_identity_history_janitor(
     }
 }
 
+/// Background janitor periodically pruning expired economy idempotency and purchase request records.
+pub async fn run_economy_idempotency_janitor(
+    storage: Storage,
+    metrics: Option<std::sync::Arc<crate::metrics::Metrics>>,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+    interval: std::time::Duration,
+    retention: chrono::Duration,
+) {
+    let mut timer = tokio::time::interval(interval);
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    tracing::info!(
+        interval_secs = interval.as_secs(),
+        retention_hours = retention.num_hours(),
+        "started economy idempotency janitor"
+    );
+
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.recv() => {
+                tracing::info!("economy idempotency janitor received shutdown signal");
+                break;
+            }
+            _ = timer.tick() => {
+                let cutoff = chrono::Utc::now() - retention;
+                let pruned_purchases = match storage.prune_economy_purchase_requests(cutoff, 1000).await {
+                    Ok(n) => n,
+                    Err(err) => {
+                        tracing::warn!(?err, "failed to prune expired economy purchase requests");
+                        0
+                    }
+                };
+                let pruned_idem = match storage.prune_economy_idempotency(cutoff, 1000).await {
+                    Ok(n) => n,
+                    Err(err) => {
+                        tracing::warn!(?err, "failed to prune expired economy idempotency entries");
+                        0
+                    }
+                };
+                let total = pruned_purchases + pruned_idem;
+                if total > 0 {
+                    if let Some(m) = &metrics {
+                        m.economy_idempotency_pruned_total.fetch_add(total, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    tracing::info!(
+                        pruned_purchases,
+                        pruned_idem,
+                        "pruned expired economy idempotency records"
+                    );
+                } else {
+                    tracing::debug!("economy idempotency janitor check completed (0 pruned)");
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct MemberIdentityRecord {
     pub id: Uuid,
@@ -2754,6 +2811,28 @@ impl Storage {
                     )
                     .await
             }
+        }
+    }
+
+    pub async fn prune_economy_purchase_requests(
+        &self,
+        cutoff: DateTime<Utc>,
+        limit: usize,
+    ) -> anyhow::Result<u64> {
+        match self {
+            Self::Memory(store) => Ok(store.prune_economy_purchase_requests(cutoff, limit)),
+            Self::Postgres(store) => store.prune_economy_purchase_requests(cutoff, limit).await,
+        }
+    }
+
+    pub async fn prune_economy_idempotency(
+        &self,
+        cutoff: DateTime<Utc>,
+        limit: usize,
+    ) -> anyhow::Result<u64> {
+        match self {
+            Self::Memory(store) => Ok(store.prune_economy_idempotency(cutoff, limit)),
+            Self::Postgres(store) => store.prune_economy_idempotency(cutoff, limit).await,
         }
     }
 
@@ -8216,5 +8295,97 @@ mod tests {
                 "User B's idempotency entry must be preserved"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_memory_store_economy_retention_pruning() {
+        let store = Storage::memory();
+        let guild_id = "111000111000111000";
+        let user_id = "222000222000222000";
+
+        // Give user some coins
+        store
+            .adjust_member_progress(guild_id, user_id, 0, 1000, 0)
+            .await
+            .unwrap();
+
+        // Create a store item
+        let item = store
+            .create_store_item(guild_id, "Hat", "A fancy hat", 100, None, Some(10))
+            .await
+            .unwrap();
+
+        // Make an idempotent purchase
+        let (purchased, p1, remaining_coins) = store
+            .purchase_store_item(guild_id, user_id, item.id, Some("mem_purchase_idem_1"))
+            .await
+            .unwrap();
+        assert_eq!(purchased.id, item.id);
+        assert_eq!(remaining_coins, 900);
+
+        // Claim work with interaction ID
+        let work_res = store
+            .claim_work_reward(
+                guild_id,
+                user_id,
+                Some("mem_work_idem_1"),
+                50,
+                50,
+                60,
+                Some(0.5),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(work_res, WorkClaimOutcome::Claimed { .. }));
+
+        // Pruning with past cutoff does not remove active entries
+        let past_cutoff = Utc::now() - chrono::Duration::hours(1);
+        let pruned_purchases_past = store
+            .prune_economy_purchase_requests(past_cutoff, 100)
+            .await
+            .unwrap();
+        assert_eq!(pruned_purchases_past, 0);
+
+        let pruned_idem_past = store
+            .prune_economy_idempotency(past_cutoff, 100)
+            .await
+            .unwrap();
+        assert_eq!(pruned_idem_past, 0);
+
+        // Verify purchase idempotency still works
+        let (_, p_cached, coins_cached) = store
+            .purchase_store_item(guild_id, user_id, item.id, Some("mem_purchase_idem_1"))
+            .await
+            .unwrap();
+        assert_eq!(p_cached.id, p1.id);
+        assert_eq!(coins_cached, 900); // snapshot balance_after at purchase time
+
+        // Pruning with future cutoff removes auxiliary records
+        let future_cutoff = Utc::now() + chrono::Duration::hours(25);
+        let pruned_purchases_future = store
+            .prune_economy_purchase_requests(future_cutoff, 100)
+            .await
+            .unwrap();
+        assert_eq!(pruned_purchases_future, 1);
+
+        let pruned_idem_future = store
+            .prune_economy_idempotency(future_cutoff, 100)
+            .await
+            .unwrap();
+        assert_eq!(pruned_idem_future, 1);
+
+        // Core business records (purchases, balance, stock) remain completely intact
+        let purchases = store
+            .list_store_purchases(guild_id, Some(user_id))
+            .await
+            .unwrap();
+        assert_eq!(purchases.len(), 1);
+        assert_eq!(purchases[0].id, p1.id);
+
+        let progress = store.get_member_progress(guild_id, user_id).await.unwrap();
+        assert_eq!(progress.coins, 950);
+
+        let items = store.list_store_items(guild_id).await.unwrap();
+        assert_eq!(items[0].stock, Some(9));
     }
 }

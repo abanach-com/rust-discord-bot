@@ -2432,6 +2432,42 @@ impl MemoryStore {
         Ok(())
     }
 
+    pub fn prune_economy_purchase_requests(&self, cutoff: DateTime<Utc>, limit: usize) -> u64 {
+        let _guard = self.progression_guard();
+        let mut to_remove = Vec::new();
+        for entry in self.economy_purchase_requests.iter() {
+            if entry.value().created_at < cutoff {
+                to_remove.push(entry.key().clone());
+                if to_remove.len() >= limit {
+                    break;
+                }
+            }
+        }
+        let count = to_remove.len() as u64;
+        for k in to_remove {
+            self.economy_purchase_requests.remove(&k);
+        }
+        count
+    }
+
+    pub fn prune_economy_idempotency(&self, cutoff: DateTime<Utc>, limit: usize) -> u64 {
+        let _guard = self.progression_guard();
+        let mut to_remove = Vec::new();
+        for entry in self.economy_idempotency.iter() {
+            if entry.value().created_at < cutoff {
+                to_remove.push(entry.key().clone());
+                if to_remove.len() >= limit {
+                    break;
+                }
+            }
+        }
+        let count = to_remove.len() as u64;
+        for k in to_remove {
+            self.economy_idempotency.remove(&k);
+        }
+        count
+    }
+
     pub fn record_member_identity_change(
         &self,
         guild_id: &str,
