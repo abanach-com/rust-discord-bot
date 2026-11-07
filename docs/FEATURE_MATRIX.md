@@ -671,6 +671,12 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Implemented atomic rejection: invalid payloads are rejected before storage mutation, ensuring existing valid schedules are not corrupted or overwritten.
   - Enhanced on-call evaluation (`compute_is_on_call`): replaced silent ignoring of invalid ranges with structured operator warning logs (`tracing::warn!`) including guild ID, user ID, weekday, and raw range values.
   - Added non-destructive diagnostics for legacy records: `GET /api/guilds/{guild_id}/duty/profiles/{user_id}` and `GET /api/guilds/{guild_id}/duty/profiles` expose `invalid_schedule` containing validation errors without deleting or mutating stored profiles, allowing administrators to inspect and fix legacy schedules safely.
+- **PostgreSQL Scheduler Expired Lease Terminalization Resiliency & Telemetry (#259)**:
+  - Fixed silent error discarding in `PostgresSchedulerStore::claim_due`: replaced `let _ = sqlx::query(...).execute(...).await;` with observable janitor method `finalize_expired_leases`.
+  - Added structured operator error logging via `tracing::error!(error = %error, "scheduler: unable to finalize expired processing leases")` upon database failure during cleanup, preventing invisible stuck `processing` jobs.
+  - Implemented Prometheus telemetry counters: `scheduler_expired_lease_cleanup_errors_total` (tracking database errors during lease terminalization) and `scheduler_expired_lease_terminalized_total` (tracking expired processing leases transitioned to terminal `failed` status after exhausting `max_attempts`).
+  - Preserved guild-isolation and non-blocking worker polling (#60): failures during stale lease terminalization log errors and increment metrics while allowing `claim_due` to continue claiming active due jobs without halting cross-guild work.
+  - Symmetrical parity between `MemorySchedulerStore` and `PostgresSchedulerStore`: both stores expose `finalize_expired_leases` and propagate telemetry metrics, unblocking user quotas once expired attempts are terminalized.
 
 ## Delivery order
 

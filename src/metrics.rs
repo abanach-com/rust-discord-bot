@@ -16,6 +16,8 @@ pub struct Metrics {
     pub message_updates_unknown_author_total: AtomicU64,
     pub lua_events_overloaded_total: AtomicU64,
     pub lua_commands_overloaded_total: AtomicU64,
+    pub scheduler_expired_lease_cleanup_errors_total: AtomicU64,
+    pub scheduler_expired_lease_terminalized_total: AtomicU64,
 }
 
 impl Default for Metrics {
@@ -34,6 +36,8 @@ impl Default for Metrics {
             message_updates_unknown_author_total: AtomicU64::new(0),
             lua_events_overloaded_total: AtomicU64::new(0),
             lua_commands_overloaded_total: AtomicU64::new(0),
+            scheduler_expired_lease_cleanup_errors_total: AtomicU64::new(0),
+            scheduler_expired_lease_terminalized_total: AtomicU64::new(0),
         }
     }
 }
@@ -109,7 +113,15 @@ impl Metrics {
              # HELP rusty_discord_bot_lua_commands_overloaded_total Total number of Lua commands rejected due to capacity exhaustion\n\
              # TYPE rusty_discord_bot_lua_commands_overloaded_total counter\n\
              rusty_discord_bot_lua_commands_overloaded_total {13}\n\
-             zuckerbot_lua_commands_overloaded_total {13}\n",
+             zuckerbot_lua_commands_overloaded_total {13}\n\
+             # HELP rusty_discord_bot_scheduler_expired_lease_cleanup_errors_total Total number of database errors encountered when attempting to terminalize expired scheduler leases\n\
+             # TYPE rusty_discord_bot_scheduler_expired_lease_cleanup_errors_total counter\n\
+             rusty_discord_bot_scheduler_expired_lease_cleanup_errors_total {14}\n\
+             zuckerbot_scheduler_expired_lease_cleanup_errors_total {14}\n\
+             # HELP rusty_discord_bot_scheduler_expired_lease_terminalized_total Total number of expired processing leases terminalized to failed after exceeding max attempts\n\
+             # TYPE rusty_discord_bot_scheduler_expired_lease_terminalized_total counter\n\
+             rusty_discord_bot_scheduler_expired_lease_terminalized_total {15}\n\
+             zuckerbot_scheduler_expired_lease_terminalized_total {15}\n",
             self.uptime_seconds(),
             self.discord_events_total.load(Ordering::Relaxed),
             self.lua_commands_total.load(Ordering::Relaxed),
@@ -125,6 +137,10 @@ impl Metrics {
             active_lua_executions,
             self.lua_events_overloaded_total.load(Ordering::Relaxed),
             self.lua_commands_overloaded_total.load(Ordering::Relaxed),
+            self.scheduler_expired_lease_cleanup_errors_total
+                .load(Ordering::Relaxed),
+            self.scheduler_expired_lease_terminalized_total
+                .load(Ordering::Relaxed),
         )
     }
 }
@@ -147,6 +163,12 @@ mod tests {
         metrics
             .lua_commands_overloaded_total
             .store(1, Ordering::Relaxed);
+        metrics
+            .scheduler_expired_lease_cleanup_errors_total
+            .store(3, Ordering::Relaxed);
+        metrics
+            .scheduler_expired_lease_terminalized_total
+            .store(8, Ordering::Relaxed);
 
         let rendered = metrics.render_prometheus(3, 2);
         assert!(rendered.contains("zuckerbot_discord_events_total 15"));
@@ -155,6 +177,8 @@ mod tests {
         assert!(rendered.contains("zuckerbot_lua_active_executions 2"));
         assert!(rendered.contains("zuckerbot_lua_events_overloaded_total 2"));
         assert!(rendered.contains("zuckerbot_lua_commands_overloaded_total 1"));
+        assert!(rendered.contains("zuckerbot_scheduler_expired_lease_cleanup_errors_total 3"));
+        assert!(rendered.contains("zuckerbot_scheduler_expired_lease_terminalized_total 8"));
         assert!(rendered.contains("zuckerbot_active_sessions 3"));
         assert!(rendered.contains("zuckerbot_uptime_seconds"));
     }

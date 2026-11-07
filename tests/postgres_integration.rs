@@ -224,6 +224,190 @@ async fn test_postgres_integration_suite() {
             .unwrap()
     );
 
+    // 3b. Regression test for Issue #259: claim_due handles terminalization failure gracefully and updates metrics
+    let pg_pool = match &scheduler {
+        SchedulerStore::Postgres(pg) => pg.pool().clone(),
+        _ => unreachable!(),
+    };
+    let test_metrics = Arc::new(rusty_discord_bot::metrics::Metrics::new());
+    let scheduler_with_metrics = scheduler.clone().with_metrics(test_metrics.clone());
+
+    // Create job A: max_attempts = 1, will be in processing with expired lease
+    let user_a = format!("user_a_{}", Uuid::new_v4().simple());
+    let job_a = NewScheduledJob {
+        guild_id: guild_id.clone(),
+        module_id: "scheduler".to_owned(),
+        channel_id: "channel_a".to_owned(),
+        creator_user_id: user_a.clone(),
+        content: "Job A expired lease".to_owned(),
+        mention_creator: false,
+        run_at: Utc::now() - Duration::seconds(200),
+        repeat_every_seconds: None,
+        remaining_runs: Some(1),
+        max_attempts: 1,
+    };
+    let outcome_a = scheduler_with_metrics
+        .create_job(job_a, 1)
+        .await
+        .expect("create job A");
+    let record_a = match outcome_a {
+        CreateJobOutcome::Created(record) => record,
+        other => panic!("expected Created, got {:?}", other),
+    };
+
+    // Transition job A directly to processing with attempts=1, locked_at in the past
+    let stale_locked_at = Utc::now() - Duration::seconds(120);
+    sqlx::query(
+        "UPDATE scheduled_jobs SET status = 'processing', attempts = 1, locked_by = 'worker-stale', locked_at = $1 WHERE id = $2::uuid",
+    )
+    .bind(stale_locked_at)
+    .bind(&record_a.id)
+    .execute(&pg_pool)
+    .await
+    .expect("setup job A in expired processing state");
+
+    // Create job B: status = 'active', run_at <= now
+    let user_b = format!("user_b_{}", Uuid::new_v4().simple());
+    let job_b = NewScheduledJob {
+        guild_id: guild_id.clone(),
+        module_id: "scheduler".to_owned(),
+        channel_id: "channel_b".to_owned(),
+        creator_user_id: user_b.clone(),
+        content: "Job B active due".to_owned(),
+        mention_creator: false,
+        run_at: Utc::now() - Duration::seconds(10),
+        repeat_every_seconds: None,
+        remaining_runs: Some(1),
+        max_attempts: 3,
+    };
+    let outcome_b = scheduler_with_metrics
+        .create_job(job_b, 1)
+        .await
+        .expect("create job B");
+    let record_b = match outcome_b {
+        CreateJobOutcome::Created(record) => record,
+        other => panic!("expected Created, got {:?}", other),
+    };
+
+    // Verify user A has reached their limit because Job A is in processing
+    let job_a2 = NewScheduledJob {
+        guild_id: guild_id.clone(),
+        module_id: "scheduler".to_owned(),
+        channel_id: "channel_a2".to_owned(),
+        creator_user_id: user_a.clone(),
+        content: "Job A second attempt".to_owned(),
+        mention_creator: false,
+        run_at: Utc::now(),
+        repeat_every_seconds: None,
+        remaining_runs: Some(1),
+        max_attempts: 1,
+    };
+    let limit_check = scheduler_with_metrics
+        .create_job(job_a2.clone(), 1)
+        .await
+        .expect("create job A2 should check limit");
+    assert!(matches!(
+        limit_check,
+        CreateJobOutcome::LimitReached { limit: 1 }
+    ));
+
+    // Inject temporary trigger on scheduled_jobs to simulate controlled failure of processing -> failed
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION fail_terminalize_processing() RETURNS trigger AS $$
+        BEGIN
+            IF OLD.status = 'processing' AND NEW.status = 'failed' THEN
+                RAISE EXCEPTION 'simulated failure in expired lease terminalization';
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        CREATE TRIGGER trigger_fail_terminalize
+        BEFORE UPDATE ON scheduled_jobs
+        FOR EACH ROW
+        EXECUTE FUNCTION fail_terminalize_processing();
+        "#,
+    )
+    .execute(&pg_pool)
+    .await
+    .expect("install simulated failure trigger");
+
+    // Call claim_due: cleanup will encounter the trigger failure, but must NOT drop error silently
+    // and must NOT block Job B from being claimed (preventing regression #60).
+    let now = Utc::now();
+    let stale_before = now - Duration::seconds(60);
+    let claimed_jobs = scheduler_with_metrics
+        .claim_due("worker-claim-resilient", now, stale_before, 10)
+        .await
+        .expect("claim_due must not fail when terminalization query fails");
+
+    // Job B was successfully claimed
+    assert!(claimed_jobs.iter().any(|j| j.id == record_b.id));
+
+    // Job A was NOT updated due to trigger failure
+    let job_a_stuck = scheduler_with_metrics
+        .get_job(&record_a.id)
+        .await
+        .expect("get job A")
+        .expect("job A exists");
+    assert_eq!(job_a_stuck.status, "processing");
+
+    // Operator telemetry: cleanup error counter incremented
+    assert_eq!(
+        test_metrics
+            .scheduler_expired_lease_cleanup_errors_total
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+
+    // Drop the simulated trigger
+    sqlx::query(
+        r#"
+        DROP TRIGGER IF EXISTS trigger_fail_terminalize ON scheduled_jobs;
+        DROP FUNCTION IF EXISTS fail_terminalize_processing();
+        "#,
+    )
+    .execute(&pg_pool)
+    .await
+    .expect("drop simulated failure trigger");
+
+    // Call finalize_expired_leases or claim_due again: now cleanup succeeds
+    let terminalized_count = scheduler_with_metrics
+        .finalize_expired_leases(now, stale_before)
+        .await
+        .expect("finalize_expired_leases should succeed after trigger dropped");
+    assert!(terminalized_count >= 1);
+
+    // Job A is now terminalized to failed
+    let job_a_final = scheduler_with_metrics
+        .get_job(&record_a.id)
+        .await
+        .expect("get job A")
+        .expect("job A exists");
+    assert_eq!(job_a_final.status, "failed");
+    assert_eq!(
+        job_a_final.last_error.as_deref(),
+        Some("worker lease expired after reaching maximum attempts")
+    );
+    assert!(job_a_final.locked_by.is_none());
+    assert!(job_a_final.locked_at.is_none());
+
+    // Terminalized metrics incremented
+    assert!(
+        test_metrics
+            .scheduler_expired_lease_terminalized_total
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= 1
+    );
+
+    // User A quota is now freed: user A can create a job
+    let unblocked_outcome = scheduler_with_metrics
+        .create_job(job_a2, 1)
+        .await
+        .expect("create job A2 should succeed now");
+    assert!(matches!(unblocked_outcome, CreateJobOutcome::Created(_)));
+
     // 4. Test Tickets Store in PostgreSQL
     let tickets = PostgresTicketStore::connect(&database_url)
         .await

@@ -13,9 +13,20 @@ use super::model::{
 #[derive(Clone, Default)]
 pub struct MemorySchedulerStore {
     jobs: Arc<Mutex<HashMap<String, ScheduledJob>>>,
+    metrics: Option<Arc<crate::metrics::Metrics>>,
 }
 
 impl MemorySchedulerStore {
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Arc<crate::metrics::Metrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    #[must_use]
+    pub fn metrics(&self) -> Option<&Arc<crate::metrics::Metrics>> {
+        self.metrics.as_ref()
+    }
     pub fn create_job(&self, job: NewScheduledJob, max_jobs: u16) -> CreateJobOutcome {
         let mut jobs = self.lock();
         let pending_count = jobs
@@ -138,13 +149,8 @@ impl MemorySchedulerStore {
         job.renew_lease(worker_id, now)
     }
 
-    pub fn claim_due(
-        &self,
-        worker_id: &str,
-        now: DateTime<Utc>,
-        stale_before: DateTime<Utc>,
-        limit: u8,
-    ) -> Vec<ScheduledJob> {
+    pub fn finalize_expired_leases(&self, now: DateTime<Utc>, stale_before: DateTime<Utc>) -> u64 {
+        let mut count = 0u64;
         let mut jobs = self.lock();
 
         for job in jobs.values_mut() {
@@ -161,9 +167,38 @@ impl MemorySchedulerStore {
                 job.locked_by = None;
                 job.locked_at = None;
                 job.updated_at = now;
+                count += 1;
             }
         }
 
+        if count > 0 {
+            tracing::info!(
+                terminalized = count,
+                "scheduler: finalized expired processing leases that exceeded max attempts"
+            );
+            if let Some(metrics) = &self.metrics {
+                metrics
+                    .scheduler_expired_lease_terminalized_total
+                    .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+                metrics
+                    .scheduler_jobs_failed_total
+                    .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
+        count
+    }
+
+    pub fn claim_due(
+        &self,
+        worker_id: &str,
+        now: DateTime<Utc>,
+        stale_before: DateTime<Utc>,
+        limit: u8,
+    ) -> Vec<ScheduledJob> {
+        self.finalize_expired_leases(now, stale_before);
+
+        let mut jobs = self.lock();
         let mut candidates = jobs
             .values()
             .filter(|job| job.is_claimable(now, stale_before))

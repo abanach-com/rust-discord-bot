@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
@@ -11,12 +13,32 @@ use super::model::{
 #[derive(Clone)]
 pub struct PostgresSchedulerStore {
     pool: PgPool,
+    metrics: Option<Arc<crate::metrics::Metrics>>,
 }
 
 impl PostgresSchedulerStore {
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            metrics: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Arc<crate::metrics::Metrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    #[must_use]
+    pub fn metrics(&self) -> Option<&Arc<crate::metrics::Metrics>> {
+        self.metrics.as_ref()
+    }
+
+    #[must_use]
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
     }
 
     pub async fn connect(database_url: &str) -> anyhow::Result<Self> {
@@ -25,7 +47,7 @@ impl PostgresSchedulerStore {
             .connect(database_url)
             .await?;
         crate::storage::run_safe_migrations(&pool).await?;
-        Ok(Self { pool })
+        Ok(Self::new(pool))
     }
 
     pub async fn create_job(
@@ -397,14 +419,12 @@ impl PostgresSchedulerStore {
         Ok(result.rows_affected() > 0)
     }
 
-    pub async fn claim_due(
+    pub async fn finalize_expired_leases(
         &self,
-        worker_id: &str,
         now: DateTime<Utc>,
         stale_before: DateTime<Utc>,
-        limit: u8,
-    ) -> anyhow::Result<Vec<ScheduledJob>> {
-        let _ = sqlx::query(
+    ) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
             r#"
             WITH expired AS (
                 SELECT id
@@ -429,7 +449,45 @@ impl PostgresSchedulerStore {
         .bind(now)
         .bind(stale_before)
         .execute(&self.pool)
-        .await;
+        .await?;
+
+        let rows = result.rows_affected();
+        if rows > 0 {
+            tracing::info!(
+                terminalized = rows,
+                "scheduler: finalized expired processing leases that exceeded max attempts"
+            );
+            if let Some(metrics) = &self.metrics {
+                metrics
+                    .scheduler_expired_lease_terminalized_total
+                    .fetch_add(rows, std::sync::atomic::Ordering::Relaxed);
+                metrics
+                    .scheduler_jobs_failed_total
+                    .fetch_add(rows, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
+        Ok(rows)
+    }
+
+    pub async fn claim_due(
+        &self,
+        worker_id: &str,
+        now: DateTime<Utc>,
+        stale_before: DateTime<Utc>,
+        limit: u8,
+    ) -> anyhow::Result<Vec<ScheduledJob>> {
+        if let Err(error) = self.finalize_expired_leases(now, stale_before).await {
+            tracing::error!(
+                error = %error,
+                "scheduler: unable to finalize expired processing leases"
+            );
+            if let Some(metrics) = &self.metrics {
+                metrics
+                    .scheduler_expired_lease_cleanup_errors_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
 
         Ok(sqlx::query_as::<_, ScheduledJob>(
             r#"

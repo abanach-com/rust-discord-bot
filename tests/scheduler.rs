@@ -480,3 +480,121 @@ async fn completed_jobs_with_completed_at_are_not_claimable_or_resurrected() {
     assert_eq!(job_in_store.status, STATUS_COMPLETED);
     assert!(job_in_store.completed_at.is_some());
 }
+
+#[tokio::test]
+async fn test_scheduler_finalize_expired_leases_metrics_and_quota_freeing() {
+    let metrics = std::sync::Arc::new(rusty_discord_bot::metrics::Metrics::new());
+    let store = SchedulerStore::memory().with_metrics(metrics.clone());
+    let now = Utc::now();
+
+    // Create a job with max_attempts = 1 and max user jobs limit = 1
+    let mut job = new_job(now - Duration::seconds(10));
+    job.max_attempts = 1;
+    let created = created_job(&store, job.clone(), 1).await;
+
+    // Worker claims the job at T=0
+    let claimed = store
+        .claim_due("worker-1", now, now - Duration::seconds(60), 1)
+        .await
+        .expect("claim should succeed");
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].id, created.id);
+    assert_eq!(claimed[0].status, STATUS_PROCESSING);
+
+    // While in processing state, quota limit is reached (pending count = 1 >= max_jobs = 1)
+    let second_job = new_job(now - Duration::seconds(5));
+    let outcome = store
+        .create_job(second_job.clone(), 1)
+        .await
+        .expect("create_job check");
+    assert!(matches!(
+        outcome,
+        CreateJobOutcome::LimitReached { limit: 1 }
+    ));
+
+    // Advance time past lease window (70s > 60s)
+    let claim_time = now + Duration::seconds(70);
+    let stale_before = claim_time - Duration::seconds(60);
+
+    // Finalize expired leases
+    let terminalized = store
+        .finalize_expired_leases(claim_time, stale_before)
+        .await
+        .expect("finalize_expired_leases should succeed");
+    assert_eq!(terminalized, 1);
+
+    // Verify job transitioned to failed and released worker lease
+    let job_after = store.get_job(&created.id).await.unwrap().unwrap();
+    assert_eq!(job_after.status, STATUS_FAILED);
+    assert_eq!(
+        job_after.last_error.as_deref(),
+        Some("worker lease expired after reaching maximum attempts")
+    );
+    assert!(job_after.completed_at.is_some());
+    assert!(job_after.locked_by.is_none());
+    assert!(job_after.locked_at.is_none());
+
+    // Verify metrics telemetry
+    assert_eq!(
+        metrics
+            .scheduler_expired_lease_terminalized_total
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        metrics
+            .scheduler_jobs_failed_total
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+
+    // Verify user quota is unblocked: user can now create a new job
+    let second_outcome = store
+        .create_job(second_job, 1)
+        .await
+        .expect("create_job after terminalization");
+    assert!(matches!(second_outcome, CreateJobOutcome::Created(_)));
+}
+
+#[tokio::test]
+async fn test_scheduler_expired_lease_with_remaining_attempts_is_not_terminalized() {
+    let metrics = std::sync::Arc::new(rusty_discord_bot::metrics::Metrics::new());
+    let store = SchedulerStore::memory().with_metrics(metrics.clone());
+    let now = Utc::now();
+
+    // Create a job with max_attempts = 3
+    let mut job = new_job(now - Duration::seconds(10));
+    job.max_attempts = 3;
+    let created = created_job(&store, job, 10).await;
+
+    // Worker claims attempt 1
+    let claimed = store
+        .claim_due("worker-1", now, now - Duration::seconds(60), 1)
+        .await
+        .expect("claim should succeed");
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].attempts, 1);
+
+    // Lease expires (locked_at < stale_before), but attempts (1) < max_attempts (3)
+    let claim_time = now + Duration::seconds(70);
+    let stale_before = claim_time - Duration::seconds(60);
+
+    let terminalized = store
+        .finalize_expired_leases(claim_time, stale_before)
+        .await
+        .expect("finalize_expired_leases");
+    assert_eq!(
+        terminalized, 0,
+        "must not terminalize jobs with attempts < max_attempts"
+    );
+
+    // Job remains processing / claimable for retry
+    let reclaimed = store
+        .claim_due("worker-2", claim_time, stale_before, 1)
+        .await
+        .expect("claim_due should reclaim job for retry");
+    assert_eq!(reclaimed.len(), 1);
+    assert_eq!(reclaimed[0].id, created.id);
+    assert_eq!(reclaimed[0].attempts, 2);
+    assert_eq!(reclaimed[0].locked_by.as_deref(), Some("worker-2"));
+}

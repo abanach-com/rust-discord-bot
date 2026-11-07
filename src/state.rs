@@ -143,6 +143,7 @@ impl AppState {
             .build()?;
 
         let metrics = Arc::new(crate::metrics::Metrics::new());
+        let scheduler = scheduler.with_metrics(metrics.clone());
         let rate_limiter = Arc::new(crate::rate_limit::RateLimiter::new());
         let policy_engine = Arc::new(crate::policy::CommandPolicyEngine::new());
         let (guild_events, _) = tokio::sync::broadcast::channel(512);

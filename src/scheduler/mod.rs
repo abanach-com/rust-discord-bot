@@ -59,6 +59,22 @@ impl SchedulerStore {
         Self::Postgres(PostgresSchedulerStore::new(pool))
     }
 
+    #[must_use]
+    pub fn with_metrics(self, metrics: Arc<crate::metrics::Metrics>) -> Self {
+        match self {
+            Self::Memory(store) => Self::Memory(store.with_metrics(metrics)),
+            Self::Postgres(store) => Self::Postgres(store.with_metrics(metrics)),
+        }
+    }
+
+    #[must_use]
+    pub fn metrics(&self) -> Option<&Arc<crate::metrics::Metrics>> {
+        match self {
+            Self::Memory(store) => store.metrics(),
+            Self::Postgres(store) => store.metrics(),
+        }
+    }
+
     pub async fn create_job(
         &self,
         job: NewScheduledJob,
@@ -121,6 +137,17 @@ impl SchedulerStore {
         match self {
             Self::Memory(store) => Ok(store.renew_lease(job_id, worker_id, now)),
             Self::Postgres(store) => Ok(store.renew_lease(job_id, worker_id, now).await?),
+        }
+    }
+
+    pub async fn finalize_expired_leases(
+        &self,
+        now: chrono::DateTime<Utc>,
+        stale_before: chrono::DateTime<Utc>,
+    ) -> Result<u64> {
+        match self {
+            Self::Memory(store) => Ok(store.finalize_expired_leases(now, stale_before)),
+            Self::Postgres(store) => Ok(store.finalize_expired_leases(now, stale_before).await?),
         }
     }
 
