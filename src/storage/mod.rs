@@ -36,8 +36,9 @@ pub use crate::asset_analytics::{
 };
 
 pub use progression::{
-    CoinTransfer, CoinTransferOutcome, DailyClaimOutcome, MemberProgress, ProgressMetric,
-    ReputationGrantOutcome, XpAward, level_for_xp, total_xp_for_level,
+    CoinTransfer, CoinTransferOutcome, CrimeClaimOutcome, DailyClaimOutcome, MemberProgress,
+    ProgressMetric, ReputationGrantOutcome, WORK_JOBS, WorkClaimOutcome, XpAward, level_for_xp,
+    total_xp_for_level,
 };
 
 #[allow(clippy::large_enum_variant)]
@@ -1630,6 +1631,86 @@ impl Storage {
                         base_reward,
                         streak_bonus,
                         max_streak_bonus,
+                    )
+                    .await
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn claim_work_reward(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        interaction_id: Option<&str>,
+        min_payout: i64,
+        max_payout: i64,
+        cooldown_seconds: u64,
+        roll: Option<f64>,
+    ) -> anyhow::Result<WorkClaimOutcome> {
+        match self {
+            Self::Memory(store) => Ok(store.claim_work_reward(
+                guild_id,
+                user_id,
+                interaction_id,
+                min_payout,
+                max_payout,
+                cooldown_seconds,
+                roll,
+            )),
+            Self::Postgres(store) => {
+                store
+                    .claim_work_reward(
+                        guild_id,
+                        user_id,
+                        interaction_id,
+                        min_payout,
+                        max_payout,
+                        cooldown_seconds,
+                        roll,
+                    )
+                    .await
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn claim_crime_reward(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        interaction_id: Option<&str>,
+        min_payout: i64,
+        max_payout: i64,
+        success_rate: f64,
+        payout_multiplier: f64,
+        cooldown_seconds: u64,
+        roll: Option<f64>,
+    ) -> anyhow::Result<CrimeClaimOutcome> {
+        match self {
+            Self::Memory(store) => Ok(store.claim_crime_reward(
+                guild_id,
+                user_id,
+                interaction_id,
+                min_payout,
+                max_payout,
+                success_rate,
+                payout_multiplier,
+                cooldown_seconds,
+                roll,
+            )),
+            Self::Postgres(store) => {
+                store
+                    .claim_crime_reward(
+                        guild_id,
+                        user_id,
+                        interaction_id,
+                        min_payout,
+                        max_payout,
+                        success_rate,
+                        payout_multiplier,
+                        cooldown_seconds,
+                        roll,
                     )
                     .await
             }

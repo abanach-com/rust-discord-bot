@@ -24,7 +24,8 @@ use crate::{
 };
 
 use super::{
-    giveaway, moderation_cases, music, progression, reaction_roles, scheduler, tags, tickets,
+    economy, giveaway, moderation_cases, music, progression, reaction_roles, scheduler, tags,
+    tickets,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,6 +52,8 @@ pub struct ActionOrigin {
     pub app_permissions: Permissions,
 
     pub enforce_actor_permissions: bool,
+
+    pub interaction_id: Option<String>,
 }
 
 pub fn chunk_discord_text(text: &str, limit: usize) -> Vec<String> {
@@ -229,6 +232,8 @@ pub async fn execute_command_actions(
         app_permissions: command.app_permissions.unwrap_or_else(Permissions::empty),
 
         enforce_actor_permissions: true,
+
+        interaction_id: Some(command.id.get().to_string()),
     };
 
     for (index, action) in actions.iter().enumerate() {
@@ -335,6 +340,8 @@ pub async fn execute_event_actions(
         app_permissions: Permissions::all(),
 
         enforce_actor_permissions: false,
+
+        interaction_id: None,
     };
 
     let mut last_action_succeeded = true;
@@ -552,6 +559,7 @@ fn action_rate_limit_scope(action: &LuaAction) -> Option<&'static str> {
         } => Some("tag_create"),
 
         LuaAction::ReactionRole { .. } => Some("reaction_role"),
+        LuaAction::Economy { .. } => Some("economy"),
 
         LuaAction::BanMember { .. }
         | LuaAction::KickMember { .. }
@@ -1457,6 +1465,24 @@ async fn execute_action(
                     origin.app_permissions,
                     origin.enforce_actor_permissions,
                 ),
+                operation,
+            )
+            .await
+        }
+
+        LuaAction::Economy { operation } => {
+            economy::execute(
+                ctx,
+                state,
+                module_id,
+                economy::EconomyExecutionContext {
+                    guild_id: origin.guild_id,
+                    channel_id: origin.channel_id,
+                    actor_id: origin.actor_id,
+                    actor_permissions: origin.actor_permissions,
+                    enforce_actor_permissions: origin.enforce_actor_permissions,
+                    interaction_id: origin.interaction_id.clone(),
+                },
                 operation,
             )
             .await

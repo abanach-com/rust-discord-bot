@@ -12,23 +12,24 @@ use super::{
     AdjustMemberProgressParams, AiGuildBudget, AiKnowledgeDocument, AuditLogEntry, CardCollection,
     CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome, CommandPolicyRule, CommunityPoll,
     CompanionChannelLease, CompanionChannelMapping, CompanionMappingItem, CountingGame,
-    CustomAutomation, DailyClaimOutcome, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription,
-    GameAccountLink, GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway,
-    GuildModuleSettings, HelpForumConfig, HelpForumSession, HelpForumStats, IntegrationConnection,
-    IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking, KickStreamSubscription,
-    LinkedAccount, MAX_COMPANION_MAPPINGS_PER_GUILD, McpToolAuthorization, MemberIdentityRecord,
-    MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
-    ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
-    ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
-    ProgressionSeason, ReactionRoleBinding, RecordCompanionLeaseParams, RecruitmentApplication,
-    RecruitmentReview, RecruitmentRoleFulfillment, RecruitmentTrack, RedditSubscription,
-    ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent, ServerSnapshot,
-    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
-    TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament,
-    TransitionApplicationParams, TupperError, TupperProfile, TwitchStreamSubscription,
-    UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WorkflowDefinition,
-    WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
-    parse_member_search_cursor, snowflake_created_at, validate_snowflake,
+    CrimeClaimOutcome, CustomAutomation, DailyClaimOutcome, DynamicVoiceRoom, EventRoster,
+    FaqEntry, FeedSubscription, GameAccountLink, GamingHubGameStatus, GitHubDevopsMapping,
+    GitLabSubscription, Giveaway, GuildModuleSettings, HelpForumConfig, HelpForumSession,
+    HelpForumStats, IntegrationConnection, IntegrationDeliveryLog, IntegrationWebhookSubscription,
+    InviteTracking, KickStreamSubscription, LinkedAccount, MAX_COMPANION_MAPPINGS_PER_GUILD,
+    McpToolAuthorization, MemberIdentityRecord, MemberProgress, MemberSearchFilter,
+    MemberSearchRow, MemberSnapshot, ModerationAppeal, ModerationExecutionIntent,
+    ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState, ModuleDraftConfig,
+    PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric, ProgressionSeason,
+    ReactionRoleBinding, RecordCompanionLeaseParams, RecruitmentApplication, RecruitmentReview,
+    RecruitmentRoleFulfillment, RecruitmentTrack, RedditSubscription, ReputationGrantOutcome,
+    RetainedRecordNotice, ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry,
+    SteamLfgPost, StickyMessage, StoreItem, StorePurchase, TagRecord, TelegramBridge,
+    TelegramMessageMapping, TimedRoleGrant, Tournament, TransitionApplicationParams, TupperError,
+    TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
+    VkSubscription, WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
+    YouTubeChannelSubscription, level_for_xp, parse_member_search_cursor, snowflake_created_at,
+    validate_snowflake,
 };
 
 pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
@@ -547,6 +548,26 @@ impl PostgresStore {
         .unwrap_or(0);
         related_erased += deleted_help_sessions as usize;
 
+        let deleted_economy_cooldowns =
+            sqlx::query("DELETE FROM economy_cooldowns WHERE guild_id = $1 AND user_id = $2")
+                .bind(guild_id)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await
+                .map(|r| r.rows_affected())
+                .unwrap_or(0);
+        related_erased += deleted_economy_cooldowns as usize;
+
+        let deleted_economy_idempotency =
+            sqlx::query("DELETE FROM economy_idempotency WHERE guild_id = $1 AND user_id = $2")
+                .bind(guild_id)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await
+                .map(|r| r.rows_affected())
+                .unwrap_or(0);
+        related_erased += deleted_economy_idempotency as usize;
+
         tx.commit().await?;
 
         let retained_records = vec![
@@ -694,6 +715,299 @@ impl PostgresStore {
 
             next_claim_at: now + Duration::hours(24),
         })
+    }
+
+    fn generate_random_unit_float() -> f64 {
+        let bytes = *Uuid::new_v4().as_bytes();
+        let u = u64::from_le_bytes(bytes[0..8].try_into().unwrap_or([0u8; 8]));
+        (u as f64) / (u64::MAX as f64)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn claim_work_reward(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        interaction_id: Option<&str>,
+        min_payout: i64,
+        max_payout: i64,
+        cooldown_seconds: u64,
+        roll: Option<f64>,
+    ) -> anyhow::Result<WorkClaimOutcome> {
+        let mut transaction = self.pool.begin().await?;
+
+        if let Some(id) = interaction_id {
+            let row: Option<(String,)> = sqlx::query_as(
+                "SELECT outcome_json FROM economy_idempotency WHERE guild_id = $1 AND interaction_id = $2"
+            )
+            .bind(guild_id)
+            .bind(id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+
+            if let Some((json_str,)) = row
+                && let Ok(outcome) = serde_json::from_str::<WorkClaimOutcome>(&json_str)
+            {
+                ensure_profile(&mut transaction, guild_id, user_id).await?;
+                let profile = lock_profile(&mut transaction, guild_id, user_id).await?;
+                transaction.commit().await?;
+                return Ok(match outcome {
+                    WorkClaimOutcome::Claimed { reward, job, .. }
+                    | WorkClaimOutcome::AlreadyProcessed { reward, job, .. } => {
+                        WorkClaimOutcome::AlreadyProcessed {
+                            profile,
+                            reward,
+                            job,
+                        }
+                    }
+                    _ => outcome,
+                });
+            }
+        }
+
+        ensure_profile(&mut transaction, guild_id, user_id).await?;
+        let mut profile = lock_profile(&mut transaction, guild_id, user_id).await?;
+        let now = Utc::now();
+
+        let last_action_row: Option<(DateTime<Utc>,)> = sqlx::query_as(
+            "SELECT last_action_at FROM economy_cooldowns WHERE guild_id = $1 AND user_id = $2 AND action_type = 'work' FOR UPDATE"
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+
+        if let Some((last_action_at,)) = last_action_row {
+            let next_claim_at = last_action_at + Duration::seconds(cooldown_seconds as i64);
+            if now < next_claim_at {
+                transaction.commit().await?;
+                return Ok(WorkClaimOutcome::Cooldown {
+                    profile,
+                    next_claim_at,
+                });
+            }
+        }
+
+        let r = roll
+            .unwrap_or_else(Self::generate_random_unit_float)
+            .clamp(0.0, 1.0);
+        let job_idx =
+            ((r * WORK_JOBS.len() as f64) as usize).min(WORK_JOBS.len().saturating_sub(1));
+        let job = WORK_JOBS[job_idx].to_string();
+
+        let span = (max_payout - min_payout).max(0);
+        let reward = min_payout
+            .saturating_add((span as f64 * r).round() as i64)
+            .max(1);
+
+        profile.coins = profile.coins.saturating_add(reward);
+        profile.updated_at = now;
+        write_profile(&mut transaction, &profile).await?;
+
+        let next_claim_at = now + Duration::seconds(cooldown_seconds as i64);
+        sqlx::query(
+            r#"
+            INSERT INTO economy_cooldowns (guild_id, user_id, action_type, last_action_at)
+            VALUES ($1, $2, 'work', $3)
+            ON CONFLICT (guild_id, user_id, action_type) DO UPDATE SET last_action_at = EXCLUDED.last_action_at
+            "#
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+
+        let outcome = WorkClaimOutcome::Claimed {
+            profile,
+            reward,
+            job,
+            next_claim_at,
+        };
+
+        if let Some(id) = interaction_id
+            && let Ok(serialized) = serde_json::to_string(&outcome)
+        {
+            sqlx::query(
+                r#"
+                INSERT INTO economy_idempotency (guild_id, interaction_id, user_id, action_type, outcome_json, created_at)
+                VALUES ($1, $2, $3, 'work', $4, $5)
+                ON CONFLICT (guild_id, interaction_id) DO NOTHING
+                "#
+            )
+            .bind(guild_id)
+            .bind(id)
+            .bind(user_id)
+            .bind(serialized)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+        }
+
+        transaction.commit().await?;
+        Ok(outcome)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn claim_crime_reward(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        interaction_id: Option<&str>,
+        min_payout: i64,
+        max_payout: i64,
+        success_rate: f64,
+        payout_multiplier: f64,
+        cooldown_seconds: u64,
+        roll: Option<f64>,
+    ) -> anyhow::Result<CrimeClaimOutcome> {
+        let mut transaction = self.pool.begin().await?;
+
+        if let Some(id) = interaction_id {
+            let row: Option<(String,)> = sqlx::query_as(
+                "SELECT outcome_json FROM economy_idempotency WHERE guild_id = $1 AND interaction_id = $2"
+            )
+            .bind(guild_id)
+            .bind(id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+
+            if let Some((json_str,)) = row
+                && let Ok(outcome) = serde_json::from_str::<CrimeClaimOutcome>(&json_str)
+            {
+                ensure_profile(&mut transaction, guild_id, user_id).await?;
+                let profile = lock_profile(&mut transaction, guild_id, user_id).await?;
+                transaction.commit().await?;
+                return Ok(match outcome {
+                    CrimeClaimOutcome::Success { reward, .. } => {
+                        CrimeClaimOutcome::AlreadyProcessed {
+                            profile,
+                            success: true,
+                            amount: reward,
+                        }
+                    }
+                    CrimeClaimOutcome::Failure { penalty, .. } => {
+                        CrimeClaimOutcome::AlreadyProcessed {
+                            profile,
+                            success: false,
+                            amount: penalty,
+                        }
+                    }
+                    CrimeClaimOutcome::AlreadyProcessed {
+                        success, amount, ..
+                    } => CrimeClaimOutcome::AlreadyProcessed {
+                        profile,
+                        success,
+                        amount,
+                    },
+                    _ => outcome,
+                });
+            }
+        }
+
+        ensure_profile(&mut transaction, guild_id, user_id).await?;
+        let mut profile = lock_profile(&mut transaction, guild_id, user_id).await?;
+        let now = Utc::now();
+
+        let last_action_row: Option<(DateTime<Utc>,)> = sqlx::query_as(
+            "SELECT last_action_at FROM economy_cooldowns WHERE guild_id = $1 AND user_id = $2 AND action_type = 'crime' FOR UPDATE"
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+
+        if let Some((last_action_at,)) = last_action_row {
+            let next_claim_at = last_action_at + Duration::seconds(cooldown_seconds as i64);
+            if now < next_claim_at {
+                transaction.commit().await?;
+                return Ok(CrimeClaimOutcome::Cooldown {
+                    profile,
+                    next_claim_at,
+                });
+            }
+        }
+
+        let r = roll
+            .unwrap_or_else(Self::generate_random_unit_float)
+            .clamp(0.0, 1.0);
+        let success = r <= success_rate;
+        let next_claim_at = now + Duration::seconds(cooldown_seconds as i64);
+
+        let outcome = if success {
+            let span = (max_payout - min_payout).max(0);
+            let base_reward = min_payout
+                .saturating_add((span as f64 * r).round() as i64)
+                .max(1);
+            let reward = ((base_reward as f64 * payout_multiplier).round() as i64).max(1);
+            profile.coins = profile.coins.saturating_add(reward);
+            profile.updated_at = now;
+            write_profile(&mut transaction, &profile).await?;
+
+            sqlx::query(
+                r#"
+                INSERT INTO economy_cooldowns (guild_id, user_id, action_type, last_action_at)
+                VALUES ($1, $2, 'crime', $3)
+                ON CONFLICT (guild_id, user_id, action_type) DO UPDATE SET last_action_at = EXCLUDED.last_action_at
+                "#
+            )
+            .bind(guild_id)
+            .bind(user_id)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+
+            CrimeClaimOutcome::Success {
+                profile,
+                reward,
+                next_claim_at,
+            }
+        } else {
+            let penalty = 0;
+            profile.updated_at = now;
+            write_profile(&mut transaction, &profile).await?;
+
+            sqlx::query(
+                r#"
+                INSERT INTO economy_cooldowns (guild_id, user_id, action_type, last_action_at)
+                VALUES ($1, $2, 'crime', $3)
+                ON CONFLICT (guild_id, user_id, action_type) DO UPDATE SET last_action_at = EXCLUDED.last_action_at
+                "#
+            )
+            .bind(guild_id)
+            .bind(user_id)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+
+            CrimeClaimOutcome::Failure {
+                profile,
+                penalty,
+                next_claim_at,
+            }
+        };
+
+        if let Some(id) = interaction_id
+            && let Ok(serialized) = serde_json::to_string(&outcome)
+        {
+            sqlx::query(
+                r#"
+                INSERT INTO economy_idempotency (guild_id, interaction_id, user_id, action_type, outcome_json, created_at)
+                VALUES ($1, $2, $3, 'crime', $4, $5)
+                ON CONFLICT (guild_id, interaction_id) DO NOTHING
+                "#
+            )
+            .bind(guild_id)
+            .bind(id)
+            .bind(user_id)
+            .bind(serialized)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+        }
+
+        transaction.commit().await?;
+        Ok(outcome)
     }
 
     pub async fn transfer_coins(

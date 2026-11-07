@@ -89,6 +89,57 @@ pub enum ReputationGrantOutcome {
     SameAccount,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum WorkClaimOutcome {
+    Claimed {
+        profile: MemberProgress,
+        reward: i64,
+        job: String,
+        next_claim_at: DateTime<Utc>,
+    },
+    Cooldown {
+        profile: MemberProgress,
+        next_claim_at: DateTime<Utc>,
+    },
+    AlreadyProcessed {
+        profile: MemberProgress,
+        reward: i64,
+        job: String,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum CrimeClaimOutcome {
+    Success {
+        profile: MemberProgress,
+        reward: i64,
+        next_claim_at: DateTime<Utc>,
+    },
+    Failure {
+        profile: MemberProgress,
+        penalty: i64,
+        next_claim_at: DateTime<Utc>,
+    },
+    Cooldown {
+        profile: MemberProgress,
+        next_claim_at: DateTime<Utc>,
+    },
+    AlreadyProcessed {
+        profile: MemberProgress,
+        success: bool,
+        amount: i64,
+    },
+}
+
+pub const WORK_JOBS: &[&str] = &[
+    "Programista Rust",
+    "Barista w Cyber Cafe",
+    "Moderator Discorda",
+    "Rocket Pilot",
+    "AI Engineer",
+    "Server Detective",
+];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProgressMetric {
     Xp,

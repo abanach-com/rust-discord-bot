@@ -368,6 +368,8 @@ async fn ensure_channel_belongs_to_guild(
         app_permissions: Permissions::all(),
 
         enforce_actor_permissions: false,
+
+        interaction_id: None,
     };
 
     resolve_and_validate_channel(ctx, &origin, None, ChannelPurpose::SendMessage).await?;

@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use rusty_discord_bot::lua::{
-    GiveawayOperation, LuaAction, LuaEngine, LuaExecutionContext, LuaLimits, ProgressionOperation,
-    ReactionRoleOperation, TagOperation,
+    EconomyOperation, GiveawayOperation, LuaAction, LuaEngine, LuaExecutionContext, LuaLimits,
+    ProgressionOperation, ReactionRoleOperation, TagOperation,
 };
 use serde_json::json;
 
@@ -125,13 +125,69 @@ async fn test_economy_subcommands_and_progression_actions() {
         )
         .await
         .expect("economy buy should succeed");
-    assert!(
-        actions
-            .iter()
-            .any(|a| matches!(a, LuaAction::Reply { content, .. } if content.contains("vip_pass")))
-    );
+    assert_eq!(actions.len(), 1);
+    match &actions[0] {
+        LuaAction::Economy {
+            operation: EconomyOperation::Buy { item },
+        } => {
+            assert_eq!(item, "vip_pass");
+        }
+        other => panic!("expected EconomyOperation::Buy, got {other:?}"),
+    }
 
-    // 4. Missing or unsupported subcommand
+    // 4. /economy work
+    let actions = eng
+        .execute_command("economy", "economy", context(json!({ "work": {} })))
+        .await
+        .expect("economy work should succeed");
+    assert_eq!(actions.len(), 1);
+    assert!(matches!(
+        &actions[0],
+        LuaAction::Economy {
+            operation: EconomyOperation::Work { .. }
+        }
+    ));
+
+    // 5. /economy crime
+    let actions = eng
+        .execute_command("economy", "economy", context(json!({ "crime": {} })))
+        .await
+        .expect("economy crime should succeed");
+    assert_eq!(actions.len(), 1);
+    assert!(matches!(
+        &actions[0],
+        LuaAction::Economy {
+            operation: EconomyOperation::Crime { .. }
+        }
+    ));
+
+    // 6. /economy shop
+    let actions = eng
+        .execute_command("economy", "economy", context(json!({ "shop": {} })))
+        .await
+        .expect("economy shop should succeed");
+    assert_eq!(actions.len(), 1);
+    assert!(matches!(
+        &actions[0],
+        LuaAction::Economy {
+            operation: EconomyOperation::Shop
+        }
+    ));
+
+    // 7. /economy inventory
+    let actions = eng
+        .execute_command("economy", "economy", context(json!({ "inventory": {} })))
+        .await
+        .expect("economy inventory should succeed");
+    assert_eq!(actions.len(), 1);
+    assert!(matches!(
+        &actions[0],
+        LuaAction::Economy {
+            operation: EconomyOperation::Inventory
+        }
+    ));
+
+    // 8. Missing or unsupported subcommand
     let actions = eng
         .execute_command("economy", "economy", context(json!({})))
         .await

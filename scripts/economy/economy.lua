@@ -143,84 +143,55 @@ return {
         end
 
         if sub == "work" then
-            local jobs = {
-                "Programista Rust", "Barista w Cyber Cafe", "Moderator Discorda",
-                "Rocket Pilot", "AI Engineer", "Server Detective"
-            }
-            local min_p = (ctx.config and ctx.config.min_work_payout) or 50
-            local max_p = (ctx.config and ctx.config.max_work_payout) or 250
-            local earnings = math.floor((min_p + max_p) / 2)
-            local job = jobs[1]
-
             return {
                 {
-                    type = "reply",
-                    content = string.format("💼 You worked a shift as **%s** and earned **%d coins**! 🪙", job, earnings),
-                    ephemeral = false,
-                },
-                {
-                    type = "audit",
-                    event = "economy_work",
-                    data = {
-                        user_id = user_id,
-                        job = job,
-                        earnings = earnings,
+                    type = "economy",
+                    operation = {
+                        type = "work",
                     },
                 },
             }
         end
 
         if sub == "crime" then
-            local gain = 350
             return {
                 {
-                    type = "reply",
-                    content = string.format("🕵️ You pulled off a heist on the cyber-vault! You scored **%d coins**! 💰", gain),
-                    ephemeral = false,
-                },
-                {
-                    type = "audit",
-                    event = "economy_crime",
-                    data = {
-                        user_id = user_id,
-                        outcome = "success",
-                        amount = gain,
+                    type = "economy",
+                    operation = {
+                        type = "crime",
                     },
                 },
             }
         end
 
         if sub == "shop" then
-            local content = "🛍️ **Sklep Serwerowy Rusty Discord Bot**\n\n" ..
-                "1. `vip_pass` — **VIP Pass** (500 coins) — Access to VIP zone\n" ..
-                "2. `xp_booster` — **XP Booster** (300 coins) — Accelerates leveling\n" ..
-                "3. `custom_color` — **Custom Color** (200 coins) — Custom nickname color\n" ..
-                "4. `mystery_box` — **Mystery Box** (150 coins) — Niespodzianka ze skrzyni\n" ..
-                "5. `trophy` — **Diamond Trophy** (1000 coins) — Prestigious trophy\n\n" ..
-                "To buy an item, use: `/economy buy item:name`"
             return {
                 {
-                    type = "reply",
-                    content = content,
-                    ephemeral = false,
+                    type = "economy",
+                    operation = {
+                        type = "shop",
+                    },
                 },
             }
         end
 
         if sub == "buy" then
-            local item_id = opts.item or "mystery_box"
+            local item_id = opts.item
+            if not item_id or tostring(item_id):match("^%s*$") then
+                return {
+                    {
+                        type = "reply",
+                        content = "Należy podać identyfikator lub nazwę przedmiotu do zakupu.",
+                        ephemeral = true,
+                    },
+                }
+            end
             return {
                 {
-                    type = "reply",
-                    content = string.format("🛒 Successfully purchased item **%s**! Added to your inventory `/economy inventory`.", item_id),
-                    ephemeral = true,
-                },
-                {
-                    type = "audit",
-                    event = "economy_buy",
-                    data = {
-                        user_id = user_id,
-                        item = item_id,
+                    type = "economy",
+                    operation = {
+                        type = "buy",
+                        item = tostring(item_id),
                     },
                 },
             }
@@ -229,9 +200,10 @@ return {
         if sub == "inventory" then
             return {
                 {
-                    type = "reply",
-                    content = string.format("🎒 **Ekwipunek <@%s>:**\n• 🎫 VIP Pass (Aktywny)\n• 💎 Diamond Trophy (Kolekcjonerski)\n• 📦 1x Mystery Box (Gotowy do otwarcia)", user_id),
-                    ephemeral = true,
+                    type = "economy",
+                    operation = {
+                        type = "inventory",
+                    },
                 },
             }
         end

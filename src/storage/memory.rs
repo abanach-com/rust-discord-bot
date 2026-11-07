@@ -13,12 +13,12 @@ use super::{
     AdjustMemberProgressParams, AiGuildBudget, AiKnowledgeDocument, AuditLogEntry, CardCollection,
     CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome, CommandPolicyRule, CommunityPoll,
     CompanionChannelLease, CompanionChannelMapping, CompanionMappingItem, CountingGame,
-    CustomAutomation, DailyClaimOutcome, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription,
-    GameAccountLink, GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway,
-    GuildModuleSettings, IntegrationConnection, IntegrationDeliveryLog,
-    IntegrationWebhookSubscription, InviteTracking, KickStreamSubscription, LinkedAccount,
-    MAX_COMPANION_MAPPINGS_PER_GUILD, McpToolAuthorization, MemberIdentityRecord, MemberProgress,
-    MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
+    CrimeClaimOutcome, CustomAutomation, DailyClaimOutcome, DynamicVoiceRoom, EventRoster,
+    FaqEntry, FeedSubscription, GameAccountLink, GamingHubGameStatus, GitHubDevopsMapping,
+    GitLabSubscription, Giveaway, GuildModuleSettings, IntegrationConnection,
+    IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking, KickStreamSubscription,
+    LinkedAccount, MAX_COMPANION_MAPPINGS_PER_GUILD, McpToolAuthorization, MemberIdentityRecord,
+    MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
     ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
     ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
     ProgressionSeason, ReactionRoleBinding, RecordCompanionLeaseParams, RedditSubscription,
@@ -26,9 +26,9 @@ use super::{
     SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
     TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError,
     TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
-    VkSubscription, WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription,
-    is_member_after_cursor, level_for_xp, parse_member_search_cursor, snowflake_created_at,
-    validate_snowflake,
+    VkSubscription, WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
+    YouTubeChannelSubscription, is_member_after_cursor, level_for_xp, parse_member_search_cursor,
+    snowflake_created_at, validate_snowflake,
 };
 
 type ModuleKey = (String, String);
@@ -86,6 +86,10 @@ pub struct MemoryStore {
     pub(crate) store_items: Arc<DashMap<Uuid, StoreItem>>,
 
     store_purchases: Arc<DashMap<Uuid, StorePurchase>>,
+
+    economy_cooldowns: Arc<DashMap<(String, String, String), chrono::DateTime<Utc>>>,
+
+    economy_idempotency: Arc<DashMap<(String, String), String>>,
 
     progression_seasons: Arc<DashMap<Uuid, ProgressionSeason>>,
 
@@ -546,6 +550,9 @@ impl MemoryStore {
             .retain(|(g, from), _| !(g == guild_id && from == user_id));
         related_erased += before_rep.saturating_sub(self.reputation_cooldowns.len());
 
+        self.economy_cooldowns
+            .retain(|(g, u, _), _| !(g == guild_id && u == user_id));
+
         let before_identities = self.identity_history.len();
         self.identity_history
             .retain(|_, r| !(r.guild_id == guild_id && r.user_id == user_id));
@@ -738,6 +745,205 @@ impl MemoryStore {
 
             next_claim_at: now + Duration::hours(24),
         }
+    }
+
+    fn generate_random_unit_float() -> f64 {
+        let bytes = *Uuid::new_v4().as_bytes();
+        let u = u64::from_le_bytes(bytes[0..8].try_into().unwrap_or([0u8; 8]));
+        (u as f64) / (u64::MAX as f64)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_work_reward(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        interaction_id: Option<&str>,
+        min_payout: i64,
+        max_payout: i64,
+        cooldown_seconds: u64,
+        roll: Option<f64>,
+    ) -> WorkClaimOutcome {
+        let _guard = self.progression_guard();
+        let now = Utc::now();
+
+        if let Some(id) = interaction_id
+            && let Some(cached) = self
+                .economy_idempotency
+                .get(&(guild_id.to_string(), id.to_string()))
+            && let Ok(outcome) = serde_json::from_str::<WorkClaimOutcome>(&cached)
+        {
+            let profile = self.profile(guild_id, user_id, now);
+            return match outcome {
+                WorkClaimOutcome::Claimed { reward, job, .. }
+                | WorkClaimOutcome::AlreadyProcessed { reward, job, .. } => {
+                    WorkClaimOutcome::AlreadyProcessed {
+                        profile,
+                        reward,
+                        job,
+                    }
+                }
+                _ => outcome,
+            };
+        }
+
+        let cooldown_key = (
+            guild_id.to_string(),
+            user_id.to_string(),
+            "work".to_string(),
+        );
+        if let Some(last_claim) = self.economy_cooldowns.get(&cooldown_key) {
+            let next_claim_at = *last_claim + Duration::seconds(cooldown_seconds as i64);
+            if now < next_claim_at {
+                let profile = self.profile(guild_id, user_id, now);
+                return WorkClaimOutcome::Cooldown {
+                    profile,
+                    next_claim_at,
+                };
+            }
+        }
+
+        let r = roll
+            .unwrap_or_else(Self::generate_random_unit_float)
+            .clamp(0.0, 1.0);
+        let job_idx =
+            ((r * WORK_JOBS.len() as f64) as usize).min(WORK_JOBS.len().saturating_sub(1));
+        let job = WORK_JOBS[job_idx].to_string();
+
+        let span = (max_payout - min_payout).max(0);
+        let reward = min_payout
+            .saturating_add((span as f64 * r).round() as i64)
+            .max(1);
+
+        let mut profile = self.profile(guild_id, user_id, now);
+        profile.coins = profile.coins.saturating_add(reward);
+        profile.updated_at = now;
+        self.store_profile(profile.clone());
+
+        let next_claim_at = now + Duration::seconds(cooldown_seconds as i64);
+        self.economy_cooldowns.insert(cooldown_key, now);
+
+        let outcome = WorkClaimOutcome::Claimed {
+            profile,
+            reward,
+            job,
+            next_claim_at,
+        };
+
+        if let Some(id) = interaction_id
+            && let Ok(serialized) = serde_json::to_string(&outcome)
+        {
+            self.economy_idempotency
+                .insert((guild_id.to_string(), id.to_string()), serialized);
+        }
+
+        outcome
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_crime_reward(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        interaction_id: Option<&str>,
+        min_payout: i64,
+        max_payout: i64,
+        success_rate: f64,
+        payout_multiplier: f64,
+        cooldown_seconds: u64,
+        roll: Option<f64>,
+    ) -> CrimeClaimOutcome {
+        let _guard = self.progression_guard();
+        let now = Utc::now();
+
+        if let Some(id) = interaction_id
+            && let Some(cached) = self
+                .economy_idempotency
+                .get(&(guild_id.to_string(), id.to_string()))
+            && let Ok(outcome) = serde_json::from_str::<CrimeClaimOutcome>(&cached)
+        {
+            let profile = self.profile(guild_id, user_id, now);
+            return match outcome {
+                CrimeClaimOutcome::Success { reward, .. } => CrimeClaimOutcome::AlreadyProcessed {
+                    profile,
+                    success: true,
+                    amount: reward,
+                },
+                CrimeClaimOutcome::Failure { penalty, .. } => CrimeClaimOutcome::AlreadyProcessed {
+                    profile,
+                    success: false,
+                    amount: penalty,
+                },
+                CrimeClaimOutcome::AlreadyProcessed {
+                    success, amount, ..
+                } => CrimeClaimOutcome::AlreadyProcessed {
+                    profile,
+                    success,
+                    amount,
+                },
+                _ => outcome,
+            };
+        }
+
+        let cooldown_key = (
+            guild_id.to_string(),
+            user_id.to_string(),
+            "crime".to_string(),
+        );
+        if let Some(last_claim) = self.economy_cooldowns.get(&cooldown_key) {
+            let next_claim_at = *last_claim + Duration::seconds(cooldown_seconds as i64);
+            if now < next_claim_at {
+                let profile = self.profile(guild_id, user_id, now);
+                return CrimeClaimOutcome::Cooldown {
+                    profile,
+                    next_claim_at,
+                };
+            }
+        }
+
+        let r = roll
+            .unwrap_or_else(Self::generate_random_unit_float)
+            .clamp(0.0, 1.0);
+        let success = r <= success_rate;
+        let next_claim_at = now + Duration::seconds(cooldown_seconds as i64);
+
+        let mut profile = self.profile(guild_id, user_id, now);
+
+        let outcome = if success {
+            let span = (max_payout - min_payout).max(0);
+            let base_reward = min_payout
+                .saturating_add((span as f64 * r).round() as i64)
+                .max(1);
+            let reward = ((base_reward as f64 * payout_multiplier).round() as i64).max(1);
+            profile.coins = profile.coins.saturating_add(reward);
+            profile.updated_at = now;
+            self.store_profile(profile.clone());
+            self.economy_cooldowns.insert(cooldown_key, now);
+            CrimeClaimOutcome::Success {
+                profile,
+                reward,
+                next_claim_at,
+            }
+        } else {
+            let penalty = 0;
+            profile.updated_at = now;
+            self.store_profile(profile.clone());
+            self.economy_cooldowns.insert(cooldown_key, now);
+            CrimeClaimOutcome::Failure {
+                profile,
+                penalty,
+                next_claim_at,
+            }
+        };
+
+        if let Some(id) = interaction_id
+            && let Ok(serialized) = serde_json::to_string(&outcome)
+        {
+            self.economy_idempotency
+                .insert((guild_id.to_string(), id.to_string()), serialized);
+        }
+
+        outcome
     }
 
     pub fn transfer_coins(

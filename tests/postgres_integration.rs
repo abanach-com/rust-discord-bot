@@ -2520,4 +2520,89 @@ async fn test_postgres_integration_suite() {
         .await
         .expect("delete reaction role binding second time in pg");
     assert!(!rr_del_re);
+
+    // 30. Economy work & crime rewards, cooldowns and idempotency in Postgres (#278)
+    let eco_guild = "777000000000000001";
+    let eco_user = "888000000000000001";
+
+    let work_outcome = store
+        .claim_work_reward(
+            eco_guild,
+            eco_user,
+            Some("pg_work_int_1"),
+            50,
+            250,
+            60,
+            Some(0.5),
+        )
+        .await
+        .expect("claim work reward in pg");
+
+    match &work_outcome {
+        rusty_discord_bot::storage::WorkClaimOutcome::Claimed { reward, .. } => {
+            assert_eq!(*reward, 150);
+        }
+        other => panic!("expected WorkClaimOutcome::Claimed, got {other:?}"),
+    }
+
+    // Idempotent retry
+    let work_retry = store
+        .claim_work_reward(
+            eco_guild,
+            eco_user,
+            Some("pg_work_int_1"),
+            50,
+            250,
+            60,
+            Some(0.5),
+        )
+        .await
+        .expect("claim work reward retry in pg");
+
+    match &work_retry {
+        rusty_discord_bot::storage::WorkClaimOutcome::AlreadyProcessed { reward, .. } => {
+            assert_eq!(*reward, 150);
+        }
+        other => panic!("expected WorkClaimOutcome::AlreadyProcessed, got {other:?}"),
+    }
+
+    // Cooldown rejection with new interaction
+    let work_cd = store
+        .claim_work_reward(
+            eco_guild,
+            eco_user,
+            Some("pg_work_int_2"),
+            50,
+            250,
+            60,
+            Some(0.5),
+        )
+        .await
+        .expect("claim work reward cd in pg");
+
+    assert!(matches!(
+        work_cd,
+        rusty_discord_bot::storage::WorkClaimOutcome::Cooldown { .. }
+    ));
+
+    // Crime in PG
+    let crime_outcome = store
+        .claim_crime_reward(
+            eco_guild,
+            eco_user,
+            Some("pg_crime_int_1"),
+            50,
+            250,
+            0.6,
+            2.5,
+            120,
+            Some(0.1),
+        )
+        .await
+        .expect("claim crime reward in pg");
+
+    assert!(matches!(
+        crime_outcome,
+        rusty_discord_bot::storage::CrimeClaimOutcome::Success { .. }
+    ));
 }

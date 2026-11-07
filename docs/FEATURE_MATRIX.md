@@ -272,6 +272,7 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 - **Custom Tag Mutation Capability & Permission Guards (Issue #275)**: Enforced capability boundary in `tags::execute_tag_action`: restricted tag operations exclusively to trusted module identity (`module_id == "tags"`), and enforced mandatory interactive user command origin (`enforce_actor_permissions && actor_id.is_some()`) along with `MANAGE_MESSAGES` or `ADMINISTRATOR` permissions for `Create` and `Delete` operations, preventing unauthorized tag mutations via event callbacks or foreign modules.
 - **Giveaway Cross-Guild Channel Tenant Isolation & Worker Delivery Quarantine (Issue #276)**: Enforced strict channel tenant isolation in `ensure_channel_view_access` via cached `GET /channels/{channel_id}` verification against origin `guild_id` and rejected non-message channels (categories, voice channels). Hardened `run_giveaway_worker`, `/end`, and `/reroll` with defense-in-depth channel tenancy checks, quarantining cross-guild attempts with `giveaway_cross_guild_blocked` audit records while preventing unauthenticated cross-guild announcement publication.
 - **Reaction Roles Persistence, Role Hierarchy & Gateway Reactions (Issue #277)**: Replaced mock responses with end-to-end `/reactionrole create/remove` pipeline backed by `reaction_role_bindings` PostgreSQL migration `0040_reaction_roles.sql` and `MemoryStore`, strongly-typed `ReactionRoleOperation` and `LuaAction::ReactionRole`. Enforces actor and bot `MANAGE_ROLES` permission validation and Discord role hierarchy verification (`ensure_role_hierarchy`). Implemented Gateway `reaction_add` and `reaction_remove` event listeners that safely grant and revoke mapped roles with bot loop prevention and audit logging (`reaction_role_granted`, `reaction_role_revoked`, `reaction_role_grant_failed`). Added REST API (`/api/guilds/{guild_id}/reaction-roles`) with session, CSRF, and channel tenant isolation.
+- **Economy Work/Crime Payouts, Cooldowns, Store Integration & Role Fulfillment (Issue #278)**: Replaced mock responses in `/economy work`, `/economy crime`, `/economy shop`, `/economy buy`, and `/economy inventory` with native `EconomyOperation` backed by `economy_cooldowns` and `economy_idempotency` tables (`migrations/0041_economy_cooldowns_and_idempotency.sql`). Implemented atomic `claim_work_reward` and `claim_crime_reward` with configurable bounds, success rates, cooldown enforcement, and interaction ID deduplication. Connected `/economy shop`, `/economy buy`, and `/economy inventory` directly to real store storage (`StoreItem` and `StorePurchase`), supporting slug/UUID lookup, atomic balance debit and stock decrement, role hierarchy validation and Discord role fulfillment (`deliver_store_role`), cross-guild isolation, and audit logging.
 
 ## 8. Levels and economy
 
@@ -286,12 +287,12 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 | Leaderboards | Planned |
 | Seasonal resets | Implemented |
 | Import from other bots | Foundation (preview-only) |
-| Virtual currency | Planned |
+| Virtual currency | Implemented |
 | Daily/weekly rewards | Planned |
 | Shop and inventory | Implemented |
 | Tradable items | Implemented |
 | Gambling-style commands | Excluded pending legal review |
-| Work/minigame income | Planned |
+| Work/minigame income | Implemented |
 | Economy sinks and taxes | Planned |
 | Per-guild currency branding | Planned |
 | Fraud and alt detection | Planned |

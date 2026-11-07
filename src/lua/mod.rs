@@ -1,3 +1,4 @@
+pub mod economy;
 mod engine;
 mod giveaway;
 pub mod install_xml;
@@ -9,6 +10,7 @@ mod scheduler;
 mod tags;
 mod tickets;
 
+pub use economy::EconomyOperation;
 pub use engine::{LuaEngine, LuaEngineError, LuaLimits};
 pub use giveaway::GiveawayOperation;
 pub use install_xml::{InstallManifest, InstallModuleEntry, InstallXmlError};

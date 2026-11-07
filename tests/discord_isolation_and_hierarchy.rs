@@ -19,12 +19,13 @@ use rusty_discord_bot::{
     config::Config,
     discord::{
         Handler,
+        economy::{self, EconomyExecutionContext},
         executor::{
             ActionOrigin, ChannelPurpose, ensure_member_hierarchy, execute_event_actions,
             resolve_and_validate_channel,
         },
     },
-    lua::LuaAction,
+    lua::{EconomyOperation, LuaAction},
     storage::UpdateModuleSettingsParams,
 };
 
@@ -731,6 +732,47 @@ async fn create_test_state() -> AppState {
         .expect("bootstrap should succeed")
 }
 
+async fn create_test_state_with_port(port: u16) -> AppState {
+    let bind: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+    let config = Config {
+        discord_token: "dummy_token".to_string(),
+        discord_application_id: 123456789,
+        discord_client_id: "123456789".to_string(),
+        discord_client_secret: "secret".to_string(),
+        discord_oauth_redirect_url: "http://127.0.0.1:8080/auth/discord/callback".to_string(),
+        discord_dev_guild_id: None,
+        dashboard_bind: bind,
+        dashboard_public_url: format!("http://{}", bind),
+        database_url: None,
+        scripts_dir: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts"),
+        session_cookie_secure: false,
+        session_ttl_seconds: 86400,
+        lua_memory_limit_bytes: 4 * 1024 * 1024,
+        lua_instruction_limit: 200_000,
+        lua_hook_granularity: 100,
+        lua_max_parallel: 32,
+        lua_max_per_guild: 8,
+        lua_command_timeout_ms: 3000,
+        music_allowed_hosts: std::collections::HashSet::new(),
+        trusted_proxies: ["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()]
+            .into_iter()
+            .collect(),
+        offline_mode: false,
+        discord_api_base_url: format!("http://127.0.0.1:{port}"),
+        transcript_encryption_key: None,
+        transcript_active_key_id: "v1".to_string(),
+        transcript_keyring: None,
+        ticket_transcripts_disabled: false,
+        metrics_token: None,
+        metrics_allowed_ips: std::collections::HashSet::new(),
+    };
+
+    AppState::bootstrap(config)
+        .await
+        .expect("bootstrap should succeed")
+}
+
 #[tokio::test]
 
 async fn test_channel_resolution_server_isolation_and_error_handling() {
@@ -752,6 +794,8 @@ async fn test_channel_resolution_server_isolation_and_error_handling() {
         app_permissions: serenity::all::Permissions::all(),
 
         enforce_actor_permissions: true,
+
+        interaction_id: None,
     };
 
     // 1. Correct channel on same guild -> Ok
@@ -852,6 +896,7 @@ async fn test_channel_resolution_server_isolation_and_error_handling() {
         actor_roles: Vec::new(),
         app_permissions: serenity::all::Permissions::all(),
         enforce_actor_permissions: true,
+        interaction_id: None,
     };
 
     let denied_channel = resolve_and_validate_channel(
@@ -1192,7 +1237,7 @@ async fn test_event_action_failures_suppress_sent_audit_and_adjust_message_delet
 #[tokio::test]
 async fn test_message_update_author_verification_and_automod_guard() {
     let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
-    let state = create_test_state().await;
+    let state = create_test_state_with_port(mock.port).await;
     let handler = Handler::new(state.clone());
 
     // 1. Enable AutoMod on guild 100 with invite blocking and message deletion
@@ -1454,7 +1499,7 @@ async fn test_message_update_author_verification_and_automod_guard() {
 #[tokio::test]
 async fn test_action_policy_denial_blocks_executor_without_discord_http_call() {
     let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
-    let state = create_test_state().await;
+    let state = create_test_state_with_port(mock.port).await;
     let guild_id = GuildId::new(100);
     let target_user = UserId::new(333333333333333333);
 
@@ -1525,7 +1570,7 @@ async fn test_voice_companion_disabled_mapping_never_grants_and_revokes_active_l
     use rusty_discord_bot::storage::{CompanionMappingItem, RecordCompanionLeaseParams};
 
     let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
-    let state = create_test_state().await;
+    let state = create_test_state_with_port(mock.port).await;
 
     let guild_id = GuildId::new(100);
     let voice_ch = ChannelId::new(105);
@@ -1707,7 +1752,7 @@ async fn test_voice_companion_ready_empty_cache_defers_reconciliation_without_re
     use serenity::all::VoiceState;
 
     let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
-    let state = create_test_state().await;
+    let state = create_test_state_with_port(mock.port).await;
 
     let guild_id = GuildId::new(100);
     let voice_str = "105";
@@ -1854,7 +1899,7 @@ async fn test_voice_companion_delayed_guild_create_reconciliation_race_safe() {
     use serenity::all::{GuildCreateEvent, VoiceState, VoiceStateUpdateEvent};
 
     let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
-    let state = create_test_state().await;
+    let state = create_test_state_with_port(mock.port).await;
 
     let guild_id = GuildId::new(100);
     let voice_str = "105";
@@ -2058,7 +2103,7 @@ async fn test_voice_companion_delayed_guild_create_reconciliation_race_safe() {
 #[tokio::test]
 async fn test_tag_mutation_from_event_and_untrusted_module_strictly_denied() {
     let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
-    let state = create_test_state().await;
+    let state = create_test_state_with_port(mock.port).await;
     let guild_id = GuildId::new(100);
     let guild_id_str = "100";
     let initial_modifications = mock.modifying_requests_count.load(Ordering::SeqCst);
@@ -2170,7 +2215,7 @@ async fn test_tag_mutation_from_event_and_untrusted_module_strictly_denied() {
 #[tokio::test]
 async fn test_giveaway_worker_cross_guild_channel_blocked_and_quarantined() {
     let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
-    let state = create_test_state().await;
+    let state = create_test_state_with_port(mock.port).await;
 
     let origin_guild = "100";
     let foreign_channel = "201"; // belongs to guild 200 in mock
@@ -2727,7 +2772,7 @@ async fn test_reaction_roles_executor_permissions_and_hierarchy() {
 #[tokio::test]
 async fn test_reaction_roles_gateway_reaction_events() {
     let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
-    let state = create_test_state().await;
+    let state = create_test_state_with_port(mock.port).await;
 
     // Seed binding in storage: Message 900000000000000001 + emoji "🎉" -> Role 1002
     let binding = rusty_discord_bot::storage::ReactionRoleBinding {
@@ -2917,6 +2962,484 @@ async fn test_reaction_roles_gateway_reaction_events() {
         mock.modifying_requests_count.load(Ordering::SeqCst),
         baseline_disabled,
         "Reaction role event must be ignored when module is disabled"
+    );
+
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn test_economy_work_and_crime_payout_cooldown_idempotency_suite() {
+    let (ctx, _mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state().await;
+
+    let guild_id = GuildId::new(100);
+    let user_1 = UserId::new(111111111111111111);
+    let user_2 = UserId::new(222222222222222222);
+
+    // Initial state: 0 coins for user_1
+    let initial_progress = state
+        .storage
+        .get_member_progress("100", "111111111111111111")
+        .await
+        .unwrap();
+    assert_eq!(initial_progress.coins, 0);
+
+    // 1. /economy work with roll 0.5 (deterministic halfway between min 50 and max 250 -> 150 coins)
+    let execution = EconomyExecutionContext {
+        guild_id: Some(guild_id),
+        channel_id: Some(ChannelId::new(101)),
+        actor_id: Some(user_1),
+        actor_permissions: serenity::all::Permissions::empty(),
+        enforce_actor_permissions: true,
+        interaction_id: Some("work_int_1".to_string()),
+    };
+
+    let reply = economy::execute(
+        &ctx,
+        &state,
+        "economy",
+        execution.clone(),
+        &EconomyOperation::Work { roll: Some(0.5) },
+    )
+    .await
+    .unwrap()
+    .expect("work reply expected");
+    assert!(reply.contains("**150** monet") || reply.contains("**150** coins"));
+
+    let progress_after_work = state
+        .storage
+        .get_member_progress("100", "111111111111111111")
+        .await
+        .unwrap();
+    assert_eq!(progress_after_work.coins, 150);
+
+    // 2. Retry identical interaction_id -> Idempotent! Returns AlreadyProcessed and balance unchanged
+    let reply_retry = economy::execute(
+        &ctx,
+        &state,
+        "economy",
+        execution.clone(),
+        &EconomyOperation::Work { roll: Some(0.5) },
+    )
+    .await
+    .unwrap()
+    .expect("retry reply expected");
+    assert!(reply_retry.contains("zostało już zrealizowane"));
+    let progress_after_retry = state
+        .storage
+        .get_member_progress("100", "111111111111111111")
+        .await
+        .unwrap();
+    assert_eq!(
+        progress_after_retry.coins, 150,
+        "balance must not change on duplicate interaction retry"
+    );
+
+    // 3. New interaction_id before cooldown expires -> Cooldown rejection!
+    let mut execution_cd = execution.clone();
+    execution_cd.interaction_id = Some("work_int_2".to_string());
+    let reply_cd = economy::execute(
+        &ctx,
+        &state,
+        "economy",
+        execution_cd,
+        &EconomyOperation::Work { roll: Some(0.5) },
+    )
+    .await
+    .unwrap()
+    .expect("cooldown reply expected");
+    assert!(reply_cd.contains("odpocząć"));
+    let progress_after_cd = state
+        .storage
+        .get_member_progress("100", "111111111111111111")
+        .await
+        .unwrap();
+    assert_eq!(
+        progress_after_cd.coins, 150,
+        "balance must not change on cooldown rejection"
+    );
+
+    // 4. /economy crime with roll 0.1 (success! roll <= 0.6 success rate)
+    let execution_crime = EconomyExecutionContext {
+        guild_id: Some(guild_id),
+        channel_id: Some(ChannelId::new(101)),
+        actor_id: Some(user_1),
+        actor_permissions: serenity::all::Permissions::empty(),
+        enforce_actor_permissions: true,
+        interaction_id: Some("crime_int_1".to_string()),
+    };
+
+    let reply_crime = economy::execute(
+        &ctx,
+        &state,
+        "economy",
+        execution_crime.clone(),
+        &EconomyOperation::Crime { roll: Some(0.1) },
+    )
+    .await
+    .unwrap()
+    .expect("crime reply expected");
+    assert!(reply_crime.contains("Udany skok"));
+    let progress_after_crime = state
+        .storage
+        .get_member_progress("100", "111111111111111111")
+        .await
+        .unwrap();
+    assert!(
+        progress_after_crime.coins > 150,
+        "crime success must credit reward"
+    );
+
+    // 5. Retry identical crime interaction_id -> Idempotent!
+    let reply_crime_retry = economy::execute(
+        &ctx,
+        &state,
+        "economy",
+        execution_crime.clone(),
+        &EconomyOperation::Crime { roll: Some(0.1) },
+    )
+    .await
+    .unwrap()
+    .expect("crime retry reply expected");
+    assert!(reply_crime_retry.contains("zostało już zrealizowane"));
+    assert_eq!(
+        state
+            .storage
+            .get_member_progress("100", "111111111111111111")
+            .await
+            .unwrap()
+            .coins,
+        progress_after_crime.coins
+    );
+
+    // 6. User 2 runs /economy crime with roll 0.95 (failure! roll > 0.6)
+    let execution_crime_fail = EconomyExecutionContext {
+        guild_id: Some(guild_id),
+        channel_id: Some(ChannelId::new(101)),
+        actor_id: Some(user_2),
+        actor_permissions: serenity::all::Permissions::empty(),
+        enforce_actor_permissions: true,
+        interaction_id: Some("crime_fail_1".to_string()),
+    };
+
+    let reply_fail = economy::execute(
+        &ctx,
+        &state,
+        "economy",
+        execution_crime_fail,
+        &EconomyOperation::Crime { roll: Some(0.95) },
+    )
+    .await
+    .unwrap()
+    .expect("crime fail reply expected");
+    assert!(reply_fail.contains("przyłapany") || reply_fail.contains("nie powiódł"));
+    assert_eq!(
+        state
+            .storage
+            .get_member_progress("100", "222222222222222222")
+            .await
+            .unwrap()
+            .coins,
+        0,
+        "failed crime must not award coins"
+    );
+
+    // 7. Untrusted module identity -> rejected
+    let untrusted_err = economy::execute(
+        &ctx,
+        &state,
+        "untrusted_module",
+        execution.clone(),
+        &EconomyOperation::Work { roll: Some(0.5) },
+    )
+    .await;
+    assert!(
+        untrusted_err.is_err(),
+        "untrusted module identity must be rejected"
+    );
+
+    // 8. Disabled module -> rejected
+    state
+        .storage
+        .update_module_settings_with_audit(UpdateModuleSettingsParams {
+            guild_id: "100",
+            module_id: "economy",
+            enabled: false,
+            config: serde_json::json!({}),
+            actor_id: Some("admin"),
+            audit_event: "module_disable",
+            audit_data: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+
+    let disabled_err = economy::execute(
+        &ctx,
+        &state,
+        "economy",
+        execution,
+        &EconomyOperation::Work { roll: Some(0.5) },
+    )
+    .await;
+    assert!(
+        disabled_err.is_err(),
+        "disabled economy module must be rejected"
+    );
+
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn test_economy_shop_buy_inventory_role_hierarchy_and_guild_isolation() {
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state_with_port(mock.port).await;
+
+    let guild_id = GuildId::new(100);
+    let user_1 = UserId::new(111111111111111111);
+    let user_2 = UserId::new(222222222222222222);
+
+    // Create store items on guild 100
+    // Role 301 is lower than MockBot's role (300) in mock setup
+    let item_vip = state
+        .storage
+        .create_store_item(
+            "100",
+            "VIP Pass",
+            "Access to VIP zone",
+            200,
+            Some("1002"),
+            Some(2),
+        )
+        .await
+        .unwrap();
+
+    let _item_booster = state
+        .storage
+        .create_store_item("100", "XP Booster", "Increases XP gain", 100, None, None)
+        .await
+        .unwrap();
+
+    // Create store item on guild 200 (for isolation check)
+    let item_foreign = state
+        .storage
+        .create_store_item("200", "Foreign Trophy", "Cross-guild test", 50, None, None)
+        .await
+        .unwrap();
+
+    // Give user_1 500 coins on guild 100
+    state
+        .storage
+        .adjust_member_progress("100", "111111111111111111", 0, 500, 0)
+        .await
+        .unwrap();
+
+    let execution = EconomyExecutionContext {
+        guild_id: Some(guild_id),
+        channel_id: Some(ChannelId::new(101)),
+        actor_id: Some(user_1),
+        actor_permissions: serenity::all::Permissions::empty(),
+        enforce_actor_permissions: true,
+        interaction_id: Some("buy_int_1".to_string()),
+    };
+
+    // 1. /economy shop -> displays items for guild 100, excludes guild 200
+    let shop_reply = economy::execute(
+        &ctx,
+        &state,
+        "economy",
+        execution.clone(),
+        &EconomyOperation::Shop,
+    )
+    .await
+    .unwrap()
+    .expect("shop reply");
+    assert!(shop_reply.contains("VIP Pass"));
+    assert!(shop_reply.contains("XP Booster"));
+    assert!(
+        !shop_reply.contains("Foreign Trophy"),
+        "cross-guild item must not be listed in shop"
+    );
+
+    // 2. /economy inventory before purchase -> empty
+    let inv_empty = economy::execute(
+        &ctx,
+        &state,
+        "economy",
+        execution.clone(),
+        &EconomyOperation::Inventory,
+    )
+    .await
+    .unwrap()
+    .expect("inv reply");
+    assert!(inv_empty.contains("Twój ekwipunek na tym serwerze jest pusty"));
+
+    // 3. /economy buy item:xp_booster (by slug!)
+    let buy_reply = economy::execute(
+        &ctx,
+        &state,
+        "economy",
+        execution.clone(),
+        &EconomyOperation::Buy {
+            item: "xp_booster".to_string(),
+        },
+    )
+    .await
+    .unwrap()
+    .expect("buy reply");
+    assert!(buy_reply.contains("Pomyślnie zakupiono"));
+    assert!(buy_reply.contains("XP Booster"));
+    assert!(buy_reply.contains("**400** monet")); // 500 - 100
+
+    let progress_after_buy1 = state
+        .storage
+        .get_member_progress("100", "111111111111111111")
+        .await
+        .unwrap();
+    assert_eq!(progress_after_buy1.coins, 400);
+
+    // 4. /economy inventory after first buy -> contains XP Booster
+    let inv_reply = economy::execute(
+        &ctx,
+        &state,
+        "economy",
+        execution.clone(),
+        &EconomyOperation::Inventory,
+    )
+    .await
+    .unwrap()
+    .expect("inv reply");
+    assert!(inv_reply.contains("XP Booster"));
+    assert!(inv_reply.contains("completed"));
+
+    // 5. /economy buy item:vip_pass (by name, has role_id 301 and stock 2)
+    let baseline_modifications = mock.modifying_requests_count.load(Ordering::SeqCst);
+    let buy_vip = economy::execute(
+        &ctx,
+        &state,
+        "economy",
+        execution.clone(),
+        &EconomyOperation::Buy {
+            item: "VIP Pass".to_string(),
+        },
+    )
+    .await
+    .unwrap()
+    .expect("buy vip reply");
+    assert!(buy_vip.contains("Pomyślnie zakupiono"));
+    assert!(buy_vip.contains("**200** monet")); // 400 - 200
+
+    // Role assignment request dispatched to mock
+    assert!(
+        mock.modifying_requests_count.load(Ordering::SeqCst) > baseline_modifications,
+        "Role delivery PUT request must be dispatched"
+    );
+
+    // Stock decremented to 1
+    let items_now = state.storage.list_store_items("100").await.unwrap();
+    let vip_now = items_now.into_iter().find(|i| i.id == item_vip.id).unwrap();
+    assert_eq!(vip_now.stock, Some(1));
+
+    // 6. Cross-guild buy attempt -> rejected!
+    let cross_guild_buy = economy::execute(
+        &ctx,
+        &state,
+        "economy",
+        execution.clone(),
+        &EconomyOperation::Buy {
+            item: item_foreign.id.to_string(),
+        },
+    )
+    .await;
+    assert!(
+        cross_guild_buy.is_err(),
+        "cross-guild item purchase must fail"
+    );
+    assert_eq!(
+        state
+            .storage
+            .get_member_progress("100", "111111111111111111")
+            .await
+            .unwrap()
+            .coins,
+        200,
+        "failed purchase must not debit balance"
+    );
+
+    // 7. Insufficient coins -> rejected!
+    let execution_u2 = EconomyExecutionContext {
+        guild_id: Some(guild_id),
+        channel_id: Some(ChannelId::new(101)),
+        actor_id: Some(user_2),
+        actor_permissions: serenity::all::Permissions::empty(),
+        enforce_actor_permissions: true,
+        interaction_id: Some("u2_buy_1".to_string()),
+    };
+    let u2_buy = economy::execute(
+        &ctx,
+        &state,
+        "economy",
+        execution_u2,
+        &EconomyOperation::Buy {
+            item: "XP Booster".to_string(),
+        },
+    )
+    .await;
+    assert!(u2_buy.is_err(), "insufficient funds must be rejected");
+
+    // 8. Stock depletion: buy remaining VIP Pass
+    let buy_vip_2 = economy::execute(
+        &ctx,
+        &state,
+        "economy",
+        execution.clone(),
+        &EconomyOperation::Buy {
+            item: "vip_pass".to_string(),
+        },
+    )
+    .await
+    .unwrap()
+    .expect("buy vip 2");
+    assert!(buy_vip_2.contains("Pomyślnie zakupiono"));
+    assert_eq!(
+        state
+            .storage
+            .get_member_progress("100", "111111111111111111")
+            .await
+            .unwrap()
+            .coins,
+        0 // 200 - 200
+    );
+
+    // Stock is now 0. Give coins again to attempt buying out of stock item
+    state
+        .storage
+        .adjust_member_progress("100", "111111111111111111", 0, 500, 0)
+        .await
+        .unwrap();
+
+    let buy_out_of_stock = economy::execute(
+        &ctx,
+        &state,
+        "economy",
+        execution.clone(),
+        &EconomyOperation::Buy {
+            item: "vip_pass".to_string(),
+        },
+    )
+    .await;
+    assert!(
+        buy_out_of_stock.is_err(),
+        "out of stock item purchase must be rejected"
+    );
+    assert_eq!(
+        state
+            .storage
+            .get_member_progress("100", "111111111111111111")
+            .await
+            .unwrap()
+            .coins,
+        500,
+        "rejected out of stock purchase must not debit balance"
     );
 
     shard_manager.shutdown_all().await;

@@ -153,6 +153,7 @@ pub async fn execute(
                 actor_roles: Vec::new(),
                 app_permissions: execution.app_permissions,
                 enforce_actor_permissions: execution.enforce_actor_permissions,
+                interaction_id: None,
             };
 
             let target_channel = resolve_and_validate_channel(
