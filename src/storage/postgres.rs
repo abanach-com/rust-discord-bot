@@ -3062,11 +3062,14 @@ impl PostgresStore {
             ),
             remaining AS (
                 SELECT COUNT(*) AS count
-                FROM reaction_role_grants
-                WHERE guild_id = $1 AND user_id = $2 AND role_id = $4
+                FROM reaction_role_grants AS g
+                WHERE g.guild_id = $1 AND g.user_id = $2 AND g.role_id = $4
+                  AND NOT EXISTS (
+                      SELECT 1 FROM deleted AS d WHERE d.id = g.id
+                  )
             )
             SELECT
-                (SELECT COUNT(*) > 0 FROM deleted) AS grant_existed,
+                EXISTS (SELECT 1 FROM deleted) AS grant_existed,
                 COALESCE((SELECT granted_by_bot FROM deleted), false) AS granted_by_bot,
                 (SELECT count FROM remaining) AS remaining_sources
             "#,
