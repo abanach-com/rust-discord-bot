@@ -8045,6 +8045,30 @@ async fn test_giveaway_max_winners_and_channel_view_live_mode() {
     // 1. Mock Discord API
     let discord_mock_app = axum::Router::new()
         .route(
+            "/channels/{channel_id}",
+            get(
+                |axum::extract::Path(channel_id): axum::extract::Path<String>| async move {
+                    if channel_id == "555666777888999" {
+                        axum::Json(serde_json::json!({
+                            "id": channel_id,
+                            "guild_id": "777888999000111",
+                            "type": 0
+                        }))
+                        .into_response()
+                    } else {
+                        (
+                            reqwest::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({
+                                "code": 10003,
+                                "message": "Unknown Channel"
+                            })),
+                        )
+                            .into_response()
+                    }
+                },
+            ),
+        )
+        .route(
             "/channels/{channel_id}/permissions/member/{user_id}",
             get(
                 |axum::extract::Path((_channel_id, user_id)): axum::extract::Path<(
@@ -8301,4 +8325,426 @@ async fn test_giveaway_max_winners_and_channel_view_live_mode() {
         .await
         .unwrap();
     assert_eq!(get_ok_resp.status(), reqwest::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_giveaway_cross_guild_channel_isolation_live_mode() {
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+
+    let guild_a = "777888999000111";
+    let guild_b = "888999000111222";
+
+    let channel_a = "111111111111111101"; // belongs to guild A (text)
+    let channel_b = "222222222222222201"; // belongs to guild B (text)
+    let channel_dm = "333333333333333301"; // DM channel (type 1, guild_id null)
+    let channel_category = "444444444444444401"; // category channel (type 4, guild A)
+    let channel_voice = "555555555555555501"; // voice channel (type 2, guild A)
+    let channel_forbidden = "666666666666666601"; // bot forbidden (403)
+    let channel_upstream_err = "777777777777777701"; // upstream error (500)
+
+    // 1. Mock Discord API
+    let discord_mock_app = axum::Router::new()
+        .route(
+            "/channels/{channel_id}",
+            get(
+                |axum::extract::Path(cid): axum::extract::Path<String>| async move {
+                    match cid.as_str() {
+                        "111111111111111101" => axum::Json(serde_json::json!({
+                            "id": "111111111111111101",
+                            "guild_id": "777888999000111",
+                            "type": 0
+                        }))
+                        .into_response(),
+                        "222222222222222201" => axum::Json(serde_json::json!({
+                            "id": "222222222222222201",
+                            "guild_id": "888999000111222",
+                            "type": 0
+                        }))
+                        .into_response(),
+                        "333333333333333301" => axum::Json(serde_json::json!({
+                            "id": "333333333333333301",
+                            "guild_id": null,
+                            "type": 1
+                        }))
+                        .into_response(),
+                        "444444444444444401" => axum::Json(serde_json::json!({
+                            "id": "444444444444444401",
+                            "guild_id": "777888999000111",
+                            "type": 4
+                        }))
+                        .into_response(),
+                        "555555555555555501" => axum::Json(serde_json::json!({
+                            "id": "555555555555555501",
+                            "guild_id": "777888999000111",
+                            "type": 2
+                        }))
+                        .into_response(),
+                        "666666666666666601" => (
+                            reqwest::StatusCode::FORBIDDEN,
+                            axum::Json(serde_json::json!({
+                                "code": 50001,
+                                "message": "Missing Access"
+                            })),
+                        )
+                            .into_response(),
+                        "777777777777777701" => (
+                            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                            axum::Json(serde_json::json!({
+                                "code": 0,
+                                "message": "Internal Discord Error"
+                            })),
+                        )
+                            .into_response(),
+                        _ => (
+                            reqwest::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({
+                                "code": 10003,
+                                "message": "Unknown Channel"
+                            })),
+                        )
+                            .into_response(),
+                    }
+                },
+            ),
+        )
+        .route(
+            "/channels/{channel_id}/permissions/member/{user_id}",
+            get(
+                |axum::extract::Path((_channel_id, _user_id)): axum::extract::Path<(
+                    String,
+                    String,
+                )>| async move {
+                    // Both admin A and admin B have VIEW_CHANNEL (1024) in the tested channels
+                    axum::Json(serde_json::json!({
+                        "permissions": "1024"
+                    }))
+                    .into_response()
+                },
+            ),
+        )
+        .route(
+            "/guilds/{guild_id}/members/{user_id}",
+            get(
+                |axum::extract::Path((_guild_id, user_id)): axum::extract::Path<(
+                    String,
+                    String,
+                )>| async move {
+                    axum::Json(serde_json::json!({
+                        "user": { "id": user_id },
+                        "roles": []
+                    }))
+                    .into_response()
+                },
+            ),
+        );
+
+    let discord_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind discord mock");
+    let discord_addr = discord_listener.local_addr().expect("discord mock addr");
+    tokio::spawn(async move {
+        axum::serve(discord_listener, discord_mock_app)
+            .await
+            .unwrap();
+    });
+
+    // 2. Configure app state in live mode
+    let mut config = test_config();
+    config.discord_token = "live_bot_token_production_secret".to_string();
+    config.offline_mode = false;
+    config.discord_api_base_url = format!("http://{discord_addr}");
+
+    let app = AppState::bootstrap(config).await.expect("bootstrap");
+    let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
+    let web_state = WebState {
+        app,
+        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        permissions_cache,
+    };
+    web_state
+        .app
+        .is_gateway_ready
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind web listener");
+    let web_addr = web_listener.local_addr().expect("web addr");
+    let router = build_router(web_state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            web_listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{web_addr}");
+
+    // Sessions for Admin A (Guild A manager) and Admin B (Guild B manager)
+    let admin_a_sess = "admin_a_sess_token";
+    let admin_a_csrf = "admin_a_csrf_token";
+    let admin_a_id = "111111111111111111";
+
+    web_state
+        .app
+        .sessions
+        .save_session(
+            admin_a_sess,
+            DashboardUser {
+                id: admin_a_id.to_owned(),
+                username: "admin_a".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![
+                DashboardGuild {
+                    id: guild_a.to_owned(),
+                    name: "Guild A".to_owned(),
+                    icon: None,
+                    owner: false,
+                    permissions: "32".to_owned(), // MANAGE_GUILD
+                },
+                DashboardGuild {
+                    id: guild_b.to_owned(),
+                    name: "Guild B".to_owned(),
+                    icon: None,
+                    owner: false,
+                    permissions: "0".to_owned(), // Non-manager in Guild B
+                },
+            ],
+            admin_a_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    web_state.permissions_cache.insert(
+        (admin_a_id.to_owned(), guild_a.to_owned()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    let admin_b_sess = "admin_b_sess_token";
+    let admin_b_csrf = "admin_b_csrf_token";
+    let admin_b_id = "222222222222222222";
+
+    web_state
+        .app
+        .sessions
+        .save_session(
+            admin_b_sess,
+            DashboardUser {
+                id: admin_b_id.to_owned(),
+                username: "admin_b".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_b.to_owned(),
+                name: "Guild B".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "32".to_owned(), // MANAGE_GUILD in B
+            }],
+            admin_b_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    web_state.permissions_cache.insert(
+        (admin_b_id.to_owned(), guild_b.to_owned()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    let cookie_a = format!("rusty_discord_bot_session={admin_a_sess}");
+    let cookie_b = format!("rusty_discord_bot_session={admin_b_sess}");
+
+    // Case 1: Admin A attempts POST /api/guilds/{guild_a}/giveaways with channel_b (Foreign Guild B)
+    // -> 403 Forbidden ("Kanał konkursu musi należeć do tej gildii"), 0 database writes
+    let cross_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/giveaways"))
+        .header(COOKIE, &cookie_a)
+        .header("x-csrf-token", admin_a_csrf)
+        .json(&serde_json::json!({
+            "channel_id": channel_b,
+            "prize": "Cross-Guild Attack",
+            "winners_count": 1,
+            "duration_minutes": 60
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cross_resp.status(), reqwest::StatusCode::FORBIDDEN);
+    let error_body: serde_json::Value = cross_resp.json().await.unwrap();
+    assert!(
+        error_body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Kanał konkursu musi należeć do tej gildii")
+    );
+
+    // Case 2: Admin A attempts POST with channel_dm (DM channel, guild_id is null)
+    // -> 403 Forbidden
+    let dm_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/giveaways"))
+        .header(COOKIE, &cookie_a)
+        .header("x-csrf-token", admin_a_csrf)
+        .json(&serde_json::json!({
+            "channel_id": channel_dm,
+            "prize": "DM Attack",
+            "winners_count": 1,
+            "duration_minutes": 60
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dm_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Case 3: Admin A attempts POST with channel_category (type 4, Category)
+    // -> 400 Bad Request
+    let cat_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/giveaways"))
+        .header(COOKIE, &cookie_a)
+        .header("x-csrf-token", admin_a_csrf)
+        .json(&serde_json::json!({
+            "channel_id": channel_category,
+            "prize": "Category Attack",
+            "winners_count": 1,
+            "duration_minutes": 60
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cat_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Case 4: Admin A attempts POST with channel_voice (type 2, Voice)
+    // -> 400 Bad Request
+    let voice_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/giveaways"))
+        .header(COOKIE, &cookie_a)
+        .header("x-csrf-token", admin_a_csrf)
+        .json(&serde_json::json!({
+            "channel_id": channel_voice,
+            "prize": "Voice Attack",
+            "winners_count": 1,
+            "duration_minutes": 60
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(voice_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Case 5: Admin A attempts POST with channel_forbidden (bot has no access / 403)
+    // -> 403 Forbidden
+    let forb_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/giveaways"))
+        .header(COOKIE, &cookie_a)
+        .header("x-csrf-token", admin_a_csrf)
+        .json(&serde_json::json!({
+            "channel_id": channel_forbidden,
+            "prize": "Inaccessible Channel Attack",
+            "winners_count": 1,
+            "duration_minutes": 60
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forb_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Case 6: Admin A attempts POST with channel_upstream_err (upstream 500 error)
+    // -> 403 Forbidden (fail closed)
+    let upstr_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/giveaways"))
+        .header(COOKIE, &cookie_a)
+        .header("x-csrf-token", admin_a_csrf)
+        .json(&serde_json::json!({
+            "channel_id": channel_upstream_err,
+            "prize": "Upstream Error Channel",
+            "winners_count": 1,
+            "duration_minutes": 60
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upstr_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Case 7: Admin A attempts POST with legitimate channel_a belonging to Guild A
+    // -> 200 OK, persistent giveaway created
+    let legit_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/giveaways"))
+        .header(COOKIE, &cookie_a)
+        .header("x-csrf-token", admin_a_csrf)
+        .json(&serde_json::json!({
+            "channel_id": channel_a,
+            "prize": "Legitimate Guild A Prize",
+            "winners_count": 1,
+            "duration_minutes": 60
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(legit_resp.status(), reqwest::StatusCode::OK);
+    let ga_a: rusty_discord_bot::storage::Giveaway = legit_resp.json().await.unwrap();
+    assert_eq!(ga_a.guild_id, guild_a);
+    assert_eq!(ga_a.channel_id, channel_a);
+
+    // Case 8: Multi-tenant G1 / G2 isolation:
+    // Admin B in Guild B creates a giveaway targeting channel_b in Guild B -> 200 OK
+    let legit_b_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_b}/giveaways"))
+        .header(COOKIE, &cookie_b)
+        .header("x-csrf-token", admin_b_csrf)
+        .json(&serde_json::json!({
+            "channel_id": channel_b,
+            "prize": "Legitimate Guild B Prize",
+            "winners_count": 1,
+            "duration_minutes": 60
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(legit_b_resp.status(), reqwest::StatusCode::OK);
+    let ga_b: rusty_discord_bot::storage::Giveaway = legit_b_resp.json().await.unwrap();
+    assert_eq!(ga_b.guild_id, guild_b);
+    assert_eq!(ga_b.channel_id, channel_b);
+
+    // Admin B attempts to access Guild A's giveaway -> 403 Forbidden (not a member of Guild A)
+    let b_access_a_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/giveaways/{}",
+            ga_a.id
+        ))
+        .header(COOKIE, &cookie_b)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(b_access_a_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Admin A attempts to create giveaway in Guild B targeting channel_a -> 403 Forbidden (Admin A cannot manage B)
+    let a_target_b_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_b}/giveaways"))
+        .header(COOKIE, &cookie_a)
+        .header("x-csrf-token", admin_a_csrf)
+        .json(&serde_json::json!({
+            "channel_id": channel_a,
+            "prize": "Forbidden Cross Guild",
+            "winners_count": 1,
+            "duration_minutes": 60
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(a_target_b_resp.status(), reqwest::StatusCode::FORBIDDEN);
 }

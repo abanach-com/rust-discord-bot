@@ -2166,3 +2166,185 @@ async fn test_tag_mutation_from_event_and_untrusted_module_strictly_denied() {
 
     shard_manager.shutdown_all().await;
 }
+
+#[tokio::test]
+async fn test_giveaway_worker_cross_guild_channel_blocked_and_quarantined() {
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state().await;
+
+    let origin_guild = "100";
+    let foreign_channel = "201"; // belongs to guild 200 in mock
+    let category_channel = "401"; // category channel in mock
+    let legitimate_channel = "101"; // legitimate channel in guild 100
+
+    // 1. Seed historical expired giveaway targeting foreign channel 201 (guild 200)
+    let cross_ga_id = uuid::Uuid::new_v4();
+    state
+        .storage
+        .create_giveaway_with_id(
+            cross_ga_id,
+            origin_guild,
+            foreign_channel,
+            "Cross-Guild Nitro",
+            1,
+            chrono::Utc::now() - chrono::Duration::minutes(5),
+            Some("111111111111111111"),
+        )
+        .await
+        .unwrap();
+
+    // Add a participant to be drawn as winner
+    state
+        .storage
+        .join_giveaway(cross_ga_id, "555555555555555555")
+        .await
+        .unwrap();
+
+    // 2. Seed expired giveaway targeting category channel 401
+    let category_ga_id = uuid::Uuid::new_v4();
+    state
+        .storage
+        .create_giveaway_with_id(
+            category_ga_id,
+            origin_guild,
+            category_channel,
+            "Category Gift",
+            1,
+            chrono::Utc::now() - chrono::Duration::minutes(5),
+            Some("111111111111111111"),
+        )
+        .await
+        .unwrap();
+
+    state
+        .storage
+        .join_giveaway(category_ga_id, "555555555555555555")
+        .await
+        .unwrap();
+
+    // 3. Seed expired giveaway targeting legitimate channel 101
+    let legit_ga_id = uuid::Uuid::new_v4();
+    state
+        .storage
+        .create_giveaway_with_id(
+            legit_ga_id,
+            origin_guild,
+            legitimate_channel,
+            "Legit Server Prize",
+            1,
+            chrono::Utc::now() - chrono::Duration::minutes(5),
+            Some("111111111111111111"),
+        )
+        .await
+        .unwrap();
+
+    state
+        .storage
+        .join_giveaway(legit_ga_id, "555555555555555555")
+        .await
+        .unwrap();
+
+    // Process worker cycle
+    let finished_count =
+        rusty_discord_bot::discord::giveaway::process_expired_giveaways_cycle(&ctx.http, &state)
+            .await
+            .expect("worker cycle");
+
+    assert_eq!(
+        finished_count, 3,
+        "All 3 expired giveaways should be transitioned"
+    );
+
+    // Verify recorded calls to mock Discord HTTP
+    let recorded = mock.recorded_calls.lock().await.clone();
+
+    // Channel 201 (foreign guild) MUST NEVER have received a POST to /messages
+    let cross_guild_posts: Vec<_> = recorded
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/201/messages"))
+        .collect();
+    assert!(
+        cross_guild_posts.is_empty(),
+        "Tenant isolation violation: worker must NEVER post to foreign channel 201"
+    );
+
+    // Channel 401 (category) MUST NEVER have received a POST to /messages
+    let category_posts: Vec<_> = recorded
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/401/messages"))
+        .collect();
+    assert!(
+        category_posts.is_empty(),
+        "Worker must NEVER post to category channel 401"
+    );
+
+    // Channel 101 (legitimate) MUST have received exactly 1 POST to /messages
+    let legit_posts: Vec<_> = recorded
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+        .collect();
+    assert_eq!(
+        legit_posts.len(),
+        1,
+        "Worker must announce finish in legitimate channel 101"
+    );
+
+    // Verify audit logs
+    let audit_logs = state
+        .storage
+        .list_audit_events(origin_guild, 20)
+        .await
+        .unwrap();
+
+    let cross_blocked = audit_logs
+        .iter()
+        .find(|a| a.event == "giveaway_cross_guild_blocked");
+    assert!(
+        cross_blocked.is_some(),
+        "Audit log giveaway_cross_guild_blocked must be recorded"
+    );
+    let cross_payload = &cross_blocked.unwrap().data;
+    assert_eq!(
+        cross_payload.get("giveaway_id").and_then(|v| v.as_str()),
+        Some(cross_ga_id.to_string().as_str())
+    );
+    assert_eq!(
+        cross_payload
+            .get("detected_guild_id")
+            .and_then(|v| v.as_str()),
+        Some("200")
+    );
+
+    let cat_failed = audit_logs.iter().find(|a| {
+        a.event == "giveaway_delivery_failed"
+            && a.data.get("giveaway_id").and_then(|v| v.as_str())
+                == Some(category_ga_id.to_string().as_str())
+    });
+    assert!(
+        cat_failed.is_some(),
+        "Audit log giveaway_delivery_failed must be recorded for category channel"
+    );
+
+    // Simulate restart / subsequent worker cycle:
+    // Calling process_expired_giveaways_cycle again must not re-process or send additional messages
+    let cycle2_count =
+        rusty_discord_bot::discord::giveaway::process_expired_giveaways_cycle(&ctx.http, &state)
+            .await
+            .expect("worker cycle restart");
+    assert_eq!(
+        cycle2_count, 0,
+        "Restarting worker must find 0 pending expired giveaways"
+    );
+
+    let recorded2 = mock.recorded_calls.lock().await.clone();
+    let cross_guild_posts2: Vec<_> = recorded2
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/201/messages"))
+        .collect();
+    assert!(
+        cross_guild_posts2.is_empty(),
+        "Subsequent cycles must not produce messages"
+    );
+
+    shard_manager.shutdown_all().await;
+}

@@ -477,6 +477,17 @@ pub async fn ensure_guild_member_access(
     }
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct CachedChannelScope {
+    pub guild_id: Option<String>,
+    #[serde(rename = "type")]
+    pub channel_type: u8,
+}
+
+static CHANNEL_SCOPE_CACHE: std::sync::LazyLock<
+    DashMap<String, (CachedChannelScope, DateTime<Utc>)>,
+> = std::sync::LazyLock::new(DashMap::new);
+
 pub async fn ensure_channel_view_access(
     state: &WebState,
     session: &Session,
@@ -493,6 +504,70 @@ pub async fn ensure_channel_view_access(
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     let base_url = &state.app.config.discord_api_base_url;
+
+    let now = Utc::now();
+    let channel_scope = if let Some(entry) = CHANNEL_SCOPE_CACHE.get(channel_id)
+        && now - entry.1 < Duration::seconds(15)
+    {
+        entry.0.clone()
+    } else {
+        let chan_url = format!("{base_url}/channels/{channel_id}");
+        let chan_resp = state
+            .app
+            .http_client
+            .get(&chan_url)
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("Bot {}", state.app.config.discord_token),
+            )
+            .send()
+            .await
+            .map_err(ApiError::upstream)?;
+
+        if chan_resp.status() == StatusCode::FORBIDDEN
+            || chan_resp.status() == StatusCode::NOT_FOUND
+        {
+            return Err(ApiError::forbidden(
+                "Brak dostępu do kanału konkursu: kanał nie istnieje lub bot nie ma do niego dostępu",
+            ));
+        }
+
+        if !chan_resp.status().is_success() {
+            return Err(ApiError::forbidden(
+                "Nie udało się zweryfikować kanału konkursu w Discord API",
+            ));
+        }
+
+        let scope = chan_resp
+            .json::<CachedChannelScope>()
+            .await
+            .map_err(ApiError::upstream)?;
+
+        CHANNEL_SCOPE_CACHE.insert(channel_id.to_string(), (scope.clone(), now));
+        scope
+    };
+
+    if channel_scope.guild_id.as_deref() != Some(guild_id) {
+        return Err(ApiError::forbidden(
+            "Kanał konkursu musi należeć do tej gildii",
+        ));
+    }
+
+    if channel_scope.channel_type == 2
+        || channel_scope.channel_type == 4
+        || channel_scope.channel_type == 13
+    {
+        return Err(ApiError::bad_request(
+            "Kanał konkursu nie może być kategorią ani kanałem głosowym",
+        ));
+    }
+
+    if !matches!(channel_scope.channel_type, 0 | 5 | 10 | 11 | 12) {
+        return Err(ApiError::bad_request(
+            "Kanał konkursu nie obsługuje wiadomości tekstowych",
+        ));
+    }
+
     let perm_url = format!(
         "{base_url}/channels/{channel_id}/permissions/member/{}",
         session.user.id
@@ -679,6 +754,9 @@ pub async fn cleanup_stale_records(state: &WebState) -> (usize, usize, usize) {
         .permissions_cache
         .retain(|_, entry| now - entry.checked_at <= perms_cutoff);
     let perms_removed = before_perms.saturating_sub(state.permissions_cache.len());
+
+    let scope_cutoff = Duration::seconds(30);
+    CHANNEL_SCOPE_CACHE.retain(|_, (_, checked_at)| now - *checked_at <= scope_cutoff);
 
     (
         states_removed as usize,
