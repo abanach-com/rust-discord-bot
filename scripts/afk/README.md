@@ -22,7 +22,11 @@ Zarządzanie statusem nieobecności AFK, automatyczne powiadomienia przy wzmiank
 ## ⚡ Obsługa zdarzeń
 - `message_create`:
   - Jeśli autor wiadomości był oznaczony jako AFK oraz włączona jest opcja `auto_clear_on_message` (domyślnie `true`), status jest automatycznie wyłączany i bot wysyła powiadomienie powitalne.
-  - Jeśli w treści wiadomości wspomniano użytkowników posiadających status AFK, bot informuje o ich nieobecności i powodzie bez pingowania (`allowed_mentions` wyczyszczone).
+  - Jeśli w treści wiadomości wspomniano użytkowników posiadających status AFK:
+    - Agregacja: co najwyżej **1 zbiorcza wiadomość** na zdarzenie (maks. 5 unikalnych użytkowników, treść <= 2000 znaków).
+    - Per-target cooldown: powiadomienie o tej samej osobie na danym kanale nie częściej niż raz na 60 sekund.
+    - Rate limit wyjściowy: maksymalnie 2 odpowiedzi na 30 sekund na kanał oraz 3 na 30 sekund na autora wiadomości.
+    - Zero ping-loopów: powiadomienia wysyłane z wyczyszczonym `allowed_mentions` (bez pingowania).
 
 ---
 
@@ -35,5 +39,6 @@ Zarządzanie statusem nieobecności AFK, automatyczne powiadomienia przy wzmiank
 
 ## 🛡️ Bezpieczeństwo i audyt
 - Wszystkie operacje podlegają izolacji per-gildia (tenant isolation).
-- Audytowane zdarzenia: `afk_set`, `afk_clear`, `afk_auto_clear`.
+- Audytowane zdarzenia: `afk_set`, `afk_clear`, `afk_auto_clear`, `afk_notice_throttled`.
+- Metryki Prometheus: `afk_notifications_suppressed_total` (rejestruje zduszone powiadomienia floodu).
 - Usunięcie danych użytkownika w ramach RODO (`/privacy/delete`) automatycznie czyści status AFK.

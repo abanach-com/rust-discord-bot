@@ -5911,3 +5911,231 @@ async fn test_reaction_roles_binding_lifecycle_edit_and_deletion_suite() {
 
     shard_manager.shutdown_all().await;
 }
+
+#[tokio::test]
+async fn test_afk_mention_aggregation_and_rate_limiting_suite() {
+    use axum::http::Method;
+    use rusty_discord_bot::discord::afk::{AfkExecutionContext, execute_afk_action};
+    use rusty_discord_bot::lua::AfkOperation;
+    use serenity::all::{ChannelId, GuildId, Permissions, UserId};
+    use std::sync::atomic::Ordering;
+
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state().await;
+
+    let guild_id = GuildId::new(100);
+    let channel_id = ChannelId::new(101);
+    let channel_2 = ChannelId::new(102);
+
+    // 1. Setup 10 AFK users in guild 100
+    for i in 1..=10 {
+        let user = UserId::new(1000 + i);
+        let _ = execute_afk_action(
+            &ctx,
+            &state,
+            "afk",
+            AfkExecutionContext::new(
+                Some(guild_id),
+                Some(channel_id),
+                Some(user),
+                Permissions::empty(),
+                false,
+            ),
+            &AfkOperation::Set {
+                reason: Some(format!("AFK task #{i}")),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    mock.recorded_calls.lock().await.clear();
+
+    // 2. User 222222222222222222 mentions 10 users + self + duplicate mentions
+    let author_id = UserId::new(222222222222222222);
+    let mut mentions: Vec<String> = (1..=10).map(|i| (1000 + i).to_string()).collect();
+    mentions.push(author_id.get().to_string()); // Self-mention (must be ignored)
+    mentions.push("1001".to_string()); // Duplicate mention (must be deduplicated)
+
+    let _ = execute_afk_action(
+        &ctx,
+        &state,
+        "afk",
+        AfkExecutionContext::new(
+            Some(guild_id),
+            Some(channel_id),
+            Some(author_id),
+            Permissions::empty(),
+            false,
+        ),
+        &AfkOperation::OnMessage {
+            author_id: author_id.get().to_string(),
+            mentioned_user_ids: mentions,
+            auto_clear: false,
+        },
+    )
+    .await
+    .unwrap();
+
+    // Exactly 1 outbound Discord POST /messages must be dispatched (fan-out prevention & aggregation)
+    let calls = mock.recorded_calls.lock().await.clone();
+    let msg_posts: Vec<_> = calls
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+        .collect();
+    assert_eq!(
+        msg_posts.len(),
+        1,
+        "Exactly 1 aggregate message must be sent to Discord instead of N individual messages"
+    );
+
+    // 3. Mentioning recently announced user (1001) in the same channel must be suppressed by per-target cooldown
+    mock.recorded_calls.lock().await.clear();
+    let author_2 = UserId::new(333333333333333333);
+    let _ = execute_afk_action(
+        &ctx,
+        &state,
+        "afk",
+        AfkExecutionContext::new(
+            Some(guild_id),
+            Some(channel_id),
+            Some(author_2),
+            Permissions::empty(),
+            false,
+        ),
+        &AfkOperation::OnMessage {
+            author_id: author_2.get().to_string(),
+            mentioned_user_ids: vec!["1001".to_string()],
+            auto_clear: false,
+        },
+    )
+    .await
+    .unwrap();
+
+    let calls_cooldown = mock.recorded_calls.lock().await.clone();
+    assert_eq!(
+        calls_cooldown
+            .iter()
+            .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+            .count(),
+        0,
+        "Notice must be suppressed while target user 1001 is on cooldown in channel 101"
+    );
+
+    // 4. Mentioning 1001 (on cooldown) along with 1006 (not yet announced) sends notice ONLY for 1006
+    let _ = execute_afk_action(
+        &ctx,
+        &state,
+        "afk",
+        AfkExecutionContext::new(
+            Some(guild_id),
+            Some(channel_id),
+            Some(author_2),
+            Permissions::empty(),
+            false,
+        ),
+        &AfkOperation::OnMessage {
+            author_id: author_2.get().to_string(),
+            mentioned_user_ids: vec!["1001".to_string(), "1006".to_string()],
+            auto_clear: false,
+        },
+    )
+    .await
+    .unwrap();
+
+    let calls_mixed = mock.recorded_calls.lock().await.clone();
+    assert_eq!(
+        calls_mixed
+            .iter()
+            .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+            .count(),
+        1,
+        "Notice for unannounced target 1006 must be sent"
+    );
+
+    // 5. Channel rate limit: 2 notices have been sent in channel 101 (limit is 2 per 30s)
+    // A 3rd message mentioning 1007 in channel 101 must be throttled
+    let author_3 = UserId::new(444444444444444444);
+    let baseline_suppressed = state
+        .metrics
+        .afk_notifications_suppressed_total
+        .load(Ordering::Relaxed);
+    mock.recorded_calls.lock().await.clear();
+
+    let _ = execute_afk_action(
+        &ctx,
+        &state,
+        "afk",
+        AfkExecutionContext::new(
+            Some(guild_id),
+            Some(channel_id),
+            Some(author_3),
+            Permissions::empty(),
+            false,
+        ),
+        &AfkOperation::OnMessage {
+            author_id: author_3.get().to_string(),
+            mentioned_user_ids: vec!["1007".to_string()],
+            auto_clear: false,
+        },
+    )
+    .await
+    .unwrap();
+
+    let calls_throttled = mock.recorded_calls.lock().await.clone();
+    assert_eq!(
+        calls_throttled
+            .iter()
+            .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+            .count(),
+        0,
+        "Channel notice #3 in 30s must be throttled by channel rate limit"
+    );
+    assert!(
+        state
+            .metrics
+            .afk_notifications_suppressed_total
+            .load(Ordering::Relaxed)
+            > baseline_suppressed,
+        "afk_notifications_suppressed_total metric must be incremented"
+    );
+
+    let audits = state.storage.list_audit_events("100", 10).await.unwrap();
+    assert!(
+        audits.iter().any(|a| a.event == "afk_notice_throttled"),
+        "Audit event afk_notice_throttled must be recorded upon throttling"
+    );
+
+    // 6. Channel isolation: channel 102 has independent rate limiter and target cooldowns
+    let _ = execute_afk_action(
+        &ctx,
+        &state,
+        "afk",
+        AfkExecutionContext::new(
+            Some(guild_id),
+            Some(channel_2),
+            Some(author_3),
+            Permissions::empty(),
+            false,
+        ),
+        &AfkOperation::OnMessage {
+            author_id: author_3.get().to_string(),
+            mentioned_user_ids: vec!["1007".to_string()],
+            auto_clear: false,
+        },
+    )
+    .await
+    .unwrap();
+
+    let calls_chan2 = mock.recorded_calls.lock().await.clone();
+    assert_eq!(
+        calls_chan2
+            .iter()
+            .filter(|(m, p)| *m == Method::POST && p.contains("/channels/102/messages"))
+            .count(),
+        1,
+        "Channel 102 must deliver notice without being affected by channel 101's limits"
+    );
+
+    shard_manager.shutdown_all().await;
+}

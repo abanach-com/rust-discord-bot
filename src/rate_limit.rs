@@ -149,6 +149,60 @@ impl RateLimiter {
         }
     }
 
+    pub fn is_rate_limited(&self, key: &str, quota: RateLimitQuota) -> bool {
+        let now = Instant::now();
+        let mut history = self.history.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(timestamps) = history.get_mut(key) {
+            Self::evaluate_capacity(timestamps, now, quota).is_err()
+        } else {
+            false
+        }
+    }
+
+    pub fn check_multi_rate_limit(&self, checks: &[(&str, RateLimitQuota)]) -> RateLimitDecision {
+        if checks.is_empty() {
+            return RateLimitDecision {
+                allowed: true,
+                remaining: u32::MAX,
+                reset_after: Duration::ZERO,
+                limit: u32::MAX,
+            };
+        }
+
+        let now = Instant::now();
+        let mut history = self.history.lock().unwrap_or_else(|e| e.into_inner());
+
+        // First pass: evaluate capacity for all keys without recording timestamps
+        for &(key, quota) in checks {
+            let timestamps = history.entry(key.to_string()).or_default();
+            if let Err(decision) = Self::evaluate_capacity(timestamps, now, quota) {
+                return decision;
+            }
+        }
+
+        // Second pass: all checks passed, record timestamp for all keys atomically
+        let mut min_remaining = u32::MAX;
+        let mut max_limit = 0;
+        for &(key, quota) in checks {
+            let timestamps = history.entry(key.to_string()).or_default();
+            timestamps.push(now);
+            let rem = quota.max_requests.saturating_sub(timestamps.len() as u32);
+            if rem < min_remaining {
+                min_remaining = rem;
+            }
+            if quota.max_requests > max_limit {
+                max_limit = quota.max_requests;
+            }
+        }
+
+        RateLimitDecision {
+            allowed: true,
+            remaining: min_remaining,
+            reset_after: Duration::ZERO,
+            limit: max_limit,
+        }
+    }
+
     pub fn check_command(
         &self,
         command_name: &str,
