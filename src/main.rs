@@ -35,6 +35,7 @@ async fn main() -> Result<()> {
     let help_forum_shutdown_rx = shutdown_tx.subscribe();
     let asset_analytics_shutdown_rx = shutdown_tx.subscribe();
     let companion_janitor_shutdown_rx = shutdown_tx.subscribe();
+    let delete_janitor_shutdown_rx = shutdown_tx.subscribe();
 
     let web_handle = tokio::spawn(rusty_discord_bot::web::serve_with_shutdown(
         state.clone(),
@@ -82,6 +83,11 @@ async fn main() -> Result<()> {
             std::time::Duration::from_secs(300),
         ),
     );
+    let delete_janitor_handle = tokio::spawn(rusty_discord_bot::discord::run_delete_queue_janitor(
+        state.delete_coordinator.clone(),
+        delete_janitor_shutdown_rx,
+        std::time::Duration::from_secs(300),
+    ));
 
     tokio::pin!(web_handle);
     tokio::pin!(discord_handle);
@@ -91,6 +97,7 @@ async fn main() -> Result<()> {
     tokio::pin!(help_forum_handle);
     tokio::pin!(asset_analytics_handle);
     tokio::pin!(companion_janitor_handle);
+    tokio::pin!(delete_janitor_handle);
 
     let result = tokio::select! {
         res = &mut web_handle => {
@@ -159,6 +166,9 @@ async fn main() -> Result<()> {
         }
         if !companion_janitor_handle.is_finished() {
             let _ = (&mut companion_janitor_handle).await;
+        }
+        if !delete_janitor_handle.is_finished() {
+            let _ = (&mut delete_janitor_handle).await;
         }
     };
 

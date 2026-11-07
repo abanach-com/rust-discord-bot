@@ -597,6 +597,10 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Safe channel worker idle shutdown: workers remove their registration conditionally (`remove_if`) only if the entry still points to the same active channel sender (`same_channel`), preventing inadvertent de-registration of newly spawned workers.
   - Full queue drain on idle timeout: before termination, worker closes receiver (`rx.close()`), drains all buffered requests, and processes final moderation delete batches (`process_delete_batch`), guaranteeing zero lost moderation deletes.
   - Enqueue retry loop with channel refresh: if an enqueue operation encounters a closing worker channel (`TrySendError::Closed`), it recovers the oneshot reply channel, re-acquires or spawns an active worker channel under lock, and retries delivery.
+- **Guild Lock Lifecycle & Dead Reference Pruning (#310)**:
+  - Migrated `guild_locks` in `DeleteCoordinator` from retaining strong `Arc<Mutex<()>>` references to unheld `Weak<Mutex<()>>` references (`Arc<DashMap<GuildId, Weak<Mutex<()>>>>`).
+  - Implemented atomic lock acquisition via `get_guild_lock` that upgrades valid weak references or lazily re-inserts a new downgraded lock, immediately releasing inner `Mutex<()>` instances once callers complete registration or quota checks.
+  - Added deterministic pruning via `prune_unused_guild_locks()`, opportunistic retention boundaries when map capacity reaches 256 keys, and integrated a background janitor loop (`run_delete_queue_janitor`) running periodic sweeping on shutdown broadcast integration, eliminating unbounded memory leaks across churned guilds.
 
 ## 19. Concurrency, Steam LFG Retention & Action Policy Enforcement (Issues #236, #237, #238, #239, #240, #241)
 

@@ -4,7 +4,7 @@ mod commands;
 pub mod companion;
 pub mod components;
 pub mod delete_queue;
-pub use delete_queue::{DeleteCoordinator, DeleteOutcome, DeleteRequest};
+pub use delete_queue::{DeleteCoordinator, DeleteOutcome, DeleteRequest, run_delete_queue_janitor};
 pub mod economy;
 pub mod events;
 pub mod executor;

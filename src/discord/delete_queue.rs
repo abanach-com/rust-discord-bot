@@ -29,7 +29,7 @@ pub struct DeleteRequest {
 #[derive(Clone)]
 pub struct DeleteCoordinator {
     channels: Arc<DashMap<(GuildId, ChannelId), mpsc::Sender<DeleteRequest>>>,
-    guild_locks: Arc<DashMap<GuildId, Arc<std::sync::Mutex<()>>>>,
+    guild_locks: Arc<DashMap<GuildId, std::sync::Weak<std::sync::Mutex<()>>>>,
     max_channels_per_guild: usize,
     channel_queue_capacity: usize,
     batch_window_ms: u64,
@@ -55,6 +55,40 @@ impl DeleteCoordinator {
         self.channels.len()
     }
 
+    pub fn guild_locks_len(&self) -> usize {
+        self.guild_locks.len()
+    }
+
+    pub fn prune_unused_guild_locks(&self) -> usize {
+        let before = self.guild_locks.len();
+        self.guild_locks.retain(|_, weak| weak.strong_count() > 0);
+        before.saturating_sub(self.guild_locks.len())
+    }
+
+    pub fn get_guild_lock(&self, guild_id: GuildId) -> Arc<std::sync::Mutex<()>> {
+        // Opportunistic retention pruning if map grows large
+        if self.guild_locks.len() >= 256 {
+            self.prune_unused_guild_locks();
+        }
+
+        match self.guild_locks.entry(guild_id) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                if let Some(strong) = entry.get().upgrade() {
+                    strong
+                } else {
+                    let strong = Arc::new(std::sync::Mutex::new(()));
+                    entry.insert(Arc::downgrade(&strong));
+                    strong
+                }
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let strong = Arc::new(std::sync::Mutex::new(()));
+                entry.insert(Arc::downgrade(&strong));
+                strong
+            }
+        }
+    }
+
     fn get_or_spawn_channel_worker(
         &self,
         http: Arc<Http>,
@@ -63,11 +97,7 @@ impl DeleteCoordinator {
     ) -> Result<mpsc::Sender<DeleteRequest>> {
         let key = (guild_id, channel_id);
 
-        let lock = self
-            .guild_locks
-            .entry(guild_id)
-            .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
-            .clone();
+        let lock = self.get_guild_lock(guild_id);
         let _guard = lock.lock().unwrap();
 
         if let Some(sender) = self.channels.get(&key) {
@@ -368,6 +398,30 @@ fn is_already_gone_error(err: &serenity::Error) -> bool {
         || err_str.contains("10003")
 }
 
+/// Janitor loop that periodically purges unreferenced moderation delete queue locks from RAM.
+pub async fn run_delete_queue_janitor(
+    coordinator: Arc<DeleteCoordinator>,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+    interval: std::time::Duration,
+) {
+    let mut timer = tokio::time::interval(interval);
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.recv() => {
+                break;
+            }
+            _ = timer.tick() => {
+                let pruned = coordinator.prune_unused_guild_locks();
+                if pruned > 0 {
+                    tracing::debug!(pruned, "pruned unreferenced delete queue guild locks from memory");
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,5 +564,80 @@ mod tests {
             "Missing Permissions (error 50013)",
         ));
         assert!(!is_already_gone_error(&perm_err));
+    }
+
+    #[test]
+    fn test_delete_coordinator_concurrent_guild_locks_share_same_mutex() {
+        let coordinator = DeleteCoordinator::new(2, 2);
+        let guild_id = GuildId::new(42);
+
+        let lock1 = coordinator.get_guild_lock(guild_id);
+        let lock2 = coordinator.get_guild_lock(guild_id);
+
+        assert!(
+            Arc::ptr_eq(&lock1, &lock2),
+            "Concurrent lock lookups for the same guild must share the identical Mutex instance"
+        );
+    }
+
+    #[test]
+    fn test_delete_coordinator_guild_locks_pruning_cleans_dead_weak_refs_without_affecting_active_locks()
+     {
+        let coordinator = DeleteCoordinator::new(2, 2);
+
+        // Retain a strong reference to lock for guild 42
+        let active_guild_id = GuildId::new(42);
+        let active_lock = coordinator.get_guild_lock(active_guild_id);
+
+        // Acquire and immediately drop locks for 100 other guilds (below the 256 opportunistic threshold)
+        for i in 1..=100 {
+            let gid = GuildId::new(100_000 + i);
+            let _ = coordinator.get_guild_lock(gid);
+        }
+
+        assert_eq!(
+            coordinator.guild_locks_len(),
+            101,
+            "Guild locks map should hold created entries before pruning"
+        );
+
+        // Prune unreferenced locks
+        let pruned = coordinator.prune_unused_guild_locks();
+        assert_eq!(
+            pruned, 100,
+            "Exactly 100 dead weak references must be pruned"
+        );
+
+        // The active guild lock for 42 must NOT have been pruned
+        assert_eq!(coordinator.guild_locks_len(), 1);
+        let reacquired_lock = coordinator.get_guild_lock(active_guild_id);
+        assert!(
+            Arc::ptr_eq(&active_lock, &reacquired_lock),
+            "Active lock must remain valid and share the same Mutex instance"
+        );
+
+        // Now drop the active lock; subsequent prune must reclaim the entry
+        drop(active_lock);
+        drop(reacquired_lock);
+        let pruned_remaining = coordinator.prune_unused_guild_locks();
+        assert_eq!(pruned_remaining, 1);
+        assert_eq!(coordinator.guild_locks_len(), 0);
+    }
+
+    #[test]
+    fn test_delete_coordinator_opportunistic_pruning_bounds_map_size() {
+        let coordinator = DeleteCoordinator::new(2, 2);
+
+        // Create 1000 locks without retaining strong references; opportunistic pruning at >= 256 should prevent unbounded growth
+        for i in 1..=1000 {
+            let gid = GuildId::new(200_000 + i);
+            let _ = coordinator.get_guild_lock(gid);
+        }
+
+        assert!(
+            coordinator.guild_locks_len() <= 256,
+            "Opportunistic pruning should bound map growth, but len was {}",
+            coordinator.guild_locks_len()
+        );
     }
 }
