@@ -353,6 +353,7 @@ Music integrations must comply with source-platform terms, copyright rules and D
 | --- | --- |
 | Ping/runtime diagnostic | Implemented |
 | Bot information | Implemented |
+| AFK system (persistent `/afk set/clear/status`, mention notifications, auto-clear on message, multi-tenant) | Implemented |
 | User information | Planned |
 | Avatar/banner lookup | Planned |
 | Server information | Planned |

@@ -360,6 +360,14 @@ pub struct BirthdayRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::FromRow)]
+pub struct AfkRecord {
+    pub guild_id: String,
+    pub user_id: String,
+    pub reason: String,
+    pub set_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct StarboardEntry {
     pub guild_id: String,
@@ -2841,6 +2849,31 @@ impl Storage {
         match self {
             Self::Memory(store) => store.delete_birthday(guild_id, user_id),
             Self::Postgres(store) => store.delete_birthday(guild_id, user_id).await,
+        }
+    }
+
+    pub async fn set_afk(&self, afk: AfkRecord) -> anyhow::Result<AfkRecord> {
+        match self {
+            Self::Memory(store) => store.set_afk(afk),
+            Self::Postgres(store) => store.set_afk(afk).await,
+        }
+    }
+
+    pub async fn get_afk(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Option<AfkRecord>> {
+        match self {
+            Self::Memory(store) => store.get_afk(guild_id, user_id),
+            Self::Postgres(store) => store.get_afk(guild_id, user_id).await,
+        }
+    }
+
+    pub async fn clear_afk(&self, guild_id: &str, user_id: &str) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => store.clear_afk(guild_id, user_id),
+            Self::Postgres(store) => store.clear_afk(guild_id, user_id).await,
         }
     }
 

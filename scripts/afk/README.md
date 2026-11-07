@@ -8,37 +8,32 @@ Silnik: **rusty-discord-bot (Rust + Lua 5.4)**
 ---
 
 ## 📌 Opis
-Zarządzanie statusem nieobecności AFK i automatyczne powiadomienia na czacie.
+Zarządzanie statusem nieobecności AFK, automatyczne powiadomienia przy wzmiankach użytkowników oraz automatyczne wyłączanie AFK po wysłaniu nowej wiadomości. Trwały stan przechowywany jest w PostgreSQL i MemoryStore z pełną izolacją per-gildia.
 
 ---
 
-## 📂 Zawartość folderu
-- `module.lua` — Pełna logika wykonawcza modułu w piaskownicy Lua (mlua).
-- `config.json` — Domyślna konfiguracja startowa modułu.
-- `README.md` — Niniejsza dokumentacja techniczna.
+## 📂 Komendy slash
+- `/afk set [reason:string]` — Włącza status AFK z opcjonalnym powodem (maks. 256 znaków).
+- `/afk clear` — Wyłącza Twój status AFK.
+- `/afk status` — Sprawdza Twój obecny status AFK oraz czas jego ustawienia.
+
+---
+
+## ⚡ Obsługa zdarzeń
+- `message_create`:
+  - Jeśli autor wiadomości był oznaczony jako AFK oraz włączona jest opcja `auto_clear_on_message` (domyślnie `true`), status jest automatycznie wyłączany i bot wysyła powiadomienie powitalne.
+  - Jeśli w treści wiadomości wspomniano użytkowników posiadających status AFK, bot informuje o ich nieobecności i powodzie bez pingowania (`allowed_mentions` wyczyszczone).
 
 ---
 
 ## ⚙️ Konfiguracja (`config.json`)
-Moduł ładuje swoje parametry początkowe z pliku `config.json`. Administratorzy mogą nadpisywać te wartości per-serwer w bazie PostgreSQL oraz przez panel WWW.
-
----
-
-## 🚀 Rejestracja w `install.xml`
-Wpis modułu w pliku instalatora `scripts/install.xml`:
-```xml
-<module id="afk" enabled="true" version="1.0.0">
-    <name>AFK System</name>
-    <description>Zarządzanie statusem nieobecności AFK i automatyczne powiadomienia na czacie.</description>
-    <folder>afk</folder>
-    <entry>module.lua</entry>
-    <config>config.json</config>
-    <author>Adrian Banach</author>
-    <category>utility</category>
-</module>
-```
+- `auto_clear_on_message` (`boolean`, domyślnie `true`) — Automatyczne zdejmowanie AFK po napisaniu wiadomości.
+- `max_reason_length` (`integer`, min `10`, max `500`, domyślnie `256`) — Maksymalna długość powodu.
+- `afk_prefix` (`string`, domyślnie `"[AFK] "`) — Prefiks dla powiadomień.
 
 ---
 
 ## 🛡️ Bezpieczeństwo i audyt
-Wszystkie krytyczne operacje podlegają walidacji uprawnień Discorda, limitom zapytań (rate limiting) oraz rejestracji w audycie platformy.
+- Wszystkie operacje podlegają izolacji per-gildia (tenant isolation).
+- Audytowane zdarzenia: `afk_set`, `afk_clear`, `afk_auto_clear`.
+- Usunięcie danych użytkownika w ramach RODO (`/privacy/delete`) automatycznie czyści status AFK.

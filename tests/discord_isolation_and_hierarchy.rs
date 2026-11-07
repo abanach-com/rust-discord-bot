@@ -5318,3 +5318,252 @@ async fn test_quotes_and_birthdays_privacy_erasure_and_export_suite() {
 
     shard_manager.shutdown_all().await;
 }
+
+#[tokio::test]
+async fn test_afk_storage_and_lifecycle_suite() {
+    use rusty_discord_bot::discord::afk::{AfkExecutionContext, execute_afk_action};
+    use rusty_discord_bot::lua::AfkOperation;
+    use serenity::all::{ChannelId, GuildId, Permissions, UserId};
+
+    let (ctx, _mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state().await;
+
+    let guild_a = "100";
+    let guild_b = "200";
+    let user_1 = UserId::new(111111111111111111);
+    let user_2 = UserId::new(222222222222222222);
+
+    // 1. Initial status check when not AFK
+    let res_status_none = execute_afk_action(
+        &ctx,
+        &state,
+        "afk",
+        AfkExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(user_1),
+            Permissions::empty(),
+            false,
+        ),
+        &AfkOperation::Status { user_id: None },
+    )
+    .await
+    .unwrap();
+    assert!(
+        res_status_none
+            .unwrap()
+            .contains("nie ma obecnie aktywnego statusu AFK")
+    );
+
+    // 2. Set AFK for user_1 in Guild A
+    let res_set = execute_afk_action(
+        &ctx,
+        &state,
+        "afk",
+        AfkExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(user_1),
+            Permissions::empty(),
+            false,
+        ),
+        &AfkOperation::Set {
+            reason: Some("Piszę kod w Rust".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(res_set.unwrap().contains("Piszę kod w Rust"));
+
+    // Set AFK for user_1 in Guild B with different reason (multi-tenant isolation)
+    let _ = execute_afk_action(
+        &ctx,
+        &state,
+        "afk",
+        AfkExecutionContext::new(
+            Some(GuildId::new(200)),
+            Some(ChannelId::new(201)),
+            Some(user_1),
+            Permissions::empty(),
+            false,
+        ),
+        &AfkOperation::Set {
+            reason: Some("Inny serwer AFK".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+
+    // 3. Status check in Guild A returns Guild A's status
+    let res_status_a = execute_afk_action(
+        &ctx,
+        &state,
+        "afk",
+        AfkExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(user_1),
+            Permissions::empty(),
+            false,
+        ),
+        &AfkOperation::Status { user_id: None },
+    )
+    .await
+    .unwrap();
+    assert!(res_status_a.unwrap().contains("Piszę kod w Rust"));
+
+    // Status check in Guild B returns Guild B's status
+    let res_status_b = execute_afk_action(
+        &ctx,
+        &state,
+        "afk",
+        AfkExecutionContext::new(
+            Some(GuildId::new(200)),
+            Some(ChannelId::new(201)),
+            Some(user_1),
+            Permissions::empty(),
+            false,
+        ),
+        &AfkOperation::Status { user_id: None },
+    )
+    .await
+    .unwrap();
+    assert!(res_status_b.unwrap().contains("Inny serwer AFK"));
+
+    // 4. OnMessage mention: user_2 mentions user_1 in Guild A
+    let _ = execute_afk_action(
+        &ctx,
+        &state,
+        "afk",
+        AfkExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(user_2),
+            Permissions::empty(),
+            false,
+        ),
+        &AfkOperation::OnMessage {
+            author_id: user_2.get().to_string(),
+            mentioned_user_ids: vec![user_1.get().to_string()],
+            auto_clear: false,
+        },
+    )
+    .await
+    .unwrap();
+    // user_1 is still AFK
+    assert!(
+        state
+            .storage
+            .get_afk(guild_a, &user_1.get().to_string())
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // 5. OnMessage auto_clear: user_1 sends a message with auto_clear = true
+    let _ = execute_afk_action(
+        &ctx,
+        &state,
+        "afk",
+        AfkExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(user_1),
+            Permissions::empty(),
+            false,
+        ),
+        &AfkOperation::OnMessage {
+            author_id: user_1.get().to_string(),
+            mentioned_user_ids: vec![],
+            auto_clear: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    // user_1's AFK in Guild A is now cleared!
+    assert!(
+        state
+            .storage
+            .get_afk(guild_a, &user_1.get().to_string())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // user_1's AFK in Guild B is STILL intact (tenant isolation)!
+    assert!(
+        state
+            .storage
+            .get_afk(guild_b, &user_1.get().to_string())
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // 6. Explicit clear
+    let _ = execute_afk_action(
+        &ctx,
+        &state,
+        "afk",
+        AfkExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(user_1),
+            Permissions::empty(),
+            false,
+        ),
+        &AfkOperation::Set { reason: None },
+    )
+    .await
+    .unwrap();
+
+    let res_clear = execute_afk_action(
+        &ctx,
+        &state,
+        "afk",
+        AfkExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(user_1),
+            Permissions::empty(),
+            false,
+        ),
+        &AfkOperation::Clear,
+    )
+    .await
+    .unwrap();
+    assert!(res_clear.unwrap().contains("został wyłączony"));
+
+    // 7. Erasure clears AFK
+    let _ = execute_afk_action(
+        &ctx,
+        &state,
+        "afk",
+        AfkExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(user_1),
+            Permissions::empty(),
+            false,
+        ),
+        &AfkOperation::Set { reason: None },
+    )
+    .await
+    .unwrap();
+    let rep = state
+        .storage
+        .erase_guild_user_data(guild_a, &user_1.get().to_string())
+        .await
+        .unwrap();
+    assert!(rep.related_records_erased >= 1);
+    assert!(
+        state
+            .storage
+            .get_afk(guild_a, &user_1.get().to_string())
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    shard_manager.shutdown_all().await;
+}

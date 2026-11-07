@@ -10,16 +10,16 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::{
-    AdjustMemberProgressParams, AiGuildBudget, AiKnowledgeDocument, AuditLogEntry, BirthdayRecord,
-    CardCollection, CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome, CommandPolicyRule,
-    CommunityPoll, CompanionChannelLease, CompanionChannelMapping, CompanionMappingItem,
-    CountingGame, CrimeClaimOutcome, CustomAutomation, DailyClaimOutcome, DynamicVoiceRoom,
-    EconomyIdempotencyEntry, EconomyPurchaseRequestRecord, EventRoster, FaqEntry, FeedSubscription,
-    GameAccountLink, GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway,
-    GuildModuleSettings, IntegrationConnection, IntegrationDeliveryLog,
-    IntegrationWebhookSubscription, InviteTracking, KickStreamSubscription, LinkedAccount,
-    MAX_COMPANION_MAPPINGS_PER_GUILD, McpToolAuthorization, MemberIdentityRecord, MemberProgress,
-    MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
+    AdjustMemberProgressParams, AfkRecord, AiGuildBudget, AiKnowledgeDocument, AuditLogEntry,
+    BirthdayRecord, CardCollection, CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome,
+    CommandPolicyRule, CommunityPoll, CompanionChannelLease, CompanionChannelMapping,
+    CompanionMappingItem, CountingGame, CrimeClaimOutcome, CustomAutomation, DailyClaimOutcome,
+    DynamicVoiceRoom, EconomyIdempotencyEntry, EconomyPurchaseRequestRecord, EventRoster, FaqEntry,
+    FeedSubscription, GameAccountLink, GamingHubGameStatus, GitHubDevopsMapping,
+    GitLabSubscription, Giveaway, GuildModuleSettings, IntegrationConnection,
+    IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking, KickStreamSubscription,
+    LinkedAccount, MAX_COMPANION_MAPPINGS_PER_GUILD, McpToolAuthorization, MemberIdentityRecord,
+    MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
     ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
     ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
     ProgressionSeason, QuoteRecord, ReactionRoleBinding, ReactionRoleGrant,
@@ -232,6 +232,7 @@ pub struct MemoryStore {
     reaction_role_grants: Arc<DashMap<(String, String, Uuid), ReactionRoleGrant>>,
     quotes: Arc<DashMap<Uuid, QuoteRecord>>,
     birthdays: Arc<DashMap<(String, String), BirthdayRecord>>,
+    afk: Arc<DashMap<(String, String), AfkRecord>>,
 }
 
 impl MemoryStore {
@@ -635,6 +636,14 @@ impl MemoryStore {
 
         if self
             .birthdays
+            .remove(&(guild_id.to_string(), user_id.to_string()))
+            .is_some()
+        {
+            related_erased += 1;
+        }
+
+        if self
+            .afk
             .remove(&(guild_id.to_string(), user_id.to_string()))
             .is_some()
         {
@@ -2401,6 +2410,28 @@ impl MemoryStore {
         validate_snowflake("user_id", user_id)?;
         let key = (guild_id.to_owned(), user_id.to_owned());
         Ok(self.birthdays.remove(&key).is_some())
+    }
+
+    pub fn set_afk(&self, afk: AfkRecord) -> anyhow::Result<AfkRecord> {
+        validate_snowflake("guild_id", &afk.guild_id)?;
+        validate_snowflake("user_id", &afk.user_id)?;
+        let key = (afk.guild_id.clone(), afk.user_id.clone());
+        self.afk.insert(key, afk.clone());
+        Ok(afk)
+    }
+
+    pub fn get_afk(&self, guild_id: &str, user_id: &str) -> anyhow::Result<Option<AfkRecord>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+        let key = (guild_id.to_owned(), user_id.to_owned());
+        Ok(self.afk.get(&key).map(|e| e.value().clone()))
+    }
+
+    pub fn clear_afk(&self, guild_id: &str, user_id: &str) -> anyhow::Result<bool> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+        let key = (guild_id.to_owned(), user_id.to_owned());
+        Ok(self.afk.remove(&key).is_some())
     }
 
     pub fn record_starboard_entry(

@@ -89,21 +89,13 @@ return {
             }
         end
 
-        local user_id = ctx.user_id
-
         if sub == "set" then
-            local reason = opts.reason or t("modules.afk.default_reason", ctx)
+            local reason = opts.reason
             return {
                 {
-                    type = "reply",
-                    content = t("modules.afk.set_reply", { user = user_id, reason = reason }, ctx),
-                    ephemeral = false,
-                },
-                {
-                    type = "audit",
-                    event = "afk_set",
-                    data = {
-                        user_id = user_id,
+                    type = "afk",
+                    operation = {
+                        operation = "set",
                         reason = reason,
                     },
                 },
@@ -113,9 +105,10 @@ return {
         if sub == "clear" then
             return {
                 {
-                    type = "reply",
-                    content = t("modules.afk.clear_reply", { user = user_id }, ctx),
-                    ephemeral = true,
+                    type = "afk",
+                    operation = {
+                        operation = "clear",
+                    },
                 },
             }
         end
@@ -123,9 +116,10 @@ return {
         if sub == "status" then
             return {
                 {
-                    type = "reply",
-                    content = t("modules.afk.status_reply", { user = user_id }, ctx),
-                    ephemeral = true,
+                    type = "afk",
+                    operation = {
+                        operation = "status",
+                    },
                 },
             }
         end
@@ -134,6 +128,40 @@ return {
     end,
 
     on_event = function(event, ctx)
-        return {}
+        if event ~= "message_create" then
+            return {}
+        end
+
+        local author_id = tostring(ctx.actor_id or "")
+        if author_id == "" then
+            return {}
+        end
+
+        local mentions = {}
+        if type(ctx.data) == "table" and type(ctx.data.mentions) == "table" then
+            for _, m in ipairs(ctx.data.mentions) do
+                local mid = tostring(m or "")
+                if mid ~= "" then
+                    table.insert(mentions, mid)
+                end
+            end
+        end
+
+        local auto_clear = true
+        if type(ctx.config) == "table" and ctx.config.auto_clear_on_message == false then
+            auto_clear = false
+        end
+
+        return {
+            {
+                type = "afk",
+                operation = {
+                    operation = "on_message",
+                    author_id = author_id,
+                    mentioned_user_ids = mentions,
+                    auto_clear = auto_clear,
+                },
+            },
+        }
     end,
 }

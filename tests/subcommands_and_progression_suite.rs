@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use rusty_discord_bot::lua::{
-    BirthdayOperation, EconomyOperation, GiveawayOperation, LuaAction, LuaEngine,
-    LuaExecutionContext, LuaLimits, ProgressionOperation, QuoteOperation, ReactionRoleOperation,
-    StarboardOperation, TagOperation,
+    AfkOperation, BirthdayOperation, EconomyOperation, GiveawayOperation, LuaAction, LuaEngine,
+    LuaEventContext, LuaExecutionContext, LuaLimits, ProgressionOperation, QuoteOperation,
+    ReactionRoleOperation, StarboardOperation, TagOperation,
 };
 use serde_json::json;
 
@@ -414,25 +414,64 @@ async fn test_afk_subcommands() {
         )
         .await
         .expect("afk set should succeed");
-    assert!(
-        actions
-            .iter()
-            .any(|a| matches!(a, LuaAction::Audit { event, .. } if event == "afk_set"))
-    );
+    assert!(actions.iter().any(|a| matches!(
+        a,
+        LuaAction::Afk {
+            operation: AfkOperation::Set { reason: Some(r) }
+        } if r == "Working on Rust"
+    )));
 
     // /afk clear
     let actions = eng
         .execute_command("afk", "afk", context(json!({ "clear": {} })))
         .await
         .expect("afk clear should succeed");
-    assert!(actions.iter().any(|a| matches!(a, LuaAction::Reply { .. })));
+    assert!(actions.iter().any(|a| matches!(
+        a,
+        LuaAction::Afk {
+            operation: AfkOperation::Clear
+        }
+    )));
 
     // /afk status
     let actions = eng
         .execute_command("afk", "afk", context(json!({ "status": {} })))
         .await
         .expect("afk status should succeed");
-    assert!(actions.iter().any(|a| matches!(a, LuaAction::Reply { .. })));
+    assert!(actions.iter().any(|a| matches!(
+        a,
+        LuaAction::Afk {
+            operation: AfkOperation::Status { .. }
+        }
+    )));
+
+    // Event message_create
+    let event_ctx = LuaEventContext {
+        name: "message_create".to_owned(),
+        guild_id: Some("100".to_owned()),
+        channel_id: Some("200".to_owned()),
+        actor_id: Some("300".to_owned()),
+        data: json!({
+            "mentions": ["400", "500"]
+        }),
+        config: json!({
+            "auto_clear_on_message": true
+        }),
+    };
+    let event_actions = eng
+        .execute_event("afk", "message_create", event_ctx)
+        .await
+        .expect("afk on_event should succeed");
+    assert!(event_actions.iter().any(|a| matches!(
+        a,
+        LuaAction::Afk {
+            operation: AfkOperation::OnMessage {
+                author_id,
+                mentioned_user_ids,
+                auto_clear: true,
+            }
+        } if author_id == "300" && mentioned_user_ids == &vec!["400".to_string(), "500".to_string()]
+    )));
 
     // Missing subcommand
     let actions = eng

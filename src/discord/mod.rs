@@ -1,3 +1,4 @@
+pub mod afk;
 pub mod birthdays;
 mod commands;
 pub mod companion;

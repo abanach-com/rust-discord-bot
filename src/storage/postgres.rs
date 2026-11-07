@@ -9,16 +9,16 @@ use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
 use uuid::Uuid;
 
 use super::{
-    AdjustMemberProgressParams, AiGuildBudget, AiKnowledgeDocument, AuditLogEntry, BirthdayRecord,
-    CardCollection, CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome, CommandPolicyRule,
-    CommunityPoll, CompanionChannelLease, CompanionChannelMapping, CompanionMappingItem,
-    CountingGame, CrimeClaimOutcome, CustomAutomation, DailyClaimOutcome, DynamicVoiceRoom,
-    EventRoster, FaqEntry, FeedSubscription, GameAccountLink, GamingHubGameStatus,
-    GitHubDevopsMapping, GitLabSubscription, Giveaway, GuildModuleSettings, HelpForumConfig,
-    HelpForumSession, HelpForumStats, IntegrationConnection, IntegrationDeliveryLog,
-    IntegrationWebhookSubscription, InviteTracking, KickStreamSubscription, LinkedAccount,
-    MAX_COMPANION_MAPPINGS_PER_GUILD, McpToolAuthorization, MemberIdentityRecord, MemberProgress,
-    MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
+    AdjustMemberProgressParams, AfkRecord, AiGuildBudget, AiKnowledgeDocument, AuditLogEntry,
+    BirthdayRecord, CardCollection, CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome,
+    CommandPolicyRule, CommunityPoll, CompanionChannelLease, CompanionChannelMapping,
+    CompanionMappingItem, CountingGame, CrimeClaimOutcome, CustomAutomation, DailyClaimOutcome,
+    DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink,
+    GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway, GuildModuleSettings,
+    HelpForumConfig, HelpForumSession, HelpForumStats, IntegrationConnection,
+    IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking, KickStreamSubscription,
+    LinkedAccount, MAX_COMPANION_MAPPINGS_PER_GUILD, McpToolAuthorization, MemberIdentityRecord,
+    MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
     ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
     ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
     ProgressionSeason, QuoteRecord, ReactionRoleBinding, ReactionRoleGrant,
@@ -598,6 +598,15 @@ impl PostgresStore {
                 .await?
                 .rows_affected();
         related_erased += deleted_birthdays as usize;
+
+        let deleted_afk =
+            sqlx::query("DELETE FROM member_afk WHERE guild_id = $1 AND user_id = $2")
+                .bind(guild_id)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+        related_erased += deleted_afk as usize;
 
         tx.commit().await?;
 
@@ -3345,6 +3354,71 @@ impl PostgresStore {
         let result = sqlx::query(
             r#"
             DELETE FROM guild_birthdays
+            WHERE guild_id = $1 AND user_id = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn set_afk(&self, afk: AfkRecord) -> anyhow::Result<AfkRecord> {
+        validate_snowflake("guild_id", &afk.guild_id)?;
+        validate_snowflake("user_id", &afk.user_id)?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO member_afk (guild_id, user_id, reason, set_at)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (guild_id, user_id)
+            DO UPDATE SET
+                reason = EXCLUDED.reason,
+                set_at = EXCLUDED.set_at
+            "#,
+        )
+        .bind(&afk.guild_id)
+        .bind(&afk.user_id)
+        .bind(&afk.reason)
+        .bind(afk.set_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(afk)
+    }
+
+    pub async fn get_afk(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Option<AfkRecord>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+
+        let row = sqlx::query_as::<_, AfkRecord>(
+            r#"
+            SELECT guild_id, user_id, reason, set_at
+            FROM member_afk
+            WHERE guild_id = $1 AND user_id = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    pub async fn clear_afk(&self, guild_id: &str, user_id: &str) -> anyhow::Result<bool> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+
+        let result = sqlx::query(
+            r#"
+            DELETE FROM member_afk
             WHERE guild_id = $1 AND user_id = $2
             "#,
         )
