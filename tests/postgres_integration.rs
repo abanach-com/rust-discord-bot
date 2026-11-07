@@ -322,7 +322,14 @@ async fn test_postgres_integration_suite() {
             RETURN NEW;
         END;
         $$ LANGUAGE plpgsql;
+        "#,
+    )
+    .execute(&pg_pool)
+    .await
+    .expect("install simulated failure trigger function");
 
+    sqlx::query(
+        r#"
         CREATE TRIGGER trigger_fail_terminalize
         BEFORE UPDATE ON scheduled_jobs
         FOR EACH ROW
@@ -362,15 +369,15 @@ async fn test_postgres_integration_suite() {
     );
 
     // Drop the simulated trigger
-    sqlx::query(
-        r#"
-        DROP TRIGGER IF EXISTS trigger_fail_terminalize ON scheduled_jobs;
-        DROP FUNCTION IF EXISTS fail_terminalize_processing();
-        "#,
-    )
-    .execute(&pg_pool)
-    .await
-    .expect("drop simulated failure trigger");
+    sqlx::query("DROP TRIGGER IF EXISTS trigger_fail_terminalize ON scheduled_jobs;")
+        .execute(&pg_pool)
+        .await
+        .expect("drop simulated failure trigger");
+
+    sqlx::query("DROP FUNCTION IF EXISTS fail_terminalize_processing();")
+        .execute(&pg_pool)
+        .await
+        .expect("drop simulated failure function");
 
     // Call finalize_expired_leases or claim_due again: now cleanup succeeds
     let terminalized_count = scheduler_with_metrics

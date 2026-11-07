@@ -277,8 +277,8 @@ test("Delayed response for Guild A does NOT render into Guild B after fast guild
         json: async () => ({
           user: { id: "1001", username: "Tester" },
           guilds: [
-            { id: "guild-a", name: "Guild A" },
-            { id: "guild-b", name: "Guild B" },
+            { id: "guild-a", name: "Guild A", permissions: "32" },
+            { id: "guild-b", name: "Guild B", permissions: "32" },
           ],
           csrf_token: "csrf-token-123",
         }),
@@ -367,8 +367,8 @@ test("Switching guild aborts in-flight fetch requests via AbortController", asyn
         json: async () => ({
           user: { id: "1001", username: "Tester" },
           guilds: [
-            { id: "guild-a", name: "Guild A" },
-            { id: "guild-b", name: "Guild B" },
+            { id: "guild-a", name: "Guild A", permissions: "32" },
+            { id: "guild-b", name: "Guild B", permissions: "32" },
           ],
           csrf_token: "token",
         }),
@@ -408,8 +408,8 @@ test("Saving a module from Guild A is rejected and NEVER directs save to Guild B
         json: async () => ({
           user: { id: "1001", username: "Tester" },
           guilds: [
-            { id: "guild-a", name: "Guild A" },
-            { id: "guild-b", name: "Guild B" },
+            { id: "guild-a", name: "Guild A", permissions: "32" },
+            { id: "guild-b", name: "Guild B", permissions: "32" },
           ],
           csrf_token: "token",
         }),
@@ -483,8 +483,8 @@ test("In-flight save for Guild A does not mutate Guild B UI or KPIs when it reso
         json: async () => ({
           user: { id: "1001", username: "Tester" },
           guilds: [
-            { id: "guild-a", name: "Guild A" },
-            { id: "guild-b", name: "Guild B" },
+            { id: "guild-a", name: "Guild A", permissions: "32" },
+            { id: "guild-b", name: "Guild B", permissions: "32" },
           ],
           csrf_token: "token",
         }),
@@ -549,8 +549,8 @@ test("Switching guilds resets modulesData and KPIs immediately to avoid leakage"
         json: async () => ({
           user: { id: "1001", username: "Tester" },
           guilds: [
-            { id: "guild-a", name: "Guild A" },
-            { id: "guild-b", name: "Guild B" },
+            { id: "guild-a", name: "Guild A", permissions: "32" },
+            { id: "guild-b", name: "Guild B", permissions: "32" },
           ],
           csrf_token: "token",
         }),
@@ -596,8 +596,8 @@ test("Moderation case details and notes are bound to targetGuild and blocked aft
         json: async () => ({
           user: { id: "1001", username: "Tester" },
           guilds: [
-            { id: "guild-a", name: "Guild A" },
-            { id: "guild-b", name: "Guild B" },
+            { id: "guild-a", name: "Guild A", permissions: "32" },
+            { id: "guild-b", name: "Guild B", permissions: "32" },
           ],
           csrf_token: "token",
         }),
@@ -700,8 +700,8 @@ test("Voiding a case is blocked if guild changed before dialog submission", asyn
         json: async () => ({
           user: { id: "1001", username: "Tester" },
           guilds: [
-            { id: "guild-a", name: "Guild A" },
-            { id: "guild-b", name: "Guild B" },
+            { id: "guild-a", name: "Guild A", permissions: "32" },
+            { id: "guild-b", name: "Guild B", permissions: "32" },
           ],
           csrf_token: "token",
         }),
