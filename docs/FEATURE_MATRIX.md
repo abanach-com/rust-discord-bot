@@ -243,7 +243,7 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 | Custom tags persistence and management (`/tag`) | Implemented |
 | Community submissions delivery assurance (`/report`, `/suggest`, etc.) | Implemented |
 | Suggestions with voting | Planned |
-| Starboard | Implemented |
+| Starboard (persistent `/starboard config` & `stats`, REST tracking) | Implemented |
 | Counting channels | Implemented |
 | Word-chain games | Planned |
 | Trivia | Planned |

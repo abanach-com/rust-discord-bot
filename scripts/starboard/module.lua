@@ -89,13 +89,16 @@ return {
         end
 
         if sub == "config" then
-            local ch = opts.channel or "0"
-            local thresh = opts.threshold or 3
+            local ch = tostring(opts.channel or "")
+            local thresh = tonumber(opts.threshold) or 3
             return {
                 {
-                    type = "reply",
-                    content = t("modules.starboard.config_reply", { channel = ch, threshold = thresh }, ctx),
-                    ephemeral = true,
+                    type = "starboard",
+                    operation = {
+                        operation = "configure",
+                        channel_id = ch,
+                        threshold = thresh,
+                    },
                 },
             }
         end

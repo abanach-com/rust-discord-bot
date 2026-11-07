@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use rusty_discord_bot::lua::{
     EconomyOperation, GiveawayOperation, LuaAction, LuaEngine, LuaExecutionContext, LuaLimits,
-    ProgressionOperation, ReactionRoleOperation, TagOperation,
+    ProgressionOperation, ReactionRoleOperation, StarboardOperation, TagOperation,
 };
 use serde_json::json;
 
@@ -637,7 +637,15 @@ async fn test_starboard_subcommands() {
         )
         .await
         .expect("starboard config should succeed");
-    assert!(actions.iter().any(|a| matches!(a, LuaAction::Reply { .. })));
+    assert!(actions.iter().any(|a| matches!(
+        a,
+        LuaAction::Starboard {
+            operation: StarboardOperation::Configure {
+                channel_id,
+                threshold,
+            }
+        } if channel_id == "987654" && *threshold == 5
+    )));
 
     // /starboard stats
     let actions = eng

@@ -4389,3 +4389,188 @@ async fn test_scheduler_destination_channel_authorization_suite() {
 
     shard_manager.shutdown_all().await;
 }
+
+#[tokio::test]
+async fn test_starboard_config_execution_and_persistence_suite() {
+    use rusty_discord_bot::discord::starboard::{
+        StarboardExecutionContext, execute_starboard_action,
+    };
+    use rusty_discord_bot::lua::StarboardOperation;
+    use serenity::all::{ChannelId, GuildId, Permissions, UserId};
+
+    let (ctx, _mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state().await;
+
+    let guild_id = GuildId::new(100);
+    let owner_id = UserId::new(111111111111111111);
+    let member_id = UserId::new(333333333333333333);
+    let valid_channel_id = "101".to_string();
+
+    // 1. Valid configuration by Owner / Administrator
+    let res = execute_starboard_action(
+        &ctx,
+        &state,
+        "starboard",
+        StarboardExecutionContext::new(
+            Some(guild_id),
+            Some(ChannelId::new(101)),
+            Some(owner_id),
+            Permissions::ADMINISTRATOR,
+            true,
+        ),
+        &StarboardOperation::Configure {
+            channel_id: valid_channel_id.clone(),
+            threshold: 5,
+        },
+    )
+    .await;
+
+    assert!(
+        res.is_ok(),
+        "Starboard configure by owner should succeed: {:?}",
+        res.err()
+    );
+    let confirmation = res.unwrap().expect("Should have confirmation message");
+    assert!(confirmation.contains("<#101>") && confirmation.contains("5"));
+
+    // Verify persistence in storage
+    let settings = state
+        .storage
+        .get_module_settings("100", "starboard")
+        .await
+        .unwrap()
+        .expect("Settings should exist");
+    assert_eq!(settings.config["channel_id"], "101");
+    assert_eq!(settings.config["threshold"], 5);
+
+    // Verify audit log
+    let audits = state.storage.list_audit_events("100", 10).await.unwrap();
+    assert!(audits.iter().any(|a| a.event == "starboard_config_updated"));
+
+    // 2. Verify Lua engine executes /starboard stats with the new ctx.config
+    let scripts = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts");
+    let eng = rusty_discord_bot::lua::LuaEngine::load(
+        scripts,
+        rusty_discord_bot::lua::LuaLimits {
+            memory_bytes: 4 * 1024 * 1024,
+            instruction_limit: 200_000,
+            hook_granularity: 100,
+        },
+    )
+    .expect("LuaEngine load");
+
+    let stats_ctx = rusty_discord_bot::lua::LuaExecutionContext {
+        guild_id: Some("100".to_string()),
+        channel_id: "101".to_string(),
+        user_id: "111111111111111111".to_string(),
+        user_name: "Owner".to_string(),
+        member_roles: Vec::new(),
+        member_permissions: "8".to_string(),
+        locale: "en-US".to_string(),
+        config: settings.config.clone(),
+        options: serde_json::json!({ "stats": {} }),
+    };
+    let actions = eng
+        .execute_command("starboard", "starboard", stats_ctx)
+        .await
+        .expect("stats command should succeed");
+    assert!(actions.iter().any(|a| matches!(
+        a,
+        rusty_discord_bot::lua::LuaAction::Reply { content, .. }
+        if content.contains("101") && content.contains("5")
+    )));
+
+    // 3. Rejection when actor lacks MANAGE_GUILD / ADMINISTRATOR
+    let res_no_perm = execute_starboard_action(
+        &ctx,
+        &state,
+        "starboard",
+        StarboardExecutionContext::new(
+            Some(guild_id),
+            Some(ChannelId::new(101)),
+            Some(member_id),
+            Permissions::empty(),
+            true,
+        ),
+        &StarboardOperation::Configure {
+            channel_id: valid_channel_id.clone(),
+            threshold: 5,
+        },
+    )
+    .await;
+    assert!(
+        res_no_perm.is_err(),
+        "Non-admin actor without MANAGE_GUILD must be rejected"
+    );
+    assert!(
+        res_no_perm
+            .unwrap_err()
+            .to_string()
+            .contains("MANAGE_GUILD")
+    );
+
+    // 4. Rejection when channel belongs to foreign guild (channel 201 on guild 200)
+    let res_foreign = execute_starboard_action(
+        &ctx,
+        &state,
+        "starboard",
+        StarboardExecutionContext::new(
+            Some(guild_id),
+            Some(ChannelId::new(101)),
+            Some(owner_id),
+            Permissions::ADMINISTRATOR,
+            true,
+        ),
+        &StarboardOperation::Configure {
+            channel_id: "201".to_string(),
+            threshold: 5,
+        },
+    )
+    .await;
+    assert!(
+        res_foreign.is_err(),
+        "Foreign guild channel must be rejected"
+    );
+    assert!(
+        res_foreign
+            .unwrap_err()
+            .to_string()
+            .contains("innego serwera")
+    );
+
+    // 5. Rejection when channel is category (channel 401)
+    let res_cat = execute_starboard_action(
+        &ctx,
+        &state,
+        "starboard",
+        StarboardExecutionContext::new(
+            Some(guild_id),
+            Some(ChannelId::new(101)),
+            Some(owner_id),
+            Permissions::ADMINISTRATOR,
+            true,
+        ),
+        &StarboardOperation::Configure {
+            channel_id: "401".to_string(),
+            threshold: 5,
+        },
+    )
+    .await;
+    assert!(res_cat.is_err(), "Category channel must be rejected");
+    assert!(res_cat.unwrap_err().to_string().contains("Kategoria"));
+
+    // 6. Validation of threshold out of bounds
+    let op_bad_threshold = StarboardOperation::Configure {
+        channel_id: "101".to_string(),
+        threshold: 0,
+    };
+    assert!(op_bad_threshold.validate().is_err());
+
+    let op_bad_threshold2 = StarboardOperation::Configure {
+        channel_id: "101".to_string(),
+        threshold: 26,
+    };
+    assert!(op_bad_threshold2.validate().is_err());
+
+    shard_manager.shutdown_all().await;
+}

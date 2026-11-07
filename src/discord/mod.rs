@@ -14,6 +14,7 @@ pub mod music;
 pub mod progression;
 pub mod reaction_roles;
 pub mod scheduler;
+pub mod starboard;
 pub mod tags;
 pub mod tickets;
 
