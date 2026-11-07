@@ -1290,6 +1290,65 @@ async fn test_postgres_integration_suite() {
     assert_eq!(purchases_list.len(), 1);
     assert_eq!(purchases_list[0].id, purchase.id);
 
+    // 20b. Test Issue #293: claim_store_role_delivery concurrency & terminal completed status in PostgreSQL
+    let (_p_item, p_purchase, _) = store
+        .purchase_store_item(&guild_id, &store_user, item.id, Some("pg_idem_claim_race"))
+        .await
+        .unwrap();
+    assert_eq!(p_purchase.fulfillment_status, "pending");
+
+    let mut claim_handles = Vec::new();
+    for _ in 0..20 {
+        let store_clone = store.clone();
+        let pid = p_purchase.id;
+        claim_handles.push(tokio::spawn(async move {
+            store_clone.claim_store_role_delivery(pid).await.unwrap()
+        }));
+    }
+
+    let mut pg_true_count = 0;
+    let mut pg_false_count = 0;
+    for h in claim_handles {
+        if h.await.unwrap() {
+            pg_true_count += 1;
+        } else {
+            pg_false_count += 1;
+        }
+    }
+    assert_eq!(
+        pg_true_count, 1,
+        "Exactly one task must claim delivery on PostgreSQL"
+    );
+    assert_eq!(
+        pg_false_count, 19,
+        "All other 19 tasks must fail claim on PostgreSQL"
+    );
+
+    // Complete the delivery
+    store
+        .update_store_purchase_fulfillment(p_purchase.id, "completed", None, Some(Utc::now()))
+        .await
+        .unwrap();
+
+    // Verify 'failed' cannot overwrite 'completed'
+    store
+        .update_store_purchase_fulfillment(
+            p_purchase.id,
+            "failed",
+            Some("attempted overwrite"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let p_check = store
+        .get_store_purchase(p_purchase.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(p_check.fulfillment_status, "completed");
+    assert!(p_check.failure_reason.is_none());
+
     // 21. Test Member Intelligence in PostgreSQL
     use rusty_discord_bot::storage::{MemberSearchFilter, UpsertMemberSnapshotParams};
 

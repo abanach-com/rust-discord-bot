@@ -233,68 +233,126 @@ pub async fn execute(
                     .unwrap_or("błąd doręczenia roli");
                 format!("failed: {reason}")
             } else if let Some(role_id_str) = &item.role_id {
-                let role_id_num = role_id_str
-                    .parse::<u64>()
-                    .map_err(|_| anyhow!("nieprawidłowy identyfikator roli w przedmiocie"))?;
-                let role_id_typed = RoleId::new(role_id_num);
+                let claimed = state.storage.claim_store_role_delivery(purchase.id).await?;
 
-                let role_safety = if let Ok(partial_guild) =
-                    guild_id.to_partial_guild(&ctx.http).await
-                {
-                    if let Some(role) = partial_guild.roles.get(&role_id_typed) {
-                        if role.managed {
-                            Err(
-                                "Role zarządzane przez integracje nie mogą być nadawane przez sklep",
-                            )
-                        } else if crate::discord::reaction_roles::is_privileged_role_permissions(
-                            role.permissions,
-                        ) {
-                            Err("Rola posiada uprawnienia administracyjne i nie może zostać nadana")
-                        } else {
-                            Ok(())
-                        }
+                if !claimed {
+                    let fresh_purchase = state
+                        .storage
+                        .get_store_purchase(purchase.id)
+                        .await?
+                        .unwrap_or_else(|| purchase.clone());
+                    if fresh_purchase.fulfillment_status == "completed" {
+                        "completed".to_string()
+                    } else if fresh_purchase.fulfillment_status == "failed" {
+                        let reason = fresh_purchase
+                            .failure_reason
+                            .as_deref()
+                            .unwrap_or("błąd doręczenia roli");
+                        format!("failed: {reason}")
                     } else {
-                        Err("Rola nie istnieje na tym serwerze")
+                        "processing".to_string()
                     }
                 } else {
-                    Ok(())
-                };
+                    let role_id_num = role_id_str
+                        .parse::<u64>()
+                        .map_err(|_| anyhow!("nieprawidłowy identyfikator roli w przedmiocie"))?;
+                    let role_id_typed = RoleId::new(role_id_num);
 
-                match role_safety {
-                    Err(err_msg) => {
-                        let _ = state
-                            .storage
-                            .update_store_purchase_fulfillment(
-                                purchase.id,
-                                "failed",
-                                Some(err_msg),
-                                None,
-                            )
-                            .await;
-                        format!("failed: {err_msg}")
-                    }
-                    Ok(()) => match ensure_role_hierarchy(ctx, guild_id, None, role_id_typed).await
+                    let role_safety = if let Ok(partial_guild) =
+                        guild_id.to_partial_guild(&ctx.http).await
                     {
-                        Ok(()) => {
-                            match state
-                                .deliver_store_role(&guild_key, &actor_key, role_id_str)
+                        if let Some(role) = partial_guild.roles.get(&role_id_typed) {
+                            if role.managed {
+                                Err(
+                                    "Role zarządzane przez integracje nie mogą być nadawane przez sklep",
+                                )
+                            } else if crate::discord::reaction_roles::is_privileged_role_permissions(
+                                role.permissions,
+                            ) {
+                                Err(
+                                    "Rola posiada uprawnienia administracyjne i nie może zostać nadana",
+                                )
+                            } else {
+                                Ok(())
+                            }
+                        } else {
+                            Err("Rola nie istnieje na tym serwerze")
+                        }
+                    } else {
+                        Ok(())
+                    };
+
+                    match role_safety {
+                        Err(err_msg) => {
+                            if let Err(e) = state
+                                .storage
+                                .update_store_purchase_fulfillment(
+                                    purchase.id,
+                                    "failed",
+                                    Some(err_msg),
+                                    None,
+                                )
                                 .await
                             {
+                                tracing::error!(
+                                    purchase_id = %purchase.id,
+                                    error = %e,
+                                    "Failed to persist failed fulfillment status in store_purchases"
+                                );
+                            }
+                            format!("failed: {err_msg}")
+                        }
+                        Ok(()) => {
+                            match ensure_role_hierarchy(ctx, guild_id, None, role_id_typed).await {
                                 Ok(()) => {
-                                    let _ = state
-                                        .storage
-                                        .update_store_purchase_fulfillment(
-                                            purchase.id,
-                                            "completed",
-                                            None,
-                                            Some(Utc::now()),
-                                        )
-                                        .await;
-                                    "completed".to_string()
+                                    match state
+                                        .deliver_store_role(&guild_key, &actor_key, role_id_str)
+                                        .await
+                                    {
+                                        Ok(()) => {
+                                            if let Err(e) = state
+                                                .storage
+                                                .update_store_purchase_fulfillment(
+                                                    purchase.id,
+                                                    "completed",
+                                                    None,
+                                                    Some(Utc::now()),
+                                                )
+                                                .await
+                                            {
+                                                tracing::error!(
+                                                    purchase_id = %purchase.id,
+                                                    error = %e,
+                                                    "Failed to persist completed fulfillment status in store_purchases"
+                                                );
+                                            }
+                                            "completed".to_string()
+                                        }
+                                        Err(err) => {
+                                            let err_str = err.to_string();
+                                            if let Err(e) = state
+                                                .storage
+                                                .update_store_purchase_fulfillment(
+                                                    purchase.id,
+                                                    "failed",
+                                                    Some(&err_str),
+                                                    None,
+                                                )
+                                                .await
+                                            {
+                                                tracing::error!(
+                                                    purchase_id = %purchase.id,
+                                                    error = %e,
+                                                    "Failed to persist failed fulfillment status in store_purchases"
+                                                );
+                                            }
+                                            format!("failed: {err_str}")
+                                        }
+                                    }
                                 }
                                 Err(err) => {
                                     let err_str = err.to_string();
-                                    let _ = state
+                                    if let Err(e) = state
                                         .storage
                                         .update_store_purchase_fulfillment(
                                             purchase.id,
@@ -302,25 +360,19 @@ pub async fn execute(
                                             Some(&err_str),
                                             None,
                                         )
-                                        .await;
+                                        .await
+                                    {
+                                        tracing::error!(
+                                            purchase_id = %purchase.id,
+                                            error = %e,
+                                            "Failed to persist failed fulfillment status in store_purchases"
+                                        );
+                                    }
                                     format!("failed: {err_str}")
                                 }
                             }
                         }
-                        Err(err) => {
-                            let err_str = err.to_string();
-                            let _ = state
-                                .storage
-                                .update_store_purchase_fulfillment(
-                                    purchase.id,
-                                    "failed",
-                                    Some(&err_str),
-                                    None,
-                                )
-                                .await;
-                            format!("failed: {err_str}")
-                        }
-                    },
+                    }
                 }
             } else {
                 "completed".to_string()

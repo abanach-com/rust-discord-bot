@@ -3388,6 +3388,32 @@ impl PostgresStore {
         Ok(recs)
     }
 
+    pub async fn claim_store_role_delivery(&self, purchase_id: Uuid) -> anyhow::Result<bool> {
+        let now = Utc::now();
+        let lease_until = now + chrono::Duration::seconds(60);
+
+        let res = sqlx::query(
+            r#"
+            UPDATE store_purchases
+            SET fulfillment_status = 'processing',
+                lease_expires_at = $2
+            WHERE id = $1
+              AND (
+                  fulfillment_status = 'pending'
+                  OR (fulfillment_status = 'processing' AND lease_expires_at IS NOT NULL AND lease_expires_at < $3)
+              )
+              AND role_id IS NOT NULL
+            "#,
+        )
+        .bind(purchase_id)
+        .bind(lease_until)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(res.rows_affected() == 1)
+    }
+
     pub async fn update_store_purchase_fulfillment(
         &self,
         purchase_id: Uuid,
@@ -3398,8 +3424,8 @@ impl PostgresStore {
         sqlx::query(
             r#"
             UPDATE store_purchases
-            SET fulfillment_status = $2, failure_reason = $3, fulfilled_at = $4
-            WHERE id = $1
+            SET fulfillment_status = $2, failure_reason = $3, fulfilled_at = $4, lease_expires_at = NULL
+            WHERE id = $1 AND fulfillment_status != 'completed'
             "#,
         )
         .bind(purchase_id)

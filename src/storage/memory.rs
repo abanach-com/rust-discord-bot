@@ -2333,6 +2333,8 @@ impl MemoryStore {
                 None
             },
 
+            lease_expires_at: None,
+
             created_at: now,
         };
 
@@ -2376,6 +2378,35 @@ impl MemoryStore {
         list
     }
 
+    pub fn claim_store_role_delivery(&self, purchase_id: Uuid) -> anyhow::Result<bool> {
+        let _guard = self.progression_guard();
+        let mut purchase = match self.store_purchases.get_mut(&purchase_id) {
+            Some(p) => p,
+            None => return Ok(false),
+        };
+
+        if purchase.role_id.is_none() {
+            return Ok(false);
+        }
+
+        let now = Utc::now();
+        let can_claim = if purchase.fulfillment_status == "pending" {
+            true
+        } else if purchase.fulfillment_status == "processing" {
+            purchase.lease_expires_at.is_some_and(|exp| exp < now)
+        } else {
+            false
+        };
+
+        if can_claim {
+            purchase.fulfillment_status = "processing".to_string();
+            purchase.lease_expires_at = Some(now + chrono::Duration::seconds(60));
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     pub fn update_store_purchase_fulfillment(
         &self,
         purchase_id: Uuid,
@@ -2383,13 +2414,21 @@ impl MemoryStore {
         failure_reason: Option<&str>,
         fulfilled_at: Option<DateTime<Utc>>,
     ) -> anyhow::Result<()> {
+        let _guard = self.progression_guard();
         let mut purchase = self
             .store_purchases
             .get_mut(&purchase_id)
             .ok_or_else(|| anyhow::anyhow!("store purchase not found"))?;
+
+        // Terminal status: completed must never be overwritten!
+        if purchase.fulfillment_status == "completed" {
+            return Ok(());
+        }
+
         purchase.fulfillment_status = status.to_string();
         purchase.failure_reason = failure_reason.map(|s| s.to_string());
         purchase.fulfilled_at = fulfilled_at;
+        purchase.lease_expires_at = None;
         Ok(())
     }
 

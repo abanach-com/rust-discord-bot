@@ -1403,46 +1403,27 @@ pub async fn purchase_store_item(
     } else if purchase.fulfillment_status == "failed" {
         ("failed".to_string(), purchase.failure_reason.clone())
     } else if let Some(ref role_id) = item.role_id {
-        let role_safety = verify_store_role_delivery_safety(&state, &guild_id, role_id).await;
-        match role_safety {
-            Err(err_msg) => {
-                let _ = state
-                    .app
-                    .storage
-                    .update_store_purchase_fulfillment(purchase.id, "failed", Some(&err_msg), None)
-                    .await;
-                ("failed".to_string(), Some(err_msg))
-            }
-            Ok(()) => match state
+        let claimed = state
+            .app
+            .storage
+            .claim_store_role_delivery(purchase.id)
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+
+        if !claimed {
+            let fresh = state
                 .app
-                .deliver_store_role(&guild_id, &session.user.id, role_id)
+                .storage
+                .get_store_purchase(purchase.id)
                 .await
-            {
-                Ok(()) => {
-                    let now = Utc::now();
-                    let _ = state
-                        .app
-                        .storage
-                        .update_store_purchase_fulfillment(
-                            purchase.id,
-                            "completed",
-                            None,
-                            Some(now),
-                        )
-                        .await;
-                    ("completed".to_string(), None)
-                }
-                Err(err) => {
-                    let err_msg = err.to_string();
-                    tracing::error!(
-                        guild_id = %guild_id,
-                        user_id = %session.user.id,
-                        role_id = %role_id,
-                        purchase_id = %purchase.id,
-                        error = %err_msg,
-                        "Failed to deliver Discord role for store purchase"
-                    );
-                    let _ = state
+                .map_err(|e| ApiError::internal(e.to_string()))?
+                .unwrap_or_else(|| purchase.clone());
+            (fresh.fulfillment_status, fresh.failure_reason)
+        } else {
+            let role_safety = verify_store_role_delivery_safety(&state, &guild_id, role_id).await;
+            match role_safety {
+                Err(err_msg) => {
+                    if let Err(e) = state
                         .app
                         .storage
                         .update_store_purchase_fulfillment(
@@ -1451,10 +1432,73 @@ pub async fn purchase_store_item(
                             Some(&err_msg),
                             None,
                         )
-                        .await;
+                        .await
+                    {
+                        tracing::error!(
+                            purchase_id = %purchase.id,
+                            error = %e,
+                            "Failed to update store purchase fulfillment to failed after role safety rejection"
+                        );
+                    }
                     ("failed".to_string(), Some(err_msg))
                 }
-            },
+                Ok(()) => match state
+                    .app
+                    .deliver_store_role(&guild_id, &session.user.id, role_id)
+                    .await
+                {
+                    Ok(()) => {
+                        let now = Utc::now();
+                        if let Err(e) = state
+                            .app
+                            .storage
+                            .update_store_purchase_fulfillment(
+                                purchase.id,
+                                "completed",
+                                None,
+                                Some(now),
+                            )
+                            .await
+                        {
+                            tracing::error!(
+                                purchase_id = %purchase.id,
+                                error = %e,
+                                "Failed to update store purchase fulfillment to completed"
+                            );
+                        }
+                        ("completed".to_string(), None)
+                    }
+                    Err(err) => {
+                        let err_msg = err.to_string();
+                        tracing::error!(
+                            guild_id = %guild_id,
+                            user_id = %session.user.id,
+                            role_id = %role_id,
+                            purchase_id = %purchase.id,
+                            error = %err_msg,
+                            "Failed to deliver Discord role for store purchase"
+                        );
+                        if let Err(e) = state
+                            .app
+                            .storage
+                            .update_store_purchase_fulfillment(
+                                purchase.id,
+                                "failed",
+                                Some(&err_msg),
+                                None,
+                            )
+                            .await
+                        {
+                            tracing::error!(
+                                purchase_id = %purchase.id,
+                                error = %e,
+                                "Failed to update store purchase fulfillment to failed"
+                            );
+                        }
+                        ("failed".to_string(), Some(err_msg))
+                    }
+                },
+            }
         }
     } else {
         ("completed".to_string(), None)

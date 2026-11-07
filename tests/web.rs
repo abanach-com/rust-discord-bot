@@ -12796,3 +12796,368 @@ async fn test_recruitment_review_role_authorization_and_approval_policy_suite() 
         .unwrap();
     assert_eq!(leg_trans.status(), reqwest::StatusCode::OK);
 }
+
+#[tokio::test]
+async fn test_store_purchase_concurrent_fulfillment_race_suite() {
+    use axum::Json;
+    use axum::extract::Path;
+    use axum::response::IntoResponse;
+    use axum::routing::{get, put};
+    use reqwest::header::COOKIE;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let guild_id = "888000000000000001";
+    let buyer_id = "888000000000000002";
+    let role_id = "888000000000000003";
+
+    let role_delivery_count = Arc::new(AtomicUsize::new(0));
+    let role_delivery_count_clone = role_delivery_count.clone();
+
+    let discord_mock_app = axum::Router::new()
+        .route(
+            "/users/@me",
+            get(|| async move {
+                Json(serde_json::json!({
+                    "id": "999999999999999999"
+                }))
+                .into_response()
+            }),
+        )
+        .route(
+            "/guilds/{guild_id}",
+            get(|Path(gid): Path<String>| async move {
+                Json(serde_json::json!({
+                    "id": gid,
+                    "owner_id": "999000000000000000",
+                    "roles": [
+                        {
+                            "id": "888000000000000003",
+                            "name": "StoreRole",
+                            "permissions": "0",
+                            "position": 10,
+                            "managed": false,
+                            "color": 0,
+                            "colors": { "primary_color": 0 },
+                            "hoist": false,
+                            "mentionable": false,
+                            "flags": 0
+                        }
+                    ]
+                }))
+                .into_response()
+            }),
+        )
+        .route(
+            "/guilds/{guild_id}/roles",
+            get(|| async move {
+                Json(serde_json::json!([
+                    {
+                        "id": "888000000000000003",
+                        "name": "StoreRole",
+                        "permissions": "0",
+                        "position": 10,
+                        "managed": false,
+                        "color": 0,
+                        "colors": { "primary_color": 0 },
+                        "hoist": false,
+                        "mentionable": false,
+                        "flags": 0
+                    },
+                    {
+                        "id": "888000000000000004",
+                        "name": "BotRole",
+                        "permissions": "268435456",
+                        "position": 60,
+                        "managed": false,
+                        "color": 0,
+                        "colors": { "primary_color": 0 },
+                        "hoist": false,
+                        "mentionable": false,
+                        "flags": 0
+                    }
+                ]))
+                .into_response()
+            }),
+        )
+        .route(
+            "/guilds/{guild_id}/members/{user_id}",
+            get(|Path((_gid, user_id)): Path<(String, String)>| async move {
+                if user_id == "999999999999999999" {
+                    Json(serde_json::json!({
+                        "user": { "id": user_id },
+                        "roles": ["888000000000000004"],
+                        "permissions": "268435456"
+                    }))
+                    .into_response()
+                } else {
+                    Json(serde_json::json!({
+                        "user": { "id": user_id },
+                        "roles": [],
+                        "permissions": "0"
+                    }))
+                    .into_response()
+                }
+            }),
+        )
+        .route(
+            "/guilds/{guild_id}/permissions/member/{user_id}",
+            get(|| async move { Json(serde_json::json!({ "permissions": "0" })).into_response() }),
+        )
+        .route(
+            "/guilds/{guild_id}/members/{user_id}/roles/{role_id}",
+            put({
+                let count = role_delivery_count_clone.clone();
+                move || {
+                    let count = count.clone();
+                    async move {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        // Add artificial delay to simulate realistic network latency
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        reqwest::StatusCode::NO_CONTENT.into_response()
+                    }
+                }
+            }),
+        );
+
+    let discord_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind discord mock");
+    let discord_addr = discord_listener.local_addr().expect("discord mock addr");
+    tokio::spawn(async move {
+        axum::serve(discord_listener, discord_mock_app)
+            .await
+            .unwrap();
+    });
+
+    let mut config = test_config();
+    config.discord_token = "live_bot_token_concurrent_delivery_secret".to_string();
+    config.offline_mode = false;
+    config.discord_api_base_url = format!("http://{discord_addr}");
+
+    let app = AppState::bootstrap(config).await.expect("bootstrap");
+    let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
+    let web_state = WebState {
+        app,
+        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        permissions_cache,
+    };
+
+    let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind web listener");
+    let web_addr = web_listener.local_addr().expect("web addr");
+    let router = build_router(web_state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            web_listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{web_addr}");
+
+    let buyer_session = "buyer_concurrent_sess";
+    let buyer_csrf = "buyer_concurrent_csrf";
+
+    web_state
+        .app
+        .sessions
+        .save_session(
+            buyer_session,
+            DashboardUser {
+                id: buyer_id.to_owned(),
+                username: "buyer".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_owned(),
+                name: "Guild Concurrent".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_owned(),
+            }],
+            buyer_csrf.to_owned(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let cookie_buyer = format!("rusty_discord_bot_session={buyer_session}");
+
+    // Give buyer 1000 coins
+    web_state
+        .app
+        .storage
+        .adjust_member_progress(guild_id, buyer_id, 0, 1000, 0)
+        .await
+        .unwrap();
+
+    // Create store item with role_id
+    let item = web_state
+        .app
+        .storage
+        .create_store_item(
+            guild_id,
+            "VIP Role",
+            "Grants VIP status",
+            100,
+            Some(role_id),
+            Some(5),
+        )
+        .await
+        .unwrap();
+
+    // 1. Test unitarny: 20 równoległych tasków próbuje wykonać claim_store_role_delivery
+    let (_test_item, test_purchase, _) = web_state
+        .app
+        .storage
+        .purchase_store_item(guild_id, buyer_id, item.id, Some("claim_test_int_1"))
+        .await
+        .unwrap();
+    assert_eq!(test_purchase.fulfillment_status, "pending");
+
+    let mut handles = Vec::new();
+    for _ in 0..20 {
+        let storage = web_state.app.storage.clone();
+        let pid = test_purchase.id;
+        handles.push(tokio::spawn(async move {
+            storage.claim_store_role_delivery(pid).await.unwrap()
+        }));
+    }
+
+    let mut true_count = 0;
+    let mut false_count = 0;
+    for h in handles {
+        if h.await.unwrap() {
+            true_count += 1;
+        } else {
+            false_count += 1;
+        }
+    }
+    assert_eq!(true_count, 1, "Exactly one task must claim the delivery");
+    assert_eq!(false_count, 19, "All other 19 tasks must receive false");
+
+    // 2. Test statusu: update na completed, a następnie próba nadpisania przez failed
+    web_state
+        .app
+        .storage
+        .update_store_purchase_fulfillment(test_purchase.id, "completed", None, Some(Utc::now()))
+        .await
+        .unwrap();
+
+    // Próba nadpisania na failed musi zostać zignorowana (status pozostaje completed)
+    web_state
+        .app
+        .storage
+        .update_store_purchase_fulfillment(
+            test_purchase.id,
+            "failed",
+            Some("late failure override attempt"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let check_purchase = web_state
+        .app
+        .storage
+        .get_store_purchase(test_purchase.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(check_purchase.fulfillment_status, "completed");
+    assert!(check_purchase.failure_reason.is_none());
+
+    // 3. Test wyścigu HTTP: Dwa jednoczesne żądania POST z tym samym Idempotency-Key
+    let idempotency_key = "concurrent_retry_abc";
+    let req1 = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/store/purchase"))
+        .header(COOKIE, &cookie_buyer)
+        .header("x-csrf-token", buyer_csrf)
+        .header("idempotency-key", idempotency_key)
+        .json(&serde_json::json!({ "item_id": item.id }));
+
+    let req2 = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/store/purchase"))
+        .header(COOKIE, &cookie_buyer)
+        .header("x-csrf-token", buyer_csrf)
+        .header("idempotency-key", idempotency_key)
+        .json(&serde_json::json!({ "item_id": item.id }));
+
+    let count_before = role_delivery_count.load(Ordering::SeqCst);
+
+    let (res1, res2) = tokio::join!(req1.send(), req2.send());
+    let (resp1, resp2) = (res1.unwrap(), res2.unwrap());
+
+    assert_eq!(resp1.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp2.status(), reqwest::StatusCode::OK);
+
+    let json1: serde_json::Value = resp1.json().await.unwrap();
+    let json2: serde_json::Value = resp2.json().await.unwrap();
+
+    // Identyczny purchase_id
+    assert_eq!(json1["purchase_id"], json2["purchase_id"]);
+    let final_pid = uuid::Uuid::parse_str(json1["purchase_id"].as_str().unwrap()).unwrap();
+
+    // Dokładnie jedno wywołanie Discord API PUT role!
+    let count_after = role_delivery_count.load(Ordering::SeqCst);
+    assert_eq!(
+        count_after,
+        count_before + 1,
+        "Discord API PUT must be dispatched exactly once despite concurrent requests"
+    );
+
+    // Saldo i stan magazynowy zmniejszone dokładnie jeden raz
+    let final_profile = web_state
+        .app
+        .storage
+        .get_member_progress(guild_id, buyer_id)
+        .await
+        .unwrap();
+    // 1000 - 100 (test 1) - 100 (test 2) = 800
+    assert_eq!(final_profile.coins, 800);
+
+    let final_items = web_state
+        .app
+        .storage
+        .list_store_items(guild_id)
+        .await
+        .unwrap();
+    let final_item = final_items.iter().find(|i| i.id == item.id).unwrap();
+    // 5 - 1 - 1 = 3
+    assert_eq!(final_item.stock, Some(3));
+
+    // Zakup ostatecznie ma status completed
+    let final_purchase = web_state
+        .app
+        .storage
+        .get_store_purchase(final_pid)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(final_purchase.fulfillment_status, "completed");
+
+    // 4. Test ponowionego żądania po zakończeniu - zwraca completed bez kolejnego PUT do Discorda
+    let retry_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/store/purchase"))
+        .header(COOKIE, &cookie_buyer)
+        .header("x-csrf-token", buyer_csrf)
+        .header("idempotency-key", idempotency_key)
+        .json(&serde_json::json!({ "item_id": item.id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(retry_resp.status(), reqwest::StatusCode::OK);
+    let retry_json: serde_json::Value = retry_resp.json().await.unwrap();
+    assert_eq!(retry_json["fulfillment_status"], "completed");
+    assert_eq!(
+        role_delivery_count.load(Ordering::SeqCst),
+        count_after,
+        "No additional Discord PUT should occur on completed purchase retry"
+    );
+}

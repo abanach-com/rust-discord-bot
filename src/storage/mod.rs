@@ -376,6 +376,10 @@ pub struct StorePurchase {
 
     pub fulfilled_at: Option<DateTime<Utc>>,
 
+    #[serde(default)]
+    #[sqlx(default)]
+    pub lease_expires_at: Option<DateTime<Utc>>,
+
     pub created_at: DateTime<Utc>,
 }
 
@@ -2715,6 +2719,13 @@ impl Storage {
             Self::Memory(store) => Ok(store.list_store_purchases(guild_id, user_id)),
 
             Self::Postgres(store) => store.list_store_purchases(guild_id, user_id).await,
+        }
+    }
+
+    pub async fn claim_store_role_delivery(&self, purchase_id: Uuid) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => store.claim_store_role_delivery(purchase_id),
+            Self::Postgres(store) => store.claim_store_role_delivery(purchase_id).await,
         }
     }
 
