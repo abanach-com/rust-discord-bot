@@ -4911,6 +4911,12 @@ pub async fn fetch_current_member_role_ids(
     validate_snowflake("guild_id", guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
     validate_snowflake("user_id", user_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
 
+    state
+        .app
+        .metrics
+        .discord_rest_requests_total
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
     let base_url = &state.app.config.discord_api_base_url;
     let token = &state.app.config.discord_token;
     let auth_header = format!("Bot {token}");
@@ -4956,6 +4962,12 @@ pub async fn check_is_guild_owner(
     if state.app.config.is_offline_mode() {
         return Ok(session.guilds.iter().any(|g| g.id == guild_id && g.owner));
     }
+
+    state
+        .app
+        .metrics
+        .discord_rest_requests_total
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     let base_url = &state.app.config.discord_api_base_url;
     let token = &state.app.config.discord_token;
@@ -5020,14 +5032,97 @@ pub async fn ensure_recruitment_reviewer_access(
     Ok(())
 }
 
-pub async fn count_eligible_approvals(
+/// Request-scoped context to cache actor permissions and live Discord state within a single HTTP request,
+/// eliminating N+1 Discord REST lookups when listing or filtering applications across tracks.
+pub struct ActorReviewerAccessContext {
+    pub is_staff: bool,
+    pub is_member: bool,
+    pub is_owner: Option<bool>,
+    pub live_roles: Option<Vec<String>>,
+    pub track_access_cache: std::collections::HashMap<Uuid, bool>,
+}
+
+impl ActorReviewerAccessContext {
+    pub fn new(is_staff: bool, is_member: bool) -> Self {
+        Self {
+            is_staff,
+            is_member,
+            is_owner: None,
+            live_roles: None,
+            track_access_cache: std::collections::HashMap::new(),
+        }
+    }
+
+    pub async fn check_track_access(
+        &mut self,
+        state: &WebState,
+        session: &crate::web::auth::Session,
+        guild_id: &str,
+        track: &RecruitmentTrack,
+    ) -> bool {
+        if let Some(&allowed) = self.track_access_cache.get(&track.id) {
+            return allowed;
+        }
+
+        let allowed = if track.config.review_role_ids.is_empty() {
+            self.is_staff
+        } else if !self.is_member {
+            false
+        } else {
+            let is_owner = match self.is_owner {
+                Some(o) => o,
+                None => {
+                    let o = check_is_guild_owner(state, session, guild_id)
+                        .await
+                        .unwrap_or(false);
+                    self.is_owner = Some(o);
+                    o
+                }
+            };
+
+            if is_owner {
+                true
+            } else {
+                let roles = match self.live_roles.as_ref() {
+                    Some(r) => r,
+                    None => {
+                        let fetched =
+                            fetch_current_member_role_ids(state, guild_id, &session.user.id)
+                                .await
+                                .unwrap_or_default();
+                        self.live_roles = Some(fetched);
+                        self.live_roles.as_ref().unwrap()
+                    }
+                };
+
+                roles.iter().any(|rid| {
+                    track
+                        .config
+                        .review_role_ids
+                        .iter()
+                        .any(|allowed| allowed == rid)
+                })
+            }
+        };
+
+        self.track_access_cache.insert(track.id, allowed);
+        allowed
+    }
+}
+
+pub async fn count_eligible_approvals_with_target(
     state: &WebState,
     guild_id: &str,
     track: &RecruitmentTrack,
     reviews: &[RecruitmentReview],
+    target_approvals: usize,
 ) -> Result<usize, ApiError> {
     if track.config.review_role_ids.is_empty() {
         return Ok(crate::recruitment::count_distinct_approvals(reviews));
+    }
+
+    if target_approvals == 0 {
+        return Ok(0);
     }
 
     let mut approved_reviewers = std::collections::HashSet::new();
@@ -5041,9 +5136,19 @@ pub async fn count_eligible_approvals(
         return Ok(0);
     }
 
+    // Short-circuit: if total distinct approvers is fewer than target, stop before REST call
+    if approved_reviewers.len() < target_approvals {
+        return Ok(approved_reviewers.len());
+    }
+
     let guild_owner_id = if state.app.config.is_offline_mode() {
         None
     } else {
+        state
+            .app
+            .metrics
+            .discord_rest_requests_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let base_url = &state.app.config.discord_api_base_url;
         let token = &state.app.config.discord_token;
         let auth_header = format!("Bot {token}");
@@ -5066,14 +5171,22 @@ pub async fn count_eligible_approvals(
     };
 
     let mut eligible_count = 0;
+    let mut non_owner_reviewers = Vec::new();
     for reviewer_id in approved_reviewers {
         if let Some(ref owner_id) = guild_owner_id
             && &reviewer_id == owner_id
         {
             eligible_count += 1;
-            continue;
+            if eligible_count >= target_approvals {
+                return Ok(eligible_count);
+            }
+        } else {
+            non_owner_reviewers.push(reviewer_id);
         }
+    }
 
+    // Sequentially verify non-owner reviewers until target threshold is met
+    for reviewer_id in non_owner_reviewers {
         let roles_res = fetch_current_member_role_ids(state, guild_id, &reviewer_id).await;
         match roles_res {
             Ok(roles) => {
@@ -5086,6 +5199,9 @@ pub async fn count_eligible_approvals(
                 });
                 if has_role {
                     eligible_count += 1;
+                    if eligible_count >= target_approvals {
+                        break;
+                    }
                 }
             }
             Err(e) => {
@@ -5100,6 +5216,15 @@ pub async fn count_eligible_approvals(
     }
 
     Ok(eligible_count)
+}
+
+pub async fn count_eligible_approvals(
+    state: &WebState,
+    guild_id: &str,
+    track: &RecruitmentTrack,
+    reviews: &[RecruitmentReview],
+) -> Result<usize, ApiError> {
+    count_eligible_approvals_with_target(state, guild_id, track, reviews, usize::MAX).await
 }
 
 pub async fn upsert_recruitment_track(
@@ -5261,6 +5386,9 @@ pub async fn list_recruitment_applications(
     let is_staff = ensure_guild_access(&state, &session, &guild_id)
         .await
         .is_ok();
+    let is_member = true;
+
+    let mut actor_ctx = ActorReviewerAccessContext::new(is_staff, is_member);
 
     let is_track_reviewer = if let Some(track_id) = query.track_id {
         if let Ok(Some(track)) = state
@@ -5269,9 +5397,9 @@ pub async fn list_recruitment_applications(
             .get_recruitment_track(&guild_id, track_id)
             .await
         {
-            ensure_recruitment_reviewer_access(&state, &session, &guild_id, &track)
+            actor_ctx
+                .check_track_access(&state, &session, &guild_id, &track)
                 .await
-                .is_ok()
         } else {
             false
         }
@@ -5350,9 +5478,9 @@ pub async fn list_recruitment_applications(
         };
 
         let can_view_staff = if let Some(tr) = track {
-            ensure_recruitment_reviewer_access(&state, &session, &guild_id, tr)
+            actor_ctx
+                .check_track_access(&state, &session, &guild_id, tr)
                 .await
-                .is_ok()
         } else {
             is_staff
         };
@@ -5663,8 +5791,11 @@ pub async fn transition_recruitment_application(
             ));
         }
 
-        let approvals = count_eligible_approvals(&state, &guild_id, &track, &reviews).await?;
-        if approvals < track.config.final_approvals as usize {
+        let required = track.config.final_approvals as usize;
+        let approvals =
+            count_eligible_approvals_with_target(&state, &guild_id, &track, &reviews, required)
+                .await?;
+        if approvals < required {
             return Err(ApiError::bad_request(format!(
                 "Application requires at least {} distinct approvals before acceptance, but has {}",
                 track.config.final_approvals, approvals

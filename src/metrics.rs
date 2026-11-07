@@ -19,6 +19,7 @@ pub struct Metrics {
     pub scheduler_expired_lease_cleanup_errors_total: AtomicU64,
     pub scheduler_expired_lease_terminalized_total: AtomicU64,
     pub economy_idempotency_pruned_total: AtomicU64,
+    pub discord_rest_requests_total: AtomicU64,
 }
 
 impl Default for Metrics {
@@ -40,6 +41,7 @@ impl Default for Metrics {
             scheduler_expired_lease_cleanup_errors_total: AtomicU64::new(0),
             scheduler_expired_lease_terminalized_total: AtomicU64::new(0),
             economy_idempotency_pruned_total: AtomicU64::new(0),
+            discord_rest_requests_total: AtomicU64::new(0),
         }
     }
 }
@@ -127,7 +129,11 @@ impl Metrics {
              # HELP rusty_discord_bot_economy_idempotency_pruned_total Total number of expired economy purchase requests and idempotency keys pruned\n\
              # TYPE rusty_discord_bot_economy_idempotency_pruned_total counter\n\
              rusty_discord_bot_economy_idempotency_pruned_total {16}\n\
-             zuckerbot_economy_idempotency_pruned_total {16}\n",
+             zuckerbot_economy_idempotency_pruned_total {16}\n\
+             # HELP rusty_discord_bot_discord_rest_requests_total Total number of outbound Discord REST API HTTP requests dispatched\n\
+             # TYPE rusty_discord_bot_discord_rest_requests_total counter\n\
+             rusty_discord_bot_discord_rest_requests_total {17}\n\
+             zuckerbot_discord_rest_requests_total {17}\n",
             self.uptime_seconds(),
             self.discord_events_total.load(Ordering::Relaxed),
             self.lua_commands_total.load(Ordering::Relaxed),
@@ -149,6 +155,7 @@ impl Metrics {
                 .load(Ordering::Relaxed),
             self.economy_idempotency_pruned_total
                 .load(Ordering::Relaxed),
+            self.discord_rest_requests_total.load(Ordering::Relaxed),
         )
     }
 }
@@ -180,6 +187,9 @@ mod tests {
         metrics
             .economy_idempotency_pruned_total
             .store(42, Ordering::Relaxed);
+        metrics
+            .discord_rest_requests_total
+            .store(13, Ordering::Relaxed);
 
         let rendered = metrics.render_prometheus(3, 2);
         assert!(rendered.contains("zuckerbot_discord_events_total 15"));
@@ -192,6 +202,8 @@ mod tests {
         assert!(rendered.contains("zuckerbot_scheduler_expired_lease_terminalized_total 8"));
         assert!(rendered.contains("zuckerbot_economy_idempotency_pruned_total 42"));
         assert!(rendered.contains("rusty_discord_bot_economy_idempotency_pruned_total 42"));
+        assert!(rendered.contains("zuckerbot_discord_rest_requests_total 13"));
+        assert!(rendered.contains("rusty_discord_bot_discord_rest_requests_total 13"));
         assert!(rendered.contains("zuckerbot_active_sessions 3"));
         assert!(rendered.contains("zuckerbot_uptime_seconds"));
     }

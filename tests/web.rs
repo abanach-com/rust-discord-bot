@@ -13388,3 +13388,525 @@ async fn test_economy_store_purchase_idempotency_validation_and_rate_limit_suite
         "Rapid purchase flooding must trigger 429 Too Many Requests"
     );
 }
+
+#[tokio::test]
+async fn test_recruitment_n_plus_one_avoidance_and_approval_threshold_suite() {
+    use axum::Json;
+    use axum::extract::Path;
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+    use reqwest::header::COOKIE;
+    use rusty_discord_bot::recruitment::{
+        RecruitmentApplication, RecruitmentReview, RecruitmentTrack, RecruitmentTrackConfig,
+    };
+
+    let guild_id = "555000555000555001";
+    let owner_id = "999000000000000000";
+    let reviewer_id = "222000222000222001";
+    let candidate_id = "444000444000444001";
+
+    let guild_get_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let member_get_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let g_cnt = guild_get_count.clone();
+    let m_cnt = member_get_count.clone();
+
+    let discord_mock_app = axum::Router::new()
+        .route(
+            "/users/@me",
+            get(|| async move {
+                Json(serde_json::json!({
+                    "id": "999999999999999999"
+                }))
+                .into_response()
+            }),
+        )
+        .route(
+            "/guilds/{guild_id}/permissions/member/{user_id}",
+            get(|| async move {
+                Json(serde_json::json!({
+                    "permissions": "0"
+                }))
+                .into_response()
+            }),
+        )
+        .route(
+            "/guilds/{guild_id}",
+            get(move |Path(gid): Path<String>| {
+                let g = g_cnt.clone();
+                async move {
+                    g.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Json(serde_json::json!({
+                        "id": gid,
+                        "owner_id": "999000000000000000",
+                        "roles": [
+                            {
+                                "id": "2001",
+                                "name": "ReviewerRole",
+                                "permissions": "0",
+                                "position": 10,
+                                "managed": false,
+                                "color": 0,
+                                "colors": { "primary_color": 0 },
+                                "hoist": false,
+                                "mentionable": false,
+                                "flags": 0
+                            },
+                            {
+                                "id": "9999",
+                                "name": "OtherRole",
+                                "permissions": "0",
+                                "position": 12,
+                                "managed": false,
+                                "color": 0,
+                                "colors": { "primary_color": 0 },
+                                "hoist": false,
+                                "mentionable": false,
+                                "flags": 0
+                            }
+                        ]
+                    }))
+                    .into_response()
+                }
+            }),
+        )
+        .route(
+            "/guilds/{guild_id}/members/{user_id}",
+            get(move |Path((_gid, uid)): Path<(String, String)>| {
+                let m = m_cnt.clone();
+                async move {
+                    m.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let roles = if uid == "222000222000222001"
+                        || uid == "333000333000333001"
+                        || uid == "333000333000333002"
+                        || uid == "333000333000333003"
+                        || uid == "333000333000333004"
+                        || uid == "333000333000333005"
+                    {
+                        vec!["2001"]
+                    } else {
+                        vec![]
+                    };
+                    Json(serde_json::json!({
+                        "user": { "id": uid, "username": format!("user_{uid}") },
+                        "roles": roles
+                    }))
+                    .into_response()
+                }
+            }),
+        );
+
+    let discord_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind discord listener");
+    let discord_addr = discord_listener.local_addr().expect("discord addr");
+    tokio::spawn(async move {
+        axum::serve(
+            discord_listener,
+            discord_mock_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let mut config = test_config();
+    config.discord_token = "live_bot_token_n_plus_one_secret".to_string();
+    config.offline_mode = false;
+    config.discord_api_base_url = format!("http://{discord_addr}");
+
+    let app = AppState::bootstrap(config).await.expect("bootstrap");
+    let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
+    let web_state = WebState {
+        app,
+        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        permissions_cache,
+    };
+    let router = build_router(web_state.clone());
+
+    let server_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind web test listener");
+    let server_addr = server_listener.local_addr().expect("server addr");
+    tokio::spawn(async move {
+        axum::serve(
+            server_listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let base_url = format!("http://{server_addr}");
+    let client = reqwest::Client::new();
+
+    // Setup sessions
+    let reviewer_session = "reviewer_sess_n1";
+    let reviewer_csrf = "reviewer_csrf_n1";
+    web_state
+        .app
+        .sessions
+        .save_session(
+            reviewer_session,
+            DashboardUser {
+                id: reviewer_id.to_owned(),
+                username: "reviewer_user".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_owned(),
+                name: "Guild N1".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_owned(),
+            }],
+            reviewer_csrf.to_owned(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let cookie_reviewer = format!("rusty_discord_bot_session={reviewer_session}");
+
+    // Create Track 1 with review_role_ids = ["2001"]
+    let track_1 = web_state
+        .app
+        .storage
+        .upsert_recruitment_track(RecruitmentTrack {
+            id: uuid::Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            slug: "track-moderator".to_string(),
+            name: "Moderator Track".to_string(),
+            enabled: true,
+            target_role_id: None,
+            version: 1,
+            config: sqlx::types::Json(RecruitmentTrackConfig {
+                review_role_ids: vec!["2001".to_string()],
+                final_approvals: 2,
+                ..Default::default()
+            }),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    // Create 100 applications for Track 1
+    for i in 0..100 {
+        let app_row = RecruitmentApplication {
+            id: uuid::Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            track_id: track_1.id,
+            applicant_user_id: format!("444000000000000{:03}", i),
+            track_version: 1,
+            status: "submitted".to_string(),
+            submitted_answers: sqlx::types::Json(vec![]),
+            current_stage: "screening".to_string(),
+            version: 1,
+            submitted_at: Utc::now(),
+            updated_at: Utc::now(),
+            decided_at: None,
+            decision_reason: None,
+            decided_by: None,
+        };
+        web_state
+            .app
+            .storage
+            .create_recruitment_application(app_row)
+            .await
+            .unwrap();
+    }
+
+    // Reset REST counters before the test
+    guild_get_count.store(0, std::sync::atomic::Ordering::SeqCst);
+    member_get_count.store(0, std::sync::atomic::Ordering::SeqCst);
+    web_state
+        .app
+        .metrics
+        .discord_rest_requests_total
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+
+    // Fetch page of 100 applications
+    let list_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/recruitment/applications?track_id={}&limit=100",
+            track_1.id
+        ))
+        .header(COOKIE, &cookie_reviewer)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_resp.status(), reqwest::StatusCode::OK);
+    let list_body: serde_json::Value = list_resp.json().await.unwrap();
+    let apps_array = list_body["applications"].as_array().unwrap();
+    assert_eq!(apps_array.len(), 100);
+
+    // CRITICAL ASSERTION for Issue #297:
+    // Without N+1 optimization, 100 applications would trigger 100 GET /guilds and 100 GET /members.
+    // With ActorReviewerAccessContext, there is at most 1 GET /guilds (owner check) and 1 GET /members (roles check)
+    // for the entire request!
+    let g_calls = guild_get_count.load(std::sync::atomic::Ordering::SeqCst);
+    let m_calls = member_get_count.load(std::sync::atomic::Ordering::SeqCst);
+    let rest_metrics = web_state
+        .app
+        .metrics
+        .discord_rest_requests_total
+        .load(std::sync::atomic::Ordering::SeqCst);
+
+    assert!(
+        g_calls <= 1,
+        "GET /guilds must be executed at most once per request, but got {g_calls}"
+    );
+    assert!(
+        m_calls <= 2,
+        "GET /members must be executed at most twice per request (1 auth + 1 roles), but got {m_calls}"
+    );
+    assert!(
+        rest_metrics <= 2,
+        "Staff reviewer authorization must perform at most 2 REST calls (1 owner, 1 roles), but performed {rest_metrics}"
+    );
+
+    // Verify all 100 views are staff views (contain staff-level reviews array)
+    for app_view in apps_array {
+        assert!(
+            app_view.get("reviews").is_some(),
+            "Staff view must contain reviews"
+        );
+    }
+
+    // Check Multi-track optimization: Create Track 2 with role "9999" (reviewer does NOT have it)
+    let track_2 = web_state
+        .app
+        .storage
+        .upsert_recruitment_track(RecruitmentTrack {
+            id: uuid::Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            slug: "track-admin".to_string(),
+            name: "Admin Track".to_string(),
+            enabled: true,
+            target_role_id: None,
+            version: 1,
+            config: sqlx::types::Json(RecruitmentTrackConfig {
+                review_role_ids: vec!["9999".to_string()],
+                final_approvals: 2,
+                ..Default::default()
+            }),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    let app_track_2 = RecruitmentApplication {
+        id: uuid::Uuid::new_v4(),
+        guild_id: guild_id.to_string(),
+        track_id: track_2.id,
+        applicant_user_id: "444999999999999999".to_string(),
+        track_version: 1,
+        status: "submitted".to_string(),
+        submitted_answers: sqlx::types::Json(vec![]),
+        current_stage: "screening".to_string(),
+        version: 1,
+        submitted_at: Utc::now(),
+        updated_at: Utc::now(),
+        decided_at: None,
+        decision_reason: None,
+        decided_by: None,
+    };
+    web_state
+        .app
+        .storage
+        .create_recruitment_application(app_track_2.clone())
+        .await
+        .unwrap();
+
+    // Verify staff notes/reviews of track 2 do NOT leak to reviewer of track 1
+    let app2_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/recruitment/applications/{}",
+            app_track_2.id
+        ))
+        .header(COOKIE, &cookie_reviewer)
+        .send()
+        .await
+        .unwrap();
+    // Reviewer is not assigned to track 2 and is not the applicant -> 403 Forbidden
+    assert_eq!(app2_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Test Early Exit / Threshold-Oriented approval counting on acceptance
+    // Application under track 1 requires final_approvals = 2
+    let test_app = RecruitmentApplication {
+        id: uuid::Uuid::new_v4(),
+        guild_id: guild_id.to_string(),
+        track_id: track_1.id,
+        applicant_user_id: candidate_id.to_string(),
+        track_version: 1,
+        status: "screening".to_string(),
+        submitted_answers: sqlx::types::Json(vec![]),
+        current_stage: "screening".to_string(),
+        version: 1,
+        submitted_at: Utc::now(),
+        updated_at: Utc::now(),
+        decided_at: None,
+        decision_reason: None,
+        decided_by: None,
+    };
+    web_state
+        .app
+        .storage
+        .create_recruitment_application(test_app.clone())
+        .await
+        .unwrap();
+
+    // Add 5 distinct reviews recommending 'approve'
+    for i in 1..=5 {
+        web_state
+            .app
+            .storage
+            .upsert_recruitment_review(RecruitmentReview {
+                id: uuid::Uuid::new_v4(),
+                application_id: test_app.id,
+                guild_id: guild_id.to_string(),
+                reviewer_user_id: format!("33300033300033300{i}"),
+                recommendation: "approve".to_string(),
+                note: Some(format!("Approval note {i}")),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+    }
+
+    // Reset member get count
+    member_get_count.store(0, std::sync::atomic::Ordering::SeqCst);
+
+    // Accept application: final_approvals is 2
+    let admin_session = "admin_trans_sess";
+    let admin_csrf = "admin_trans_csrf";
+    web_state
+        .app
+        .sessions
+        .save_session(
+            admin_session,
+            DashboardUser {
+                id: owner_id.to_owned(),
+                username: "owner".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_owned(),
+                name: "Guild N1".to_owned(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_owned(),
+            }],
+            admin_csrf.to_owned(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+    web_state.permissions_cache.insert(
+        (owner_id.to_owned(), guild_id.to_owned()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+    let cookie_admin = format!("rusty_discord_bot_session={admin_session}");
+
+    let trans_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/recruitment/applications/{}/transition",
+            test_app.id
+        ))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "expected_version": 1,
+            "new_status": "accepted",
+            "new_stage": "accepted",
+            "decision_reason": "Passed"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(trans_resp.status(), reqwest::StatusCode::OK);
+
+    // CRITICAL ASSERTION: Since target is 2 approvals, count_eligible_approvals_with_target stops
+    // after verifying 2 reviewers. It must NOT fetch all 5 reviewers!
+    let m_trans_calls = member_get_count.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        m_trans_calls <= 2,
+        "Acceptance must stop after satisfying final_approvals (<= 2 fetches), but performed {m_trans_calls}"
+    );
+
+    // Short-circuit test: When approved count < final_approvals, 0 Discord REST calls should occur
+    let short_app = RecruitmentApplication {
+        id: uuid::Uuid::new_v4(),
+        guild_id: guild_id.to_string(),
+        track_id: track_1.id,
+        applicant_user_id: candidate_id.to_string(),
+        track_version: 1,
+        status: "screening".to_string(),
+        submitted_answers: sqlx::types::Json(vec![]),
+        current_stage: "screening".to_string(),
+        version: 1,
+        submitted_at: Utc::now(),
+        updated_at: Utc::now(),
+        decided_at: None,
+        decision_reason: None,
+        decided_by: None,
+    };
+    web_state
+        .app
+        .storage
+        .create_recruitment_application(short_app.clone())
+        .await
+        .unwrap();
+    // Only 1 approval for a track requiring 2
+    web_state
+        .app
+        .storage
+        .upsert_recruitment_review(RecruitmentReview {
+            id: uuid::Uuid::new_v4(),
+            application_id: short_app.id,
+            guild_id: guild_id.to_string(),
+            reviewer_user_id: "333000333000333001".to_string(),
+            recommendation: "approve".to_string(),
+            note: Some("Single approval".to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    guild_get_count.store(0, std::sync::atomic::Ordering::SeqCst);
+    member_get_count.store(0, std::sync::atomic::Ordering::SeqCst);
+
+    let short_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/recruitment/applications/{}/transition",
+            short_app.id
+        ))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "expected_version": 1,
+            "new_status": "accepted",
+            "new_stage": "accepted",
+            "decision_reason": "Premature accept"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(short_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    // Short-circuit prevented ANY REST calls!
+    assert_eq!(guild_get_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(
+        member_get_count.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+}
