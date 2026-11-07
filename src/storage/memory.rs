@@ -2025,8 +2025,22 @@ impl MemoryStore {
             binding.message_id.clone(),
             binding.emoji_key.clone(),
         );
-        self.reaction_roles.insert(key, binding.clone());
-        Ok(binding)
+        let res = match self.reaction_roles.entry(key) {
+            dashmap::mapref::entry::Entry::Occupied(mut occ) => {
+                let existing = occ.get_mut();
+                existing.role_id = binding.role_id;
+                if binding.channel_id.is_some() {
+                    existing.channel_id = binding.channel_id;
+                }
+                existing.created_by = binding.created_by;
+                existing.clone()
+            }
+            dashmap::mapref::entry::Entry::Vacant(vac) => {
+                vac.insert(binding.clone());
+                binding
+            }
+        };
+        Ok(res)
     }
 
     pub fn get_reaction_role_binding(

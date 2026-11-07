@@ -9237,6 +9237,30 @@ async fn test_reaction_roles_web_api_and_isolation() {
         .unwrap()
         .to_string();
 
+    // Issue #287: Re-POSTing the same natural key (guild_a, message_id, emoji) with updated role_id
+    // must perform an UPSERT that preserves the original binding ID
+    let update_a_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/reaction-roles"))
+        .header(COOKIE, &cookie_a)
+        .header("x-csrf-token", admin_a_csrf)
+        .json(&serde_json::json!({
+            "channel_id": channel_a,
+            "message_id": "900000000000000001",
+            "emoji": "🎉",
+            "role_id": "1001"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(update_a_resp.status(), reqwest::StatusCode::OK);
+    let updated_a: serde_json::Value = update_a_resp.json().await.unwrap();
+    assert_eq!(
+        updated_a["reaction_role"]["id"].as_str().unwrap(),
+        binding_a_id,
+        "UPSERT via Web API must preserve original binding UUID (Issue #287)"
+    );
+    assert_eq!(updated_a["reaction_role"]["role_id"], "1001");
+
     // 3. Admin A attempts without CSRF -> 403 Forbidden
     let no_csrf_resp = client
         .post(format!("{base_url}/api/guilds/{guild_a}/reaction-roles"))

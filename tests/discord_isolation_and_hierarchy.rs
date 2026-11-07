@@ -2405,15 +2405,17 @@ async fn test_reaction_roles_storage_crud_and_guild_isolation() {
     let emoji = "🎉";
 
     // 1. Create binding in Guild A
+    let original_id_a = uuid::Uuid::new_v4();
+    let original_created_at_a = chrono::Utc::now();
     let binding_a = rusty_discord_bot::storage::ReactionRoleBinding {
-        id: uuid::Uuid::new_v4(),
+        id: original_id_a,
         guild_id: guild_a.to_string(),
         channel_id: Some("101".to_string()),
         message_id: msg_id.to_string(),
         emoji_key: emoji.to_string(),
         role_id: role_a.to_string(),
         created_by: Some("admin_a".to_string()),
-        created_at: chrono::Utc::now(),
+        created_at: original_created_at_a,
     };
     state
         .storage
@@ -2476,12 +2478,12 @@ async fn test_reaction_roles_storage_crud_and_guild_isolation() {
     let binding_a_updated = rusty_discord_bot::storage::ReactionRoleBinding {
         id: uuid::Uuid::new_v4(),
         guild_id: guild_a.to_string(),
-        channel_id: Some("101".to_string()),
+        channel_id: None, // channel_id: None preserves existing channel_id "101"
         message_id: msg_id.to_string(),
         emoji_key: emoji.to_string(),
         role_id: "1005".to_string(),
         created_by: Some("admin_a".to_string()),
-        created_at: chrono::Utc::now(),
+        created_at: chrono::Utc::now() + chrono::Duration::hours(1),
     };
     state
         .storage
@@ -2496,6 +2498,19 @@ async fn test_reaction_roles_storage_crud_and_guild_isolation() {
         .unwrap()
         .unwrap();
     assert_eq!(read_a_updated.role_id, "1005");
+    assert_eq!(
+        read_a_updated.id, original_id_a,
+        "UPSERT must preserve original binding UUID (Issue #287)"
+    );
+    assert_eq!(
+        read_a_updated.created_at, original_created_at_a,
+        "UPSERT must preserve original created_at"
+    );
+    assert_eq!(
+        read_a_updated.channel_id,
+        Some("101".to_string()),
+        "UPSERT with None channel_id preserves existing channel_id"
+    );
 
     // 4. Custom emoji canonicalization
     let custom_emoji_raw = "<:my_emoji:123456789012345678>";

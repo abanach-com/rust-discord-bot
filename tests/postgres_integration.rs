@@ -2525,20 +2525,40 @@ async fn test_postgres_integration_suite() {
         .expect("list reaction role bindings in pg");
     assert_eq!(rr_list.len(), 1);
 
-    // Upsert update
+    let original_rr_id = rr_binding.id;
+    let original_rr_created_at = rr_binding.created_at;
+
+    // Upsert update (Issue #287)
     let mut rr_updated = rr_binding.clone();
+    rr_updated.id = uuid::Uuid::new_v4(); // different candidate ID
+    rr_updated.channel_id = None; // None channel_id should preserve existing channel_id
     rr_updated.role_id = "1005".to_string();
-    store
+    let updated_res = store
         .upsert_reaction_role_binding(rr_updated)
         .await
         .expect("update reaction role binding in pg");
+
+    assert_eq!(
+        updated_res.id, original_rr_id,
+        "PostgreSQL UPSERT must preserve original UUID"
+    );
+    assert_eq!(
+        updated_res.created_at, original_rr_created_at,
+        "PostgreSQL UPSERT must preserve original created_at"
+    );
+    assert_eq!(
+        updated_res.channel_id, rr_binding.channel_id,
+        "PostgreSQL UPSERT with None must preserve existing channel_id"
+    );
 
     let rr_read_updated = store
         .get_reaction_role_binding(rr_guild, rr_msg, rr_emoji)
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(rr_read_updated.id, original_rr_id);
     assert_eq!(rr_read_updated.role_id, "1005");
+    assert_eq!(rr_read_updated.channel_id, rr_binding.channel_id);
 
     let rr_del = store
         .delete_reaction_role_binding(rr_guild, rr_msg, rr_emoji)
