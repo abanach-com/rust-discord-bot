@@ -357,6 +357,7 @@ pub async fn handle_reaction_role_event(
         .parse()
         .context("invalid role_id in reaction role binding")?;
     let role_id = RoleId::new(role_id_u64);
+    let user_id_str = user_id.get().to_string();
 
     if is_add {
         let guild = guild_id.to_partial_guild(&ctx.http).await?;
@@ -382,53 +383,154 @@ pub async fn handle_reaction_role_event(
             return Ok(());
         }
 
-        match ctx
-            .http
-            .add_member_role(guild_id, user_id, role_id, Some("Reaction role"))
+        // Determine whether user possessed this role before reaction
+        let member = if let Some(ref m) = reaction.member {
+            Some(m.clone())
+        } else {
+            ctx.http.get_member(guild_id, user_id).await.ok()
+        };
+        let member_has_role = member
+            .as_ref()
+            .map(|m| m.roles.contains(&role_id))
+            .unwrap_or(false);
+
+        // Check active reaction role grants for this user and role
+        let existing_grants = state
+            .storage
+            .list_active_reaction_role_grants_for_user_role(
+                &guild_id_str,
+                &user_id_str,
+                &binding.role_id,
+            )
             .await
-        {
-            Ok(()) => {
-                let _ = state
-                    .storage
-                    .record_audit(
-                        Some(&guild_id_str),
-                        Some(&user_id.get().to_string()),
-                        "reaction_roles",
-                        "reaction_role_granted",
-                        serde_json::json!({
-                            "message_id": message_id_str,
-                            "emoji": emoji_key,
-                            "role_id": binding.role_id,
-                        }),
-                    )
-                    .await;
+            .unwrap_or_default();
+        let has_prior_bot_grant = existing_grants.iter().any(|g| g.granted_by_bot);
+
+        // If member already has the role without prior reaction role bot grant, it was granted by moderator/external source
+        let granted_by_bot = if !member_has_role {
+            true
+        } else {
+            has_prior_bot_grant
+        };
+
+        // Record the grant in the ledger
+        let _ = state
+            .storage
+            .record_reaction_role_grant(
+                &guild_id_str,
+                &user_id_str,
+                &binding.role_id,
+                binding.id,
+                granted_by_bot,
+            )
+            .await?;
+
+        if !member_has_role {
+            match ctx
+                .http
+                .add_member_role(guild_id, user_id, role_id, Some("Reaction role"))
+                .await
+            {
+                Ok(()) => {
+                    let _ = state
+                        .storage
+                        .record_audit(
+                            Some(&guild_id_str),
+                            Some(&user_id.get().to_string()),
+                            "reaction_roles",
+                            "reaction_role_granted",
+                            serde_json::json!({
+                                "message_id": message_id_str,
+                                "emoji": emoji_key,
+                                "role_id": binding.role_id,
+                            }),
+                        )
+                        .await;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        ?err,
+                        guild_id = %guild_id_str,
+                        user_id = %user_id.get(),
+                        role_id = %binding.role_id,
+                        "failed to add reaction role to member"
+                    );
+                    let _ = state
+                        .storage
+                        .release_reaction_role_grant(
+                            &guild_id_str,
+                            &user_id_str,
+                            &binding.role_id,
+                            binding.id,
+                        )
+                        .await;
+                    let _ = state
+                        .storage
+                        .record_audit(
+                            Some(&guild_id_str),
+                            Some(&user_id.get().to_string()),
+                            "reaction_roles",
+                            "reaction_role_grant_failed",
+                            serde_json::json!({
+                                "message_id": message_id_str,
+                                "emoji": emoji_key,
+                                "role_id": binding.role_id,
+                                "error": err.to_string(),
+                            }),
+                        )
+                        .await;
+                }
             }
-            Err(err) => {
-                tracing::warn!(
-                    ?err,
-                    guild_id = %guild_id_str,
-                    user_id = %user_id.get(),
-                    role_id = %binding.role_id,
-                    "failed to add reaction role to member"
-                );
-                let _ = state
-                    .storage
-                    .record_audit(
-                        Some(&guild_id_str),
-                        Some(&user_id.get().to_string()),
-                        "reaction_roles",
-                        "reaction_role_grant_failed",
-                        serde_json::json!({
-                            "message_id": message_id_str,
-                            "emoji": emoji_key,
-                            "role_id": binding.role_id,
-                            "error": err.to_string(),
-                        }),
-                    )
-                    .await;
-            }
+        } else {
+            tracing::info!(
+                guild_id = %guild_id_str,
+                user_id = %user_id.get(),
+                role_id = %binding.role_id,
+                granted_by_bot,
+                "Member already possesses role; tracked in reaction_role_grants ledger without duplicate add_member_role"
+            );
         }
     } else {
+        let release = state
+            .storage
+            .release_reaction_role_grant(&guild_id_str, &user_id_str, &binding.role_id, binding.id)
+            .await?;
+
+        if !release.should_revoke_role {
+            let reason = if !release.grant_existed {
+                "no_grant_record"
+            } else if !release.granted_by_bot {
+                "pre_existing_role_preserved"
+            } else {
+                "other_active_binding_preserved"
+            };
+            tracing::info!(
+                guild_id = %guild_id_str,
+                user_id = %user_id.get(),
+                role_id = %binding.role_id,
+                reason,
+                remaining_sources = release.remaining_active_sources,
+                "Reaction removed but role preserved on member"
+            );
+            let _ = state
+                .storage
+                .record_audit(
+                    Some(&guild_id_str),
+                    Some(&user_id.get().to_string()),
+                    "reaction_roles",
+                    "reaction_role_preserved",
+                    serde_json::json!({
+                        "message_id": message_id_str,
+                        "emoji": emoji_key,
+                        "role_id": binding.role_id,
+                        "reason": reason,
+                        "remaining_sources": release.remaining_active_sources,
+                    }),
+                )
+                .await;
+            return Ok(());
+        }
+
         match ctx
             .http
             .remove_member_role(guild_id, user_id, role_id, Some("Reaction role removed"))

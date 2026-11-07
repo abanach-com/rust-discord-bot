@@ -322,6 +322,25 @@ pub struct ReactionRoleBinding {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::FromRow)]
+pub struct ReactionRoleGrant {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub user_id: String,
+    pub role_id: String,
+    pub binding_id: Uuid,
+    pub granted_by_bot: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleaseReactionRoleGrantOutcome {
+    pub grant_existed: bool,
+    pub granted_by_bot: bool,
+    pub remaining_active_sources: usize,
+    pub should_revoke_role: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct StarboardEntry {
     pub guild_id: String,
@@ -2642,6 +2661,73 @@ impl Storage {
         match self {
             Self::Memory(store) => store.list_reaction_role_bindings(guild_id),
             Self::Postgres(store) => store.list_reaction_role_bindings(guild_id).await,
+        }
+    }
+
+    pub async fn record_reaction_role_grant(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_id: &str,
+        binding_id: Uuid,
+        granted_by_bot: bool,
+    ) -> anyhow::Result<ReactionRoleGrant> {
+        match self {
+            Self::Memory(store) => store.record_reaction_role_grant(
+                guild_id,
+                user_id,
+                role_id,
+                binding_id,
+                granted_by_bot,
+            ),
+            Self::Postgres(store) => {
+                store
+                    .record_reaction_role_grant(
+                        guild_id,
+                        user_id,
+                        role_id,
+                        binding_id,
+                        granted_by_bot,
+                    )
+                    .await
+            }
+        }
+    }
+
+    pub async fn release_reaction_role_grant(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_id: &str,
+        binding_id: Uuid,
+    ) -> anyhow::Result<ReleaseReactionRoleGrantOutcome> {
+        match self {
+            Self::Memory(store) => {
+                store.release_reaction_role_grant(guild_id, user_id, role_id, binding_id)
+            }
+            Self::Postgres(store) => {
+                store
+                    .release_reaction_role_grant(guild_id, user_id, role_id, binding_id)
+                    .await
+            }
+        }
+    }
+
+    pub async fn list_active_reaction_role_grants_for_user_role(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_id: &str,
+    ) -> anyhow::Result<Vec<ReactionRoleGrant>> {
+        match self {
+            Self::Memory(store) => {
+                store.list_active_reaction_role_grants_for_user_role(guild_id, user_id, role_id)
+            }
+            Self::Postgres(store) => {
+                store
+                    .list_active_reaction_role_grants_for_user_role(guild_id, user_id, role_id)
+                    .await
+            }
         }
     }
 

@@ -609,23 +609,36 @@ async fn mock_discord_handler(
             })).into_response(),
 
             // Regular raid target member
-
             "222222222222222222" => Json(json!({
-
                 "user": { "id": "222222222222222222", "username": "RaidSpammer", "avatar": null, "bot": false },
-
-                "roles": ["1002"], // Member role (rank 10)
-
+                "roles": [],
                 "joined_at": "2026-10-31T06:59:00Z",
-
                 "deaf": false,
-
                 "mute": false,
-
                 "flags": 0,
-
                 "pending": false
+            })).into_response(),
 
+            // Member with pre-existing role (Issue #286)
+            "555555555555555555" => Json(json!({
+                "user": { "id": "555555555555555555", "username": "PreExistingMember", "avatar": null, "bot": false },
+                "roles": ["1002"],
+                "joined_at": "2026-01-01T00:00:00Z",
+                "deaf": false,
+                "mute": false,
+                "flags": 0,
+                "pending": false
+            })).into_response(),
+
+            // Member for shared multi-binding testing (Issue #286)
+            "777777777777777777" => Json(json!({
+                "user": { "id": "777777777777777777", "username": "MultiBindingMember", "avatar": null, "bot": false },
+                "roles": [],
+                "joined_at": "2026-01-01T00:00:00Z",
+                "deaf": false,
+                "mute": false,
+                "flags": 0,
+                "pending": false
             })).into_response(),
 
             // Guild Manager member with MANAGE_GUILD
@@ -3049,6 +3062,303 @@ async fn test_reaction_roles_gateway_reaction_events() {
         mock.modifying_requests_count.load(Ordering::SeqCst),
         baseline_disabled,
         "Reaction role event must be ignored when module is disabled"
+    );
+
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn test_reaction_roles_provenance_and_shared_grants_lifecycle_suite() {
+    use chrono::Utc;
+    use rusty_discord_bot::storage::ReactionRoleBinding;
+    use uuid::Uuid;
+
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state().await;
+
+    // Enable reaction_roles module
+    state
+        .storage
+        .update_module_settings_with_audit(rusty_discord_bot::storage::UpdateModuleSettingsParams {
+            guild_id: "100",
+            module_id: "reaction_roles",
+            enabled: true,
+            config: serde_json::json!({}),
+            actor_id: Some("admin"),
+            audit_event: "module_enable",
+            audit_data: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+
+    // Create Binding 1: (msg 900000000000000001, 🎉) -> Role 1002
+    let _b1 = state
+        .storage
+        .upsert_reaction_role_binding(ReactionRoleBinding {
+            id: Uuid::new_v4(),
+            guild_id: "100".to_string(),
+            channel_id: Some("101".to_string()),
+            message_id: "900000000000000001".to_string(),
+            emoji_key: "🎉".to_string(),
+            role_id: "1002".to_string(),
+            created_by: Some("admin".to_string()),
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    // Create Binding 2: (msg 900000000000000002, ✅) -> Same Role 1002
+    let _b2 = state
+        .storage
+        .upsert_reaction_role_binding(ReactionRoleBinding {
+            id: Uuid::new_v4(),
+            guild_id: "100".to_string(),
+            channel_id: Some("101".to_string()),
+            message_id: "900000000000000002".to_string(),
+            emoji_key: "✅".to_string(),
+            role_id: "1002".to_string(),
+            created_by: Some("admin".to_string()),
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    // =========================================================================
+    // CASE A: User with pre-existing role granted by moderator (Issue #286)
+    // User 555555555555555555 already holds role 1002 in mock guild member state
+    // =========================================================================
+    let reaction_preexisting_add: serenity::all::Reaction =
+        serde_json::from_value(serde_json::json!({
+            "channel_id": "101",
+            "message_id": "900000000000000001",
+            "guild_id": "100",
+            "user_id": "555555555555555555",
+            "emoji": { "name": "🎉", "id": null },
+            "burst": false,
+            "type": 0
+        }))
+        .unwrap();
+
+    let baseline_calls = mock.recorded_calls.lock().await.len();
+    rusty_discord_bot::discord::reaction_roles::handle_reaction_role_event(
+        &ctx,
+        &state,
+        &reaction_preexisting_add,
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Verify: No PUT sent because user already has role 1002
+    let calls_after_add = mock.recorded_calls.lock().await.clone();
+    let put_preexisting = calls_after_add[baseline_calls..].iter().any(|(m, p)| {
+        *m == Method::PUT && p.contains("/guilds/100/members/555555555555555555/roles/1002")
+    });
+    assert!(
+        !put_preexisting,
+        "Redundant PUT must not be sent for member with pre-existing role"
+    );
+
+    // Ledger must record the grant with granted_by_bot = false
+    let grants = state
+        .storage
+        .list_active_reaction_role_grants_for_user_role("100", "555555555555555555", "1002")
+        .await
+        .unwrap();
+    assert_eq!(grants.len(), 1);
+    assert!(
+        !grants[0].granted_by_bot,
+        "Pre-existing role grant must be marked granted_by_bot = false"
+    );
+
+    // Now user removes the reaction:
+    let reaction_preexisting_remove: serenity::all::Reaction =
+        serde_json::from_value(serde_json::json!({
+            "channel_id": "101",
+            "message_id": "900000000000000001",
+            "guild_id": "100",
+            "user_id": "555555555555555555",
+            "emoji": { "name": "🎉", "id": null },
+            "burst": false,
+            "type": 0
+        }))
+        .unwrap();
+
+    let baseline_before_remove = mock.recorded_calls.lock().await.len();
+    rusty_discord_bot::discord::reaction_roles::handle_reaction_role_event(
+        &ctx,
+        &state,
+        &reaction_preexisting_remove,
+        false,
+    )
+    .await
+    .unwrap();
+
+    // CRITICAL ASSERTION: DELETE must NOT be sent to Discord!
+    let calls_after_remove = mock.recorded_calls.lock().await.clone();
+    let delete_sent = calls_after_remove[baseline_before_remove..]
+        .iter()
+        .any(|(m, p)| {
+            *m == Method::DELETE && p.contains("/guilds/100/members/555555555555555555/roles/1002")
+        });
+    assert!(
+        !delete_sent,
+        "CRITICAL: remove_member_role must NOT be sent for pre-existing role granted by moderator"
+    );
+
+    // Verify audit log records preservation
+    let audits = state.storage.list_audit_events("100", 10).await.unwrap();
+    let preserved_audit = audits.iter().find(|a| {
+        a.event == "reaction_role_preserved" && a.actor_id.as_deref() == Some("555555555555555555")
+    });
+    assert!(
+        preserved_audit.is_some(),
+        "Audit log must record reaction_role_preserved for pre-existing role"
+    );
+    assert_eq!(
+        preserved_audit.unwrap().data["reason"],
+        "pre_existing_role_preserved"
+    );
+
+    // =========================================================================
+    // CASE B: Shared Multi-Binding Preservation (Issue #286)
+    // User 777777777777777777 reacts to B1 (msg 1), then B2 (msg 2)
+    // =========================================================================
+    let r_user_b1_add: serenity::all::Reaction = serde_json::from_value(serde_json::json!({
+        "channel_id": "101",
+        "message_id": "900000000000000001",
+        "guild_id": "100",
+        "user_id": "777777777777777777",
+        "emoji": { "name": "🎉", "id": null },
+        "burst": false,
+        "type": 0
+    }))
+    .unwrap();
+
+    let r_user_b2_add: serenity::all::Reaction = serde_json::from_value(serde_json::json!({
+        "channel_id": "101",
+        "message_id": "900000000000000002",
+        "guild_id": "100",
+        "user_id": "777777777777777777",
+        "emoji": { "name": "✅", "id": null },
+        "burst": false,
+        "type": 0
+    }))
+    .unwrap();
+
+    let baseline_multi = mock.recorded_calls.lock().await.len();
+    rusty_discord_bot::discord::reaction_roles::handle_reaction_role_event(
+        &ctx,
+        &state,
+        &r_user_b1_add,
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Verify PUT sent for B1
+    let calls_multi_add = mock.recorded_calls.lock().await.clone();
+    let put_b1 = calls_multi_add[baseline_multi..].iter().any(|(m, p)| {
+        *m == Method::PUT && p.contains("/guilds/100/members/777777777777777777/roles/1002")
+    });
+    assert!(put_b1, "PUT must be sent for initial bot grant under B1");
+
+    // React under B2
+    rusty_discord_bot::discord::reaction_roles::handle_reaction_role_event(
+        &ctx,
+        &state,
+        &r_user_b2_add,
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Both B1 and B2 must be recorded in ledger as active bot grants
+    let grants_multi = state
+        .storage
+        .list_active_reaction_role_grants_for_user_role("100", "777777777777777777", "1002")
+        .await
+        .unwrap();
+    assert_eq!(
+        grants_multi.len(),
+        2,
+        "Must hold two distinct active grants for role 1002"
+    );
+    assert!(grants_multi.iter().all(|g| g.granted_by_bot));
+
+    // Now user UNREACTS under B1 (🎉 on msg 1):
+    let r_user_b1_rem: serenity::all::Reaction = serde_json::from_value(serde_json::json!({
+        "channel_id": "101",
+        "message_id": "900000000000000001",
+        "guild_id": "100",
+        "user_id": "777777777777777777",
+        "emoji": { "name": "🎉", "id": null },
+        "burst": false,
+        "type": 0
+    }))
+    .unwrap();
+
+    let baseline_b1_rem = mock.recorded_calls.lock().await.len();
+    rusty_discord_bot::discord::reaction_roles::handle_reaction_role_event(
+        &ctx,
+        &state,
+        &r_user_b1_rem,
+        false,
+    )
+    .await
+    .unwrap();
+
+    // CRITICAL ASSERTION: B2 is still active, so DELETE must NOT be sent!
+    let calls_b1_rem = mock.recorded_calls.lock().await.clone();
+    let delete_b1_rem = calls_b1_rem[baseline_b1_rem..].iter().any(|(m, p)| {
+        *m == Method::DELETE && p.contains("/guilds/100/members/777777777777777777/roles/1002")
+    });
+    assert!(
+        !delete_b1_rem,
+        "CRITICAL: Unreacting B1 must NOT remove role because B2 is still active"
+    );
+
+    // Audit log confirms preservation due to other active binding
+    let audits_b1 = state.storage.list_audit_events("100", 10).await.unwrap();
+    let preserved_b1 = audits_b1.iter().find(|a| {
+        a.event == "reaction_role_preserved" && a.actor_id.as_deref() == Some("777777777777777777")
+    });
+    assert!(preserved_b1.is_some());
+    assert_eq!(
+        preserved_b1.unwrap().data["reason"],
+        "other_active_binding_preserved"
+    );
+
+    // Finally, user UNREACTS under B2 (✅ on msg 2):
+    let r_user_b2_rem: serenity::all::Reaction = serde_json::from_value(serde_json::json!({
+        "channel_id": "101",
+        "message_id": "900000000000000002",
+        "guild_id": "100",
+        "user_id": "777777777777777777",
+        "emoji": { "name": "✅", "id": null },
+        "burst": false,
+        "type": 0
+    }))
+    .unwrap();
+
+    let baseline_b2_rem = mock.recorded_calls.lock().await.len();
+    rusty_discord_bot::discord::reaction_roles::handle_reaction_role_event(
+        &ctx,
+        &state,
+        &r_user_b2_rem,
+        false,
+    )
+    .await
+    .unwrap();
+
+    // Now all sources are exhausted: DELETE must be sent!
+    let calls_b2_rem = mock.recorded_calls.lock().await.clone();
+    let delete_b2_rem = calls_b2_rem[baseline_b2_rem..].iter().any(|(m, p)| {
+        *m == Method::DELETE && p.contains("/guilds/100/members/777777777777777777/roles/1002")
+    });
+    assert!(
+        delete_b2_rem,
+        "DELETE role must be sent once the final reaction role binding is removed"
     );
 
     shard_manager.shutdown_all().await;

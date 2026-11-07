@@ -22,12 +22,13 @@ use super::{
     MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
     ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
     ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
-    ProgressionSeason, ReactionRoleBinding, RecordCompanionLeaseParams, RedditSubscription,
-    ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent, ServerSnapshot,
-    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
-    TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError,
-    TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
-    VkSubscription, WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
+    ProgressionSeason, ReactionRoleBinding, ReactionRoleGrant, RecordCompanionLeaseParams,
+    RedditSubscription, ReleaseReactionRoleGrantOutcome, ReputationGrantOutcome,
+    RetainedRecordNotice, ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry,
+    SteamLfgPost, StickyMessage, StoreItem, StorePurchase, TagRecord, TelegramBridge,
+    TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError, TupperProfile,
+    TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport, VkSubscription,
+    WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
     YouTubeChannelSubscription, is_member_after_cursor, level_for_xp, parse_member_search_cursor,
     snowflake_created_at, validate_snowflake,
 };
@@ -228,6 +229,7 @@ pub struct MemoryStore {
     asset_analytics_failure_injected: Arc<std::sync::atomic::AtomicBool>,
     tags: Arc<DashMap<(String, String), TagRecord>>,
     reaction_roles: Arc<DashMap<(String, String, String), ReactionRoleBinding>>,
+    reaction_role_grants: Arc<DashMap<(String, String, Uuid), ReactionRoleGrant>>,
 }
 
 impl MemoryStore {
@@ -2077,19 +2079,30 @@ impl MemoryStore {
             message_id.to_owned(),
             emoji_key.to_owned(),
         );
-        if self.reaction_roles.remove(&key).is_some() {
-            return Ok(true);
-        }
-        let mut to_remove = None;
-        for entry in self.reaction_roles.iter() {
-            let b = entry.value();
-            if b.guild_id == guild_id && b.message_id == message_id && b.emoji_key == emoji_key {
-                to_remove = Some(entry.key().clone());
-                break;
+        let removed = if let Some((_, b)) = self.reaction_roles.remove(&key) {
+            Some(b)
+        } else {
+            let mut to_remove = None;
+            for entry in self.reaction_roles.iter() {
+                let b = entry.value();
+                if b.guild_id == guild_id && b.message_id == message_id && b.emoji_key == emoji_key
+                {
+                    to_remove = Some((entry.key().clone(), b.clone()));
+                    break;
+                }
             }
-        }
-        if let Some(k) = to_remove {
-            Ok(self.reaction_roles.remove(&k).is_some())
+            if let Some((k, b)) = to_remove {
+                self.reaction_roles.remove(&k);
+                Some(b)
+            } else {
+                None
+            }
+        };
+
+        if let Some(ref binding) = removed {
+            self.reaction_role_grants
+                .retain(|_, g| g.binding_id != binding.id);
+            Ok(true)
         } else {
             Ok(false)
         }
@@ -2109,7 +2122,12 @@ impl MemoryStore {
             }
         }
         if let Some(k) = to_remove {
-            Ok(self.reaction_roles.remove(&k).is_some())
+            let removed = self.reaction_roles.remove(&k).is_some();
+            if removed {
+                self.reaction_role_grants
+                    .retain(|_, g| g.binding_id != binding_id);
+            }
+            Ok(removed)
         } else {
             Ok(false)
         }
@@ -2127,6 +2145,90 @@ impl MemoryStore {
             .collect();
         list.sort_by_key(|a| a.created_at);
         Ok(list)
+    }
+
+    pub fn record_reaction_role_grant(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_id: &str,
+        binding_id: Uuid,
+        granted_by_bot: bool,
+    ) -> anyhow::Result<ReactionRoleGrant> {
+        let key = (guild_id.to_owned(), user_id.to_owned(), binding_id);
+        let grant = match self.reaction_role_grants.entry(key) {
+            dashmap::mapref::entry::Entry::Occupied(mut occ) => {
+                let existing = occ.get_mut();
+                existing.role_id = role_id.to_owned();
+                existing.granted_by_bot = granted_by_bot;
+                existing.clone()
+            }
+            dashmap::mapref::entry::Entry::Vacant(vac) => {
+                let grant = ReactionRoleGrant {
+                    id: Uuid::new_v4(),
+                    guild_id: guild_id.to_owned(),
+                    user_id: user_id.to_owned(),
+                    role_id: role_id.to_owned(),
+                    binding_id,
+                    granted_by_bot,
+                    created_at: Utc::now(),
+                };
+                vac.insert(grant.clone());
+                grant
+            }
+        };
+        Ok(grant)
+    }
+
+    pub fn release_reaction_role_grant(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_id: &str,
+        binding_id: Uuid,
+    ) -> anyhow::Result<ReleaseReactionRoleGrantOutcome> {
+        let key = (guild_id.to_owned(), user_id.to_owned(), binding_id);
+        let removed = self.reaction_role_grants.remove(&key);
+        let (grant_existed, granted_by_bot) = match removed {
+            Some((_, g)) => (true, g.granted_by_bot),
+            None => (false, false),
+        };
+
+        let remaining_active_sources = self
+            .reaction_role_grants
+            .iter()
+            .filter(|e| {
+                let g = e.value();
+                g.guild_id == guild_id && g.user_id == user_id && g.role_id == role_id
+            })
+            .count();
+
+        let should_revoke_role = grant_existed && granted_by_bot && remaining_active_sources == 0;
+
+        Ok(ReleaseReactionRoleGrantOutcome {
+            grant_existed,
+            granted_by_bot,
+            remaining_active_sources,
+            should_revoke_role,
+        })
+    }
+
+    pub fn list_active_reaction_role_grants_for_user_role(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_id: &str,
+    ) -> anyhow::Result<Vec<ReactionRoleGrant>> {
+        let grants = self
+            .reaction_role_grants
+            .iter()
+            .filter(|e| {
+                let g = e.value();
+                g.guild_id == guild_id && g.user_id == user_id && g.role_id == role_id
+            })
+            .map(|e| e.value().clone())
+            .collect();
+        Ok(grants)
     }
 
     pub fn record_starboard_entry(

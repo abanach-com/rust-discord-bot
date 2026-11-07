@@ -21,15 +21,15 @@ use super::{
     MemberSearchRow, MemberSnapshot, ModerationAppeal, ModerationExecutionIntent,
     ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState, ModuleDraftConfig,
     PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric, ProgressionSeason,
-    ReactionRoleBinding, RecordCompanionLeaseParams, RecruitmentApplication, RecruitmentReview,
-    RecruitmentRoleFulfillment, RecruitmentTrack, RedditSubscription, ReputationGrantOutcome,
-    RetainedRecordNotice, ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry,
-    SteamLfgPost, StickyMessage, StoreItem, StorePurchase, TagRecord, TelegramBridge,
-    TelegramMessageMapping, TimedRoleGrant, Tournament, TransitionApplicationParams, TupperError,
-    TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
-    VkSubscription, WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
-    YouTubeChannelSubscription, level_for_xp, parse_member_search_cursor, snowflake_created_at,
-    validate_snowflake,
+    ReactionRoleBinding, ReactionRoleGrant, RecordCompanionLeaseParams, RecruitmentApplication,
+    RecruitmentReview, RecruitmentRoleFulfillment, RecruitmentTrack, RedditSubscription,
+    ReleaseReactionRoleGrantOutcome, ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent,
+    ServerSnapshot, SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem,
+    StorePurchase, TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament,
+    TransitionApplicationParams, TupperError, TupperProfile, TwitchStreamSubscription,
+    UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WORK_JOBS, WorkClaimOutcome,
+    WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
+    parse_member_search_cursor, snowflake_created_at, validate_snowflake,
 };
 
 pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
@@ -3001,6 +3001,113 @@ impl PostgresStore {
             "#,
         )
         .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn record_reaction_role_grant(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_id: &str,
+        binding_id: Uuid,
+        granted_by_bot: bool,
+    ) -> anyhow::Result<ReactionRoleGrant> {
+        let id = Uuid::new_v4();
+        let row = sqlx::query_as::<_, ReactionRoleGrant>(
+            r#"
+            INSERT INTO reaction_role_grants (id, guild_id, user_id, role_id, binding_id, granted_by_bot, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, NOW())
+            ON CONFLICT (guild_id, user_id, binding_id)
+            DO UPDATE SET
+                role_id = EXCLUDED.role_id,
+                granted_by_bot = EXCLUDED.granted_by_bot
+            RETURNING id, guild_id, user_id, role_id, binding_id, granted_by_bot, created_at
+            "#,
+        )
+        .bind(id)
+        .bind(guild_id)
+        .bind(user_id)
+        .bind(role_id)
+        .bind(binding_id)
+        .bind(granted_by_bot)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    pub async fn release_reaction_role_grant(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_id: &str,
+        binding_id: Uuid,
+    ) -> anyhow::Result<ReleaseReactionRoleGrantOutcome> {
+        #[derive(sqlx::FromRow)]
+        struct ReleaseRow {
+            grant_existed: bool,
+            granted_by_bot: bool,
+            remaining_sources: i64,
+        }
+
+        let row = sqlx::query_as::<_, ReleaseRow>(
+            r#"
+            WITH deleted AS (
+                DELETE FROM reaction_role_grants
+                WHERE guild_id = $1 AND user_id = $2 AND binding_id = $3
+                RETURNING id, granted_by_bot
+            ),
+            remaining AS (
+                SELECT COUNT(*) AS count
+                FROM reaction_role_grants
+                WHERE guild_id = $1 AND user_id = $2 AND role_id = $4
+            )
+            SELECT
+                (SELECT COUNT(*) > 0 FROM deleted) AS grant_existed,
+                COALESCE((SELECT granted_by_bot FROM deleted), false) AS granted_by_bot,
+                (SELECT count FROM remaining) AS remaining_sources
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .bind(binding_id)
+        .bind(role_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let grant_existed = row.grant_existed;
+        let granted_by_bot = row.granted_by_bot;
+        let remaining_active_sources = row.remaining_sources.max(0) as usize;
+        let should_revoke_role = grant_existed && granted_by_bot && remaining_active_sources == 0;
+
+        Ok(ReleaseReactionRoleGrantOutcome {
+            grant_existed,
+            granted_by_bot,
+            remaining_active_sources,
+            should_revoke_role,
+        })
+    }
+
+    pub async fn list_active_reaction_role_grants_for_user_role(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_id: &str,
+    ) -> anyhow::Result<Vec<ReactionRoleGrant>> {
+        let rows = sqlx::query_as::<_, ReactionRoleGrant>(
+            r#"
+            SELECT id, guild_id, user_id, role_id, binding_id, granted_by_bot, created_at
+            FROM reaction_role_grants
+            WHERE guild_id = $1 AND user_id = $2 AND role_id = $3
+            ORDER BY created_at ASC
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .bind(role_id)
         .fetch_all(&self.pool)
         .await?;
 

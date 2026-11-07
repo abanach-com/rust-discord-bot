@@ -2720,6 +2720,152 @@ async fn test_postgres_integration_suite() {
         .expect("delete reaction role binding second time in pg");
     assert!(!rr_del_re);
 
+    // Reaction Role Grants Ledger in Postgres (Issue #286)
+    let pg_rr_b1 = store
+        .upsert_reaction_role_binding(rusty_discord_bot::storage::ReactionRoleBinding {
+            id: uuid::Uuid::new_v4(),
+            guild_id: rr_guild.to_string(),
+            channel_id: Some("chan_1".to_string()),
+            message_id: "msg_rr_grant_1".to_string(),
+            emoji_key: "🎉".to_string(),
+            role_id: "role_grant_test".to_string(),
+            created_by: Some("pg_admin".to_string()),
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    let pg_rr_b2 = store
+        .upsert_reaction_role_binding(rusty_discord_bot::storage::ReactionRoleBinding {
+            id: uuid::Uuid::new_v4(),
+            guild_id: rr_guild.to_string(),
+            channel_id: Some("chan_1".to_string()),
+            message_id: "msg_rr_grant_2".to_string(),
+            emoji_key: "✅".to_string(),
+            role_id: "role_grant_test".to_string(),
+            created_by: Some("pg_admin".to_string()),
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    let test_user_multi = "user_pg_rr_multi_1";
+    // Record bot grant for B1
+    let g1 = store
+        .record_reaction_role_grant(
+            rr_guild,
+            test_user_multi,
+            "role_grant_test",
+            pg_rr_b1.id,
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(g1.binding_id, pg_rr_b1.id);
+    assert!(g1.granted_by_bot);
+
+    // Record bot grant for B2
+    let g2 = store
+        .record_reaction_role_grant(
+            rr_guild,
+            test_user_multi,
+            "role_grant_test",
+            pg_rr_b2.id,
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(g2.binding_id, pg_rr_b2.id);
+
+    // Check list
+    let active_grants = store
+        .list_active_reaction_role_grants_for_user_role(
+            rr_guild,
+            test_user_multi,
+            "role_grant_test",
+        )
+        .await
+        .unwrap();
+    assert_eq!(active_grants.len(), 2);
+
+    // Release B1: B2 still active -> should_revoke_role must be false
+    let rel_b1 = store
+        .release_reaction_role_grant(rr_guild, test_user_multi, "role_grant_test", pg_rr_b1.id)
+        .await
+        .unwrap();
+    assert!(rel_b1.grant_existed);
+    assert!(rel_b1.granted_by_bot);
+    assert_eq!(rel_b1.remaining_active_sources, 1);
+    assert!(
+        !rel_b1.should_revoke_role,
+        "Releasing B1 while B2 is active must not revoke role in Postgres"
+    );
+
+    // Release B2: now remaining is 0 -> should_revoke_role must be true
+    let rel_b2 = store
+        .release_reaction_role_grant(rr_guild, test_user_multi, "role_grant_test", pg_rr_b2.id)
+        .await
+        .unwrap();
+    assert!(rel_b2.grant_existed);
+    assert_eq!(rel_b2.remaining_active_sources, 0);
+    assert!(
+        rel_b2.should_revoke_role,
+        "Releasing last remaining active grant must trigger revoke in Postgres"
+    );
+
+    // Case Pre-existing role: granted_by_bot = false
+    let test_user_pre = "user_pg_rr_pre_1";
+    let _g_pre = store
+        .record_reaction_role_grant(
+            rr_guild,
+            test_user_pre,
+            "role_grant_test",
+            pg_rr_b1.id,
+            false,
+        )
+        .await
+        .unwrap();
+    let rel_pre = store
+        .release_reaction_role_grant(rr_guild, test_user_pre, "role_grant_test", pg_rr_b1.id)
+        .await
+        .unwrap();
+    assert!(rel_pre.grant_existed);
+    assert!(!rel_pre.granted_by_bot);
+    assert!(
+        !rel_pre.should_revoke_role,
+        "Pre-existing role must never be revoked upon reaction remove in Postgres"
+    );
+
+    // Cascade deletion test: ON DELETE CASCADE
+    let _g_cascade = store
+        .record_reaction_role_grant(
+            rr_guild,
+            "user_cascade",
+            "role_grant_test",
+            pg_rr_b2.id,
+            true,
+        )
+        .await
+        .unwrap();
+    store
+        .delete_reaction_role_binding_by_id(rr_guild, pg_rr_b2.id)
+        .await
+        .unwrap();
+    let remaining_after_cascade = store
+        .list_active_reaction_role_grants_for_user_role(rr_guild, "user_cascade", "role_grant_test")
+        .await
+        .unwrap();
+    assert!(
+        remaining_after_cascade.is_empty(),
+        "Deleting reaction role binding must cascade delete grants in Postgres"
+    );
+
+    // Clean up B1
+    store
+        .delete_reaction_role_binding_by_id(rr_guild, pg_rr_b1.id)
+        .await
+        .unwrap();
+
     // 30. Economy work & crime rewards, cooldowns and idempotency in Postgres (#278)
     let eco_guild = "777000000000000001";
     let eco_user = "888000000000000001";

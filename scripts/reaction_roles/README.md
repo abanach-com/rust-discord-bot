@@ -46,3 +46,9 @@ Wpis modułu w pliku instalatora `scripts/install.xml`:
 
 ## 🛡️ Bezpieczeństwo i audyt
 Wszystkie krytyczne operacje podlegają walidacji uprawnień Discorda, limitom zapytań (rate limiting) oraz rejestracji w audycie platformy.
+
+### Ochrona pochodzenia ról i współdzielonych źródeł (Issue #286)
+System Reaction Roles korzysta z trwałego ledgera grantów `reaction_role_grants`, który śledzi pochodzenie każdej roli przyznanej przez bota:
+- **Ochrona ról pre-existing (nadanych ręcznie przez moderatora lub z innych źródeł)**: Jeżeli użytkownik posiadał rolę przed kliknięciem reakcji, usunięcie reakcji **nigdy** nie odbiera mu tej roli (`granted_by_bot = false`).
+- **Współdzielone źródła ról (wiele bindingów do tej samej roli)**: Jeżeli ta sama rola jest skonfigurowana pod wieloma różnymi wiadomościami lub emoji, usunięcie jednej reakcji nie odbiera roli, dopóki użytkownik utrzymuje przynajmniej jedną inną aktywną reakcję dla tej samej roli.
+- **Kaskadowość**: Usunięcie powiązania (`/reactionrole remove` lub REST delete) automatycznie kaskadowo czyści powiązane granty z ledgera.
