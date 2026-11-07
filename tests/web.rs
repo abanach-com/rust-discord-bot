@@ -11307,3 +11307,885 @@ async fn test_module_autorole_privilege_escalation_guard_suite() {
         .unwrap();
     assert_eq!(legit_jg_resp.status(), reqwest::StatusCode::OK);
 }
+
+#[tokio::test]
+async fn test_recruitment_privilege_escalation_and_self_accept_guard_suite() {
+    use axum::Json;
+    use axum::extract::Path;
+    use axum::response::IntoResponse;
+    use axum::routing::{get, put};
+    use reqwest::header::COOKIE;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let guild_a = "777888999000111";
+    let role_delivery_count = Arc::new(AtomicUsize::new(0));
+    let role_delivery_count_clone = role_delivery_count.clone();
+
+    // 1. Mock Discord API
+    let discord_mock_app = axum::Router::new()
+        .route(
+            "/users/@me",
+            get(|| async move {
+                Json(serde_json::json!({
+                    "id": "999999999999999999"
+                }))
+                .into_response()
+            }),
+        )
+        .route(
+            "/guilds/{guild_id}",
+            get(|Path(gid): Path<String>| async move {
+                Json(serde_json::json!({
+                    "id": gid,
+                    "owner_id": "999000000000000000",
+                    "roles": [
+                        {
+                            "id": "1001",
+                            "name": "MemberRoleA",
+                            "permissions": "0",
+                            "position": 10,
+                            "managed": false
+                        },
+                        {
+                            "id": "1003",
+                            "name": "ModRole",
+                            "permissions": "268435456", // MANAGE_ROLES
+                            "position": 40,
+                            "managed": false
+                        },
+                        {
+                            "id": "1004",
+                            "name": "BotRole",
+                            "permissions": "268435456",
+                            "position": 60,
+                            "managed": false
+                        },
+                        {
+                            "id": "1005",
+                            "name": "AdminRole",
+                            "permissions": "8", // ADMINISTRATOR
+                            "position": 30,
+                            "managed": false
+                        },
+                        {
+                            "id": "1006",
+                            "name": "TooHighRole",
+                            "permissions": "0",
+                            "position": 50,
+                            "managed": false
+                        },
+                        {
+                            "id": "1007",
+                            "name": "ManagedIntegrationRole",
+                            "permissions": "0",
+                            "position": 15,
+                            "managed": true
+                        },
+                        {
+                            "id": "1008",
+                            "name": "BanRole",
+                            "permissions": "4", // BAN_MEMBERS
+                            "position": 20,
+                            "managed": false
+                        }
+                    ]
+                }))
+                .into_response()
+            }),
+        )
+        .route(
+            "/guilds/{guild_id}/roles",
+            get(|| async move {
+                Json(serde_json::json!([
+                    {
+                        "id": "1001",
+                        "name": "MemberRoleA",
+                        "permissions": "0",
+                        "position": 10,
+                        "managed": false,
+                        "color": 0,
+                        "colors": { "primary_color": 0 },
+                        "hoist": false,
+                        "mentionable": false,
+                        "flags": 0
+                    },
+                    {
+                        "id": "1003",
+                        "name": "ModRole",
+                        "permissions": "268435456",
+                        "position": 40,
+                        "managed": false,
+                        "color": 0,
+                        "colors": { "primary_color": 0 },
+                        "hoist": false,
+                        "mentionable": false,
+                        "flags": 0
+                    },
+                    {
+                        "id": "1004",
+                        "name": "BotRole",
+                        "permissions": "268435456",
+                        "position": 60,
+                        "managed": false,
+                        "color": 0,
+                        "colors": { "primary_color": 0 },
+                        "hoist": false,
+                        "mentionable": false,
+                        "flags": 0
+                    },
+                    {
+                        "id": "1005",
+                        "name": "AdminRole",
+                        "permissions": "8",
+                        "position": 30,
+                        "managed": false,
+                        "color": 0,
+                        "colors": { "primary_color": 0 },
+                        "hoist": false,
+                        "mentionable": false,
+                        "flags": 0
+                    },
+                    {
+                        "id": "1006",
+                        "name": "TooHighRole",
+                        "permissions": "0",
+                        "position": 50,
+                        "managed": false,
+                        "color": 0,
+                        "colors": { "primary_color": 0 },
+                        "hoist": false,
+                        "mentionable": false,
+                        "flags": 0
+                    },
+                    {
+                        "id": "1007",
+                        "name": "ManagedIntegrationRole",
+                        "permissions": "0",
+                        "position": 15,
+                        "managed": true,
+                        "color": 0,
+                        "colors": { "primary_color": 0 },
+                        "hoist": false,
+                        "mentionable": false,
+                        "flags": 0
+                    },
+                    {
+                        "id": "1008",
+                        "name": "BanRole",
+                        "permissions": "4",
+                        "position": 20,
+                        "managed": false,
+                        "color": 0,
+                        "colors": { "primary_color": 0 },
+                        "hoist": false,
+                        "mentionable": false,
+                        "flags": 0
+                    }
+                ]))
+                .into_response()
+            }),
+        )
+        .route(
+            "/api/v10/guilds/{guild_id}/roles",
+            get(|| async move {
+                Json(serde_json::json!([
+                    {
+                        "id": "1001",
+                        "name": "MemberRoleA",
+                        "permissions": "0",
+                        "position": 10,
+                        "managed": false,
+                        "color": 0,
+                        "colors": { "primary_color": 0 },
+                        "hoist": false,
+                        "mentionable": false,
+                        "flags": 0
+                    },
+                    {
+                        "id": "1003",
+                        "name": "ModRole",
+                        "permissions": "268435456",
+                        "position": 40,
+                        "managed": false,
+                        "color": 0,
+                        "colors": { "primary_color": 0 },
+                        "hoist": false,
+                        "mentionable": false,
+                        "flags": 0
+                    },
+                    {
+                        "id": "1004",
+                        "name": "BotRole",
+                        "permissions": "268435456",
+                        "position": 60,
+                        "managed": false,
+                        "color": 0,
+                        "colors": { "primary_color": 0 },
+                        "hoist": false,
+                        "mentionable": false,
+                        "flags": 0
+                    },
+                    {
+                        "id": "1005",
+                        "name": "AdminRole",
+                        "permissions": "8",
+                        "position": 30,
+                        "managed": false,
+                        "color": 0,
+                        "colors": { "primary_color": 0 },
+                        "hoist": false,
+                        "mentionable": false,
+                        "flags": 0
+                    },
+                    {
+                        "id": "1006",
+                        "name": "TooHighRole",
+                        "permissions": "0",
+                        "position": 50,
+                        "managed": false,
+                        "color": 0,
+                        "colors": { "primary_color": 0 },
+                        "hoist": false,
+                        "mentionable": false,
+                        "flags": 0
+                    },
+                    {
+                        "id": "1007",
+                        "name": "ManagedIntegrationRole",
+                        "permissions": "0",
+                        "position": 15,
+                        "managed": true,
+                        "color": 0,
+                        "colors": { "primary_color": 0 },
+                        "hoist": false,
+                        "mentionable": false,
+                        "flags": 0
+                    },
+                    {
+                        "id": "1008",
+                        "name": "BanRole",
+                        "permissions": "4",
+                        "position": 20,
+                        "managed": false,
+                        "color": 0,
+                        "colors": { "primary_color": 0 },
+                        "hoist": false,
+                        "mentionable": false,
+                        "flags": 0
+                    }
+                ]))
+                .into_response()
+            }),
+        )
+        .route(
+            "/guilds/{guild_id}/members/{user_id}",
+            get(|Path((_gid, user_id)): Path<(String, String)>| async move {
+                if user_id == "999999999999999999" {
+                    Json(serde_json::json!({
+                        "user": { "id": user_id },
+                        "roles": ["1004"],
+                        "permissions": "268435456"
+                    }))
+                    .into_response()
+                } else if user_id == "111111111111111111" || user_id == "555555555555555555" {
+                    Json(serde_json::json!({
+                        "user": { "id": user_id },
+                        "roles": ["1003"],
+                        "permissions": "268435488"
+                    }))
+                    .into_response()
+                } else if user_id == "333333333333333333" {
+                    Json(serde_json::json!({
+                        "user": { "id": user_id },
+                        "roles": [],
+                        "permissions": "32"
+                    }))
+                    .into_response()
+                } else {
+                    Json(serde_json::json!({
+                        "user": { "id": user_id },
+                        "roles": [],
+                        "permissions": "0"
+                    }))
+                    .into_response()
+                }
+            }),
+        )
+        .route(
+            "/guilds/{guild_id}/members/{user_id}/roles/{role_id}",
+            put({
+                let count = role_delivery_count_clone.clone();
+                move || {
+                    let count = count.clone();
+                    async move {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        reqwest::StatusCode::NO_CONTENT.into_response()
+                    }
+                }
+            }),
+        )
+        .route(
+            "/api/v10/guilds/{guild_id}/members/{user_id}/roles/{role_id}",
+            put({
+                let count = role_delivery_count_clone.clone();
+                move || {
+                    let count = count.clone();
+                    async move {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        reqwest::StatusCode::NO_CONTENT.into_response()
+                    }
+                }
+            }),
+        );
+
+    let discord_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind discord mock");
+    let discord_addr = discord_listener.local_addr().expect("discord mock addr");
+    tokio::spawn(async move {
+        axum::serve(discord_listener, discord_mock_app)
+            .await
+            .unwrap();
+    });
+
+    let mut config = test_config();
+    config.discord_token = "live_bot_token_recruitment_sec_secret".to_string();
+    config.offline_mode = false;
+    config.discord_api_base_url = format!("http://{discord_addr}");
+
+    let app = AppState::bootstrap(config).await.expect("bootstrap");
+    let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
+    let web_state = WebState {
+        app,
+        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        permissions_cache,
+    };
+
+    let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind web listener");
+    let web_addr = web_listener.local_addr().expect("web addr");
+    let router = build_router(web_state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            web_listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{web_addr}");
+
+    let admin_session = "admin_rec_sec_sess";
+    let admin_csrf = "admin_rec_sec_csrf";
+    let admin_id = "111111111111111111";
+
+    let reviewer2_session = "reviewer2_rec_sec_sess";
+    let reviewer2_csrf = "reviewer2_rec_sec_csrf";
+    let reviewer2_id = "555555555555555555";
+
+    let no_roles_session = "no_roles_rec_sec_sess";
+    let no_roles_csrf = "no_roles_rec_sec_csrf";
+    let no_roles_id = "333333333333333333";
+
+    let candidate_session = "candidate_rec_sec_sess";
+    let candidate_csrf = "candidate_rec_sec_csrf";
+    let candidate_id = "444444444444444444";
+
+    let users = [
+        (
+            admin_id,
+            "admin",
+            admin_session,
+            admin_csrf,
+            "268435488",
+            true,
+        ),
+        (
+            reviewer2_id,
+            "reviewer2",
+            reviewer2_session,
+            reviewer2_csrf,
+            "268435488",
+            true,
+        ),
+        (
+            no_roles_id,
+            "manager_no_roles",
+            no_roles_session,
+            no_roles_csrf,
+            "32",
+            true,
+        ),
+        (
+            candidate_id,
+            "candidate",
+            candidate_session,
+            candidate_csrf,
+            "0",
+            false,
+        ),
+    ];
+
+    for (uid, uname, sid, csrf, perms, can_manage) in users {
+        web_state
+            .app
+            .sessions
+            .save_session(
+                sid,
+                DashboardUser {
+                    id: uid.to_owned(),
+                    username: uname.to_owned(),
+                    global_name: None,
+                    avatar: None,
+                },
+                vec![DashboardGuild {
+                    id: guild_a.to_owned(),
+                    name: "Guild A".to_owned(),
+                    icon: None,
+                    owner: false,
+                    permissions: perms.to_owned(),
+                }],
+                csrf.to_owned(),
+                Utc::now() + Duration::hours(1),
+                None,
+            )
+            .await
+            .unwrap();
+
+        if can_manage {
+            web_state.permissions_cache.insert(
+                (uid.to_owned(), guild_a.to_owned()),
+                CachedGuildPermission {
+                    can_manage: true,
+                    checked_at: Utc::now(),
+                },
+            );
+        }
+    }
+
+    let cookie_admin = format!("rusty_discord_bot_session={admin_session}");
+    let cookie_rev2 = format!("rusty_discord_bot_session={reviewer2_session}");
+    let cookie_no_roles = format!("rusty_discord_bot_session={no_roles_session}");
+    let cookie_candidate = format!("rusty_discord_bot_session={candidate_session}");
+
+    // Test 1: User with MANAGE_GUILD without MANAGE_ROLES attempts to create track with target_role_id -> 403 Forbidden
+    let no_role_track_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/recruitment/tracks"
+        ))
+        .header(COOKIE, &cookie_no_roles)
+        .header("x-csrf-token", no_roles_csrf)
+        .json(&serde_json::json!({
+            "slug": "staff-mod",
+            "name": "Staff Moderator",
+            "enabled": true,
+            "target_role_id": "1001",
+            "config": {
+                "auto_role_on_accept": true,
+                "final_approvals": 1,
+                "questions": []
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_role_track_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Test 2: User with MANAGE_GUILD without MANAGE_ROLES can create track without target_role_id -> 200 OK
+    let safe_track_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/recruitment/tracks"
+        ))
+        .header(COOKIE, &cookie_no_roles)
+        .header("x-csrf-token", no_roles_csrf)
+        .json(&serde_json::json!({
+            "slug": "safe-track",
+            "name": "Safe Track No Roles",
+            "enabled": true,
+            "config": {
+                "auto_role_on_accept": false,
+                "final_approvals": 1,
+                "questions": []
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(safe_track_resp.status(), reqwest::StatusCode::OK);
+
+    // Test 3: Admin attempts to create track with auto_role_on_accept=true and final_approvals=0 -> 400 Bad Request
+    let zero_approvals_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/recruitment/tracks"
+        ))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "slug": "exploit-zero-approvals",
+            "name": "Zero Approvals Exploit",
+            "enabled": true,
+            "target_role_id": "1001",
+            "config": {
+                "auto_role_on_accept": true,
+                "final_approvals": 0,
+                "questions": []
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        zero_approvals_resp.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+
+    // Test 4: Admin attempts to configure privileged or invalid target roles:
+    // 4a. ADMINISTRATOR role (1005) -> 403 Forbidden
+    let admin_priv_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/recruitment/tracks"
+        ))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "slug": "admin-role-track",
+            "name": "Admin Track",
+            "enabled": true,
+            "target_role_id": "1005",
+            "config": {
+                "auto_role_on_accept": true,
+                "final_approvals": 1,
+                "questions": []
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin_priv_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 4b. BAN_MEMBERS role (1008) -> 403 Forbidden
+    let ban_priv_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/recruitment/tracks"
+        ))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "slug": "ban-role-track",
+            "name": "Ban Track",
+            "enabled": true,
+            "target_role_id": "1008",
+            "config": {
+                "auto_role_on_accept": true,
+                "final_approvals": 1,
+                "questions": []
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ban_priv_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 4c. Managed integration role (1007) -> 400 Bad Request
+    let managed_role_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/recruitment/tracks"
+        ))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "slug": "managed-role-track",
+            "name": "Managed Track",
+            "enabled": true,
+            "target_role_id": "1007",
+            "config": {
+                "auto_role_on_accept": true,
+                "final_approvals": 1,
+                "questions": []
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(managed_role_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 4d. Role higher than actor (1006) -> 403 Forbidden
+    let too_high_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/recruitment/tracks"
+        ))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "slug": "too-high-role-track",
+            "name": "Too High Track",
+            "enabled": true,
+            "target_role_id": "1006",
+            "config": {
+                "auto_role_on_accept": true,
+                "final_approvals": 1,
+                "questions": []
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(too_high_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 4e. Non-existent role (9999) -> 400 Bad Request
+    let non_existent_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/recruitment/tracks"
+        ))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "slug": "missing-role-track",
+            "name": "Missing Role Track",
+            "enabled": true,
+            "target_role_id": "9999",
+            "config": {
+                "auto_role_on_accept": true,
+                "final_approvals": 1,
+                "questions": []
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(non_existent_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Test 5: Admin creates legitimate track with target_role_id="1001", auto_role_on_accept=true, final_approvals=1 -> 200 OK
+    let legit_track_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/recruitment/tracks"
+        ))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "slug": "staff-mod",
+            "name": "Staff Moderator Track",
+            "enabled": true,
+            "target_role_id": "1001",
+            "config": {
+                "auto_role_on_accept": true,
+                "final_approvals": 1,
+                "questions": []
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(legit_track_resp.status(), reqwest::StatusCode::OK);
+
+    // Test 6: Self-acceptance prevention
+    // 6a. Admin submits application to staff-mod
+    let admin_apply_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/recruitment/tracks/staff-mod/apply"
+        ))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({ "answers": [] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin_apply_resp.status(), reqwest::StatusCode::OK);
+    let admin_app_body: serde_json::Value = admin_apply_resp.json().await.unwrap();
+    let admin_app_id = admin_app_body["application"]["id"].as_str().unwrap();
+
+    // 6b. Reviewer 2 approves Admin's application
+    let rev2_review_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/recruitment/applications/{admin_app_id}/review"
+        ))
+        .header(COOKIE, &cookie_rev2)
+        .header("x-csrf-token", reviewer2_csrf)
+        .json(&serde_json::json!({
+            "recommendation": "approve",
+            "score": 5,
+            "notes": "Approved by peer"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rev2_review_resp.status(), reqwest::StatusCode::OK);
+
+    // 6c. Admin attempts to transition their OWN application to "accepted" -> 403 Forbidden!
+    let self_accept_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/recruitment/applications/{admin_app_id}/transition"
+        ))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "expected_version": 1,
+            "new_status": "accepted",
+            "new_stage": "completed"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(self_accept_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Test 7: Legitimate candidate application and fulfillment
+    // 7a. Candidate submits application
+    let cand_apply_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/recruitment/tracks/staff-mod/apply"
+        ))
+        .header(COOKIE, &cookie_candidate)
+        .header("x-csrf-token", candidate_csrf)
+        .json(&serde_json::json!({ "answers": [] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cand_apply_resp.status(), reqwest::StatusCode::OK);
+    let cand_app_body: serde_json::Value = cand_apply_resp.json().await.unwrap();
+    let cand_app_id = cand_app_body["application"]["id"].as_str().unwrap();
+
+    // 7b. Admin reviews Candidate's application
+    let admin_review_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/recruitment/applications/{cand_app_id}/review"
+        ))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "recommendation": "approve",
+            "score": 5,
+            "notes": "Great candidate"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin_review_resp.status(), reqwest::StatusCode::OK);
+
+    // 7c. Reviewer 2 transitions Candidate's application to accepted -> 200 OK
+    let accept_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/recruitment/applications/{cand_app_id}/transition"
+        ))
+        .header(COOKIE, &cookie_rev2)
+        .header("x-csrf-token", reviewer2_csrf)
+        .json(&serde_json::json!({
+            "expected_version": 1,
+            "new_status": "accepted",
+            "new_stage": "completed"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(accept_resp.status(), reqwest::StatusCode::OK);
+
+    // 7d. Process role fulfillment queue -> 1 processed, role dispatched via PUT
+    let baseline_delivery = role_delivery_count.load(Ordering::SeqCst);
+    let proc_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/recruitment/fulfillment/process"
+        ))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(proc_resp.status(), reqwest::StatusCode::OK);
+
+    let _proc_resp_body: serde_json::Value = proc_resp.json().await.unwrap();
+
+    let parsed_cand_id: uuid::Uuid = cand_app_id.parse().unwrap();
+    let fulfillment_record = web_state
+        .app
+        .storage
+        .get_role_fulfillment(parsed_cand_id)
+        .await
+        .unwrap()
+        .expect("fulfillment record must exist");
+    assert_eq!(fulfillment_record.status, "completed");
+    assert_eq!(
+        role_delivery_count.load(Ordering::SeqCst),
+        baseline_delivery + 1
+    );
+
+    // Test 8: Worker defense-in-depth on privileged role
+    // Inject a pending fulfillment record with role 1005 (ADMINISTRATOR)
+    let bad_app_id = uuid::Uuid::new_v4();
+    web_state
+        .app
+        .storage
+        .upsert_role_fulfillment(rusty_discord_bot::storage::RecruitmentRoleFulfillment {
+            application_id: bad_app_id,
+            guild_id: guild_a.to_string(),
+            user_id: candidate_id.to_string(),
+            role_id: "1005".to_string(), // ADMINISTRATOR
+            status: "pending".to_string(),
+            attempts: 0,
+            last_error: None,
+            next_attempt_at: Utc::now() - Duration::minutes(1),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    // Create corresponding accepted application so application status check passes
+    web_state
+        .app
+        .storage
+        .create_recruitment_application(rusty_discord_bot::recruitment::RecruitmentApplication {
+            id: bad_app_id,
+            guild_id: guild_a.to_string(),
+            track_id: uuid::Uuid::new_v4(),
+            applicant_user_id: candidate_id.to_string(),
+            track_version: 1,
+            status: "accepted".to_string(),
+            submitted_answers: sqlx::types::Json(vec![]),
+            current_stage: "completed".to_string(),
+            version: 1,
+            submitted_at: Utc::now(),
+            updated_at: Utc::now(),
+            decided_at: Some(Utc::now()),
+            decision_reason: None,
+            decided_by: Some(admin_id.to_string()),
+        })
+        .await
+        .unwrap();
+
+    let delivery_before_bad = role_delivery_count.load(Ordering::SeqCst);
+    let proc_bad_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/recruitment/fulfillment/process"
+        ))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(proc_bad_resp.status(), reqwest::StatusCode::OK);
+
+    let bad_record = web_state
+        .app
+        .storage
+        .get_role_fulfillment(bad_app_id)
+        .await
+        .unwrap()
+        .expect("bad fulfillment record must exist");
+    assert_eq!(bad_record.status, "failed");
+    assert!(
+        bad_record
+            .last_error
+            .as_deref()
+            .unwrap_or("")
+            .contains("administrative/privileged permissions"),
+        "Unexpected error: {:?}",
+        bad_record.last_error
+    );
+    assert_eq!(
+        role_delivery_count.load(Ordering::SeqCst),
+        delivery_before_bad,
+        "No PUT request must be dispatched for privileged role"
+    );
+}

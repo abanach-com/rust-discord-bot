@@ -4650,7 +4650,16 @@ pub async fn reconcile_guild_duty(
         !token.is_empty() && !token.starts_with("dummy") && token != "mock" && token != "offline";
 
     let http = if has_real_token {
-        Some(serenity::all::Http::new(token))
+        if state.app.config.discord_api_base_url.starts_with("http://") {
+            Some(
+                serenity::http::HttpBuilder::new(token)
+                    .proxy(&state.app.config.discord_api_base_url)
+                    .ratelimiter_disabled(true)
+                    .build(),
+            )
+        } else {
+            Some(serenity::all::Http::new(token))
+        }
     } else {
         None
     };
@@ -4820,6 +4829,23 @@ pub async fn upsert_recruitment_track(
     verify_csrf(&headers, &session)?;
     ensure_guild_access(&state, &session, &guild_id).await?;
     validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    if let Some(ref role_id) = payload.target_role_id {
+        if payload.config.auto_role_on_accept && payload.config.final_approvals == 0 {
+            return Err(ApiError::bad_request(
+                "Auto-role on accept requires final_approvals to be at least 1",
+            ));
+        }
+        ensure_manage_roles_access(&state, &session, &guild_id).await?;
+        validate_assignable_role(
+            &state,
+            &session,
+            &guild_id,
+            role_id,
+            "w procesie rekrutacji",
+        )
+        .await?;
+    }
 
     let track = RecruitmentTrack {
         id: payload.id.unwrap_or_else(Uuid::new_v4),
@@ -5245,6 +5271,12 @@ pub async fn transition_recruitment_application(
         .unwrap_or_default();
 
     if payload.new_status == "accepted" {
+        if app.applicant_user_id == session.user.id {
+            return Err(ApiError::forbidden(
+                "You cannot accept your own recruitment application",
+            ));
+        }
+
         let approvals = crate::recruitment::count_distinct_approvals(&reviews);
         if approvals < track.config.final_approvals as usize {
             return Err(ApiError::bad_request(format!(
@@ -5422,7 +5454,16 @@ pub async fn process_role_fulfillments(
         !token.is_empty() && !token.starts_with("dummy") && token != "mock" && token != "offline";
 
     let http = if has_real_token {
-        Some(serenity::all::Http::new(token))
+        if state.app.config.discord_api_base_url.starts_with("http://") {
+            Some(
+                serenity::http::HttpBuilder::new(token)
+                    .proxy(&state.app.config.discord_api_base_url)
+                    .ratelimiter_disabled(true)
+                    .build(),
+            )
+        } else {
+            Some(serenity::all::Http::new(token))
+        }
     } else {
         None
     };
@@ -5782,7 +5823,16 @@ pub async fn reconcile_idle_help_forums_endpoint(
         !token.is_empty() && !token.starts_with("dummy") && token != "mock" && token != "offline";
 
     let http = if has_real_token {
-        Some(serenity::all::Http::new(token))
+        if state.app.config.discord_api_base_url.starts_with("http://") {
+            Some(
+                serenity::http::HttpBuilder::new(token)
+                    .proxy(&state.app.config.discord_api_base_url)
+                    .ratelimiter_disabled(true)
+                    .build(),
+            )
+        } else {
+            Some(serenity::all::Http::new(token))
+        }
     } else {
         None
     };

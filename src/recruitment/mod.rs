@@ -268,6 +268,7 @@ pub fn validate_track_fields(
     slug: &str,
     name: &str,
     target_role_id: Option<&str>,
+    config: &RecruitmentTrackConfig,
 ) -> anyhow::Result<()> {
     validate_snowflake("guild_id", guild_id)?;
     if slug.trim().is_empty() || slug.len() > 64 {
@@ -286,6 +287,9 @@ pub fn validate_track_fields(
     }
     if let Some(rid) = target_role_id {
         validate_snowflake("target_role_id", rid)?;
+    }
+    if target_role_id.is_some() && config.auto_role_on_accept && config.final_approvals == 0 {
+        anyhow::bail!("Auto-role on accept requires final_approvals to be at least 1");
     }
     Ok(())
 }
@@ -357,6 +361,48 @@ pub async fn process_recruitment_role_fulfillments(
 
         match (g_res, u_res, r_res) {
             (Ok(g), Ok(u), Ok(r)) => {
+                // Defense-in-depth: check role permissions before granting via Discord API
+                match client.get_guild_roles(g).await {
+                    Ok(roles) => {
+                        match roles.iter().find(|role| role.id == r) {
+                            Some(role) if role.managed => {
+                                item.status = "failed".to_string();
+                                item.last_error = Some("Role is managed by an integration and cannot be auto-granted".to_string());
+                                storage.upsert_role_fulfillment(item).await?;
+                                continue;
+                            }
+                            Some(role) if crate::discord::reaction_roles::is_privileged_role_permissions(role.permissions) => {
+                                item.status = "failed".to_string();
+                                item.last_error = Some("Role possesses administrative/privileged permissions and cannot be auto-granted".to_string());
+                                storage.upsert_role_fulfillment(item).await?;
+                                continue;
+                            }
+                            None => {
+                                item.status = "failed".to_string();
+                                item.last_error = Some("Role no longer exists on guild".to_string());
+                                storage.upsert_role_fulfillment(item).await?;
+                                continue;
+                            }
+                            Some(_) => {
+                                // Role is safe to assign!
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let err_msg = format!("Failed to fetch guild roles from Discord API: {e}");
+                        item.last_error = Some(err_msg);
+                        if item.attempts >= 5 {
+                            item.status = "failed".to_string();
+                        } else {
+                            let backoff_secs = 2u64.pow(item.attempts.min(6) as u32) * 5;
+                            item.next_attempt_at =
+                                Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
+                        }
+                        storage.upsert_role_fulfillment(item).await?;
+                        continue;
+                    }
+                }
+
                 match client
                     .add_member_role(g, u, r, Some("Staff recruitment accepted"))
                     .await

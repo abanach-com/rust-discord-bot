@@ -5361,6 +5361,7 @@ impl MemoryStore {
             &track.slug,
             &track.name,
             track.target_role_id.as_deref(),
+            &track.config,
         )?;
 
         if self

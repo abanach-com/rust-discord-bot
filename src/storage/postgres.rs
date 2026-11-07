@@ -8575,6 +8575,7 @@ impl PostgresStore {
             &track.slug,
             &track.name,
             track.target_role_id.as_deref(),
+            &track.config,
         )?;
 
         let conflicting = sqlx::query_scalar::<_, i64>(
