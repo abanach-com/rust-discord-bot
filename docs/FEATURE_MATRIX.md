@@ -248,7 +248,7 @@ The bot should not advertise a feature as complete until its Discord flow, dashb
 | Word-chain games | Planned |
 | Trivia | Planned |
 | Quote database (persistent `/quote add/random/list`, multi-tenant isolation, audit) | Implemented |
-| Birthdays | Planned |
+| Birthdays (persistent `/birthday set/check/upcoming/delete`, date validation, multi-tenant isolation, audit) | Implemented |
 | Server anniversaries | Planned |
 | Event sign-ups | Implemented |
 | Attendance tracking | Planned |

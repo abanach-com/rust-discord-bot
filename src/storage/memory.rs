@@ -10,10 +10,10 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::{
-    AdjustMemberProgressParams, AiGuildBudget, AiKnowledgeDocument, AuditLogEntry, CardCollection,
-    CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome, CommandPolicyRule, CommunityPoll,
-    CompanionChannelLease, CompanionChannelMapping, CompanionMappingItem, CountingGame,
-    CrimeClaimOutcome, CustomAutomation, DailyClaimOutcome, DynamicVoiceRoom,
+    AdjustMemberProgressParams, AiGuildBudget, AiKnowledgeDocument, AuditLogEntry, BirthdayRecord,
+    CardCollection, CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome, CommandPolicyRule,
+    CommunityPoll, CompanionChannelLease, CompanionChannelMapping, CompanionMappingItem,
+    CountingGame, CrimeClaimOutcome, CustomAutomation, DailyClaimOutcome, DynamicVoiceRoom,
     EconomyIdempotencyEntry, EconomyPurchaseRequestRecord, EventRoster, FaqEntry, FeedSubscription,
     GameAccountLink, GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway,
     GuildModuleSettings, IntegrationConnection, IntegrationDeliveryLog,
@@ -30,7 +30,7 @@ use super::{
     TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
     VkSubscription, WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
     YouTubeChannelSubscription, is_member_after_cursor, level_for_xp, parse_member_search_cursor,
-    snowflake_created_at, validate_snowflake,
+    snowflake_created_at, validate_birthday_date, validate_snowflake,
 };
 
 type ModuleKey = (String, String);
@@ -231,6 +231,7 @@ pub struct MemoryStore {
     reaction_roles: Arc<DashMap<(String, String, String), ReactionRoleBinding>>,
     reaction_role_grants: Arc<DashMap<(String, String, Uuid), ReactionRoleGrant>>,
     quotes: Arc<DashMap<Uuid, QuoteRecord>>,
+    birthdays: Arc<DashMap<(String, String), BirthdayRecord>>,
 }
 
 impl MemoryStore {
@@ -2294,6 +2295,77 @@ impl MemoryStore {
             return Ok(true);
         }
         Ok(false)
+    }
+
+    pub fn set_birthday(&self, birthday: BirthdayRecord) -> anyhow::Result<BirthdayRecord> {
+        validate_snowflake("guild_id", &birthday.guild_id)?;
+        validate_snowflake("user_id", &birthday.user_id)?;
+        validate_birthday_date(birthday.month, birthday.day)?;
+        let key = (birthday.guild_id.clone(), birthday.user_id.clone());
+        self.birthdays.insert(key, birthday.clone());
+        Ok(birthday)
+    }
+
+    pub fn get_birthday(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Option<BirthdayRecord>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+        let key = (guild_id.to_owned(), user_id.to_owned());
+        Ok(self.birthdays.get(&key).map(|e| e.value().clone()))
+    }
+
+    pub fn list_upcoming_birthdays(
+        &self,
+        guild_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<BirthdayRecord>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let limit = limit.clamp(1, 100);
+        let now = Utc::now();
+        use chrono::Datelike;
+        let cur_month = now.month() as i16;
+        let cur_day = now.day() as i16;
+
+        let mut matches: Vec<BirthdayRecord> = self
+            .birthdays
+            .iter()
+            .filter(|e| e.guild_id == guild_id)
+            .map(|e| e.value().clone())
+            .collect();
+
+        matches.sort_by(|a, b| {
+            let key_a = (
+                if a.month > cur_month || (a.month == cur_month && a.day >= cur_day) {
+                    0
+                } else {
+                    1
+                },
+                a.month,
+                a.day,
+            );
+            let key_b = (
+                if b.month > cur_month || (b.month == cur_month && b.day >= cur_day) {
+                    0
+                } else {
+                    1
+                },
+                b.month,
+                b.day,
+            );
+            key_a.cmp(&key_b).then_with(|| a.user_id.cmp(&b.user_id))
+        });
+        matches.truncate(limit);
+        Ok(matches)
+    }
+
+    pub fn delete_birthday(&self, guild_id: &str, user_id: &str) -> anyhow::Result<bool> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+        let key = (guild_id.to_owned(), user_id.to_owned());
+        Ok(self.birthdays.remove(&key).is_some())
     }
 
     pub fn record_starboard_entry(

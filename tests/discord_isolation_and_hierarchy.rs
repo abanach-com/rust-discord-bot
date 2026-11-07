@@ -4874,3 +4874,264 @@ async fn test_quotes_storage_and_execution_lifecycle_suite() {
 
     shard_manager.shutdown_all().await;
 }
+
+#[tokio::test]
+async fn test_birthdays_storage_and_execution_lifecycle_suite() {
+    use rusty_discord_bot::discord::birthdays::{
+        BirthdayExecutionContext, execute_birthday_action,
+    };
+    use rusty_discord_bot::lua::BirthdayOperation;
+    use serenity::all::{ChannelId, GuildId, Permissions, UserId};
+
+    let (ctx, _mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state().await;
+
+    let guild_a = "100";
+    let actor_1 = UserId::new(111111111111111111);
+    let actor_2 = UserId::new(222222222222222222);
+    let actor_b = UserId::new(333333333333333333);
+
+    // 1. Initial check & upcoming on empty storage
+    let res_empty_check = execute_birthday_action(
+        &ctx,
+        &state,
+        "birthdays",
+        BirthdayExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(actor_1),
+            Permissions::empty(),
+            false,
+        ),
+        &BirthdayOperation::Check { user_id: None },
+    )
+    .await
+    .unwrap();
+    assert!(res_empty_check.unwrap().contains("Nie znaleziono"));
+
+    let res_empty_upcoming = execute_birthday_action(
+        &ctx,
+        &state,
+        "birthdays",
+        BirthdayExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(actor_1),
+            Permissions::empty(),
+            false,
+        ),
+        &BirthdayOperation::Upcoming { limit: 10 },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        res_empty_upcoming.as_deref(),
+        Some("Brak nadchodzących urodzin na tym serwerze.")
+    );
+
+    // 2. Reject impossible dates
+    let err_invalid_date = execute_birthday_action(
+        &ctx,
+        &state,
+        "birthdays",
+        BirthdayExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(actor_1),
+            Permissions::empty(),
+            false,
+        ),
+        &BirthdayOperation::Set { day: 31, month: 4 },
+    )
+    .await;
+    assert!(err_invalid_date.is_err(), "April 31 must be rejected");
+
+    let err_feb_30 = execute_birthday_action(
+        &ctx,
+        &state,
+        "birthdays",
+        BirthdayExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(actor_1),
+            Permissions::empty(),
+            false,
+        ),
+        &BirthdayOperation::Set { day: 30, month: 2 },
+    )
+    .await;
+    assert!(err_feb_30.is_err(), "February 30 must be rejected");
+
+    // 3. Set valid birthdays (including Feb 29)
+    let res_set_1 = execute_birthday_action(
+        &ctx,
+        &state,
+        "birthdays",
+        BirthdayExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(actor_1),
+            Permissions::empty(),
+            false,
+        ),
+        &BirthdayOperation::Set { day: 15, month: 8 },
+    )
+    .await
+    .unwrap();
+    assert!(res_set_1.unwrap().contains("15.08"));
+
+    let res_set_2 = execute_birthday_action(
+        &ctx,
+        &state,
+        "birthdays",
+        BirthdayExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(actor_2),
+            Permissions::empty(),
+            false,
+        ),
+        &BirthdayOperation::Set { day: 29, month: 2 },
+    )
+    .await
+    .unwrap();
+    assert!(res_set_2.unwrap().contains("29.02"));
+
+    // Set birthday in Guild B for tenant isolation
+    let _ = execute_birthday_action(
+        &ctx,
+        &state,
+        "birthdays",
+        BirthdayExecutionContext::new(
+            Some(GuildId::new(200)),
+            Some(ChannelId::new(201)),
+            Some(actor_b),
+            Permissions::empty(),
+            false,
+        ),
+        &BirthdayOperation::Set { day: 25, month: 12 },
+    )
+    .await
+    .unwrap();
+
+    // 4. Check birthday
+    let check_self = execute_birthday_action(
+        &ctx,
+        &state,
+        "birthdays",
+        BirthdayExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(actor_1),
+            Permissions::empty(),
+            false,
+        ),
+        &BirthdayOperation::Check { user_id: None },
+    )
+    .await
+    .unwrap();
+    assert!(check_self.unwrap().contains("15.08"));
+
+    let check_other = execute_birthday_action(
+        &ctx,
+        &state,
+        "birthdays",
+        BirthdayExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(actor_1),
+            Permissions::empty(),
+            false,
+        ),
+        &BirthdayOperation::Check {
+            user_id: Some(actor_2.get().to_string()),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(check_other.unwrap().contains("29.02"));
+
+    // Check user from Guild B in Guild A -> not found
+    let check_cross_guild = execute_birthday_action(
+        &ctx,
+        &state,
+        "birthdays",
+        BirthdayExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(actor_1),
+            Permissions::empty(),
+            false,
+        ),
+        &BirthdayOperation::Check {
+            user_id: Some(actor_b.get().to_string()),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(check_cross_guild.unwrap().contains("Nie znaleziono"));
+
+    // 5. Upcoming birthdays in Guild A does not include Guild B
+    let upcoming_a = execute_birthday_action(
+        &ctx,
+        &state,
+        "birthdays",
+        BirthdayExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(actor_1),
+            Permissions::empty(),
+            false,
+        ),
+        &BirthdayOperation::Upcoming { limit: 10 },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert!(upcoming_a.contains(&actor_1.get().to_string()));
+    assert!(upcoming_a.contains(&actor_2.get().to_string()));
+    assert!(!upcoming_a.contains(&actor_b.get().to_string()));
+
+    // 6. Delete birthday
+    let res_del = execute_birthday_action(
+        &ctx,
+        &state,
+        "birthdays",
+        BirthdayExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(actor_1),
+            Permissions::empty(),
+            false,
+        ),
+        &BirthdayOperation::Delete,
+    )
+    .await
+    .unwrap();
+    assert!(res_del.unwrap().contains("zostały usunięte"));
+
+    let check_after_del = execute_birthday_action(
+        &ctx,
+        &state,
+        "birthdays",
+        BirthdayExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(actor_1),
+            Permissions::empty(),
+            false,
+        ),
+        &BirthdayOperation::Check { user_id: None },
+    )
+    .await
+    .unwrap();
+    assert!(check_after_del.unwrap().contains("Nie znaleziono"));
+
+    // 7. Verify audits
+    let audits = state.storage.list_audit_events(guild_a, 10).await.unwrap();
+    assert!(audits.iter().any(|a| a.event == "birthday_set"));
+    assert!(audits.iter().any(|a| a.event == "birthday_delete"));
+
+    shard_manager.shutdown_all().await;
+}

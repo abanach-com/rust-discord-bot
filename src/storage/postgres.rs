@@ -9,28 +9,28 @@ use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
 use uuid::Uuid;
 
 use super::{
-    AdjustMemberProgressParams, AiGuildBudget, AiKnowledgeDocument, AuditLogEntry, CardCollection,
-    CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome, CommandPolicyRule, CommunityPoll,
-    CompanionChannelLease, CompanionChannelMapping, CompanionMappingItem, CountingGame,
-    CrimeClaimOutcome, CustomAutomation, DailyClaimOutcome, DynamicVoiceRoom, EventRoster,
-    FaqEntry, FeedSubscription, GameAccountLink, GamingHubGameStatus, GitHubDevopsMapping,
-    GitLabSubscription, Giveaway, GuildModuleSettings, HelpForumConfig, HelpForumSession,
-    HelpForumStats, IntegrationConnection, IntegrationDeliveryLog, IntegrationWebhookSubscription,
-    InviteTracking, KickStreamSubscription, LinkedAccount, MAX_COMPANION_MAPPINGS_PER_GUILD,
-    McpToolAuthorization, MemberIdentityRecord, MemberProgress, MemberSearchFilter,
-    MemberSearchRow, MemberSnapshot, ModerationAppeal, ModerationExecutionIntent,
-    ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState, ModuleDraftConfig,
-    PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric, ProgressionSeason,
-    QuoteRecord, ReactionRoleBinding, ReactionRoleGrant, RecordCompanionLeaseParams,
-    RecruitmentApplication, RecruitmentReview, RecruitmentRoleFulfillment, RecruitmentTrack,
-    RedditSubscription, ReleaseReactionRoleGrantOutcome, ReputationGrantOutcome,
-    RetainedRecordNotice, ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry,
-    SteamLfgPost, StickyMessage, StoreItem, StorePurchase, TagRecord, TelegramBridge,
-    TelegramMessageMapping, TimedRoleGrant, Tournament, TransitionApplicationParams, TupperError,
-    TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
-    VkSubscription, WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
-    YouTubeChannelSubscription, level_for_xp, parse_member_search_cursor, snowflake_created_at,
-    validate_snowflake,
+    AdjustMemberProgressParams, AiGuildBudget, AiKnowledgeDocument, AuditLogEntry, BirthdayRecord,
+    CardCollection, CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome, CommandPolicyRule,
+    CommunityPoll, CompanionChannelLease, CompanionChannelMapping, CompanionMappingItem,
+    CountingGame, CrimeClaimOutcome, CustomAutomation, DailyClaimOutcome, DynamicVoiceRoom,
+    EventRoster, FaqEntry, FeedSubscription, GameAccountLink, GamingHubGameStatus,
+    GitHubDevopsMapping, GitLabSubscription, Giveaway, GuildModuleSettings, HelpForumConfig,
+    HelpForumSession, HelpForumStats, IntegrationConnection, IntegrationDeliveryLog,
+    IntegrationWebhookSubscription, InviteTracking, KickStreamSubscription, LinkedAccount,
+    MAX_COMPANION_MAPPINGS_PER_GUILD, McpToolAuthorization, MemberIdentityRecord, MemberProgress,
+    MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
+    ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
+    ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
+    ProgressionSeason, QuoteRecord, ReactionRoleBinding, ReactionRoleGrant,
+    RecordCompanionLeaseParams, RecruitmentApplication, RecruitmentReview,
+    RecruitmentRoleFulfillment, RecruitmentTrack, RedditSubscription,
+    ReleaseReactionRoleGrantOutcome, ReputationGrantOutcome, RetainedRecordNotice, ScheduledEvent,
+    ServerSnapshot, SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem,
+    StorePurchase, TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament,
+    TransitionApplicationParams, TupperError, TupperProfile, TwitchStreamSubscription,
+    UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WORK_JOBS, WorkClaimOutcome,
+    WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
+    parse_member_search_cursor, snowflake_created_at, validate_birthday_date, validate_snowflake,
 };
 
 pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
@@ -3201,6 +3201,112 @@ impl PostgresStore {
         )
         .bind(guild_id)
         .bind(quote_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn set_birthday(&self, birthday: BirthdayRecord) -> anyhow::Result<BirthdayRecord> {
+        validate_snowflake("guild_id", &birthday.guild_id)?;
+        validate_snowflake("user_id", &birthday.user_id)?;
+        validate_birthday_date(birthday.month, birthday.day)?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO guild_birthdays (guild_id, user_id, month, day, updated_at)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (guild_id, user_id)
+            DO UPDATE SET
+                month = EXCLUDED.month,
+                day = EXCLUDED.day,
+                updated_at = EXCLUDED.updated_at
+            "#,
+        )
+        .bind(&birthday.guild_id)
+        .bind(&birthday.user_id)
+        .bind(birthday.month)
+        .bind(birthday.day)
+        .bind(birthday.updated_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(birthday)
+    }
+
+    pub async fn get_birthday(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Option<BirthdayRecord>> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+
+        let row = sqlx::query_as::<_, BirthdayRecord>(
+            r#"
+            SELECT guild_id, user_id, month, day, updated_at
+            FROM guild_birthdays
+            WHERE guild_id = $1 AND user_id = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    pub async fn list_upcoming_birthdays(
+        &self,
+        guild_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<BirthdayRecord>> {
+        validate_snowflake("guild_id", guild_id)?;
+        let limit_i64 = limit.clamp(1, 100) as i64;
+        let now = Utc::now();
+        use chrono::Datelike;
+        let cur_month = now.month() as i16;
+        let cur_day = now.day() as i16;
+
+        let rows = sqlx::query_as::<_, BirthdayRecord>(
+            r#"
+            SELECT guild_id, user_id, month, day, updated_at
+            FROM guild_birthdays
+            WHERE guild_id = $1
+            ORDER BY
+                CASE
+                    WHEN (month > $2 OR (month = $2 AND day >= $3)) THEN 0
+                    ELSE 1
+                END,
+                month ASC,
+                day ASC,
+                user_id ASC
+            LIMIT $4
+            "#,
+        )
+        .bind(guild_id)
+        .bind(cur_month)
+        .bind(cur_day)
+        .bind(limit_i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn delete_birthday(&self, guild_id: &str, user_id: &str) -> anyhow::Result<bool> {
+        validate_snowflake("guild_id", guild_id)?;
+        validate_snowflake("user_id", user_id)?;
+
+        let result = sqlx::query(
+            r#"
+            DELETE FROM guild_birthdays
+            WHERE guild_id = $1 AND user_id = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
         .execute(&self.pool)
         .await?;
 

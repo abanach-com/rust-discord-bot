@@ -24,8 +24,8 @@ use crate::{
 };
 
 use super::{
-    economy, giveaway, moderation_cases, music, progression, quotes, reaction_roles, scheduler,
-    starboard, tags, tickets,
+    birthdays, economy, giveaway, moderation_cases, music, progression, quotes, reaction_roles,
+    scheduler, starboard, tags, tickets,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -561,6 +561,7 @@ fn action_rate_limit_scope(action: &LuaAction) -> Option<&'static str> {
         LuaAction::ReactionRole { .. } => Some("reaction_role"),
         LuaAction::Starboard { .. } => Some("starboard"),
         LuaAction::Quote { .. } => Some("quote"),
+        LuaAction::Birthday { .. } => Some("birthday"),
         LuaAction::Economy { .. } => Some("economy"),
 
         LuaAction::BanMember { .. }
@@ -1501,6 +1502,23 @@ async fn execute_action(
                 state,
                 module_id,
                 quotes::QuoteExecutionContext::new(
+                    origin.guild_id,
+                    origin.channel_id,
+                    origin.actor_id,
+                    origin.actor_permissions,
+                    origin.enforce_actor_permissions,
+                ),
+                operation,
+            )
+            .await
+        }
+
+        LuaAction::Birthday { operation } => {
+            birthdays::execute_birthday_action(
+                ctx,
+                state,
+                module_id,
+                birthdays::BirthdayExecutionContext::new(
                     origin.guild_id,
                     origin.channel_id,
                     origin.actor_id,

@@ -1,3 +1,4 @@
+pub mod birthdays;
 mod commands;
 pub mod companion;
 pub mod components;

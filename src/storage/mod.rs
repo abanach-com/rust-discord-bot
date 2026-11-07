@@ -351,6 +351,15 @@ pub struct QuoteRecord {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::FromRow)]
+pub struct BirthdayRecord {
+    pub guild_id: String,
+    pub user_id: String,
+    pub month: i16,
+    pub day: i16,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct StarboardEntry {
     pub guild_id: String,
@@ -441,6 +450,21 @@ pub fn validate_snowflake(label: &str, id: &str) -> anyhow::Result<u64> {
         .map_err(|_| anyhow::anyhow!("{label} must be a valid decimal Discord snowflake"))?;
     anyhow::ensure!(parsed != 0, "{label} must be nonzero");
     Ok(parsed)
+}
+
+pub fn validate_birthday_date(month: i16, day: i16) -> anyhow::Result<()> {
+    if !(1..=12).contains(&month) {
+        anyhow::bail!("Miesiąc musi być z zakresu od 1 do 12");
+    }
+    let max_days = match month {
+        2 => 29, // Allow Feb 29 for leap year births
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if !(1..=max_days).contains(&day) {
+        anyhow::bail!("Nieprawidłowy dzień dla wybranego miesiąca (max {max_days})");
+    }
+    Ok(())
 }
 
 pub fn snowflake_created_at(id: u64) -> DateTime<Utc> {
@@ -2770,6 +2794,42 @@ impl Storage {
         match self {
             Self::Memory(store) => store.delete_quote(guild_id, quote_id),
             Self::Postgres(store) => store.delete_quote(guild_id, quote_id).await,
+        }
+    }
+
+    pub async fn set_birthday(&self, birthday: BirthdayRecord) -> anyhow::Result<BirthdayRecord> {
+        match self {
+            Self::Memory(store) => store.set_birthday(birthday),
+            Self::Postgres(store) => store.set_birthday(birthday).await,
+        }
+    }
+
+    pub async fn get_birthday(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Option<BirthdayRecord>> {
+        match self {
+            Self::Memory(store) => store.get_birthday(guild_id, user_id),
+            Self::Postgres(store) => store.get_birthday(guild_id, user_id).await,
+        }
+    }
+
+    pub async fn list_upcoming_birthdays(
+        &self,
+        guild_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<BirthdayRecord>> {
+        match self {
+            Self::Memory(store) => store.list_upcoming_birthdays(guild_id, limit),
+            Self::Postgres(store) => store.list_upcoming_birthdays(guild_id, limit).await,
+        }
+    }
+
+    pub async fn delete_birthday(&self, guild_id: &str, user_id: &str) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => store.delete_birthday(guild_id, user_id),
+            Self::Postgres(store) => store.delete_birthday(guild_id, user_id).await,
         }
     }
 

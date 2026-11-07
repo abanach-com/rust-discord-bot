@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
 use rusty_discord_bot::lua::{
-    EconomyOperation, GiveawayOperation, LuaAction, LuaEngine, LuaExecutionContext, LuaLimits,
-    ProgressionOperation, QuoteOperation, ReactionRoleOperation, StarboardOperation, TagOperation,
+    BirthdayOperation, EconomyOperation, GiveawayOperation, LuaAction, LuaEngine,
+    LuaExecutionContext, LuaLimits, ProgressionOperation, QuoteOperation, ReactionRoleOperation,
+    StarboardOperation, TagOperation,
 };
 use serde_json::json;
 
@@ -454,7 +455,12 @@ async fn test_birthdays_subcommands() {
         )
         .await
         .expect("birthday set should succeed");
-    assert!(actions.iter().any(|a| matches!(a, LuaAction::Reply { .. })));
+    assert!(actions.iter().any(|a| matches!(
+        a,
+        LuaAction::Birthday {
+            operation: BirthdayOperation::Set { day: 12, month: 5 }
+        }
+    )));
 
     // /birthday check
     let actions = eng
@@ -465,14 +471,38 @@ async fn test_birthdays_subcommands() {
         )
         .await
         .expect("birthday check should succeed");
-    assert!(actions.iter().any(|a| matches!(a, LuaAction::Reply { .. })));
+    assert!(actions.iter().any(|a| matches!(
+        a,
+        LuaAction::Birthday {
+            operation: BirthdayOperation::Check {
+                user_id: Some(uid)
+            }
+        } if uid == "999"
+    )));
 
     // /birthday upcoming
     let actions = eng
         .execute_command("birthdays", "birthday", context(json!({ "upcoming": {} })))
         .await
         .expect("birthday upcoming should succeed");
-    assert!(actions.iter().any(|a| matches!(a, LuaAction::Reply { .. })));
+    assert!(actions.iter().any(|a| matches!(
+        a,
+        LuaAction::Birthday {
+            operation: BirthdayOperation::Upcoming { limit: 10 }
+        }
+    )));
+
+    // /birthday delete
+    let actions = eng
+        .execute_command("birthdays", "birthday", context(json!({ "delete": {} })))
+        .await
+        .expect("birthday delete should succeed");
+    assert!(actions.iter().any(|a| matches!(
+        a,
+        LuaAction::Birthday {
+            operation: BirthdayOperation::Delete
+        }
+    )));
 
     // Missing subcommand
     let actions = eng

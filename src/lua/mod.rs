@@ -1,3 +1,4 @@
+pub mod birthdays;
 pub mod economy;
 mod engine;
 mod giveaway;
@@ -12,6 +13,7 @@ pub mod starboard;
 mod tags;
 mod tickets;
 
+pub use birthdays::BirthdayOperation;
 pub use economy::EconomyOperation;
 pub use engine::{LuaEngine, LuaEngineError, LuaLimits};
 pub use giveaway::GiveawayOperation;

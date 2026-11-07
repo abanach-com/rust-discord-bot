@@ -72,6 +72,21 @@ return {
                         type = "subcommand",
                         name = "upcoming",
                         description = t("modules.birthdays.commands.birthday.options.upcoming.description"),
+                        options = {
+                            {
+                                type = "integer",
+                                name = "limit",
+                                description = "Liczba nadchodzących urodzin do wyświetlenia (1-50)",
+                                required = false,
+                                min_value = 1,
+                                max_value = 50,
+                            },
+                        },
+                    },
+                    {
+                        type = "subcommand",
+                        name = "delete",
+                        description = "Usuń swoje zapisane urodziny",
                         options = {},
                     },
                 },
@@ -92,7 +107,7 @@ return {
             return {}
         end
 
-        local sub, opts = get_subcommand(ctx.options, { "set", "check", "upcoming" })
+        local sub, opts = get_subcommand(ctx.options, { "set", "check", "upcoming", "delete" })
         if not sub then
             return {
                 {
@@ -103,37 +118,63 @@ return {
             }
         end
 
-        local user_id = ctx.user_id
-
         if sub == "set" then
-            local day = opts.day or 1
-            local month = opts.month or 1
+            local day = tonumber(opts.day)
+            local month = tonumber(opts.month)
+            if not day or not month then
+                return {
+                    {
+                        type = "reply",
+                        content = "Missing required options: day and month are required.",
+                        ephemeral = true,
+                    },
+                }
+            end
             return {
                 {
-                    type = "reply",
-                    content = t("modules.birthdays.set_reply", { day = day, month = month }, ctx),
-                    ephemeral = true,
+                    type = "birthday",
+                    operation = {
+                        operation = "set",
+                        day = day,
+                        month = month,
+                    },
                 },
             }
         end
 
         if sub == "check" then
-            local target = opts.user or user_id
+            local op = { operation = "check" }
+            if opts.user and tostring(opts.user) ~= "" then
+                op.user_id = tostring(opts.user)
+            end
             return {
                 {
-                    type = "reply",
-                    content = t("modules.birthdays.check_not_found", { user = target }, ctx),
-                    ephemeral = false,
+                    type = "birthday",
+                    operation = op,
                 },
             }
         end
 
         if sub == "upcoming" then
+            local limit = tonumber(opts.limit) or 10
             return {
                 {
-                    type = "reply",
-                    content = t("modules.birthdays.upcoming_empty", ctx),
-                    ephemeral = false,
+                    type = "birthday",
+                    operation = {
+                        operation = "upcoming",
+                        limit = limit,
+                    },
+                },
+            }
+        end
+
+        if sub == "delete" then
+            return {
+                {
+                    type = "birthday",
+                    operation = {
+                        operation = "delete",
+                    },
                 },
             }
         end
