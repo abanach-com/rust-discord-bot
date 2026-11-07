@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, Weak};
 
 use anyhow::{Result, bail};
@@ -6,7 +7,7 @@ use dashmap::mapref::entry::Entry;
 use serde::{Deserialize, Serialize};
 use serenity::all::{
     Channel, ChannelId, ChannelType, Context, GuildChannel, GuildId, PermissionOverwrite,
-    PermissionOverwriteType, Permissions, UserId,
+    PermissionOverwriteType, Permissions, UserId, VoiceState,
 };
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -479,11 +480,39 @@ pub async fn revoke_companion_lease(
     }
 }
 
-/// Reconciles all active and pending companion leases for a guild against current voice states.
+/// Reconciles all active and pending companion leases for a guild against current voice states in cache.
+/// Fails fast if guild cache is unavailable, deferring reconciliation to avoid unjustified revocations (#263).
 pub async fn reconcile_guild_companion_channels(
     ctx: &Context,
     state: &AppState,
     guild_id: GuildId,
+) -> Result<ReconciliationSummary> {
+    // Ensure guild is available in cache before attempting reconciliation (#263).
+    // An unavailable guild must NEVER be treated as having zero voice states,
+    // which would cause mass unjustified revocation of active companion leases during startup.
+    let current_voice_states = match ctx.cache.guild(guild_id) {
+        Some(guild_ref) => guild_ref.voice_states.clone(),
+        None => {
+            tracing::info!(
+                guild_id = %guild_id,
+                "Guild cache is unavailable; deferring companion channel reconciliation"
+            );
+            anyhow::bail!(
+                "Guild {guild_id} cache is unavailable; deferring companion reconciliation"
+            );
+        }
+    };
+
+    reconcile_guild_companion_channels_with_voice_states(ctx, state, guild_id, current_voice_states)
+        .await
+}
+
+/// Reconciles companion leases against an explicitly provided, reliable snapshot of guild voice states.
+pub async fn reconcile_guild_companion_channels_with_voice_states(
+    ctx: &Context,
+    state: &AppState,
+    guild_id: GuildId,
+    current_voice_states: HashMap<UserId, VoiceState>,
 ) -> Result<ReconciliationSummary> {
     let guild_str = guild_id.get().to_string();
     let mappings = state.storage.list_companion_mappings(&guild_str).await?;
@@ -499,13 +528,6 @@ pub async fn reconcile_guild_companion_channels(
     let mut revoked_count = 0;
     let mut granted_count = 0;
     let mut pending_retries = 0;
-
-    // Current voice states from guild cache
-    let current_voice_states = ctx
-        .cache
-        .guild(guild_id)
-        .map(|g| g.voice_states.clone())
-        .unwrap_or_default();
 
     // 1. Retry pending revoke leases (#173)
     for lease in pending_leases {

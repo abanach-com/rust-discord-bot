@@ -691,6 +691,11 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Resolved phase 3 discrepancy in `reconcile_guild_companion_channels`: target mapping lookup now strictly enforces `m.enabled && m.voice_channel_id == voice_str`, preventing reconciliation from immediately re-granting leases revoked in phase 2.
   - Enhanced `CompanionMappingItem` and `UpsertCompanionMappingPayload` with `enabled: bool` across `PostgresStore` and `MemoryStore`: deactivating a mapping (`enabled = false`) atomically transitions all associated active leases to `revoke_pending` with immediate retry schedule (`next_attempt_at = NOW()`).
   - Added comprehensive test coverage: unit tests in `src/storage/mod.rs`, PostgreSQL integration tests in `tests/postgres_integration.rs`, and mock Discord HTTP event tests in `tests/discord_isolation_and_hierarchy.rs`.
+- **Voice Companion Safe Startup Reconciliation & Cache Availability Deferral (#263)**:
+  - Disambiguated `guild cache unavailable` from `guild has zero voice states`: `reconcile_guild_companion_channels` fails fast and defers reconciliation (`Guild {guild_id} cache is unavailable; deferring companion reconciliation`) when guild cache is absent, eliminating mass unjustified permission overwrite deletion and lease purging during Gateway startup.
+  - Extracted `reconcile_guild_companion_channels_with_voice_states` allowing reconciliation against an authoritative, reliable `HashMap<UserId, VoiceState>` snapshot.
+  - Shifted startup companion reconciliation from premature `READY` event handler (where guilds are initially unavailable in Serenity cache) to `guild_create`, running only when full guild payload and voice states are reliably populated.
+  - Added comprehensive verification in `tests/discord_isolation_and_hierarchy.rs` (`test_voice_companion_ready_empty_cache_defers_reconciliation_without_revocation`) verifying zero HTTP mutations, active lease preservation upon cache absence, and proper cleanup once an authoritative empty voice state arrives.
 
 ## Delivery order
 

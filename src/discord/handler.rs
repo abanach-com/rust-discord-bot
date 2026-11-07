@@ -150,35 +150,11 @@ impl EventHandler for Handler {
             }
         });
 
-        // Reconcile voice companion channel leases after startup/restart (#161)
-        let companion_state = self.state.clone();
-        let companion_ctx = ctx.clone();
-        let guild_ids: Vec<GuildId> = ready.guilds.iter().map(|g| g.id).collect();
-        tokio::spawn(async move {
-            for gid in guild_ids {
-                if let Err(e) = crate::discord::companion::reconcile_guild_companion_channels(
-                    &companion_ctx,
-                    &companion_state,
-                    gid,
-                )
-                .await
-                {
-                    tracing::warn!(
-                        guild_id = %gid,
-                        ?e,
-                        "Failed companion channel reconciliation during startup"
-                    );
-                }
-            }
-        });
+        // Companion channel reconciliation is deferred to `guild_create` once full guild
+        // voice states are reliably populated in cache, preventing premature lease revoking (#161, #263).
     }
 
-    async fn guild_create(
-        &self,
-        _ctx: Context,
-        guild: serenity::all::Guild,
-        _is_new: Option<bool>,
-    ) {
+    async fn guild_create(&self, ctx: Context, guild: serenity::all::Guild, _is_new: Option<bool>) {
         let guild_id_str = guild.id.to_string();
         let now = chrono::Utc::now();
 
@@ -245,6 +221,29 @@ impl EventHandler for Handler {
                 &sticker_items,
             )
             .await;
+
+        // 3. Reconcile voice companion channels with reliable guild voice states (#161, #263)
+        let companion_state = self.state.clone();
+        let companion_ctx = ctx.clone();
+        let companion_gid = guild.id;
+        let voice_states = guild.voice_states.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                crate::discord::companion::reconcile_guild_companion_channels_with_voice_states(
+                    &companion_ctx,
+                    &companion_state,
+                    companion_gid,
+                    voice_states,
+                )
+                .await
+            {
+                tracing::warn!(
+                    guild_id = %companion_gid,
+                    ?e,
+                    "Failed companion channel reconciliation on guild create"
+                );
+            }
+        });
     }
 
     async fn guild_emojis_update(

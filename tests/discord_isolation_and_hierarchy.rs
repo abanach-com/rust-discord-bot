@@ -1571,7 +1571,7 @@ async fn test_voice_companion_disabled_mapping_never_grants_and_revokes_active_l
         "Active lease for disabled mapping must be revoked and removed on voice event"
     );
 
-    // 5. Guild reconcile with disabled mapping must revoke in Phase 2 and NOT re-grant in Phase 3
+    // 5. Guild reconcile without cache must defer (#263); with reliable voice states it revokes Phase 2 and NOT re-grant in Phase 3
     state
         .storage
         .record_companion_lease(RecordCompanionLeaseParams {
@@ -1586,9 +1586,25 @@ async fn test_voice_companion_disabled_mapping_never_grants_and_revokes_active_l
         .await
         .expect("seed active lease for guild reconcile");
 
-    let summary = reconcile_guild_companion_channels(&ctx, &state, guild_id)
-        .await
-        .expect("reconcile guild companion channels");
+    // Reconcile without guild in cache must fail fast and defer (#263)
+    let defer_res = reconcile_guild_companion_channels(&ctx, &state, guild_id).await;
+    assert!(defer_res.is_err(), "must defer when cache unavailable");
+    assert!(
+        defer_res
+            .unwrap_err()
+            .to_string()
+            .contains("cache is unavailable")
+    );
+
+    // Reconcile with explicit reliable voice states (empty) revokes disabled lease
+    let summary = rusty_discord_bot::discord::companion::reconcile_guild_companion_channels_with_voice_states(
+        &ctx,
+        &state,
+        guild_id,
+        std::collections::HashMap::new(),
+    )
+    .await
+    .expect("reconcile guild companion channels with voice states");
 
     assert_eq!(
         summary.revoked, 1,
@@ -1609,6 +1625,155 @@ async fn test_voice_companion_disabled_mapping_never_grants_and_revokes_active_l
         .await
         .expect("lease lookup");
     assert!(final_lease.is_none());
+
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn test_voice_companion_ready_empty_cache_defers_reconciliation_without_revocation() {
+    use rusty_discord_bot::discord::companion::{
+        reconcile_guild_companion_channels, reconcile_guild_companion_channels_with_voice_states,
+    };
+    use rusty_discord_bot::storage::{CompanionMappingItem, RecordCompanionLeaseParams};
+    use serenity::all::VoiceState;
+
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state().await;
+
+    let guild_id = GuildId::new(100);
+    let voice_str = "105";
+    let text_str = "101"; // text channel 101 exists in mock
+    let user_str = "222222222222222222";
+    let guild_str = "100";
+
+    // 1. Setup enabled companion mapping
+    let item = CompanionMappingItem::new(voice_str, text_str, true, true);
+    state
+        .storage
+        .batch_upsert_companion_mappings(guild_str, &[item])
+        .await
+        .expect("upsert companion mapping");
+
+    // 2. Setup active companion lease for user in this voice channel
+    let generation_id = uuid::Uuid::new_v4();
+    state
+        .storage
+        .record_companion_lease(RecordCompanionLeaseParams {
+            guild_id: guild_str,
+            voice_channel_id: voice_str,
+            text_channel_id: text_str,
+            user_id: user_str,
+            generation: generation_id,
+            allow_bits: 1024,
+            deny_bits: 0,
+        })
+        .await
+        .expect("seed active lease");
+
+    let initial_modifications = mock.modifying_requests_count.load(Ordering::SeqCst);
+
+    // 3. Scenario: READY before GUILD_CREATE (cache does NOT have guild 100 yet).
+    // Reconcile must fail fast with deferral error and NOT revoke active leases (#263).
+    let reconcile_res = reconcile_guild_companion_channels(&ctx, &state, guild_id).await;
+    assert!(
+        reconcile_res.is_err(),
+        "Must return Err when guild cache is unavailable"
+    );
+    let err_msg = reconcile_res.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("cache is unavailable; deferring companion reconciliation"),
+        "Error message must specify deferral due to unavailable cache, got: {}",
+        err_msg
+    );
+
+    // Zero modifying requests to Discord (no DELETE /permissions)!
+    let after_defer_modifications = mock.modifying_requests_count.load(Ordering::SeqCst);
+    assert_eq!(
+        after_defer_modifications, initial_modifications,
+        "Deferral must NOT issue any modifying HTTP calls (like delete_permission) to Discord"
+    );
+
+    // Lease in storage must remain untouched with status 'active'
+    let lease_during_deferral = state
+        .storage
+        .get_companion_lease(guild_str, text_str, user_str)
+        .await
+        .expect("lease query")
+        .expect("lease must still exist");
+    assert_eq!(
+        lease_during_deferral.status, "active",
+        "Active lease must NOT be marked revoke_pending or deleted when cache is unavailable"
+    );
+
+    // 4. Scenario: GUILD_CREATE arrives and user is still in voice channel 105.
+    // Active lease must be preserved!
+    let mut current_voice_states = std::collections::HashMap::new();
+    let voice_state: VoiceState = serde_json::from_value(serde_json::json!({
+        "guild_id": "100",
+        "channel_id": "105",
+        "user_id": user_str,
+        "session_id": "session_active_voice",
+        "deaf": false,
+        "mute": false,
+        "self_deaf": false,
+        "self_mute": false,
+        "self_video": false,
+        "suppress": false,
+        "request_to_speak_timestamp": null
+    }))
+    .expect("deserialize VoiceState");
+    current_voice_states.insert(UserId::new(222222222222222222), voice_state);
+
+    let sync_summary = reconcile_guild_companion_channels_with_voice_states(
+        &ctx,
+        &state,
+        guild_id,
+        current_voice_states,
+    )
+    .await
+    .expect("reconciliation with active voice states succeeds");
+
+    assert_eq!(
+        sync_summary.revoked, 0,
+        "No active leases should be revoked when member is in voice"
+    );
+    assert_eq!(
+        sync_summary.granted, 0,
+        "No duplicate grant should be issued for already active lease"
+    );
+    assert_eq!(sync_summary.active_leases, 1, "Active lease remains intact");
+
+    let preserved_lease = state
+        .storage
+        .get_companion_lease(guild_str, text_str, user_str)
+        .await
+        .expect("lease query")
+        .expect("lease exists");
+    assert_eq!(preserved_lease.status, "active");
+
+    // 5. Scenario: User left voice channel while bot was offline.
+    // Reconcile with empty voice states correctly revokes the stale lease.
+    let empty_states = std::collections::HashMap::new();
+    let cleanup_summary =
+        reconcile_guild_companion_channels_with_voice_states(&ctx, &state, guild_id, empty_states)
+            .await
+            .expect("cleanup reconciliation succeeds");
+
+    assert_eq!(
+        cleanup_summary.revoked, 1,
+        "Stale lease must be revoked when user left voice"
+    );
+    assert_eq!(cleanup_summary.active_leases, 0);
+
+    let final_lease = state
+        .storage
+        .get_companion_lease(guild_str, text_str, user_str)
+        .await
+        .expect("lease query");
+    assert!(
+        final_lease.is_none(),
+        "Stale lease must be deleted after successful revocation"
+    );
 
     shard_manager.shutdown_all().await;
 }
