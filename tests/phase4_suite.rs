@@ -1145,3 +1145,262 @@ async fn test_ai_knowledge_search_security_and_performance_issue_244() {
     assert_eq!(pct_json.len(), 1);
     assert_eq!(pct_json[0]["title"], "100% discount deal");
 }
+
+#[tokio::test]
+async fn test_telegram_bridge_upsert_deduplication_and_identity_stability_issue_329() {
+    let mut config = test_config();
+    config.offline_mode = true;
+    let app = AppState::bootstrap(config).await.expect("bootstrap");
+    let permissions_cache = Arc::new(DashMap::new());
+    let web_state = WebState {
+        app,
+        login_rate_limiter: Arc::new(LoginRateLimiter::new()),
+        permissions_cache: permissions_cache.clone(),
+    };
+    web_state
+        .app
+        .is_gateway_ready
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind web listener");
+    let web_addr = web_listener.local_addr().expect("web addr");
+    let router = build_router(web_state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            web_listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{web_addr}");
+
+    let guild_id = "777000000000000001";
+    let channel_id = "888000000000000001";
+    let user_id = "999000000000000001";
+    let session_id = "session_telegram_bridge_test";
+    let csrf_token = "csrf_telegram_bridge_test";
+
+    web_state
+        .app
+        .sessions
+        .save_session(
+            session_id,
+            DashboardUser {
+                id: user_id.to_string(),
+                username: "BridgeAdmin".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Telegram Guild".to_string(),
+                icon: None,
+                owner: false,
+                permissions: "32".to_string(), // MANAGE_GUILD
+            }],
+            csrf_token.to_string(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    permissions_cache.insert(
+        (user_id.to_string(), guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    let session_cookie = format!("rusty_discord_bot_session={session_id}");
+
+    // 1. Initial creation of Telegram bridge via POST
+    let initial_payload = serde_json::json!({
+        "telegram_chat_id": "-100111111111",
+        "discord_channel_id": channel_id,
+        "secret_token": "secret_token_v1"
+    });
+
+    let resp1 = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/telegram/bridge"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&initial_payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp1.status(), reqwest::StatusCode::OK);
+
+    let body1: serde_json::Value = resp1.json().await.unwrap();
+    let bridge_id = body1["id"].as_str().expect("bridge id string").to_string();
+    let created_at = body1["created_at"]
+        .as_str()
+        .expect("created_at string")
+        .to_string();
+
+    assert_eq!(body1["telegram_chat_id"], "-100111111111");
+    assert_eq!(body1["discord_channel_id"], channel_id);
+    assert!(
+        body1.get("secret_token").is_none(),
+        "secret_token must be redacted in summary (#131)"
+    );
+
+    let bridges_initial = web_state
+        .app
+        .storage
+        .list_telegram_bridges(guild_id)
+        .await
+        .unwrap();
+    assert_eq!(bridges_initial.len(), 1, "Exactly one bridge in storage");
+
+    // 2. Sequential second POST for the same (guild_id, discord_channel_id) updating telegram_chat_id
+    let update_payload = serde_json::json!({
+        "telegram_chat_id": "-100222222222",
+        "discord_channel_id": channel_id,
+        "secret_token": "secret_token_v2"
+    });
+
+    let resp2 = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/telegram/bridge"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&update_payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), reqwest::StatusCode::OK);
+
+    let body2: serde_json::Value = resp2.json().await.unwrap();
+    assert_eq!(
+        body2["id"], bridge_id,
+        "Bridge ID must remain stable across updates (UPSERT)"
+    );
+    assert_eq!(
+        body2["created_at"], created_at,
+        "created_at must remain unchanged across updates"
+    );
+    assert_eq!(
+        body2["telegram_chat_id"], "-100222222222",
+        "telegram_chat_id must be updated"
+    );
+
+    // Storage check: exactly 1 bridge in MemoryStore, no duplicates!
+    let bridges_after = web_state
+        .app
+        .storage
+        .list_telegram_bridges(guild_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        bridges_after.len(),
+        1,
+        "MemoryStore must not create duplicates for (guild_id, discord_channel_id)"
+    );
+    assert_eq!(bridges_after[0].telegram_chat_id, "-100222222222");
+    assert_eq!(bridges_after[0].id.to_string(), bridge_id);
+
+    // get_telegram_bridge check
+    let retrieved = web_state
+        .app
+        .storage
+        .get_telegram_bridge(guild_id, channel_id)
+        .await
+        .unwrap()
+        .expect("retrieved bridge");
+    assert_eq!(retrieved.id.to_string(), bridge_id);
+    assert_eq!(retrieved.telegram_chat_id, "-100222222222");
+    assert_eq!(retrieved.secret_token, "secret_token_v2");
+
+    // 3. Message mapping consistency: mapping referencing bridge_id is maintained
+    let parsed_bridge_id = Uuid::parse_str(&bridge_id).unwrap();
+    let mapping = rusty_discord_bot::storage::TelegramMessageMapping {
+        id: Uuid::new_v4(),
+        bridge_id: parsed_bridge_id,
+        telegram_message_id: "tg_msg_101".to_string(),
+        discord_message_id: "dc_msg_202".to_string(),
+        direction: "telegram_to_discord".to_string(),
+        created_at: Utc::now(),
+    };
+    web_state
+        .app
+        .storage
+        .record_telegram_message_mapping(mapping.clone())
+        .await
+        .unwrap();
+
+    let fetched_mapping = web_state
+        .app
+        .storage
+        .get_telegram_message_mapping(parsed_bridge_id, "tg_msg_101", "telegram_to_discord")
+        .await
+        .unwrap()
+        .expect("fetched mapping");
+    assert_eq!(fetched_mapping.discord_message_id, "dc_msg_202");
+
+    // 4. Concurrent UPSERT test: 20 simultaneous create_telegram_bridge calls for same channel
+    let concurrent_channel_id = "888000000000000002";
+    let mut handles = Vec::new();
+    for i in 0..20 {
+        let storage = web_state.app.storage.clone();
+        let gid = guild_id.to_string();
+        let cid = concurrent_channel_id.to_string();
+        handles.push(tokio::spawn(async move {
+            let bridge = rusty_discord_bot::storage::TelegramBridge {
+                id: Uuid::new_v4(),
+                guild_id: gid,
+                telegram_chat_id: format!("-1003333333{:02}", i),
+                discord_channel_id: cid,
+                secret_token: format!("token_{i}"),
+                paused: false,
+                created_at: Utc::now(),
+            };
+            storage.create_telegram_bridge(bridge).await.unwrap();
+        }));
+    }
+
+    for h in handles {
+        h.await.unwrap();
+    }
+
+    let all_bridges = web_state
+        .app
+        .storage
+        .list_telegram_bridges(guild_id)
+        .await
+        .unwrap();
+    let concurrent_bridges: Vec<_> = all_bridges
+        .into_iter()
+        .filter(|b| b.discord_channel_id == concurrent_channel_id)
+        .collect();
+    assert_eq!(
+        concurrent_bridges.len(),
+        1,
+        "Concurrent UPSERT creates exactly one bridge entry without duplicates"
+    );
+
+    // 5. Deletion removes the correct bridge
+    let deleted = web_state
+        .app
+        .storage
+        .delete_telegram_bridge(parsed_bridge_id)
+        .await
+        .unwrap();
+    assert!(deleted, "Delete returns true when bridge existed");
+
+    let after_delete = web_state
+        .app
+        .storage
+        .get_telegram_bridge(guild_id, channel_id)
+        .await
+        .unwrap();
+    assert!(
+        after_delete.is_none(),
+        "Bridge was cleanly removed from storage"
+    );
+}

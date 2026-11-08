@@ -188,7 +188,7 @@ pub struct MemoryStore {
 
     youtube_subs: Arc<DashMap<(String, String), YouTubeChannelSubscription>>,
 
-    telegram_bridges: Arc<DashMap<Uuid, TelegramBridge>>,
+    telegram_bridges: Arc<DashMap<(String, String), TelegramBridge>>,
 
     telegram_mappings: Arc<DashMap<Uuid, TelegramMessageMapping>>,
 
@@ -5332,22 +5332,32 @@ impl MemoryStore {
     // Agent 10 (#99): Telegram Bridge
 
     pub fn create_telegram_bridge(&self, bridge: TelegramBridge) -> TelegramBridge {
-        self.telegram_bridges.insert(bridge.id, bridge.clone());
-
-        bridge
+        let key = (bridge.guild_id.clone(), bridge.discord_channel_id.clone());
+        use dashmap::mapref::entry::Entry;
+        match self.telegram_bridges.entry(key) {
+            Entry::Occupied(mut occupied) => {
+                let mut updated = bridge;
+                updated.id = occupied.get().id;
+                updated.created_at = occupied.get().created_at;
+                occupied.insert(updated.clone());
+                updated
+            }
+            Entry::Vacant(vacant) => {
+                vacant.insert(bridge.clone());
+                bridge
+            }
+        }
     }
 
     pub fn get_telegram_bridge(&self, guild_id: &str, channel_id: &str) -> Option<TelegramBridge> {
-        self.telegram_bridges
-            .iter()
-            .find(|e| e.guild_id == guild_id && e.discord_channel_id == channel_id)
-            .map(|e| e.value().clone())
+        let key = (guild_id.to_string(), channel_id.to_string());
+        self.telegram_bridges.get(&key).map(|e| e.value().clone())
     }
 
     pub fn list_telegram_bridges(&self, guild_id: &str) -> Vec<TelegramBridge> {
         self.telegram_bridges
             .iter()
-            .filter(|e| e.guild_id == guild_id)
+            .filter(|e| e.key().0 == guild_id)
             .map(|e| e.value().clone())
             .collect()
     }
@@ -5382,7 +5392,16 @@ impl MemoryStore {
     }
 
     pub fn delete_telegram_bridge(&self, bridge_id: Uuid) -> bool {
-        self.telegram_bridges.remove(&bridge_id).is_some()
+        let found_key = self
+            .telegram_bridges
+            .iter()
+            .find(|e| e.value().id == bridge_id)
+            .map(|e| e.key().clone());
+        if let Some(key) = found_key {
+            self.telegram_bridges.remove(&key).is_some()
+        } else {
+            false
+        }
     }
 
     // Agent 11 (#100): Workflow Builder
