@@ -36,6 +36,11 @@ RUN apt-get update \
         libopus0 \
         python3 \
     && curl --fail --location --proto '=https' --tlsv1.2 \
+        --connect-timeout 15 \
+        --max-time 90 \
+        --retry 4 \
+        --retry-delay 2 \
+        --retry-max-time 180 \
         "https://github.com/yt-dlp/yt-dlp/releases/download/${YT_DLP_VERSION}/yt-dlp" \
         --output /usr/local/bin/yt-dlp \
     && echo "${YT_DLP_SHA256}  /usr/local/bin/yt-dlp" | sha256sum --check --strict \
