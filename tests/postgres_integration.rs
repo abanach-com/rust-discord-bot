@@ -2862,7 +2862,7 @@ async fn test_postgres_integration_suite() {
     assert!(!replay_ver);
 
     // 29. Reaction Roles bindings in PostgreSQL (Issue #277)
-    let rr_guild = "pg_guild_rr_1";
+    let rr_guild = "888000000000000088";
     let rr_msg = "900000000000000001";
     let rr_emoji = "🎉";
     let rr_role = "1002";
