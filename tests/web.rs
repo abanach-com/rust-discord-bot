@@ -15408,3 +15408,672 @@ async fn test_scheduled_event_chronological_window_and_rsvp_cutoff_issue_331() {
         "Ongoing event allows join prior to end_time cutoff"
     );
 }
+
+#[tokio::test]
+async fn test_lua_event_routing_auth_and_permissions() {
+    let (web_state, _) = test_web_state().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let base_url = format!("http://{}", addr);
+    let router = build_router(web_state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+    let target_guild = "guild_allow";
+    let admin_session_id = "admin_routing_session";
+    let admin_csrf = "admin_routing_csrf";
+    web_state
+        .app
+        .sessions
+        .save_session(
+            admin_session_id,
+            DashboardUser {
+                id: "1001".to_string(),
+                username: "admin".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: target_guild.to_string(),
+                name: "Test Guild".to_string(),
+                icon: None,
+                owner: false,
+                permissions: "32".to_string(), // MANAGE_GUILD
+            }],
+            admin_csrf.to_string(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let unauthorized_session_id = "unauth_routing_session";
+    let unauth_csrf = "unauth_routing_csrf";
+    web_state
+        .app
+        .sessions
+        .save_session(
+            unauthorized_session_id,
+            DashboardUser {
+                id: "1002".to_string(),
+                username: "regular_user".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: "other_guild".to_string(),
+                name: "Other Guild".to_string(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_string(),
+            }],
+            unauth_csrf.to_string(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // 1. Missing session cookie -> 401 Unauthorized
+    let res = client
+        .get(format!(
+            "{base_url}/api/guilds/{target_guild}/lua/event-routing?event=message_create"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // 2. Session without access to target guild -> 403 Forbidden
+    let res = client
+        .get(format!(
+            "{base_url}/api/guilds/{target_guild}/lua/event-routing?event=message_create"
+        ))
+        .header(
+            COOKIE,
+            format!("rusty_discord_bot_session={unauthorized_session_id}"),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 3. Invalid snowflake format on guild_id -> 400 Bad Request
+    let res = client
+        .get(format!(
+            "{base_url}/api/guilds/invalid_snowflake!/lua/event-routing?event=message_create"
+        ))
+        .header(
+            COOKIE,
+            format!("rusty_discord_bot_session={admin_session_id}"),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 4. Authorized admin with valid guild -> 200 OK
+    let res = client
+        .get(format!(
+            "{base_url}/api/guilds/{target_guild}/lua/event-routing?event=message_create"
+        ))
+        .header(
+            COOKIE,
+            format!("rusty_discord_bot_session={admin_session_id}"),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), reqwest::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_lua_event_routing_validation_and_disclaimer() {
+    let (web_state, _) = test_web_state().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let base_url = format!("http://{}", addr);
+    let router = build_router(web_state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+    let target_guild = "guild_allow";
+    let admin_session_id = "admin_validation_session";
+    web_state
+        .app
+        .sessions
+        .save_session(
+            admin_session_id,
+            DashboardUser {
+                id: "1001".to_string(),
+                username: "admin".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: target_guild.to_string(),
+                name: "Test Guild".to_string(),
+                icon: None,
+                owner: false,
+                permissions: "32".to_string(),
+            }],
+            "csrf".to_string(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let cookie = format!("rusty_discord_bot_session={admin_session_id}");
+
+    // 1. Missing event query parameter -> 400 Bad Request
+    let res = client
+        .get(format!(
+            "{base_url}/api/guilds/{target_guild}/lua/event-routing"
+        ))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 2. Empty event query parameter -> 400 Bad Request
+    let res = client
+        .get(format!(
+            "{base_url}/api/guilds/{target_guild}/lua/event-routing?event="
+        ))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 3. Whitespace-only event -> 400 Bad Request
+    let res = client
+        .get(format!(
+            "{base_url}/api/guilds/{target_guild}/lua/event-routing?event=%20%20"
+        ))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 4. Invalid characters in event -> 400 Bad Request
+    let res = client
+        .get(format!(
+            "{base_url}/api/guilds/{target_guild}/lua/event-routing?event=message_create;drop_table"
+        ))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 5. Exceeding 64 characters in event name -> 400 Bad Request
+    let long_event = "a".repeat(65);
+    let res = client
+        .get(format!(
+            "{base_url}/api/guilds/{target_guild}/lua/event-routing?event={long_event}"
+        ))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 6. Unknown well-formed event name -> 200 OK with empty list []
+    let res = client
+        .get(format!("{base_url}/api/guilds/{target_guild}/lua/event-routing?event=non_existent_gateway_event"))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), reqwest::StatusCode::OK);
+    let routes: Vec<rusty_discord_bot::lua::LuaEventRouteDecision> = res.json().await.unwrap();
+    assert!(routes.is_empty(), "Unknown event must return empty list");
+
+    // 7. Verify Disclaimer header on valid response
+    let res = client
+        .get(format!(
+            "{base_url}/api/guilds/{target_guild}/lua/event-routing?event=message_create"
+        ))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), reqwest::StatusCode::OK);
+    let disclaimer = res.headers().get("x-routing-disclaimer");
+    assert_eq!(
+        disclaimer.and_then(|v| v.to_str().ok()),
+        Some("Eligible for dispatch - not a guarantee of execution")
+    );
+}
+
+#[tokio::test]
+async fn test_lua_event_routing_guild_isolation_and_manifest_defaults() {
+    let (web_state, _) = test_web_state().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let base_url = format!("http://{}", addr);
+    let router = build_router(web_state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+    let guild_a = "guild_allow";
+    let guild_b = "guild_web_1";
+
+    let admin_session = "admin_isolation_session";
+    web_state
+        .app
+        .sessions
+        .save_session(
+            admin_session,
+            DashboardUser {
+                id: "1001".to_string(),
+                username: "admin".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![
+                DashboardGuild {
+                    id: guild_a.to_string(),
+                    name: "Guild A".to_string(),
+                    icon: None,
+                    owner: false,
+                    permissions: "32".to_string(),
+                },
+                DashboardGuild {
+                    id: guild_b.to_string(),
+                    name: "Guild B".to_string(),
+                    icon: None,
+                    owner: false,
+                    permissions: "32".to_string(),
+                },
+            ],
+            "csrf".to_string(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let cookie = format!("rusty_discord_bot_session={admin_session}");
+
+    // Set Guild A override: afk enabled = true
+    web_state
+        .app
+        .storage
+        .set_module_settings(
+            guild_a,
+            "afk",
+            true,
+            serde_json::json!({"auto_clear_on_message": true, "max_reason_length": 256, "afk_prefix": "[AFK] "}),
+        )
+        .await
+        .unwrap();
+
+    // Set Guild B override: afk enabled = false
+    web_state
+        .app
+        .storage
+        .set_module_settings(
+            guild_b,
+            "afk",
+            false,
+            serde_json::json!({"auto_clear_on_message": false, "max_reason_length": 100, "afk_prefix": "[BUSY] "}),
+        )
+        .await
+        .unwrap();
+
+    // 1. Query Guild A: afk must be enabled with guild_override
+    let res_a = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/lua/event-routing?event=message_create"
+        ))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res_a.status(), reqwest::StatusCode::OK);
+    let routes_a: Vec<rusty_discord_bot::lua::LuaEventRouteDecision> = res_a.json().await.unwrap();
+    let afk_a = routes_a
+        .iter()
+        .find(|r| r.module_id == "afk")
+        .expect("afk module route");
+    assert!(afk_a.subscribed);
+    assert!(afk_a.configured_enabled);
+    assert_eq!(afk_a.config_source, "guild_override");
+    assert_eq!(afk_a.decision_reason, "enabled");
+
+    // 2. Query Guild B: afk must be disabled with guild_override
+    let res_b = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_b}/lua/event-routing?event=message_create"
+        ))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res_b.status(), reqwest::StatusCode::OK);
+    let routes_b: Vec<rusty_discord_bot::lua::LuaEventRouteDecision> = res_b.json().await.unwrap();
+    let afk_b = routes_b
+        .iter()
+        .find(|r| r.module_id == "afk")
+        .expect("afk module route");
+    assert!(afk_b.subscribed);
+    assert!(!afk_b.configured_enabled);
+    assert_eq!(afk_b.config_source, "guild_override");
+    assert_eq!(afk_b.decision_reason, "guild_disabled");
+
+    // 3. Check unconfigured module in Guild A: automod has manifest default_enabled = false
+    if let Some(automod_a) = routes_a.iter().find(|r| r.module_id == "automod") {
+        assert!(automod_a.subscribed);
+        assert!(!automod_a.configured_enabled);
+        assert_eq!(automod_a.config_source, "manifest_default");
+        assert_eq!(automod_a.decision_reason, "default_disabled");
+    }
+
+    // 4. Update Guild A's automod to enabled -> verify immediate reflection
+    web_state
+        .app
+        .storage
+        .set_module_settings(guild_a, "automod", true, serde_json::json!({}))
+        .await
+        .unwrap();
+
+    let res_a_updated = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/lua/event-routing?event=message_create"
+        ))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    let routes_a_updated: Vec<rusty_discord_bot::lua::LuaEventRouteDecision> =
+        res_a_updated.json().await.unwrap();
+    let automod_a_updated = routes_a_updated
+        .iter()
+        .find(|r| r.module_id == "automod")
+        .expect("automod route");
+    assert!(automod_a_updated.configured_enabled);
+    assert_eq!(automod_a_updated.config_source, "guild_override");
+    assert_eq!(automod_a_updated.decision_reason, "enabled");
+
+    // 5. Verify no unsubscribed modules: e.g. economy or tags
+    assert!(!routes_a.iter().any(|r| r.module_id == "economy"));
+
+    // 6. Verify zero secrets/config returned in JSON payload
+    let raw_val: serde_json::Value = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/lua/event-routing?event=message_create"
+        ))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for entry in raw_val.as_array().unwrap() {
+        assert!(entry.get("config").is_none(), "Must never return config");
+        assert!(entry.get("token").is_none(), "Must never return token");
+        assert!(entry.get("secret").is_none(), "Must never return secret");
+        assert_eq!(
+            entry.as_object().unwrap().len(),
+            5,
+            "Exclusively 5 fields in decision"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_lua_event_routing_pagination_and_rate_limiting() {
+    let (web_state, _) = test_web_state().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let base_url = format!("http://{}", addr);
+    let router = build_router(web_state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+    let target_guild = "guild_allow";
+    let admin_session = "admin_pagination_session";
+    web_state
+        .app
+        .sessions
+        .save_session(
+            admin_session,
+            DashboardUser {
+                id: "1001".to_string(),
+                username: "admin".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: target_guild.to_string(),
+                name: "Test Guild".to_string(),
+                icon: None,
+                owner: false,
+                permissions: "32".to_string(),
+            }],
+            "csrf".to_string(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let cookie = format!("rusty_discord_bot_session={admin_session}");
+
+    // All routes for message_create
+    let res_all = client
+        .get(format!(
+            "{base_url}/api/guilds/{target_guild}/lua/event-routing?event=message_create"
+        ))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res_all.status(), reqwest::StatusCode::OK);
+    let all_routes: Vec<rusty_discord_bot::lua::LuaEventRouteDecision> =
+        res_all.json().await.unwrap();
+    assert!(
+        all_routes.len() >= 2,
+        "message_create has at least afk, automod, progression"
+    );
+
+    // Pagination: limit=1, offset=0
+    let res_p1 = client
+        .get(format!("{base_url}/api/guilds/{target_guild}/lua/event-routing?event=message_create&limit=1&offset=0"))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res_p1.status(), reqwest::StatusCode::OK);
+    let p1_routes: Vec<rusty_discord_bot::lua::LuaEventRouteDecision> =
+        res_p1.json().await.unwrap();
+    assert_eq!(p1_routes.len(), 1);
+    assert_eq!(p1_routes[0].module_id, all_routes[0].module_id);
+
+    // Pagination: limit=1, offset=1
+    let res_p2 = client
+        .get(format!("{base_url}/api/guilds/{target_guild}/lua/event-routing?event=message_create&limit=1&offset=1"))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res_p2.status(), reqwest::StatusCode::OK);
+    let p2_routes: Vec<rusty_discord_bot::lua::LuaEventRouteDecision> =
+        res_p2.json().await.unwrap();
+    assert_eq!(p2_routes.len(), 1);
+    assert_eq!(p2_routes[0].module_id, all_routes[1].module_id);
+
+    // Rate limiting: configure quota of 3 requests per 60s for admin:lua_event_routing
+    web_state.app.rate_limiter.set_quota(
+        "admin:lua_event_routing",
+        rusty_discord_bot::rate_limit::RateLimitQuota::new(3, 60),
+    );
+
+    // 3 rapid requests consume quota
+    for _ in 0..3 {
+        let _ = client
+            .get(format!(
+                "{base_url}/api/guilds/{target_guild}/lua/event-routing?event=message_create"
+            ))
+            .header(COOKIE, &cookie)
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // 4th request must be 429 Too Many Requests
+    let res_throttled = client
+        .get(format!(
+            "{base_url}/api/guilds/{target_guild}/lua/event-routing?event=message_create"
+        ))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        res_throttled.status(),
+        reqwest::StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[tokio::test]
+async fn test_lua_event_routing_parity_and_side_effects() {
+    let (web_state, _) = test_web_state().await;
+
+    // Unit parity test across plan_event_routing states
+    let guild_id = "guild_parity_test";
+
+    // 1. Configured enabled
+    web_state
+        .app
+        .storage
+        .set_module_settings(guild_id, "afk", true, serde_json::json!({}))
+        .await
+        .unwrap();
+
+    // 2. Configured disabled
+    web_state
+        .app
+        .storage
+        .set_module_settings(guild_id, "automod", false, serde_json::json!({}))
+        .await
+        .unwrap();
+
+    let plans = rusty_discord_bot::lua::plan_event_routing(
+        &web_state.app.scripts,
+        &web_state.app.storage,
+        Some(guild_id),
+        "message_create",
+    )
+    .await;
+
+    let afk_plan = plans.iter().find(|p| p.module_id == "afk").unwrap();
+    assert!(afk_plan.decision.configured_enabled);
+    assert_eq!(afk_plan.decision.config_source, "guild_override");
+    assert_eq!(afk_plan.decision.decision_reason, "enabled");
+    assert!(afk_plan.config.is_some());
+
+    let automod_plan = plans.iter().find(|p| p.module_id == "automod").unwrap();
+    assert!(!automod_plan.decision.configured_enabled);
+    assert_eq!(automod_plan.decision.config_source, "guild_override");
+    assert_eq!(automod_plan.decision.decision_reason, "guild_disabled");
+    assert!(automod_plan.config.is_none());
+
+    // 3. Unconfigured module uses manifest default
+    let prog_plan = plans.iter().find(|p| p.module_id == "progression").unwrap();
+    assert!(!prog_plan.decision.configured_enabled);
+    assert_eq!(prog_plan.decision.config_source, "manifest_default");
+    assert_eq!(prog_plan.decision.decision_reason, "default_disabled");
+
+    // 3b. Unconfigured guild for afk: manifest default_enabled = true
+    let default_plans = rusty_discord_bot::lua::plan_event_routing(
+        &web_state.app.scripts,
+        &web_state.app.storage,
+        Some("unconfigured_guild_999"),
+        "message_create",
+    )
+    .await;
+    let default_afk = default_plans.iter().find(|p| p.module_id == "afk").unwrap();
+    assert!(default_afk.decision.configured_enabled);
+    assert_eq!(default_afk.decision.config_source, "manifest_default");
+    assert_eq!(default_afk.decision.decision_reason, "enabled");
+
+    // 4. Verify zero side-effects: calling plan_event_routing produces no metrics increment on executions
+    let initial_lua_cmds = web_state
+        .app
+        .metrics
+        .lua_commands_total
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let initial_events = web_state
+        .app
+        .metrics
+        .discord_events_total
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    let _ = rusty_discord_bot::lua::plan_event_routing(
+        &web_state.app.scripts,
+        &web_state.app.storage,
+        Some(guild_id),
+        "message_create",
+    )
+    .await;
+
+    assert_eq!(
+        web_state
+            .app
+            .metrics
+            .lua_commands_total
+            .load(std::sync::atomic::Ordering::Relaxed),
+        initial_lua_cmds
+    );
+    assert_eq!(
+        web_state
+            .app
+            .metrics
+            .discord_events_total
+            .load(std::sync::atomic::Ordering::Relaxed),
+        initial_events
+    );
+}

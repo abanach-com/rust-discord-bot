@@ -183,6 +183,10 @@ pub fn build_router(state: WebState) -> Router {
         .route("/api/modules", get(routes::list_modules))
         .route("/api/guilds/{guild_id}/modules", get(routes::guild_modules))
         .route(
+            "/api/guilds/{guild_id}/lua/event-routing",
+            get(routes::guild_lua_event_routing),
+        )
+        .route(
             "/api/guilds/{guild_id}/modules/{module_id}",
             put(routes::update_guild_module),
         )

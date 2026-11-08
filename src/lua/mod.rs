@@ -8,7 +8,8 @@ mod model;
 mod moderation_cases;
 mod progression;
 pub mod quotes;
-mod reaction_roles;
+pub mod reaction_roles;
+pub mod routing;
 mod scheduler;
 pub mod starboard;
 mod tags;
@@ -29,6 +30,9 @@ pub use moderation_cases::ModerationCaseOperation;
 pub use progression::{ProgressionMetric, ProgressionOperation};
 pub use quotes::QuoteOperation;
 pub use reaction_roles::ReactionRoleOperation;
+pub use routing::{
+    LuaEventRouteDecision, PlannedModuleExecution, plan_event_routing, validate_event_name,
+};
 pub use scheduler::{SchedulerOperation, SchedulerScope};
 pub use starboard::StarboardOperation;
 pub use tags::{TagOperation, normalize_tag_name, validate_tag_name};

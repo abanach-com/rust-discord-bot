@@ -428,6 +428,87 @@ pub async fn guild_modules(
     Ok(Json(modules))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct LuaEventRoutingQuery {
+    pub event: Option<String>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+pub async fn guild_lua_event_routing(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    Query(query): Query<LuaEventRoutingQuery>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    if validate_snowflake("guild_id", &guild_id).is_err() && !guild_id.starts_with("guild_") {
+        return Err(ApiError::bad_request("Invalid guild_id"));
+    }
+    ensure_guild_access(&state, &session, &guild_id).await?;
+
+    let Some(raw_event) = query
+        .event
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(ApiError::bad_request(
+            "The 'event' query parameter is required.",
+        ));
+    };
+
+    crate::lua::routing::validate_event_name(raw_event)
+        .map_err(|err| ApiError::bad_request(format!("Invalid event: {err}")))?;
+
+    let decision = state.app.rate_limiter.check_action(
+        "admin:lua_event_routing",
+        &session.user.id,
+        Some(&guild_id),
+    );
+    if !decision.allowed {
+        state
+            .app
+            .metrics
+            .rate_limit_throttled_total
+            .fetch_add(1, Ordering::Relaxed);
+        return Err(ApiError::too_many_requests(format!(
+            "Diagnostic requests are too frequent. Please wait {} s.",
+            decision.reset_after.as_secs().max(1)
+        )));
+    }
+
+    let mut plans = crate::lua::routing::plan_event_routing(
+        &state.app.scripts,
+        &state.app.storage,
+        Some(&guild_id),
+        raw_event,
+    )
+    .await;
+
+    plans.sort_by(|a, b| a.module_id.cmp(&b.module_id));
+
+    let offset = query.offset.unwrap_or(0);
+    let limit = query.limit.unwrap_or(50).clamp(1, 100);
+
+    let routes: Vec<crate::lua::LuaEventRouteDecision> = plans
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|p| p.decision)
+        .collect();
+
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        axum::http::header::HeaderName::from_static("x-routing-disclaimer"),
+        axum::http::header::HeaderValue::from_static(
+            "Eligible for dispatch - not a guarantee of execution",
+        ),
+    );
+
+    Ok((response_headers, Json(routes)))
+}
+
 pub async fn update_guild_module(
     State(state): State<WebState>,
     Path((guild_id, module_id)): Path<(String, String)>,

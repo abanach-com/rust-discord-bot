@@ -2589,51 +2589,43 @@ async fn run_event(
 
     actor_id: Option<serenity::all::UserId>,
 ) {
-    for module_id in state.scripts.modules_for_event(event_name).await {
-        let Some(manifest) = state.scripts.manifest(&module_id).await else {
+    let guild_id_str = guild_id.map(|g| g.get().to_string());
+    let planned_modules = crate::lua::routing::plan_event_routing(
+        &state.scripts,
+        &state.storage,
+        guild_id_str.as_deref(),
+        event_name,
+    )
+    .await;
+
+    for planned in planned_modules {
+        if !planned.decision.configured_enabled {
             continue;
-        };
+        }
 
         let mut module_event = event.clone();
-
-        if let Some(guild_id) = guild_id {
-            match state
-                .storage
-                .get_module_settings(&guild_id.get().to_string(), &module_id)
-                .await
-            {
-                Ok(Some(settings)) if settings.enabled => {
-                    module_event.config = settings.config;
-                }
-
-                Ok(Some(_)) => continue,
-
-                Ok(None) if manifest.default_enabled => {
-                    module_event.config = state.scripts.default_config(&module_id).await;
-                }
-
-                Ok(None) => continue,
-
-                Err(error) => {
-                    tracing::error!(module_id, event_name, ?error, "cannot load module settings");
-
-                    continue;
-                }
-            }
+        if let Some(config) = planned.config {
+            module_event.config = config;
         }
 
         match state
             .scripts
-            .execute_event(&module_id, event_name, module_event)
+            .execute_event(&planned.module_id, event_name, module_event)
             .await
         {
             Ok(actions) => {
                 if let Err(error) = executor::execute_event_actions(
-                    ctx, state, &module_id, guild_id, channel_id, actor_id, &actions,
+                    ctx,
+                    state,
+                    &planned.module_id,
+                    guild_id,
+                    channel_id,
+                    actor_id,
+                    &actions,
                 )
                 .await
                 {
-                    tracing::warn!(module_id, event_name, ?error, "event action failed");
+                    tracing::warn!(module_id = %planned.module_id, event_name, ?error, "event action failed");
                 }
             }
 
@@ -2643,7 +2635,7 @@ async fn run_event(
                     .lua_events_overloaded_total
                     .fetch_add(1, Ordering::Relaxed);
                 tracing::warn!(
-                    module_id,
+                    module_id = %planned.module_id,
                     event_name,
                     guild_id = ?guild_id.map(|g| g.get()),
                     "Lua event shed due to concurrency/capacity saturation"
@@ -2651,7 +2643,7 @@ async fn run_event(
             }
 
             Err(error) => {
-                tracing::warn!(module_id, event_name, ?error, "Lua event failed");
+                tracing::warn!(module_id = %planned.module_id, event_name, ?error, "Lua event failed");
             }
         }
     }
