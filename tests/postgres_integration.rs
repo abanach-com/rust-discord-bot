@@ -951,6 +951,34 @@ async fn test_postgres_integration_suite() {
         assert_eq!(res.used_tokens, 0);
     }
 
+    // 7.6. Authoritative AI metering event idempotency and deduplication (#311)
+    let meter_guild = format!("pg_ai_meter_{}", Uuid::new_v4().simple());
+    let m1 = store
+        .record_metering_event_once(&meter_guild, "provider_pg", "req_id_100", 2500, 0.05)
+        .await
+        .expect("initial postgres metering event");
+    assert_eq!(m1.used_tokens, 2500);
+    assert!((m1.used_usd - 0.05).abs() < 1e-6);
+
+    // Duplicate call with the same provider + request_id must return unchanged budget
+    let m1_dup = store
+        .record_metering_event_once(&meter_guild, "provider_pg", "req_id_100", 2500, 0.05)
+        .await
+        .expect("duplicate postgres metering event");
+    assert_eq!(
+        m1_dup.used_tokens, 2500,
+        "Idempotent event must not double-count tokens"
+    );
+    assert!((m1_dup.used_usd - 0.05).abs() < 1e-6);
+
+    // Distinct request_id must increment
+    let m2 = store
+        .record_metering_event_once(&meter_guild, "provider_pg", "req_id_101", 1000, 0.02)
+        .await
+        .expect("second distinct postgres metering event");
+    assert_eq!(m2.used_tokens, 3500);
+    assert!((m2.used_usd - 0.07).abs() < 1e-6);
+
     let count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM ai_guild_budgets WHERE guild_id = $1")
             .bind(&concurrent_guild)

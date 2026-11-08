@@ -10,19 +10,19 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::{
-    AdjustMemberProgressParams, AfkRecord, AiGuildBudget, AiKnowledgeDocument, AuditLogEntry,
-    BirthdayRecord, CardCollection, CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome,
-    CommandPolicyRule, CommunityPoll, CompanionChannelLease, CompanionChannelMapping,
-    CompanionMappingItem, CountingGame, CrimeClaimOutcome, CustomAutomation, DailyClaimOutcome,
-    DynamicVoiceRoom, EconomyIdempotencyEntry, EconomyPurchaseRequestRecord, EventRoster, FaqEntry,
-    FeedSubscription, GameAccountLink, GamingHubGameStatus, GitHubDevopsMapping,
-    GitLabSubscription, Giveaway, GuildModuleSettings, IntegrationConnection,
-    IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking, KickStreamSubscription,
-    LinkedAccount, MAX_COMPANION_MAPPINGS_PER_GUILD, McpToolAuthorization, MemberIdentityRecord,
-    MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
-    ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
-    ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
-    ProgressionSeason, QuoteRecord, ReactionRoleBinding, ReactionRoleGrant,
+    AdjustMemberProgressParams, AfkRecord, AiGuildBudget, AiKnowledgeDocument, AiMeteringEvent,
+    AuditLogEntry, BirthdayRecord, CardCollection, CardTrade, CleanupPlan, CoinTransfer,
+    CoinTransferOutcome, CommandPolicyRule, CommunityPoll, CompanionChannelLease,
+    CompanionChannelMapping, CompanionMappingItem, CountingGame, CrimeClaimOutcome,
+    CustomAutomation, DailyClaimOutcome, DynamicVoiceRoom, EconomyIdempotencyEntry,
+    EconomyPurchaseRequestRecord, EventRoster, FaqEntry, FeedSubscription, GameAccountLink,
+    GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway, GuildModuleSettings,
+    IntegrationConnection, IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking,
+    KickStreamSubscription, LinkedAccount, MAX_COMPANION_MAPPINGS_PER_GUILD, McpToolAuthorization,
+    MemberIdentityRecord, MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot,
+    ModerationAppeal, ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings,
+    ModeratorDutyState, ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage,
+    ProgressMetric, ProgressionSeason, QuoteRecord, ReactionRoleBinding, ReactionRoleGrant,
     RecordCompanionLeaseParams, RedditSubscription, ReleaseReactionRoleGrantOutcome,
     ReputationGrantOutcome, ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry,
     SteamLfgPost, StickyMessage, StoreItem, StorePurchase, TagRecord, TelegramBridge,
@@ -207,6 +207,8 @@ pub struct MemoryStore {
     social_drafts: Arc<DashMap<Uuid, SocialPublicationDraft>>,
 
     ai_budgets: Arc<DashMap<String, AiGuildBudget>>,
+
+    ai_metering_events: Arc<DashMap<(String, String, String), AiMeteringEvent>>,
 
     ai_documents: Arc<DashMap<Uuid, AiKnowledgeDocument>>,
 
@@ -5581,6 +5583,46 @@ impl MemoryStore {
         }
 
         Ok(budget.clone())
+    }
+
+    pub fn record_metering_event_once(
+        &self,
+        guild_id: &str,
+        provider: &str,
+        request_id: &str,
+        tokens: i64,
+        usd: f64,
+    ) -> anyhow::Result<AiGuildBudget> {
+        anyhow::ensure!(tokens >= 0, "tokens must be non-negative");
+        anyhow::ensure!(usd >= 0.0, "usd must be non-negative");
+        anyhow::ensure!(!guild_id.is_empty(), "guild_id cannot be empty");
+        anyhow::ensure!(!provider.is_empty(), "provider cannot be empty");
+        anyhow::ensure!(!request_id.is_empty(), "request_id cannot be empty");
+
+        let key = (
+            guild_id.to_string(),
+            provider.to_string(),
+            request_id.to_string(),
+        );
+        match self.ai_metering_events.entry(key) {
+            dashmap::mapref::entry::Entry::Occupied(_) => {
+                // Idempotent duplicate: already recorded, return current budget without recharging
+                Ok(self.get_or_create_ai_budget(guild_id))
+            }
+            dashmap::mapref::entry::Entry::Vacant(vacant) => {
+                let event = AiMeteringEvent {
+                    id: Uuid::new_v4(),
+                    guild_id: guild_id.to_string(),
+                    provider: provider.to_string(),
+                    request_id: request_id.to_string(),
+                    tokens,
+                    usd,
+                    created_at: Utc::now(),
+                };
+                vacant.insert(event);
+                self.record_ai_usage(guild_id, tokens, usd)
+            }
+        }
     }
 
     pub fn create_ai_document(&self, doc: AiKnowledgeDocument) -> AiKnowledgeDocument {

@@ -962,33 +962,17 @@ pub async fn record_ai_usage(
     State(state): State<WebState>,
     Path(guild_id): Path<String>,
     headers: HeaderMap,
-    Json(payload): Json<RecordAiUsageRequest>,
+    Json(_payload): Json<RecordAiUsageRequest>,
 ) -> Result<Json<AiGuildBudget>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
     verify_csrf(&headers, &session)?;
     ensure_guild_access(&state, &session, &guild_id).await?;
 
-    if payload.tokens < 0 || payload.usd < 0.0 {
-        return Err(ApiError::bad_request("tokens and usd must be non-negative"));
-    }
-
-    let updated = state
-        .app
-        .storage
-        .record_ai_usage(&guild_id, payload.tokens, payload.usd)
-        .await
-        .map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("exceeded") || msg.contains("limit") || msg.contains("halted") {
-                ApiError::too_many_requests(msg)
-            } else if msg.contains("must be non-negative") {
-                ApiError::bad_request(msg)
-            } else {
-                ApiError::internal(msg)
-            }
-        })?;
-
-    Ok(Json(updated))
+    // Direct client-side AI usage manipulation is strictly prohibited (#311).
+    // AI telemetry is metered authoritatively server-side via trusted adapters.
+    Err(ApiError::forbidden(
+        "Direct client AI usage manipulation is prohibited; AI usage is metered authoritatively server-side",
+    ))
 }
 
 #[derive(Debug, Deserialize)]

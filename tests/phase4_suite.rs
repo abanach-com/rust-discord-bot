@@ -565,9 +565,9 @@ async fn test_phase4_integrations_and_extensibility_suite() {
     assert_eq!(approved_data["status"], "approved");
 
     // ==========================================
-    // 10. Agent 17 & 18 (#106): AI Budget & Channel ACL RAG
+    // 10. Agent 17 & 18 (#106, #311): AI Budget & Channel ACL RAG
     // ==========================================
-    // Record within budget
+    // Direct client manipulation of AI usage via public route is strictly forbidden (#311)
     let usage_resp = client
         .post(format!("{base_url}/api/guilds/{guild_id}/ai/budget/record"))
         .header(COOKIE, &session_cookie)
@@ -576,33 +576,35 @@ async fn test_phase4_integrations_and_extensibility_suite() {
         .send()
         .await
         .unwrap();
-    assert_eq!(usage_resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(usage_resp.status(), reqwest::StatusCode::FORBIDDEN);
 
-    // Hard budget cap cut-off (AC-1)
-    let overflow_resp = client
-        .post(format!("{base_url}/api/guilds/{guild_id}/ai/budget/record"))
+    // Initial budget reflects 0 used tokens
+    let budget_get_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/ai/budget"))
         .header(COOKIE, &session_cookie)
-        .header("X-CSRF-Token", csrf_token)
-        .json(&serde_json::json!({ "tokens": 2_000_000, "usd": 50.0 }))
         .send()
         .await
         .unwrap();
-    let budget_state: serde_json::Value = overflow_resp.json().await.unwrap();
-    assert_eq!(budget_state["is_halted"], true);
+    assert_eq!(budget_get_resp.status(), reqwest::StatusCode::OK);
+    let budget_val: serde_json::Value = budget_get_resp.json().await.unwrap();
+    assert_eq!(budget_val["used_tokens"], 0);
 
-    // Any subsequent call is blocked!
-    let blocked_resp = client
-        .post(format!("{base_url}/api/guilds/{guild_id}/ai/budget/record"))
-        .header(COOKIE, &session_cookie)
-        .header("X-CSRF-Token", csrf_token)
-        .json(&serde_json::json!({ "tokens": 10, "usd": 0.001 }))
-        .send()
+    // Authoritative server-side metering records usage and halts when exceeding hard limit (#106, #311)
+    let budget_state = state
+        .app
+        .storage
+        .record_metering_event_once(guild_id, "phase4_provider", "req_phase4_1", 2_000_000, 50.0)
         .await
         .unwrap();
-    assert_eq!(
-        blocked_resp.status(),
-        reqwest::StatusCode::TOO_MANY_REQUESTS
-    );
+    assert!(budget_state.is_halted);
+
+    // Any subsequent un-halted metering attempt exceeding limit fails
+    let blocked_res = state
+        .app
+        .storage
+        .record_metering_event_once(guild_id, "phase4_provider", "req_phase4_2", 10, 0.001)
+        .await;
+    assert!(blocked_res.is_err());
 
     // RAG Channel ACL (AC-3)
     let doc = AiKnowledgeDocument {

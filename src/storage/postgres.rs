@@ -8063,6 +8063,97 @@ impl PostgresStore {
         Ok(updated)
     }
 
+    pub async fn record_metering_event_once(
+        &self,
+        guild_id: &str,
+        provider: &str,
+        request_id: &str,
+        tokens: i64,
+        usd: f64,
+    ) -> anyhow::Result<AiGuildBudget> {
+        anyhow::ensure!(tokens >= 0, "tokens must be non-negative");
+        anyhow::ensure!(usd >= 0.0, "usd must be non-negative");
+        anyhow::ensure!(!guild_id.is_empty(), "guild_id cannot be empty");
+        anyhow::ensure!(!provider.is_empty(), "provider cannot be empty");
+        anyhow::ensure!(!request_id.is_empty(), "request_id cannot be empty");
+
+        let mut tx = self.pool.begin().await?;
+
+        let insert_res = sqlx::query(
+            r#"
+            INSERT INTO ai_metering_events (id, guild_id, provider, request_id, tokens, usd, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (guild_id, provider, request_id) DO NOTHING
+            "#
+        )
+        .bind(Uuid::new_v4())
+        .bind(guild_id)
+        .bind(provider)
+        .bind(request_id)
+        .bind(tokens)
+        .bind(usd)
+        .bind(Utc::now())
+        .execute(&mut *tx)
+        .await?;
+
+        if insert_res.rows_affected() == 0 {
+            tx.commit().await?;
+            return self.get_or_create_ai_budget(guild_id).await;
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO ai_guild_budgets (guild_id, monthly_token_limit, used_tokens, monthly_usd_limit, used_usd, is_halted, reset_at)
+            VALUES ($1, 1000000, 0, 10.0, 0.0, false, NOW() + INTERVAL '30 days')
+            ON CONFLICT (guild_id) DO NOTHING
+            "#
+        )
+        .bind(guild_id)
+        .execute(&mut *tx)
+        .await?;
+
+        let mut budget = sqlx::query_as::<_, AiGuildBudget>(
+            "SELECT * FROM ai_guild_budgets WHERE guild_id = $1 FOR UPDATE",
+        )
+        .bind(guild_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        if Utc::now() >= budget.reset_at {
+            budget.used_tokens = 0;
+            budget.used_usd = 0.0;
+            budget.is_halted = false;
+            budget.reset_at = Utc::now() + chrono::Duration::days(30);
+        }
+
+        if budget.is_halted {
+            anyhow::bail!("AI budget exceeded and halted for this guild");
+        }
+
+        let new_tokens = budget
+            .used_tokens
+            .checked_add(tokens)
+            .ok_or_else(|| anyhow::anyhow!("token overflow"))?;
+
+        let new_usd = budget.used_usd + usd;
+        let is_halted =
+            new_tokens >= budget.monthly_token_limit || new_usd >= budget.monthly_usd_limit;
+
+        let updated = sqlx::query_as::<_, AiGuildBudget>(
+            "UPDATE ai_guild_budgets SET used_tokens = $1, used_usd = $2, is_halted = $3, reset_at = $4 WHERE guild_id = $5 RETURNING *"
+        )
+        .bind(new_tokens)
+        .bind(new_usd)
+        .bind(is_halted)
+        .bind(budget.reset_at)
+        .bind(guild_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(updated)
+    }
+
     pub async fn create_ai_document(
         &self,
 

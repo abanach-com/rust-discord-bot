@@ -1445,6 +1445,17 @@ pub struct AiKnowledgeDocument {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct AiMeteringEvent {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub provider: String,
+    pub request_id: String,
+    pub tokens: i64,
+    pub usd: f64,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct McpToolAuthorization {
     pub id: Uuid,
 
@@ -5426,6 +5437,26 @@ impl Storage {
             Self::Memory(store) => store.record_ai_usage(guild_id, tokens, usd),
 
             Self::Postgres(store) => store.record_ai_usage(guild_id, tokens, usd).await,
+        }
+    }
+
+    pub async fn record_metering_event_once(
+        &self,
+        guild_id: &str,
+        provider: &str,
+        request_id: &str,
+        tokens: i64,
+        usd: f64,
+    ) -> anyhow::Result<AiGuildBudget> {
+        match self {
+            Self::Memory(store) => {
+                store.record_metering_event_once(guild_id, provider, request_id, tokens, usd)
+            }
+            Self::Postgres(store) => {
+                store
+                    .record_metering_event_once(guild_id, provider, request_id, tokens, usd)
+                    .await
+            }
         }
     }
 

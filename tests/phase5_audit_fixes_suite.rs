@@ -482,24 +482,10 @@ async fn test_phase5_audit_fixes_comprehensive_suite() {
     assert_eq!(free_item.price, 0);
 
     // ==========================================
-    // 9. Issue #125: AI Budget Validation & Initialization
+    // 9. Issue #125, #311: AI Budget Validation & Authoritative Metering Initialization
     // ==========================================
-    // Negative usage values rejected
-    let neg_resp = client
-        .post(format!("{base_url}/api/guilds/{guild_a}/ai/budget/record"))
-        .header(COOKIE, &session_cookie)
-        .header("X-CSRF-Token", csrf_token)
-        .json(&serde_json::json!({
-            "tokens": -10,
-            "usd": 0.5
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(neg_resp.status(), reqwest::StatusCode::BAD_REQUEST);
-
-    // Initial usage succeeds without requiring prior GET
-    let init_resp = client
+    // Public HTTP manipulation is forbidden (#311)
+    let forbidden_resp = client
         .post(format!("{base_url}/api/guilds/{guild_a}/ai/budget/record"))
         .header(COOKIE, &session_cookie)
         .header("X-CSRF-Token", csrf_token)
@@ -510,7 +496,35 @@ async fn test_phase5_audit_fixes_comprehensive_suite() {
         .send()
         .await
         .unwrap();
-    assert_eq!(init_resp.status(), reqwest::StatusCode::OK);
-    let budget_json: serde_json::Value = init_resp.json().await.unwrap();
+    assert_eq!(forbidden_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Negative usage values rejected by storage
+    assert!(
+        state
+            .app
+            .storage
+            .record_metering_event_once(guild_a, "provider_a", "req_neg", -10, 0.5)
+            .await
+            .is_err()
+    );
+
+    // Initial usage succeeds without requiring prior GET (#125, #311)
+    let init_budget = state
+        .app
+        .storage
+        .record_metering_event_once(guild_a, "provider_a", "req_p5_init", 100, 0.05)
+        .await
+        .unwrap();
+    assert_eq!(init_budget.used_tokens, 100);
+
+    // Verify GET endpoint reflects the authoritatively recorded usage
+    let budget_get = client
+        .get(format!("{base_url}/api/guilds/{guild_a}/ai/budget"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(budget_get.status(), reqwest::StatusCode::OK);
+    let budget_json: serde_json::Value = budget_get.json().await.unwrap();
     assert_eq!(budget_json["used_tokens"], 100);
 }
