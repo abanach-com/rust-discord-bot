@@ -420,13 +420,12 @@ impl PostgresStore {
         let mut related_erased = 0;
 
         let deleted_roles =
-            sqlx::query("DELETE FROM member_persistent_roles WHERE guild_id = $1 AND user_id = $2")
+            sqlx::query("DELETE FROM persistent_user_roles WHERE guild_id = $1 AND user_id = $2")
                 .bind(guild_id)
                 .bind(user_id)
                 .execute(&mut *tx)
-                .await
-                .map(|r| r.rows_affected())
-                .unwrap_or(0);
+                .await?
+                .rows_affected();
         related_erased += deleted_roles as usize;
 
         let deleted_rewards =
@@ -434,19 +433,27 @@ impl PostgresStore {
                 .bind(guild_id)
                 .bind(user_id)
                 .execute(&mut *tx)
-                .await
-                .map(|r| r.rows_affected())
-                .unwrap_or(0);
+                .await?
+                .rows_affected();
         related_erased += deleted_rewards as usize;
+
+        let deleted_rep = sqlx::query(
+            "DELETE FROM reputation_cooldowns WHERE guild_id = $1 AND (giver_user_id = $2 OR target_user_id = $2)",
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        related_erased += deleted_rep as usize;
 
         let deleted_identities =
             sqlx::query("DELETE FROM member_identity_history WHERE guild_id = $1 AND user_id = $2")
                 .bind(guild_id)
                 .bind(user_id)
                 .execute(&mut *tx)
-                .await
-                .map(|r| r.rows_affected())
-                .unwrap_or(0);
+                .await?
+                .rows_affected();
         related_erased += deleted_identities as usize;
 
         let deleted_snapshots =
@@ -454,9 +461,8 @@ impl PostgresStore {
                 .bind(guild_id)
                 .bind(user_id)
                 .execute(&mut *tx)
-                .await
-                .map(|r| r.rows_affected())
-                .unwrap_or(0);
+                .await?
+                .rows_affected();
         related_erased += deleted_snapshots as usize;
 
         let deleted_plans =
@@ -464,9 +470,8 @@ impl PostgresStore {
                 .bind(guild_id)
                 .bind(user_id)
                 .execute(&mut *tx)
-                .await
-                .map(|r| r.rows_affected())
-                .unwrap_or(0);
+                .await?
+                .rows_affected();
         related_erased += deleted_plans as usize;
 
         let deleted_leases = sqlx::query(
@@ -475,9 +480,8 @@ impl PostgresStore {
         .bind(guild_id)
         .bind(user_id)
         .execute(&mut *tx)
-        .await
-        .map(|r| r.rows_affected())
-        .unwrap_or(0);
+        .await?
+        .rows_affected();
         related_erased += deleted_leases as usize;
 
         let deleted_policy = sqlx::query(
@@ -486,9 +490,8 @@ impl PostgresStore {
         .bind(guild_id)
         .bind(user_id)
         .execute(&mut *tx)
-        .await
-        .map(|r| r.rows_affected())
-        .unwrap_or(0);
+        .await?
+        .rows_affected();
         related_erased += deleted_policy as usize;
 
         let deleted_duty =
@@ -496,9 +499,8 @@ impl PostgresStore {
                 .bind(guild_id)
                 .bind(user_id)
                 .execute(&mut *tx)
-                .await
-                .map(|r| r.rows_affected())
-                .unwrap_or(0);
+                .await?
+                .rows_affected();
         related_erased += deleted_duty as usize;
 
         let _ =
@@ -506,7 +508,7 @@ impl PostgresStore {
                 .bind(guild_id)
                 .bind(user_id)
                 .execute(&mut *tx)
-                .await;
+                .await?;
 
         let _ = sqlx::query(
             "DELETE FROM moderator_duty_role_grants WHERE guild_id = $1 AND user_id = $2",
@@ -514,7 +516,7 @@ impl PostgresStore {
         .bind(guild_id)
         .bind(user_id)
         .execute(&mut *tx)
-        .await;
+        .await?;
 
         let deleted_rec_apps = sqlx::query(
             "DELETE FROM recruitment_applications WHERE guild_id = $1 AND applicant_user_id = $2",
@@ -522,9 +524,8 @@ impl PostgresStore {
         .bind(guild_id)
         .bind(user_id)
         .execute(&mut *tx)
-        .await
-        .map(|r| r.rows_affected())
-        .unwrap_or(0);
+        .await?
+        .rows_affected();
         related_erased += deleted_rec_apps as usize;
 
         let deleted_rec_revs = sqlx::query(
@@ -533,9 +534,8 @@ impl PostgresStore {
         .bind(guild_id)
         .bind(user_id)
         .execute(&mut *tx)
-        .await
-        .map(|r| r.rows_affected())
-        .unwrap_or(0);
+        .await?
+        .rows_affected();
         related_erased += deleted_rec_revs as usize;
 
         let deleted_help_sessions = sqlx::query(
@@ -544,9 +544,8 @@ impl PostgresStore {
         .bind(guild_id)
         .bind(user_id)
         .execute(&mut *tx)
-        .await
-        .map(|r| r.rows_affected())
-        .unwrap_or(0);
+        .await?
+        .rows_affected();
         related_erased += deleted_help_sessions as usize;
 
         let deleted_economy_cooldowns =
@@ -554,9 +553,8 @@ impl PostgresStore {
                 .bind(guild_id)
                 .bind(user_id)
                 .execute(&mut *tx)
-                .await
-                .map(|r| r.rows_affected())
-                .unwrap_or(0);
+                .await?
+                .rows_affected();
         related_erased += deleted_economy_cooldowns as usize;
 
         let deleted_economy_idempotency =
@@ -564,9 +562,8 @@ impl PostgresStore {
                 .bind(guild_id)
                 .bind(user_id)
                 .execute(&mut *tx)
-                .await
-                .map(|r| r.rows_affected())
-                .unwrap_or(0);
+                .await?
+                .rows_affected();
         related_erased += deleted_economy_idempotency as usize;
 
         let deleted_economy_purchases = sqlx::query(
@@ -575,9 +572,8 @@ impl PostgresStore {
         .bind(guild_id)
         .bind(user_id)
         .execute(&mut *tx)
-        .await
-        .map(|r| r.rows_affected())
-        .unwrap_or(0);
+        .await?
+        .rows_affected();
         related_erased += deleted_economy_purchases as usize;
 
         let deleted_quotes = sqlx::query(
