@@ -3555,4 +3555,97 @@ async fn test_postgres_integration_suite() {
         mapping_after_cascade.is_none(),
         "PostgreSQL ON DELETE CASCADE must delete mappings when bridge is deleted"
     );
+
+    // 25. Scheduled Events chronological window and RSVP cutoff (#331)
+    let ev_guild = "777000000000000001";
+    let now = Utc::now();
+    let ev_start = now + chrono::Duration::days(3);
+    let ev_earlier = ev_start - chrono::Duration::hours(1);
+
+    // 25.1. PostgreSQL rejects end_time <= start_time
+    let invalid_pg_ev = store
+        .create_scheduled_event(
+            ev_guild,
+            "Invalid PG Event",
+            "end < start",
+            ev_start,
+            Some(ev_earlier),
+            "UTC",
+            None,
+        )
+        .await;
+    assert!(
+        invalid_pg_ev.is_err(),
+        "PostgreSQL must reject scheduled event with end_time <= start_time"
+    );
+
+    // 25.2. Valid event creation in PostgreSQL
+    let valid_pg_ev = store
+        .create_scheduled_event(
+            ev_guild,
+            "Valid PG Event",
+            "end > start",
+            ev_start,
+            Some(ev_start + chrono::Duration::hours(2)),
+            "UTC",
+            Some(10),
+        )
+        .await
+        .expect("create valid scheduled event in pg");
+    assert!(valid_pg_ev.end_time.unwrap() > valid_pg_ev.start_time);
+
+    // 25.3. Expired event rejects RSVP in PostgreSQL
+    let past_start = now - chrono::Duration::days(2);
+    let past_end = now - chrono::Duration::days(1);
+    let past_pg_ev = store
+        .create_scheduled_event(
+            ev_guild,
+            "Past PG Event",
+            "already ended",
+            past_start,
+            Some(past_end),
+            "UTC",
+            Some(5),
+        )
+        .await
+        .expect("create past scheduled event in pg");
+
+    let join_past_res = store.join_event_roster(past_pg_ev.id, "pg_user_late").await;
+    assert!(
+        join_past_res.is_err(),
+        "PostgreSQL join_event_roster must reject registration on expired event"
+    );
+    assert!(
+        join_past_res
+            .unwrap_err()
+            .to_string()
+            .contains("Event registration is closed"),
+        "Error message must indicate registration is closed"
+    );
+
+    // 25.4. 20 concurrent joins on expired event in PostgreSQL
+    let mut pg_join_handles = Vec::new();
+    for i in 0..20 {
+        let store_clone = store.clone();
+        let pid = past_pg_ev.id;
+        let uid = format!("pg_concurrent_user_{i}");
+        pg_join_handles.push(tokio::spawn(async move {
+            store_clone.join_event_roster(pid, &uid).await
+        }));
+    }
+    for h in pg_join_handles {
+        let res = h.await.unwrap();
+        assert!(
+            res.is_err(),
+            "All concurrent joins on expired event must fail in pg"
+        );
+    }
+    let past_roster = store
+        .get_event_rosters(past_pg_ev.id)
+        .await
+        .expect("list roster in pg");
+    assert!(
+        past_roster.is_empty(),
+        "Roster must remain empty for expired event in pg"
+    );
 }

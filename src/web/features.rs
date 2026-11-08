@@ -2098,6 +2098,15 @@ pub async fn create_event(
         return Err(ApiError::bad_request("Invalid timezone"));
     }
 
+    if payload
+        .end_time
+        .is_some_and(|end| end <= payload.start_time)
+    {
+        return Err(ApiError::bad_request(
+            "end_time must be later than start_time",
+        ));
+    }
+
     let ev = state
         .app
         .storage
@@ -2111,7 +2120,14 @@ pub async fn create_event(
             payload.max_participants,
         )
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("end_time must be later than start_time") {
+                ApiError::bad_request("end_time must be later than start_time")
+            } else {
+                ApiError::internal(msg)
+            }
+        })?;
 
     Ok(Json(ev))
 }
@@ -2175,7 +2191,7 @@ pub async fn join_event_roster(
 
     ensure_guild_member_access(&state, &session, &guild_id).await?;
 
-    let _event = state
+    let event = state
         .app
         .storage
         .get_scheduled_event(event_id)
@@ -2184,12 +2200,25 @@ pub async fn join_event_roster(
         .filter(|ev| ev.guild_id == guild_id)
         .ok_or_else(|| ApiError::not_found("Scheduled event was not found in this guild."))?;
 
+    if !event.is_registration_open(Utc::now()) {
+        return Err(ApiError::conflict("Event registration is closed"));
+    }
+
     let entry = state
         .app
         .storage
         .join_event_roster(event_id, &session.user.id)
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("Event registration is closed") {
+                ApiError::conflict("Event registration is closed")
+            } else if msg.contains("Scheduled event not found") {
+                ApiError::not_found("Scheduled event was not found in this guild.")
+            } else {
+                ApiError::internal(msg)
+            }
+        })?;
 
     Ok(Json(entry))
 }

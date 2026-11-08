@@ -919,6 +919,17 @@ pub struct ScheduledEvent {
     pub created_at: DateTime<Utc>,
 }
 
+impl ScheduledEvent {
+    pub fn registration_deadline(&self) -> DateTime<Utc> {
+        self.end_time
+            .unwrap_or(self.start_time + chrono::Duration::hours(1))
+    }
+
+    pub fn is_registration_open(&self, now: DateTime<Utc>) -> bool {
+        now < self.registration_deadline()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct EventRoster {
     pub event_id: Uuid,
@@ -4232,8 +4243,11 @@ impl Storage {
 
         max_participants: Option<i32>,
     ) -> anyhow::Result<ScheduledEvent> {
+        if let Some(end) = end_time {
+            anyhow::ensure!(end > start_time, "end_time must be later than start_time");
+        }
         match self {
-            Self::Memory(store) => Ok(store.create_scheduled_event(
+            Self::Memory(store) => store.create_scheduled_event(
                 guild_id,
                 title,
                 description,
@@ -4241,7 +4255,7 @@ impl Storage {
                 end_time,
                 timezone,
                 max_participants,
-            )),
+            ),
 
             Self::Postgres(store) => {
                 store

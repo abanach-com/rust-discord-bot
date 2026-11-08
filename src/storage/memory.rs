@@ -4000,7 +4000,11 @@ impl MemoryStore {
         timezone: &str,
 
         max_participants: Option<i32>,
-    ) -> ScheduledEvent {
+    ) -> anyhow::Result<ScheduledEvent> {
+        if let Some(end) = end_time {
+            anyhow::ensure!(end > start_time, "end_time must be later than start_time");
+        }
+
         let id = Uuid::new_v4();
 
         let ev = ScheduledEvent {
@@ -4025,7 +4029,7 @@ impl MemoryStore {
 
         self.events.insert(id, ev.clone());
 
-        ev
+        Ok(ev)
     }
 
     pub fn list_scheduled_events(&self, guild_id: &str) -> Vec<ScheduledEvent> {
@@ -4050,6 +4054,11 @@ impl MemoryStore {
             .events
             .get(&event_id)
             .ok_or_else(|| anyhow::anyhow!("Scheduled event not found"))?;
+        let now = Utc::now();
+        anyhow::ensure!(
+            event.is_registration_open(now),
+            "Event registration is closed"
+        );
         let capacity = event.max_participants;
 
         let mut roster_list = self.rosters.entry(event_id).or_default();

@@ -4936,6 +4936,10 @@ impl PostgresStore {
 
         max_participants: Option<i32>,
     ) -> anyhow::Result<ScheduledEvent> {
+        if let Some(end) = end_time {
+            anyhow::ensure!(end > start_time, "end_time must be later than start_time");
+        }
+
         let id = Uuid::new_v4();
 
         let now = Utc::now();
@@ -5046,13 +5050,17 @@ impl PostgresStore {
     ) -> anyhow::Result<EventRoster> {
         let mut tx = self.pool.begin().await?;
 
-        let capacity: Option<i32> = sqlx::query_scalar(
-            "SELECT max_participants FROM scheduled_events WHERE id = $1 FOR UPDATE",
-        )
-        .bind(event_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("Scheduled event not found"))?;
+        let (capacity, start_time, end_time): (Option<i32>, DateTime<Utc>, Option<DateTime<Utc>>) =
+            sqlx::query_as(
+                "SELECT max_participants, start_time, end_time FROM scheduled_events WHERE id = $1 FOR UPDATE",
+            )
+            .bind(event_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Scheduled event not found"))?;
+
+        let deadline = end_time.unwrap_or(start_time + chrono::Duration::hours(1));
+        anyhow::ensure!(Utc::now() < deadline, "Event registration is closed");
 
         let existing = sqlx::query_as::<_, EventRoster>(
             r#"

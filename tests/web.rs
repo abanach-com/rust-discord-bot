@@ -15066,3 +15066,345 @@ async fn test_snapshot_api_scrubbing_and_historic_record_isolation_issue_328() {
         .unwrap();
     assert_eq!(foreign_get.status(), reqwest::StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn test_scheduled_event_chronological_window_and_rsvp_cutoff_issue_331() {
+    let mut config = test_config();
+    config.offline_mode = true;
+    let app = AppState::bootstrap(config).await.expect("bootstrap");
+    let permissions_cache = Arc::new(DashMap::new());
+    let web_state = WebState {
+        app,
+        login_rate_limiter: Arc::new(LoginRateLimiter::new()),
+        permissions_cache: permissions_cache.clone(),
+    };
+    web_state
+        .app
+        .is_gateway_ready
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind web listener");
+    let web_addr = web_listener.local_addr().expect("web addr");
+    let router = build_router(web_state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            web_listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{web_addr}");
+
+    let guild_id = "555000000000000001";
+    let admin_user_id = "555000000000000002";
+    let member_user_id = "555000000000000003";
+
+    let admin_session = "admin_session_331";
+    let admin_csrf = "admin_csrf_331";
+    let member_session = "member_session_331";
+    let member_csrf = "member_csrf_331";
+
+    web_state
+        .app
+        .sessions
+        .save_session(
+            admin_session,
+            DashboardUser {
+                id: admin_user_id.to_string(),
+                username: "EventAdmin".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Events Guild".to_string(),
+                icon: None,
+                owner: false,
+                permissions: "32".to_string(), // MANAGE_GUILD
+            }],
+            admin_csrf.to_string(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    web_state
+        .app
+        .sessions
+        .save_session(
+            member_session,
+            DashboardUser {
+                id: member_user_id.to_string(),
+                username: "EventMember".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Events Guild".to_string(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_string(), // Regular member
+            }],
+            member_csrf.to_string(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let admin_cookie = format!("rusty_discord_bot_session={admin_session}");
+    let member_cookie = format!("rusty_discord_bot_session={member_session}");
+
+    // 1. Rejection of end_time < start_time with HTTP 400
+    let start = Utc::now() + Duration::days(5);
+    let before_start = start - Duration::hours(2);
+
+    let resp_earlier = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "title": "Invalid End Earlier",
+            "description": "Invalid time window",
+            "start_time": start,
+            "end_time": before_start,
+            "timezone": "UTC"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_earlier.status(), reqwest::StatusCode::BAD_REQUEST);
+    let err_earlier: serde_json::Value = resp_earlier.json().await.unwrap();
+    assert!(
+        err_earlier["error"]
+            .as_str()
+            .unwrap()
+            .contains("end_time must be later than start_time"),
+        "Must return explicit error message when end_time < start_time"
+    );
+
+    // 2. Rejection of end_time == start_time with HTTP 400
+    let resp_equal = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "title": "Invalid End Equal",
+            "description": "Zero duration",
+            "start_time": start,
+            "end_time": start,
+            "timezone": "UTC"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_equal.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Storage level rejection for end_time <= start_time
+    let mem_invalid = web_state
+        .app
+        .storage
+        .create_scheduled_event(
+            guild_id,
+            "Direct Storage Invalid",
+            "desc",
+            start,
+            Some(before_start),
+            "UTC",
+            None,
+        )
+        .await;
+    assert!(
+        mem_invalid.is_err(),
+        "Storage::create_scheduled_event must reject end_time <= start_time"
+    );
+
+    // 3. Valid creation succeeds and produces compliant iCalendar export (DTEND > DTSTART)
+    let valid_end = start + Duration::hours(3);
+    let resp_valid = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "title": "Valid Event",
+            "description": "Compliant window",
+            "start_time": start,
+            "end_time": valid_end,
+            "timezone": "UTC"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_valid.status(), reqwest::StatusCode::OK);
+    let valid_event: serde_json::Value = resp_valid.json().await.unwrap();
+    let valid_event_id: uuid::Uuid = serde_json::from_value(valid_event["id"].clone()).unwrap();
+
+    let ics_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{valid_event_id}/ics"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ics_resp.status(), reqwest::StatusCode::OK);
+    let ics_text = ics_resp.text().await.unwrap();
+    assert!(ics_text.contains("DTSTART:"));
+    assert!(ics_text.contains("DTEND:"));
+
+    // 4. RSVP Cutoff: Event that has ended rejects RSVP with HTTP 409 Conflict
+    let expired_start = Utc::now() - Duration::days(2);
+    let expired_end = Utc::now() - Duration::days(1);
+    let expired_event = web_state
+        .app
+        .storage
+        .create_scheduled_event(
+            guild_id,
+            "Past Event",
+            "Already finished",
+            expired_start,
+            Some(expired_end),
+            "UTC",
+            Some(10),
+        )
+        .await
+        .unwrap();
+
+    let join_expired_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{}/roster/join",
+            expired_event.id
+        ))
+        .header(COOKIE, &member_cookie)
+        .header("X-CSRF-Token", member_csrf)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        join_expired_resp.status(),
+        reqwest::StatusCode::CONFLICT,
+        "Expired event join must return 409 Conflict"
+    );
+    let join_err: serde_json::Value = join_expired_resp.json().await.unwrap();
+    assert_eq!(join_err["error"], "Event registration is closed");
+
+    // Zero roster entries created
+    let roster_after = web_state
+        .app
+        .storage
+        .get_event_rosters(expired_event.id)
+        .await
+        .unwrap();
+    assert!(
+        roster_after.is_empty(),
+        "No roster entries allowed after cutoff"
+    );
+
+    // 5. 20 concurrent joins on expired event: ALL fail with 409 Conflict, 0 roster rows created
+    let mut join_handles = Vec::new();
+    for i in 0..20 {
+        let client_clone = client.clone();
+        let target_url = format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{}/roster/join",
+            expired_event.id
+        );
+        let user_session = format!("concurrent_member_session_{i}");
+        let user_csrf = format!("concurrent_member_csrf_{i}");
+        let user_id = format!("concurrent_user_555_{i:02}");
+
+        web_state
+            .app
+            .sessions
+            .save_session(
+                &user_session,
+                DashboardUser {
+                    id: user_id,
+                    username: format!("Member{i}"),
+                    global_name: None,
+                    avatar: None,
+                },
+                vec![DashboardGuild {
+                    id: guild_id.to_string(),
+                    name: "Events Guild".to_string(),
+                    icon: None,
+                    owner: false,
+                    permissions: "0".to_string(),
+                }],
+                user_csrf.clone(),
+                Utc::now() + Duration::hours(2),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let cookie = format!("rusty_discord_bot_session={user_session}");
+        join_handles.push(tokio::spawn(async move {
+            client_clone
+                .post(target_url)
+                .header(COOKIE, cookie)
+                .header("X-CSRF-Token", user_csrf)
+                .json(&serde_json::json!({}))
+                .send()
+                .await
+                .unwrap()
+        }));
+    }
+
+    for h in join_handles {
+        let res = h.await.unwrap();
+        assert_eq!(res.status(), reqwest::StatusCode::CONFLICT);
+    }
+
+    let roster_after_concurrent = web_state
+        .app
+        .storage
+        .get_event_rosters(expired_event.id)
+        .await
+        .unwrap();
+    assert!(
+        roster_after_concurrent.is_empty(),
+        "All 20 concurrent joins must be rejected; 0 roster entries created"
+    );
+
+    // 6. Ongoing event allows late RSVP
+    let ongoing_start = Utc::now() - Duration::minutes(15);
+    let ongoing_end = Utc::now() + Duration::minutes(45);
+    let ongoing_event = web_state
+        .app
+        .storage
+        .create_scheduled_event(
+            guild_id,
+            "Ongoing Event",
+            "Happening right now",
+            ongoing_start,
+            Some(ongoing_end),
+            "UTC",
+            Some(10),
+        )
+        .await
+        .unwrap();
+
+    let join_ongoing_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{}/roster/join",
+            ongoing_event.id
+        ))
+        .header(COOKIE, &member_cookie)
+        .header("X-CSRF-Token", member_csrf)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        join_ongoing_resp.status(),
+        reqwest::StatusCode::OK,
+        "Ongoing event allows join prior to end_time cutoff"
+    );
+}
