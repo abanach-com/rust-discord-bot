@@ -254,6 +254,20 @@ impl MemoryStore {
             .map(|entry| entry.value().clone())
     }
 
+    pub fn get_module_settings_batch(
+        &self,
+        guild_id: &str,
+        module_ids: &[String],
+    ) -> HashMap<String, GuildModuleSettings> {
+        let mut map = HashMap::with_capacity(module_ids.len());
+        for id in module_ids {
+            if let Some(entry) = self.settings.get(&(guild_id.to_owned(), id.clone())) {
+                map.insert(id.clone(), entry.value().clone());
+            }
+        }
+        map
+    }
+
     pub fn set_module_settings(
         &self,
 

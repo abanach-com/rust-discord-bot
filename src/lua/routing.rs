@@ -61,6 +61,12 @@ pub async fn plan_event_routing(
     let module_ids = scripts.modules_for_event(event_name).await;
     let mut plans = Vec::with_capacity(module_ids.len());
 
+    let batch_settings_res = if let Some(gid) = guild_id {
+        Some(storage.get_module_settings_batch(gid, &module_ids).await)
+    } else {
+        None
+    };
+
     for module_id in module_ids {
         let manifest = scripts.manifest(&module_id).await;
 
@@ -80,47 +86,52 @@ pub async fn plan_event_routing(
         };
 
         if let Some(gid) = guild_id {
-            match storage.get_module_settings(gid, &module_id).await {
-                Ok(Some(settings)) => {
-                    let enabled = settings.enabled;
-                    plans.push(PlannedModuleExecution {
-                        module_id: module_id.clone(),
-                        decision: LuaEventRouteDecision {
-                            module_id,
-                            subscribed: true,
-                            configured_enabled: enabled,
-                            config_source: "guild_override".to_string(),
-                            decision_reason: if enabled {
-                                "enabled".to_string()
-                            } else {
-                                "guild_disabled".to_string()
+            match batch_settings_res.as_ref().unwrap() {
+                Ok(settings_map) => {
+                    if let Some(settings) = settings_map.get(&module_id) {
+                        let enabled = settings.enabled;
+                        plans.push(PlannedModuleExecution {
+                            module_id: module_id.clone(),
+                            decision: LuaEventRouteDecision {
+                                module_id,
+                                subscribed: true,
+                                configured_enabled: enabled,
+                                config_source: "guild_override".to_string(),
+                                decision_reason: if enabled {
+                                    "enabled".to_string()
+                                } else {
+                                    "guild_disabled".to_string()
+                                },
                             },
-                        },
-                        config: if enabled { Some(settings.config) } else { None },
-                    });
-                }
-                Ok(None) => {
-                    let enabled = manifest.default_enabled;
-                    let config = if enabled {
-                        Some(scripts.default_config(&module_id).await)
+                            config: if enabled {
+                                Some(settings.config.clone())
+                            } else {
+                                None
+                            },
+                        });
                     } else {
-                        None
-                    };
-                    plans.push(PlannedModuleExecution {
-                        module_id: module_id.clone(),
-                        decision: LuaEventRouteDecision {
-                            module_id,
-                            subscribed: true,
-                            configured_enabled: enabled,
-                            config_source: "manifest_default".to_string(),
-                            decision_reason: if enabled {
-                                "enabled".to_string()
-                            } else {
-                                "default_disabled".to_string()
+                        let enabled = manifest.default_enabled;
+                        let config = if enabled {
+                            Some(scripts.default_config(&module_id).await)
+                        } else {
+                            None
+                        };
+                        plans.push(PlannedModuleExecution {
+                            module_id: module_id.clone(),
+                            decision: LuaEventRouteDecision {
+                                module_id,
+                                subscribed: true,
+                                configured_enabled: enabled,
+                                config_source: "manifest_default".to_string(),
+                                decision_reason: if enabled {
+                                    "enabled".to_string()
+                                } else {
+                                    "default_disabled".to_string()
+                                },
                             },
-                        },
-                        config,
-                    });
+                            config,
+                        });
+                    }
                 }
                 Err(error) => {
                     tracing::error!(
@@ -128,7 +139,7 @@ pub async fn plan_event_routing(
                         event_name = %event_name,
                         guild_id = %gid,
                         ?error,
-                        "cannot load module settings for event routing plan"
+                        "cannot load batch module settings for event routing plan"
                     );
                     plans.push(PlannedModuleExecution {
                         module_id: module_id.clone(),

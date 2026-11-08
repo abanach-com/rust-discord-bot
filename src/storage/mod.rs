@@ -4,6 +4,8 @@ mod postgres;
 
 mod progression;
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 
 use serde::{Deserialize, Serialize};
@@ -1637,6 +1639,17 @@ impl Storage {
             Self::Memory(store) => Ok(store.get_module_settings(guild_id, module_id)),
 
             Self::Postgres(store) => store.get_module_settings(guild_id, module_id).await,
+        }
+    }
+
+    pub async fn get_module_settings_batch(
+        &self,
+        guild_id: &str,
+        module_ids: &[String],
+    ) -> anyhow::Result<HashMap<String, GuildModuleSettings>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_module_settings_batch(guild_id, module_ids)),
+            Self::Postgres(store) => store.get_module_settings_batch(guild_id, module_ids).await,
         }
     }
 
@@ -8838,5 +8851,43 @@ mod tests {
 
         let items = store.list_store_items(guild_id).await.unwrap();
         assert_eq!(items[0].stock, Some(9));
+    }
+
+    #[tokio::test]
+    async fn test_get_module_settings_batch_memory_store_issue_339() {
+        let store = Storage::memory();
+        let guild_id = "100000000000000001";
+
+        store
+            .set_module_settings(guild_id, "mod_a", true, serde_json::json!({"key": "val_a"}))
+            .await
+            .unwrap();
+        store
+            .set_module_settings(
+                guild_id,
+                "mod_b",
+                false,
+                serde_json::json!({"key": "val_b"}),
+            )
+            .await
+            .unwrap();
+
+        let req_mods = vec!["mod_a".to_owned(), "mod_b".to_owned(), "mod_c".to_owned()];
+        let batch = store
+            .get_module_settings_batch(guild_id, &req_mods)
+            .await
+            .unwrap();
+
+        assert_eq!(batch.len(), 2);
+        assert!(batch.get("mod_a").unwrap().enabled);
+        assert!(!batch.get("mod_b").unwrap().enabled);
+        assert!(!batch.contains_key("mod_c"));
+
+        // Empty request returns empty map without error
+        let empty_batch = store
+            .get_module_settings_batch(guild_id, &[])
+            .await
+            .unwrap();
+        assert!(empty_batch.is_empty());
     }
 }

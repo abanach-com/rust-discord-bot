@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Duration, Utc};
 
@@ -150,6 +150,32 @@ impl PostgresStore {
         .await?;
 
         Ok(result)
+    }
+
+    pub async fn get_module_settings_batch(
+        &self,
+        guild_id: &str,
+        module_ids: &[String],
+    ) -> anyhow::Result<HashMap<String, GuildModuleSettings>> {
+        if module_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows = sqlx::query_as::<_, GuildModuleSettings>(
+            r#"
+            SELECT guild_id, module_id, enabled, config, updated_at
+            FROM guild_module_settings
+            WHERE guild_id = $1 AND module_id = ANY($2)
+            "#,
+        )
+        .bind(guild_id)
+        .bind(module_ids)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.module_id.clone(), row))
+            .collect())
     }
 
     pub async fn ping(&self) -> anyhow::Result<()> {
