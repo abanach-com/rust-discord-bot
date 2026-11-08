@@ -750,9 +750,15 @@ pub async fn broadcast_announcement(
             "target_channels exceeds maximum limit of 50",
         ));
     }
+    let mut seen = std::collections::HashSet::with_capacity(payload.target_channels.len());
     for ch in &payload.target_channels {
         crate::storage::validate_snowflake("channel_id", ch)
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        if !seen.insert(ch.as_str()) {
+            return Err(ApiError::bad_request(
+                "target_channels must be unique; duplicate channel ID",
+            ));
+        }
     }
     if payload.title.trim().is_empty() {
         return Err(ApiError::bad_request("title cannot be empty"));
@@ -793,6 +799,15 @@ pub async fn broadcast_announcement(
     } else {
         serenity::all::Http::new(token)
     };
+
+    let access_ctx = crate::discord::scheduler::DeliveryAccessContext::fetch(&http, g_id, actor_id)
+        .await
+        .map_err(|err| {
+            ApiError::bad_request(format!(
+                "Failed to verify guild or membership context: {err}"
+            ))
+        })?;
+
     let mut successes = Vec::new();
     let mut failures = Vec::new();
 
@@ -807,8 +822,11 @@ pub async fn broadcast_announcement(
         };
         let chan_id = serenity::all::ChannelId::new(c_num);
 
-        if let Err(err) = crate::discord::scheduler::ensure_channel_delivery_access(
-            &http, g_id, actor_id, chan_id, true,
+        if let Err(err) = crate::discord::scheduler::ensure_channel_access_with_context(
+            &http,
+            &access_ctx,
+            chan_id,
+            true,
         )
         .await
         {

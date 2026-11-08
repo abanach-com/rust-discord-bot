@@ -6655,6 +6655,58 @@ async fn test_web_broadcast_destination_channel_authorization_suite() {
     assert_eq!(body_admin["success_count"], 2);
     assert_eq!(body_admin["failure_count"], 0);
 
+    // Test F: Duplicate channel IDs in target_channels [101, 101] -> 400 Bad Request (#317)
+    let baseline_before_dups = mock.modifying_requests_count.load(Ordering::SeqCst);
+    let resp_dup = http_client
+        .post(format!("{base_url}/api/guilds/100/broadcast"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "target_channels": ["101", "101"],
+            "title": "Duplicate Channels Announcement",
+            "description": "Attempting broadcast with duplicate channels"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp_dup.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body_dup: serde_json::Value = resp_dup.json().await.unwrap();
+    assert!(
+        body_dup["error"]
+            .as_str()
+            .unwrap()
+            .contains("target_channels must be unique"),
+        "Error message should mention unique target_channels: {body_dup:?}"
+    );
+    assert_eq!(
+        mock.modifying_requests_count.load(Ordering::SeqCst),
+        baseline_before_dups,
+        "No Discord POST /messages requests should be sent when duplicate channels are submitted"
+    );
+
+    // Test G: 50 identical duplicate channel IDs [101 x 50] -> 400 Bad Request (#317)
+    let fifty_dups: Vec<String> = (0..50).map(|_| "101".to_string()).collect();
+    let resp_50_dups = http_client
+        .post(format!("{base_url}/api/guilds/100/broadcast"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "target_channels": fifty_dups,
+            "title": "50 Duplicate Channels Announcement",
+            "description": "Attempting broadcast with 50 duplicate channels"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp_50_dups.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert_eq!(
+        mock.modifying_requests_count.load(Ordering::SeqCst),
+        baseline_before_dups,
+        "No Discord modifying requests should be dispatched for 50 duplicates"
+    );
+
     shard_manager.shutdown_all().await;
 }
 

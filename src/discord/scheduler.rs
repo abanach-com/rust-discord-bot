@@ -2,8 +2,8 @@ use anyhow::{Context as _, Result, anyhow};
 
 use serenity::{
     all::{
-        Channel, ChannelId, ChannelType, GuildId, PermissionOverwriteType, Permissions, RoleId,
-        UserId,
+        Channel, ChannelId, ChannelType, GuildId, Member, PartialGuild, PermissionOverwriteType,
+        Permissions, RoleId, UserId,
     },
     client::Context,
     http::Http,
@@ -419,10 +419,51 @@ pub fn calculate_effective_channel_permissions(
     perms
 }
 
-pub async fn ensure_channel_delivery_access(
+pub struct DeliveryAccessContext {
+    pub guild_id: GuildId,
+    pub actor_id: UserId,
+    pub guild: PartialGuild,
+    pub actor_member: Member,
+    pub bot_member: Member,
+    pub bot_user_id: UserId,
+}
+
+impl DeliveryAccessContext {
+    pub async fn fetch(http: &Http, guild_id: GuildId, actor_id: UserId) -> Result<Self> {
+        let guild = guild_id
+            .to_partial_guild(http)
+            .await
+            .with_context(|| format!("cannot fetch guild data for {guild_id}"))?;
+
+        let actor_member = guild_id
+            .member(http, actor_id)
+            .await
+            .with_context(|| format!("cannot fetch member {actor_id} in guild {guild_id}"))?;
+
+        let bot_user = http
+            .get_current_user()
+            .await
+            .context("cannot fetch current bot user")?;
+
+        let bot_member = guild_id
+            .member(http, bot_user.id)
+            .await
+            .with_context(|| format!("cannot fetch bot member in guild {guild_id}"))?;
+
+        Ok(Self {
+            guild_id,
+            actor_id,
+            guild,
+            actor_member,
+            bot_member,
+            bot_user_id: bot_user.id,
+        })
+    }
+}
+
+pub async fn ensure_channel_access_with_context(
     http: &Http,
-    guild_id: GuildId,
-    actor_id: UserId,
+    ctx: &DeliveryAccessContext,
     target_channel_id: ChannelId,
     require_embed: bool,
 ) -> Result<()> {
@@ -435,7 +476,7 @@ pub async fn ensure_channel_delivery_access(
         anyhow::bail!("destination channel must be a guild channel");
     };
 
-    if guild_channel.guild_id != guild_id {
+    if guild_channel.guild_id != ctx.guild_id {
         anyhow::bail!(
             "target channel {target_channel_id} belongs to a different server {}",
             guild_channel.guild_id
@@ -469,19 +510,13 @@ pub async fn ensure_channel_delivery_access(
 
     let overwrite_channel = parent_channel.as_ref().unwrap_or(&guild_channel);
 
-    let guild = guild_id
-        .to_partial_guild(http)
-        .await
-        .with_context(|| format!("cannot fetch guild data for {guild_id}"))?;
-
     // 1. Verify creator permissions in destination channel
-    let member = guild_id
-        .member(http, actor_id)
-        .await
-        .with_context(|| format!("cannot fetch member {actor_id} in guild {guild_id}"))?;
-
-    let creator_perms =
-        calculate_effective_channel_permissions(&guild, &member.roles, actor_id, overwrite_channel);
+    let creator_perms = calculate_effective_channel_permissions(
+        &ctx.guild,
+        &ctx.actor_member.roles,
+        ctx.actor_id,
+        overwrite_channel,
+    );
 
     if !creator_perms.contains(Permissions::VIEW_CHANNEL) {
         anyhow::bail!("creator lacks VIEW_CHANNEL permission in channel {target_channel_id}");
@@ -511,26 +546,16 @@ pub async fn ensure_channel_delivery_access(
             .with_context(|| {
                 format!("cannot fetch thread members for private thread {target_channel_id}")
             })?;
-        if !thread_members.iter().any(|tm| tm.user_id == actor_id) {
+        if !thread_members.iter().any(|tm| tm.user_id == ctx.actor_id) {
             anyhow::bail!("creator is not a member of the private thread {target_channel_id}");
         }
     }
 
     // 2. Verify bot permissions in destination channel
-    let bot_user = http
-        .get_current_user()
-        .await
-        .context("cannot fetch current bot user")?;
-
-    let bot_member = guild_id
-        .member(http, bot_user.id)
-        .await
-        .with_context(|| format!("cannot fetch bot member in guild {guild_id}"))?;
-
     let bot_perms = calculate_effective_channel_permissions(
-        &guild,
-        &bot_member.roles,
-        bot_user.id,
+        &ctx.guild,
+        &ctx.bot_member.roles,
+        ctx.bot_user_id,
         overwrite_channel,
     );
 
@@ -562,12 +587,26 @@ pub async fn ensure_channel_delivery_access(
             .with_context(|| {
                 format!("cannot fetch thread members for private thread {target_channel_id}")
             })?;
-        if !thread_members.iter().any(|tm| tm.user_id == bot_user.id) {
+        if !thread_members
+            .iter()
+            .any(|tm| tm.user_id == ctx.bot_user_id)
+        {
             anyhow::bail!("bot is not a member of the private thread {target_channel_id}");
         }
     }
 
     Ok(())
+}
+
+pub async fn ensure_channel_delivery_access(
+    http: &Http,
+    guild_id: GuildId,
+    actor_id: UserId,
+    target_channel_id: ChannelId,
+    require_embed: bool,
+) -> Result<()> {
+    let ctx = DeliveryAccessContext::fetch(http, guild_id, actor_id).await?;
+    ensure_channel_access_with_context(http, &ctx, target_channel_id, require_embed).await
 }
 
 pub async fn ensure_scheduled_delivery_access(
