@@ -40,6 +40,7 @@ Current controls:
 - typed action deserialization
 - maximum 25 actions per invocation
 - validation before action execution
+- bounded manifest parser (`install.xml`): 512 KiB source ceiling, max 64 DOM depth, max 4096 elements, max 64 KiB element text
 
 These controls reduce risk from accidental loops, large allocations and direct capability abuse. They do not make arbitrary third-party Lua automatically trustworthy. Module review remains required.
 

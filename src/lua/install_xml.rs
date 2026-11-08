@@ -6,6 +6,11 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub const MAX_INSTALL_XML_BYTES: usize = 512 * 1024;
+pub const MAX_XML_DEPTH: usize = 64;
+pub const MAX_XML_ELEMENTS: usize = 4096;
+pub const MAX_XML_ELEMENT_TEXT_BYTES: usize = 65_536;
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum InstallXmlError {
     #[error("XML parse error at byte {offset}: {message}")]
@@ -54,6 +59,17 @@ fn validate_relative_path(path: &Path, field: &str) -> Result<(), InstallXmlErro
 
 impl InstallManifest {
     pub fn parse(xml: &str) -> Result<Self, InstallXmlError> {
+        if xml.len() > MAX_INSTALL_XML_BYTES {
+            return Err(InstallXmlError::ParseError {
+                offset: 0,
+                message: format!(
+                    "install.xml size exceeds maximum limit of {} bytes (got {})",
+                    MAX_INSTALL_XML_BYTES,
+                    xml.len()
+                ),
+            });
+        }
+
         let root = parse_xml_to_dom(xml)?;
 
         if root.tag != "installer" && root.tag != "install" {
@@ -247,12 +263,24 @@ impl XmlElement {
 }
 
 pub fn parse_xml_to_dom(source: &str) -> Result<XmlElement, InstallXmlError> {
+    if source.len() > MAX_INSTALL_XML_BYTES {
+        return Err(InstallXmlError::ParseError {
+            offset: 0,
+            message: format!(
+                "install.xml size exceeds maximum limit of {} bytes (got {})",
+                MAX_INSTALL_XML_BYTES,
+                source.len()
+            ),
+        });
+    }
+
     let bytes = source.as_bytes();
     let len = bytes.len();
     let mut i = 0;
 
     let mut stack: Vec<XmlElement> = Vec::new();
     let mut root: Option<XmlElement> = None;
+    let mut total_elements: usize = 0;
 
     while i < len {
         let prev_main_i = i;
@@ -304,6 +332,15 @@ pub fn parse_xml_to_dom(source: &str) -> Result<XmlElement, InstallXmlError> {
                 let end_cdata = start_cdata + relative_end;
                 let cdata_text = &source[start_cdata..end_cdata];
                 if let Some(curr) = stack.last_mut() {
+                    if curr.text.len().saturating_add(cdata_text.len()) > MAX_XML_ELEMENT_TEXT_BYTES
+                    {
+                        return Err(InstallXmlError::ParseError {
+                            offset: start_cdata,
+                            message: format!(
+                                "element text content exceeds maximum limit of {MAX_XML_ELEMENT_TEXT_BYTES} bytes"
+                            ),
+                        });
+                    }
                     curr.text.push_str(cdata_text);
                 } else if !cdata_text.trim().is_empty() {
                     return Err(InstallXmlError::ParseError {
@@ -369,6 +406,23 @@ pub fn parse_xml_to_dom(source: &str) -> Result<XmlElement, InstallXmlError> {
                 return Err(InstallXmlError::ParseError {
                     offset: start_tag,
                     message: "multiple root elements".to_owned(),
+                });
+            }
+
+            total_elements = total_elements.saturating_add(1);
+            if total_elements > MAX_XML_ELEMENTS {
+                return Err(InstallXmlError::ParseError {
+                    offset: start_tag,
+                    message: format!(
+                        "XML element count exceeded maximum limit of {MAX_XML_ELEMENTS}"
+                    ),
+                });
+            }
+
+            if stack.len() >= MAX_XML_DEPTH {
+                return Err(InstallXmlError::ParseError {
+                    offset: start_tag,
+                    message: format!("XML nesting depth exceeded maximum limit of {MAX_XML_DEPTH}"),
                 });
             }
 
@@ -517,6 +571,14 @@ pub fn parse_xml_to_dom(source: &str) -> Result<XmlElement, InstallXmlError> {
             let raw_text = &source[text_start..i];
             let unescaped = unescape_xml(raw_text);
             if let Some(curr) = stack.last_mut() {
+                if curr.text.len().saturating_add(unescaped.len()) > MAX_XML_ELEMENT_TEXT_BYTES {
+                    return Err(InstallXmlError::ParseError {
+                        offset: text_start,
+                        message: format!(
+                            "element text content exceeds maximum limit of {MAX_XML_ELEMENT_TEXT_BYTES} bytes"
+                        ),
+                    });
+                }
                 curr.text.push_str(&unescaped);
             } else if !raw_text.trim().is_empty() {
                 return Err(InstallXmlError::ParseError {
@@ -780,5 +842,91 @@ mod tests {
                 "expected Ok for valid XML: {xml}, got: {res:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_enforces_dom_depth_limit_issue_336() {
+        // Depth 64 must succeed: root <installer> (1) + 63 nested <eX> tags = 64
+        let mut open_tags = String::from("<installer>");
+        let mut close_tags = String::from("</installer>");
+        for i in 1..=63 {
+            open_tags.push_str(&format!("<e{i}>"));
+            close_tags = format!("</e{i}>{close_tags}");
+        }
+        let valid_depth_xml = format!("{open_tags}{close_tags}");
+        assert!(parse_xml_to_dom(&valid_depth_xml).is_ok());
+
+        // Depth 65 must fail: root <installer> (1) + 64 nested <eX> tags = 65
+        let mut open_tags_65 = String::from("<installer>");
+        let mut close_tags_65 = String::from("</installer>");
+        for i in 1..=64 {
+            open_tags_65.push_str(&format!("<e{i}>"));
+            close_tags_65 = format!("</e{i}>{close_tags_65}");
+        }
+        let invalid_depth_xml = format!("{open_tags_65}{close_tags_65}");
+        let err = parse_xml_to_dom(&invalid_depth_xml).unwrap_err();
+        assert!(matches!(err, InstallXmlError::ParseError { .. }));
+        assert!(err.to_string().contains("nesting depth exceeded"));
+    }
+
+    #[test]
+    fn test_enforces_element_count_limit_issue_336() {
+        // 4096 elements: <installer> (1) + 4095 flat <m/> tags = 4096
+        let mut valid_xml = String::with_capacity(32_768);
+        valid_xml.push_str("<installer>");
+        for _ in 1..=4095 {
+            valid_xml.push_str("<m/>");
+        }
+        valid_xml.push_str("</installer>");
+        assert!(parse_xml_to_dom(&valid_xml).is_ok());
+
+        // 4097 elements: <installer> (1) + 4096 flat <m/> tags = 4097
+        let mut invalid_xml = String::with_capacity(32_768);
+        invalid_xml.push_str("<installer>");
+        for _ in 1..=4096 {
+            invalid_xml.push_str("<m/>");
+        }
+        invalid_xml.push_str("</installer>");
+        let err = parse_xml_to_dom(&invalid_xml).unwrap_err();
+        assert!(matches!(err, InstallXmlError::ParseError { .. }));
+        assert!(err.to_string().contains("element count exceeded"));
+    }
+
+    #[test]
+    fn test_enforces_source_size_and_text_limits_issue_336() {
+        // Oversized source (> 512 KiB)
+        let huge_xml = format!(
+            "<installer>{}</installer>",
+            " ".repeat(MAX_INSTALL_XML_BYTES + 10)
+        );
+        let err = InstallManifest::parse(&huge_xml).unwrap_err();
+        assert!(matches!(err, InstallXmlError::ParseError { .. }));
+        assert!(err.to_string().contains("size exceeds maximum limit"));
+
+        // Oversized text node (> 64 KiB)
+        let huge_text_elem = format!(
+            "<installer><bot>{}</bot></installer>",
+            "a".repeat(MAX_XML_ELEMENT_TEXT_BYTES + 10)
+        );
+        let err_text = parse_xml_to_dom(&huge_text_elem).unwrap_err();
+        assert!(matches!(err_text, InstallXmlError::ParseError { .. }));
+        assert!(
+            err_text
+                .to_string()
+                .contains("text content exceeds maximum limit")
+        );
+
+        // Oversized CDATA (> 64 KiB)
+        let huge_cdata = format!(
+            "<installer><bot><![CDATA[{}]]></bot></installer>",
+            "a".repeat(MAX_XML_ELEMENT_TEXT_BYTES + 10)
+        );
+        let err_cdata = parse_xml_to_dom(&huge_cdata).unwrap_err();
+        assert!(matches!(err_cdata, InstallXmlError::ParseError { .. }));
+        assert!(
+            err_cdata
+                .to_string()
+                .contains("text content exceeds maximum limit")
+        );
     }
 }

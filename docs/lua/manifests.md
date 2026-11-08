@@ -139,6 +139,14 @@ Avoid using empty Lua tables where distinguishing an empty JSON object from an e
 
 The XML root must be `<installer>` or `<install>`. A `<modules>` child contains package entries; without it, entries are read directly under the root. Use the complete format shown in [quickstart](quickstart.md#installer). A `<modules>` root alone is rejected. The parser is [install_xml.rs](../../src/lua/install_xml.rs).
 
+### Manifest resource limits
+
+To prevent host resource exhaustion during engine bootstrap and hot reloading, the XML parser enforces strict resource limits:
+- **Maximum file size**: 512 KiB (`MAX_INSTALL_XML_BYTES = 524,288`). Files exceeding this size are rejected before full allocation.
+- **Maximum DOM depth**: 64 levels (`MAX_XML_DEPTH = 64`). Deeper nesting is rejected with a parse error.
+- **Maximum XML elements**: 4096 elements (`MAX_XML_ELEMENTS = 4096`).
+- **Maximum text/CDATA per element**: 64 KiB (`MAX_XML_ELEMENT_TEXT_BYTES = 65,536`).
+
 | Installer field | Location and default |
 | --- | --- |
 | `version` | Root attribute, then child element; default `1.0.0` |

@@ -438,3 +438,49 @@ async fn test_legacy_loader_rejects_symlinks_and_loops_without_install_xml() {
 
     let _ = std::fs::remove_dir_all(&private_dir);
 }
+
+#[tokio::test]
+async fn test_install_xml_oversized_file_rejected_issue_336() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path();
+
+    // 1. Valid initial install.xml
+    let valid_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<installer version="1.0.0">
+    <modules>
+        <module id="mod_base" enabled="true">
+            <folder>base</folder>
+            <entry>module.lua</entry>
+        </module>
+    </modules>
+</installer>"#;
+    std::fs::write(base.join("install.xml"), valid_xml).expect("write valid install.xml");
+
+    let base_mod_dir = base.join("base");
+    std::fs::create_dir_all(&base_mod_dir).expect("create base mod dir");
+    std::fs::write(
+        base_mod_dir.join("module.lua"),
+        r#"return { manifest = { id = "mod_base", name = "Base", version = "1.0.0", description = "Base", category = "test", commands = {} } }"#,
+    )
+    .expect("write base module.lua");
+
+    let engine = LuaEngine::load(base, limits()).expect("load engine");
+    assert!(engine.manifest("mod_base").await.is_some());
+
+    // 2. Overwrite install.xml with file exceeding 512 KiB
+    let mut oversized = String::from("<installer>");
+    oversized.push_str(&" ".repeat(512 * 1024 + 10));
+    oversized.push_str("</installer>");
+    std::fs::write(base.join("install.xml"), oversized).expect("write oversized install.xml");
+
+    let reload_res = engine.reload().await;
+    assert!(
+        reload_res.is_err(),
+        "reload must fail on oversized install.xml"
+    );
+    // Verify previous registry is safely preserved
+    assert!(
+        engine.manifest("mod_base").await.is_some(),
+        "active registry must be preserved after reload failure"
+    );
+}

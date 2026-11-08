@@ -458,14 +458,40 @@ fn ensure_confined_path(base_dir: &Path, relative: &Path) -> Result<PathBuf, Lua
     }
 }
 
+fn read_install_xml_bounded(path: &Path) -> Result<String, LuaEngineError> {
+    use std::io::Read;
+    const MAX_INSTALL_XML_BYTES: u64 = 512 * 1024;
+
+    let file = fs::File::open(path).map_err(|source| LuaEngineError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+
+    let mut bytes = Vec::new();
+    file.take(MAX_INSTALL_XML_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| LuaEngineError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    if bytes.len() as u64 > MAX_INSTALL_XML_BYTES {
+        return Err(LuaEngineError::InvalidInstallXml {
+            path: path.to_path_buf(),
+            message: format!("install.xml exceeds {MAX_INSTALL_XML_BYTES} bytes limit"),
+        });
+    }
+
+    String::from_utf8(bytes).map_err(|e| LuaEngineError::InvalidInstallXml {
+        path: path.to_path_buf(),
+        message: format!("install.xml must be valid UTF-8: {e}"),
+    })
+}
+
 fn build_registry(scripts_dir: &Path, limits: LuaLimits) -> Result<Registry, LuaEngineError> {
     let install_xml_path = scripts_dir.join("install.xml");
     let installer_manifest = if install_xml_path.is_file() {
-        let content =
-            fs::read_to_string(&install_xml_path).map_err(|source| LuaEngineError::Io {
-                path: install_xml_path.clone(),
-                source,
-            })?;
+        let content = read_install_xml_bounded(&install_xml_path)?;
         let manifest =
             InstallManifest::parse(&content).map_err(|err| LuaEngineError::InvalidInstallXml {
                 path: install_xml_path.clone(),
