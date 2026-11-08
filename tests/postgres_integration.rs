@@ -7,7 +7,9 @@ use rusty_discord_bot::{
         CreateJobOutcome, JobMutation, JobMutationOutcome, NewScheduledJob, SchedulerStore,
     },
     session::{DashboardGuild, DashboardUser, PostgresSessionStore},
-    storage::{PostgresStore, UpdateModuleSettingsParams},
+    storage::{
+        PostgresStore, SocialDraftApprovalError, SocialPublicationDraft, UpdateModuleSettingsParams,
+    },
     tickets::{
         NewTicketReservation, NewTicketTranscript, PostgresTicketStore, ReserveTicketOutcome,
         STATUS_OPEN, TicketMutationOutcome, TranscriptCrypto,
@@ -3742,4 +3744,68 @@ async fn test_postgres_integration_suite() {
     assert_eq!(pg_up_century[0].user_id, b_user_feb28);
     assert_eq!(pg_up_century[1].user_id, b_user_march);
     assert_eq!(pg_up_century[2].user_id, b_user_leap);
+
+    // Social publisher two-person approval policy (#338)
+    let sp_guild_id = format!("pg_sp_guild_{}", Uuid::new_v4().simple());
+    let sp_author = "pg_operator_author";
+    let sp_approver = "pg_operator_approver";
+    let sp_draft = SocialPublicationDraft {
+        id: Uuid::new_v4(),
+        guild_id: sp_guild_id.clone(),
+        author_id: sp_author.to_string(),
+        content: "PG announcement".to_string(),
+        media_urls: serde_json::json!([]),
+        targets: serde_json::json!(["discord"]),
+        scheduled_at: None,
+        approved_by: None,
+        status: "draft".to_string(),
+        created_at: Utc::now(),
+    };
+
+    let sp_created = store
+        .create_social_draft(sp_draft)
+        .await
+        .expect("create social draft in pg");
+    assert_eq!(sp_created.status, "draft");
+    assert_eq!(sp_created.approved_by, None);
+
+    // 1. Author self-approval must be rejected
+    let sp_self_res = store
+        .approve_social_draft(&sp_guild_id, sp_created.id, sp_author)
+        .await
+        .expect("query should succeed");
+    assert_eq!(sp_self_res, Err(SocialDraftApprovalError::SelfApproval));
+
+    // 2. Cross-guild approval must return NotFound
+    let sp_cross_guild_res = store
+        .approve_social_draft("pg_other_guild_9999", sp_created.id, sp_approver)
+        .await
+        .expect("query should succeed");
+    assert_eq!(sp_cross_guild_res, Err(SocialDraftApprovalError::NotFound));
+
+    // 3. Non-existent draft ID must return NotFound
+    let sp_not_found_res = store
+        .approve_social_draft(&sp_guild_id, Uuid::new_v4(), sp_approver)
+        .await
+        .expect("query should succeed");
+    assert_eq!(sp_not_found_res, Err(SocialDraftApprovalError::NotFound));
+
+    // 4. Distinct approver must succeed
+    let sp_approved_res = store
+        .approve_social_draft(&sp_guild_id, sp_created.id, sp_approver)
+        .await
+        .expect("query should succeed")
+        .expect("approval should succeed");
+    assert_eq!(sp_approved_res.status, "approved");
+    assert_eq!(sp_approved_res.approved_by, Some(sp_approver.to_string()));
+
+    // 5. Subsequent approval attempt must return AlreadyDecided
+    let sp_reapprove_res = store
+        .approve_social_draft(&sp_guild_id, sp_created.id, "pg_operator_third")
+        .await
+        .expect("query should succeed");
+    assert_eq!(
+        sp_reapprove_res,
+        Err(SocialDraftApprovalError::AlreadyDecided)
+    );
 }

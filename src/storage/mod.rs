@@ -1482,7 +1482,7 @@ pub struct GamingHubGameStatus {
     pub last_checked_at: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct SocialPublicationDraft {
     pub id: Uuid,
 
@@ -1503,6 +1503,16 @@ pub struct SocialPublicationDraft {
     pub status: String,
 
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(thiserror::Error, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocialDraftApprovalError {
+    #[error("draft not found")]
+    NotFound,
+    #[error("authors cannot approve their own publication drafts under two-person approval policy")]
+    SelfApproval,
+    #[error("draft has already been approved or is not in pending draft status")]
+    AlreadyDecided,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -5564,7 +5574,7 @@ impl Storage {
         id: Uuid,
 
         approver_id: &str,
-    ) -> anyhow::Result<Option<SocialPublicationDraft>> {
+    ) -> anyhow::Result<Result<SocialPublicationDraft, SocialDraftApprovalError>> {
         match self {
             Self::Memory(store) => Ok(store.approve_social_draft(guild_id, id, approver_id)),
 
@@ -8889,5 +8899,67 @@ mod tests {
             .await
             .unwrap();
         assert!(empty_batch.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_approve_social_draft_two_person_policy_issue_338() {
+        let store = Storage::memory();
+        let guild_id = "100000000000000001";
+        let author_id = "operator_author";
+        let approver_id = "operator_approver";
+
+        let draft = SocialPublicationDraft {
+            id: Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            author_id: author_id.to_string(),
+            content: "Policy announcement".to_string(),
+            media_urls: serde_json::json!([]),
+            targets: serde_json::json!(["discord"]),
+            scheduled_at: None,
+            approved_by: None,
+            status: "draft".to_string(),
+            created_at: Utc::now(),
+        };
+
+        let created = store.create_social_draft(draft).await.unwrap();
+        assert_eq!(created.status, "draft");
+        assert_eq!(created.approved_by, None);
+
+        // 1. Author self-approval must be rejected
+        let self_res = store
+            .approve_social_draft(guild_id, created.id, author_id)
+            .await
+            .unwrap();
+        assert_eq!(self_res, Err(SocialDraftApprovalError::SelfApproval));
+
+        // 2. Cross-guild approval must return NotFound
+        let cross_guild_res = store
+            .approve_social_draft("999999999999999999", created.id, approver_id)
+            .await
+            .unwrap();
+        assert_eq!(cross_guild_res, Err(SocialDraftApprovalError::NotFound));
+
+        // 3. Non-existent draft ID must return NotFound
+        let not_found_res = store
+            .approve_social_draft(guild_id, Uuid::new_v4(), approver_id)
+            .await
+            .unwrap();
+        assert_eq!(not_found_res, Err(SocialDraftApprovalError::NotFound));
+
+        // 4. Distinct approver must succeed
+        let approved_res = store
+            .approve_social_draft(guild_id, created.id, approver_id)
+            .await
+            .unwrap()
+            .expect("approval should succeed");
+        assert_eq!(approved_res.status, "approved");
+        assert_eq!(approved_res.approved_by, Some(approver_id.to_string()));
+
+        // 5. Subsequent approval attempt must return AlreadyDecided
+        let reapprove_res = store
+            .approve_social_draft(guild_id, created.id, "operator_other")
+            .await
+            .unwrap();
+        assert_eq!(reapprove_res, Err(SocialDraftApprovalError::AlreadyDecided));
     }
 }

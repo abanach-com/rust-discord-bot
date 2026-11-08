@@ -25,9 +25,9 @@ use super::{
     RecordCompanionLeaseParams, RecruitmentApplication, RecruitmentReview,
     RecruitmentRoleFulfillment, RecruitmentTrack, RedditSubscription,
     ReleaseReactionRoleGrantOutcome, ReputationGrantOutcome, ScheduledEvent, ServerSnapshot,
-    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
-    TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament,
-    TransitionApplicationParams, TupperError, TupperProfile, TwitchStreamSubscription,
+    SocialDraftApprovalError, SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage,
+    StoreItem, StorePurchase, TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant,
+    Tournament, TransitionApplicationParams, TupperError, TupperProfile, TwitchStreamSubscription,
     UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WORK_JOBS, WorkClaimOutcome,
     WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
     parse_member_search_cursor, snowflake_created_at, validate_birthday_date, validate_snowflake,
@@ -8007,24 +8007,48 @@ impl PostgresStore {
         id: Uuid,
 
         approver_id: &str,
-    ) -> anyhow::Result<Option<SocialPublicationDraft>> {
-        let row = sqlx::query_as::<_, SocialPublicationDraft>(
-
-            "UPDATE social_publication_drafts SET approved_by = $1, status = 'approved' WHERE id = $2 AND guild_id = $3 RETURNING *"
-
+    ) -> anyhow::Result<Result<SocialPublicationDraft, SocialDraftApprovalError>> {
+        let updated = sqlx::query_as::<_, SocialPublicationDraft>(
+            "UPDATE social_publication_drafts \
+             SET approved_by = $1, status = 'approved' \
+             WHERE id = $2 AND guild_id = $3 \
+               AND author_id <> $1 AND status = 'draft' AND approved_by IS NULL \
+             RETURNING *",
         )
-
         .bind(approver_id)
-
         .bind(id)
-
         .bind(guild_id)
-
         .fetch_optional(&self.pool)
-
         .await?;
 
-        Ok(row)
+        if let Some(draft) = updated {
+            return Ok(Ok(draft));
+        }
+
+        #[derive(sqlx::FromRow)]
+        struct DraftCheck {
+            author_id: String,
+            #[allow(dead_code)]
+            status: String,
+            #[allow(dead_code)]
+            approved_by: Option<String>,
+        }
+
+        let existing = sqlx::query_as::<_, DraftCheck>(
+            "SELECT author_id, status, approved_by FROM social_publication_drafts WHERE id = $1 AND guild_id = $2",
+        )
+        .bind(id)
+        .bind(guild_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match existing {
+            None => Ok(Err(SocialDraftApprovalError::NotFound)),
+            Some(row) if row.author_id == approver_id => {
+                Ok(Err(SocialDraftApprovalError::SelfApproval))
+            }
+            Some(_) => Ok(Err(SocialDraftApprovalError::AlreadyDecided)),
+        }
     }
 
     // Agent 17 & 18 (#106): AI + MCP

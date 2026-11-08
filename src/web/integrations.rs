@@ -18,8 +18,8 @@ use crate::integrations::{
 use crate::storage::{
     AiGuildBudget, AiKnowledgeDocument, GamingHubGameStatus, GitHubDevopsMapping,
     IntegrationConnection, IntegrationDeliveryLog, LinkedAccount, PluginGuildInstallation,
-    PluginMarketplacePackage, SocialPublicationDraft, SteamLfgPost, TelegramBridge,
-    WorkflowDefinition,
+    PluginMarketplacePackage, SocialDraftApprovalError, SocialPublicationDraft, SteamLfgPost,
+    TelegramBridge, WorkflowDefinition,
 };
 
 use super::{
@@ -907,6 +907,21 @@ pub async fn create_social_draft(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
+    let _ = state
+        .app
+        .storage
+        .record_audit(
+            Some(&saved.guild_id),
+            Some(&saved.author_id),
+            "social_publisher",
+            "draft_created",
+            json!({
+                "draft_id": saved.id,
+                "author_id": saved.author_id,
+            }),
+        )
+        .await;
+
     Ok(Json(saved))
 }
 
@@ -919,13 +934,44 @@ pub async fn approve_social_draft(
     verify_csrf(&headers, &session)?;
     ensure_guild_access(&state, &session, &guild_id).await?;
 
-    let approved = state
+    let approved = match state
         .app
         .storage
         .approve_social_draft(&guild_id, draft_id, &session.user.id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
-        .ok_or_else(|| ApiError::not_found("Draft not found"))?;
+    {
+        Ok(draft) => draft,
+        Err(SocialDraftApprovalError::NotFound) => {
+            return Err(ApiError::not_found("Draft not found"));
+        }
+        Err(SocialDraftApprovalError::SelfApproval) => {
+            return Err(ApiError::forbidden(
+                "Authors cannot approve their own publication drafts under two-person approval policy",
+            ));
+        }
+        Err(SocialDraftApprovalError::AlreadyDecided) => {
+            return Err(ApiError::conflict(
+                "Draft has already been approved or is not in pending draft status",
+            ));
+        }
+    };
+
+    let _ = state
+        .app
+        .storage
+        .record_audit(
+            Some(&guild_id),
+            Some(&session.user.id),
+            "social_publisher",
+            "draft_approved",
+            json!({
+                "draft_id": draft_id,
+                "author_id": approved.author_id,
+                "approver_id": session.user.id,
+            }),
+        )
+        .await;
 
     Ok(Json(approved))
 }

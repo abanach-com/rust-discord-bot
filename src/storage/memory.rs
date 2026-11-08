@@ -24,11 +24,11 @@ use super::{
     ModeratorDutyState, ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage,
     ProgressMetric, ProgressionSeason, QuoteRecord, ReactionRoleBinding, ReactionRoleGrant,
     RecordCompanionLeaseParams, RedditSubscription, ReleaseReactionRoleGrantOutcome,
-    ReputationGrantOutcome, ScheduledEvent, ServerSnapshot, SocialPublicationDraft, StarboardEntry,
-    SteamLfgPost, StickyMessage, StoreItem, StorePurchase, TagRecord, TelegramBridge,
-    TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError, TupperProfile,
-    TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport, VkSubscription,
-    WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
+    ReputationGrantOutcome, ScheduledEvent, ServerSnapshot, SocialDraftApprovalError,
+    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
+    TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError,
+    TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
+    VkSubscription, WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
     YouTubeChannelSubscription, is_member_after_cursor, level_for_xp, next_birthday_date,
     parse_member_search_cursor, snowflake_created_at, validate_birthday_date, validate_snowflake,
 };
@@ -5575,20 +5575,28 @@ impl MemoryStore {
         id: Uuid,
 
         approver_id: &str,
-    ) -> Option<SocialPublicationDraft> {
-        if let Some(mut draft) = self.social_drafts.get_mut(&id) {
-            if draft.guild_id != guild_id {
-                return None;
-            }
+    ) -> Result<SocialPublicationDraft, SocialDraftApprovalError> {
+        let mut draft = self
+            .social_drafts
+            .get_mut(&id)
+            .ok_or(SocialDraftApprovalError::NotFound)?;
 
-            draft.approved_by = Some(approver_id.to_string());
-
-            draft.status = "approved".to_string();
-
-            Some(draft.clone())
-        } else {
-            None
+        if draft.guild_id != guild_id {
+            return Err(SocialDraftApprovalError::NotFound);
         }
+
+        if draft.author_id == approver_id {
+            return Err(SocialDraftApprovalError::SelfApproval);
+        }
+
+        if draft.status != "draft" || draft.approved_by.is_some() {
+            return Err(SocialDraftApprovalError::AlreadyDecided);
+        }
+
+        draft.approved_by = Some(approver_id.to_string());
+        draft.status = "approved".to_string();
+
+        Ok(draft.clone())
     }
 
     // Agent 17 & 18 (#106): AI + MCP

@@ -119,13 +119,37 @@ async fn test_phase4_integrations_and_extensibility_suite() {
         .save_session(
             session_id,
             user,
-            guilds,
+            guilds.clone(),
             csrf_token.to_owned(),
             Utc::now() + Duration::hours(2),
             None,
         )
         .await
         .expect("save session");
+
+    // Seed second authorized operator for two-person approval workflows (#338)
+    let approver_user_id = "user_phase4_approver";
+    let approver_session_id = "test_phase4_approver_session_token";
+    let approver_csrf_token = "csrf_phase4_approver_token";
+    let approver_user = DashboardUser {
+        id: approver_user_id.to_owned(),
+        username: "Phase4Approver".to_owned(),
+        global_name: None,
+        avatar: None,
+    };
+    state
+        .app
+        .sessions
+        .save_session(
+            approver_session_id,
+            approver_user,
+            guilds,
+            approver_csrf_token.to_owned(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .expect("save approver session");
 
     // Start ephemeral server
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -533,7 +557,7 @@ async fn test_phase4_integrations_and_extensibility_suite() {
     }
 
     // ==========================================
-    // 9. Agent 16 (#105): Social Publisher Approvals
+    // 9. Agent 16 (#105, #338): Social Publisher Approvals & Two-Person Policy
     // ==========================================
     let draft_resp = client
         .post(format!("{base_url}/api/guilds/{guild_id}/social/drafts"))
@@ -551,7 +575,8 @@ async fn test_phase4_integrations_and_extensibility_suite() {
     assert_eq!(draft_data["status"], "draft");
     let draft_id = draft_data["id"].as_str().unwrap();
 
-    let approve_resp = client
+    // 1) Self-approval must be rejected with 403 Forbidden under two-person approval policy (#338)
+    let self_approve_resp = client
         .post(format!(
             "{base_url}/api/guilds/{guild_id}/social/drafts/{draft_id}/approve"
         ))
@@ -560,9 +585,43 @@ async fn test_phase4_integrations_and_extensibility_suite() {
         .send()
         .await
         .unwrap();
+    assert_eq!(
+        self_approve_resp.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "Author must not be allowed to self-approve draft"
+    );
+
+    // 2) Approval by a second authorized guild operator must succeed (#338)
+    let approver_cookie = format!("rusty_discord_bot_session={approver_session_id}");
+    let approve_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts/{draft_id}/approve"
+        ))
+        .header(COOKIE, &approver_cookie)
+        .header("X-CSRF-Token", approver_csrf_token)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(approve_resp.status(), reqwest::StatusCode::OK);
     let approved_data: serde_json::Value = approve_resp.json().await.unwrap();
     assert_eq!(approved_data["status"], "approved");
+    assert_eq!(approved_data["approved_by"], approver_user_id);
+
+    // 3) Re-approval attempt must be rejected with 409 Conflict (#338)
+    let re_approve_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts/{draft_id}/approve"
+        ))
+        .header(COOKIE, &approver_cookie)
+        .header("X-CSRF-Token", approver_csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        re_approve_resp.status(),
+        reqwest::StatusCode::CONFLICT,
+        "Subsequent approval on already approved draft must return 409 Conflict"
+    );
 
     // ==========================================
     // 10. Agent 17 & 18 (#106, #311): AI Budget & Channel ACL RAG
