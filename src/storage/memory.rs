@@ -29,8 +29,8 @@ use super::{
     TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError, TupperProfile,
     TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport, VkSubscription,
     WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
-    YouTubeChannelSubscription, is_member_after_cursor, level_for_xp, parse_member_search_cursor,
-    snowflake_created_at, validate_birthday_date, validate_snowflake,
+    YouTubeChannelSubscription, is_member_after_cursor, level_for_xp, next_birthday_date,
+    parse_member_search_cursor, snowflake_created_at, validate_birthday_date, validate_snowflake,
 };
 
 type ModuleKey = (String, String);
@@ -2435,12 +2435,17 @@ impl MemoryStore {
         guild_id: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<BirthdayRecord>> {
+        self.list_upcoming_birthdays_at(guild_id, limit, Utc::now().date_naive())
+    }
+
+    pub fn list_upcoming_birthdays_at(
+        &self,
+        guild_id: &str,
+        limit: usize,
+        today: chrono::NaiveDate,
+    ) -> anyhow::Result<Vec<BirthdayRecord>> {
         validate_snowflake("guild_id", guild_id)?;
         let limit = limit.clamp(1, 100);
-        let now = Utc::now();
-        use chrono::Datelike;
-        let cur_month = now.month() as i16;
-        let cur_day = now.day() as i16;
 
         let mut matches: Vec<BirthdayRecord> = self
             .birthdays
@@ -2450,25 +2455,9 @@ impl MemoryStore {
             .collect();
 
         matches.sort_by(|a, b| {
-            let key_a = (
-                if a.month > cur_month || (a.month == cur_month && a.day >= cur_day) {
-                    0
-                } else {
-                    1
-                },
-                a.month,
-                a.day,
-            );
-            let key_b = (
-                if b.month > cur_month || (b.month == cur_month && b.day >= cur_day) {
-                    0
-                } else {
-                    1
-                },
-                b.month,
-                b.day,
-            );
-            key_a.cmp(&key_b).then_with(|| a.user_id.cmp(&b.user_id))
+            let next_a = next_birthday_date(a.month, a.day, today);
+            let next_b = next_birthday_date(b.month, b.day, today);
+            next_a.cmp(&next_b).then_with(|| a.user_id.cmp(&b.user_id))
         });
         matches.truncate(limit);
         Ok(matches)

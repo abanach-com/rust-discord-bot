@@ -3648,4 +3648,98 @@ async fn test_postgres_integration_suite() {
         past_roster.is_empty(),
         "Roster must remain empty for expired event in pg"
     );
+
+    // 26. Birthday leap year chronology and upcoming order in PostgreSQL (#333)
+    let bday_pg_guild = "666000000000000099";
+    let b_user_leap = "777000000000000010";
+    let b_user_march = "777000000000000020";
+    let b_user_feb28 = "777000000000000030";
+
+    store
+        .set_birthday(rusty_discord_bot::storage::BirthdayRecord {
+            guild_id: bday_pg_guild.to_string(),
+            user_id: b_user_leap.to_string(),
+            month: 2,
+            day: 29,
+            updated_at: Utc::now(),
+        })
+        .await
+        .expect("set leap bday in pg");
+
+    store
+        .set_birthday(rusty_discord_bot::storage::BirthdayRecord {
+            guild_id: bday_pg_guild.to_string(),
+            user_id: b_user_march.to_string(),
+            month: 3,
+            day: 1,
+            updated_at: Utc::now(),
+        })
+        .await
+        .expect("set march bday in pg");
+
+    store
+        .set_birthday(rusty_discord_bot::storage::BirthdayRecord {
+            guild_id: bday_pg_guild.to_string(),
+            user_id: b_user_feb28.to_string(),
+            month: 2,
+            day: 28,
+            updated_at: Utc::now(),
+        })
+        .await
+        .expect("set feb28 bday in pg");
+
+    // In a non-leap year (e.g. 2026-11-08):
+    // Next 28.02 is 2027-02-28
+    // Next 01.03 is 2027-03-01
+    // Next 29.02 is 2028-02-29
+    // Ordering MUST be: 28.02, then 01.03, then 29.02.
+    let pg_frozen_2026 = chrono::NaiveDate::from_ymd_opt(2026, 11, 8).unwrap();
+    let pg_up_2026 = store
+        .list_upcoming_birthdays_at(bday_pg_guild, 3, pg_frozen_2026)
+        .await
+        .expect("list upcoming in pg at 2026");
+    assert_eq!(pg_up_2026.len(), 3);
+    assert_eq!(pg_up_2026[0].user_id, b_user_feb28);
+    assert_eq!(pg_up_2026[1].user_id, b_user_march);
+    assert_eq!(pg_up_2026[2].user_id, b_user_leap);
+
+    // Limit=1 must return only the earliest
+    let pg_up_limit1 = store
+        .list_upcoming_birthdays_at(bday_pg_guild, 1, pg_frozen_2026)
+        .await
+        .expect("list upcoming limit 1 in pg");
+    assert_eq!(pg_up_limit1.len(), 1);
+    assert_eq!(pg_up_limit1[0].user_id, b_user_feb28);
+
+    // In leap year before leap day: 2028-02-28
+    // Ordering MUST be: 28.02, then 29.02, then 01.03.
+    let pg_frozen_2028_feb = chrono::NaiveDate::from_ymd_opt(2028, 2, 28).unwrap();
+    let pg_up_2028 = store
+        .list_upcoming_birthdays_at(bday_pg_guild, 3, pg_frozen_2028_feb)
+        .await
+        .expect("list upcoming in pg at 2028 feb");
+    assert_eq!(pg_up_2028[0].user_id, b_user_feb28);
+    assert_eq!(pg_up_2028[1].user_id, b_user_leap);
+    assert_eq!(pg_up_2028[2].user_id, b_user_march);
+
+    // After leap day: 2028-03-01
+    // Ordering MUST be: 01.03, then 28.02, then 29.02.
+    let pg_frozen_2028_mar = chrono::NaiveDate::from_ymd_opt(2028, 3, 1).unwrap();
+    let pg_up_2028_mar = store
+        .list_upcoming_birthdays_at(bday_pg_guild, 3, pg_frozen_2028_mar)
+        .await
+        .expect("list upcoming in pg at 2028 mar");
+    assert_eq!(pg_up_2028_mar[0].user_id, b_user_march);
+    assert_eq!(pg_up_2028_mar[1].user_id, b_user_feb28);
+    assert_eq!(pg_up_2028_mar[2].user_id, b_user_leap);
+
+    // Century boundary check: 2097-01-01
+    let pg_frozen_2097 = chrono::NaiveDate::from_ymd_opt(2097, 1, 1).unwrap();
+    let pg_up_century = store
+        .list_upcoming_birthdays_at(bday_pg_guild, 3, pg_frozen_2097)
+        .await
+        .expect("list upcoming in pg at 2097");
+    assert_eq!(pg_up_century[0].user_id, b_user_feb28);
+    assert_eq!(pg_up_century[1].user_id, b_user_march);
+    assert_eq!(pg_up_century[2].user_id, b_user_leap);
 }

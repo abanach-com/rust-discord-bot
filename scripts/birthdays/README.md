@@ -15,7 +15,7 @@ Silnik: **rusty-discord-bot (Rust + Lua 5.4)**
 ## 📂 Komendy slash
 - `/birthday set day:<1-31> month:<1-12>` — Zapisuje lub aktualizuje Twoją datę urodzin (walidacja poprawności dni w miesiącu z obsługą 29 lutego).
 - `/birthday check [user:@user]` — Wyświetla datę urodzin Twoją lub wskazanego użytkownika.
-- `/birthday upcoming [limit:1-50]` — Wyświetla listę najbliższych urodzin na serwerze z uwzględnieniem kolejności od bieżącego dnia.
+- `/birthday upcoming [limit:1-50]` — Wyświetla listę najbliższych urodzin na serwerze z uwzględnieniem kolejności od bieżącego dnia. Dla urodzin z 29 lutego uwzględniany jest najbliższy rzeczywisty rok przestępny (w latach nieprzestępnych urodziny z 1 marca wypadają wcześniej niż z 29 lutego).
 - `/birthday delete` — Usuwa Twoją datę urodzin z bazy serwera.
 
 ---

@@ -5196,6 +5196,114 @@ async fn test_birthdays_storage_and_execution_lifecycle_suite() {
     assert!(audits.iter().any(|a| a.event == "birthday_set"));
     assert!(audits.iter().any(|a| a.event == "birthday_delete"));
 
+    // 8. Issue #333: Leap year upcoming chronology (29.02 vs 01.03 in non-leap year)
+    let leap_guild = "777000000000000099";
+    let user_leap = "888000000000000001";
+    let user_march = "888000000000000002";
+    let user_feb28 = "888000000000000003";
+
+    state
+        .storage
+        .set_birthday(rusty_discord_bot::storage::BirthdayRecord {
+            guild_id: leap_guild.to_string(),
+            user_id: user_leap.to_string(),
+            month: 2,
+            day: 29,
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    state
+        .storage
+        .set_birthday(rusty_discord_bot::storage::BirthdayRecord {
+            guild_id: leap_guild.to_string(),
+            user_id: user_march.to_string(),
+            month: 3,
+            day: 1,
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    state
+        .storage
+        .set_birthday(rusty_discord_bot::storage::BirthdayRecord {
+            guild_id: leap_guild.to_string(),
+            user_id: user_feb28.to_string(),
+            month: 2,
+            day: 28,
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    // In a non-leap year (e.g. 2026-11-08):
+    // Next 28.02 is 2027-02-28
+    // Next 01.03 is 2027-03-01
+    // Next 29.02 is 2028-02-29
+    // Ordering MUST be: 28.02, then 01.03, then 29.02.
+    let frozen_2026 = chrono::NaiveDate::from_ymd_opt(2026, 11, 8).unwrap();
+    let up_at_2026 = state
+        .storage
+        .list_upcoming_birthdays_at(leap_guild, 3, frozen_2026)
+        .await
+        .unwrap();
+    assert_eq!(up_at_2026.len(), 3);
+    assert_eq!(up_at_2026[0].user_id, user_feb28);
+    assert_eq!(up_at_2026[1].user_id, user_march);
+    assert_eq!(up_at_2026[2].user_id, user_leap);
+
+    // Limit=1 must return user_feb28, limit=2 must return user_feb28 and user_march
+    let up_limit1 = state
+        .storage
+        .list_upcoming_birthdays_at(leap_guild, 1, frozen_2026)
+        .await
+        .unwrap();
+    assert_eq!(up_limit1.len(), 1);
+    assert_eq!(up_limit1[0].user_id, user_feb28);
+
+    // On 2028-02-28 (a leap year):
+    // Next 28.02 is 2028-02-28
+    // Next 29.02 is 2028-02-29
+    // Next 01.03 is 2028-03-01
+    // Ordering MUST be: 28.02, then 29.02, then 01.03.
+    let frozen_2028_feb28 = chrono::NaiveDate::from_ymd_opt(2028, 2, 28).unwrap();
+    let up_at_2028 = state
+        .storage
+        .list_upcoming_birthdays_at(leap_guild, 3, frozen_2028_feb28)
+        .await
+        .unwrap();
+    assert_eq!(up_at_2028[0].user_id, user_feb28);
+    assert_eq!(up_at_2028[1].user_id, user_leap);
+    assert_eq!(up_at_2028[2].user_id, user_march);
+
+    // On 2028-03-01 (after leap day passed):
+    // Next 01.03 is 2028-03-01
+    // Next 28.02 is 2029-02-28
+    // Next 29.02 is 2032-02-29
+    // Ordering MUST be: 01.03, then 28.02, then 29.02.
+    let frozen_2028_mar01 = chrono::NaiveDate::from_ymd_opt(2028, 3, 1).unwrap();
+    let up_after_leap = state
+        .storage
+        .list_upcoming_birthdays_at(leap_guild, 3, frozen_2028_mar01)
+        .await
+        .unwrap();
+    assert_eq!(up_after_leap[0].user_id, user_march);
+    assert_eq!(up_after_leap[1].user_id, user_feb28);
+    assert_eq!(up_after_leap[2].user_id, user_leap);
+
+    // Century boundary check: 2097-01-01 -> 2100 is NOT a leap year, next is 2104-02-29
+    let frozen_2097 = chrono::NaiveDate::from_ymd_opt(2097, 1, 1).unwrap();
+    let up_century = state
+        .storage
+        .list_upcoming_birthdays_at(leap_guild, 3, frozen_2097)
+        .await
+        .unwrap();
+    assert_eq!(up_century[0].user_id, user_feb28);
+    assert_eq!(up_century[1].user_id, user_march);
+    assert_eq!(up_century[2].user_id, user_leap);
+
     shard_manager.shutdown_all().await;
 }
 

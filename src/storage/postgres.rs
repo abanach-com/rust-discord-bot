@@ -3385,32 +3385,58 @@ impl PostgresStore {
         guild_id: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<BirthdayRecord>> {
+        self.list_upcoming_birthdays_at(guild_id, limit, Utc::now().date_naive())
+            .await
+    }
+
+    pub async fn list_upcoming_birthdays_at(
+        &self,
+        guild_id: &str,
+        limit: usize,
+        today: chrono::NaiveDate,
+    ) -> anyhow::Result<Vec<BirthdayRecord>> {
         validate_snowflake("guild_id", guild_id)?;
         let limit_i64 = limit.clamp(1, 100) as i64;
-        let now = Utc::now();
         use chrono::Datelike;
-        let cur_month = now.month() as i16;
-        let cur_day = now.day() as i16;
+        let today_year = today.year();
 
         let rows = sqlx::query_as::<_, BirthdayRecord>(
             r#"
-            SELECT guild_id, user_id, month, day, updated_at
-            FROM guild_birthdays
-            WHERE guild_id = $1
+            SELECT b.guild_id, b.user_id, b.month, b.day, b.updated_at
+            FROM guild_birthdays b
+            CROSS JOIN LATERAL (
+                SELECT MIN(
+                    CASE
+                        WHEN b.month = 2 AND b.day = 29 THEN
+                            CASE
+                                WHEN (y % 4 = 0 AND (y % 100 <> 0 OR y % 400 = 0)) THEN MAKE_DATE(y, 2, 29)
+                                ELSE NULL
+                            END
+                        ELSE MAKE_DATE(y, b.month::integer, b.day::integer)
+                    END
+                ) AS next_date
+                FROM generate_series($2::integer, $2::integer + 8) AS s(y)
+                WHERE (
+                    CASE
+                        WHEN b.month = 2 AND b.day = 29 THEN
+                            CASE
+                                WHEN (y % 4 = 0 AND (y % 100 <> 0 OR y % 400 = 0)) THEN MAKE_DATE(y, 2, 29)
+                                ELSE NULL
+                            END
+                        ELSE MAKE_DATE(y, b.month::integer, b.day::integer)
+                    END
+                ) >= $3
+            ) occ
+            WHERE b.guild_id = $1
             ORDER BY
-                CASE
-                    WHEN (month > $2 OR (month = $2 AND day >= $3)) THEN 0
-                    ELSE 1
-                END,
-                month ASC,
-                day ASC,
-                user_id ASC
+                occ.next_date ASC,
+                b.user_id ASC
             LIMIT $4
             "#,
         )
         .bind(guild_id)
-        .bind(cur_month)
-        .bind(cur_day)
+        .bind(today_year)
+        .bind(today)
         .bind(limit_i64)
         .fetch_all(&self.pool)
         .await?;

@@ -4,7 +4,7 @@ mod postgres;
 
 mod progression;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 
 use serde::{Deserialize, Serialize};
 
@@ -487,6 +487,26 @@ pub fn validate_birthday_date(month: i16, day: i16) -> anyhow::Result<()> {
         anyhow::bail!("Nieprawidłowy dzień dla wybranego miesiąca (max {max_days})");
     }
     Ok(())
+}
+
+/// Computes the exact next occurrence date of a birthday on or after `today`.
+///
+/// For Feb 29 birthdays, this calculates the next actual leap day (Feb 29) on or after `today`,
+/// searching up to 8 years ahead (which handles the century non-leap gap, e.g. year 2100).
+#[must_use]
+pub fn next_birthday_date(month: i16, day: i16, today: NaiveDate) -> Option<NaiveDate> {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let current_year = today.year();
+    (current_year..=current_year + 8).find_map(|year| {
+        let candidate = NaiveDate::from_ymd_opt(year, month as u32, day as u32)?;
+        if candidate >= today {
+            Some(candidate)
+        } else {
+            None
+        }
+    })
 }
 
 pub fn snowflake_created_at(id: u64) -> DateTime<Utc> {
@@ -2991,6 +3011,22 @@ impl Storage {
         match self {
             Self::Memory(store) => store.list_upcoming_birthdays(guild_id, limit),
             Self::Postgres(store) => store.list_upcoming_birthdays(guild_id, limit).await,
+        }
+    }
+
+    pub async fn list_upcoming_birthdays_at(
+        &self,
+        guild_id: &str,
+        limit: usize,
+        today: NaiveDate,
+    ) -> anyhow::Result<Vec<BirthdayRecord>> {
+        match self {
+            Self::Memory(store) => store.list_upcoming_birthdays_at(guild_id, limit, today),
+            Self::Postgres(store) => {
+                store
+                    .list_upcoming_birthdays_at(guild_id, limit, today)
+                    .await
+            }
         }
     }
 
