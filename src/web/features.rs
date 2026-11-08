@@ -709,7 +709,27 @@ pub async fn broadcast_announcement(
         ));
     }
 
-    let http = serenity::all::Http::new(&state.app.config.discord_token);
+    let actor_num = session
+        .user
+        .id
+        .parse::<u64>()
+        .map_err(|_| ApiError::forbidden("Invalid actor user ID"))?;
+    let actor_id = serenity::all::UserId::new(actor_num);
+
+    let guild_num = guild_id
+        .parse::<u64>()
+        .map_err(|_| ApiError::bad_request("Invalid guild ID"))?;
+    let g_id = serenity::all::GuildId::new(guild_num);
+
+    let token = &state.app.config.discord_token;
+    let http = if state.app.config.discord_api_base_url.starts_with("http://") {
+        serenity::http::HttpBuilder::new(token)
+            .proxy(&state.app.config.discord_api_base_url)
+            .ratelimiter_disabled(true)
+            .build()
+    } else {
+        serenity::all::Http::new(token)
+    };
     let mut successes = Vec::new();
     let mut failures = Vec::new();
 
@@ -724,32 +744,14 @@ pub async fn broadcast_announcement(
         };
         let chan_id = serenity::all::ChannelId::new(c_num);
 
-        let channel = match http.get_channel(chan_id).await {
-            Ok(c) => c,
-            Err(e) => {
-                failures.push(json!({
-                    "channel_id": ch,
-                    "error": format!("Channel not found or inaccessible: {e}"),
-                    "retryable": true,
-                    "retry_token": format!("retry_{ch}"),
-                }));
-                continue;
-            }
-        };
-
-        let Some(guild_chan) = channel.guild() else {
+        if let Err(err) = crate::discord::scheduler::ensure_channel_delivery_access(
+            &http, g_id, actor_id, chan_id, true,
+        )
+        .await
+        {
             failures.push(json!({
                 "channel_id": ch,
-                "error": "The specified channel must be a guild channel",
-                "retryable": false,
-            }));
-            continue;
-        };
-
-        if guild_chan.guild_id.get().to_string() != guild_id {
-            failures.push(json!({
-                "channel_id": ch,
-                "error": "Channel belongs to another guild",
+                "error": format!("Actor or bot lacks broadcast permissions in destination channel: {err}"),
                 "retryable": false,
             }));
             continue;

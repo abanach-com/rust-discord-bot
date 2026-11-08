@@ -347,6 +347,23 @@ async fn mock_discord_handler(
             }))
             .into_response(),
 
+            "108" => Json(json!({
+                "id": "108",
+                "guild_id": "100",
+                "type": 0, // GuildText
+                "name": "visible-no-embed",
+                "position": 7,
+                "permission_overwrites": [
+                    {
+                        "id": "333333333333333333", // Member
+                        "type": 1,
+                        "allow": "3072", // VIEW_CHANNEL | SEND_MESSAGES
+                        "deny": "16384" // EMBED_LINKS
+                    }
+                ]
+            }))
+            .into_response(),
+
             "201" => Json(json!({
                 "id": "201",
                 "guild_id": "200", // Foreign guild
@@ -488,7 +505,7 @@ async fn mock_discord_handler(
                     "id": "100",
                     "name": "@everyone",
                     "position": 0,
-                    "permissions": "274877910016", // VIEW_CHANNEL | SEND_MESSAGES | SEND_MESSAGES_IN_THREADS
+                    "permissions": "274877926400", // VIEW_CHANNEL | SEND_MESSAGES | EMBED_LINKS | SEND_MESSAGES_IN_THREADS
                     "color": 0,
                     "colors": {
                         "primary_color": 0
@@ -585,6 +602,20 @@ async fn mock_discord_handler(
 
             ]
 
+        }))
+        .into_response();
+    }
+
+    // Member computed permissions query: GET /guilds/100/permissions/member/{user_id}
+    if method == Method::GET && path.contains("/permissions/member/") {
+        let user_id = path.split("/permissions/member/").nth(1).unwrap_or("");
+        let perms = match user_id {
+            "111111111111111111" => "8",  // ADMINISTRATOR
+            "333333333333333333" => "32", // MANAGE_GUILD
+            _ => "0",
+        };
+        return Json(json!({
+            "permissions": perms
         }))
         .into_response();
     }
@@ -6275,6 +6306,352 @@ async fn test_afk_multibyte_emoji_truncation_utf8_safety_suite() {
         1,
         "User 2 notice must be delivered in subsequent message since their cooldown was not consumed"
     );
+
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn test_web_broadcast_destination_channel_authorization_suite() {
+    use dashmap::DashMap;
+    use reqwest::header::COOKIE;
+    use rusty_discord_bot::web::{
+        WebState,
+        auth::{DashboardGuild, DashboardUser, LoginRateLimiter},
+        build_router,
+    };
+
+    let (_ctx, mock, shard_manager) = start_mock_discord_environment().await;
+
+    let bind: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let config = Config {
+        discord_token: "test_bot_token".to_string(),
+        discord_application_id: 123456789,
+        discord_client_id: "123456789".to_string(),
+        discord_client_secret: "secret".to_string(),
+        discord_oauth_redirect_url: "http://127.0.0.1:8080/auth/discord/callback".to_string(),
+        discord_dev_guild_id: None,
+        dashboard_bind: bind,
+        dashboard_public_url: format!("http://{}", bind),
+        database_url: None,
+        scripts_dir: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts"),
+        session_cookie_secure: false,
+        session_ttl_seconds: 86400,
+        lua_memory_limit_bytes: 4 * 1024 * 1024,
+        lua_instruction_limit: 200_000,
+        lua_hook_granularity: 100,
+        lua_max_parallel: 32,
+        lua_max_per_guild: 8,
+        lua_command_timeout_ms: 3000,
+        music_allowed_hosts: std::collections::HashSet::new(),
+        trusted_proxies: ["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()]
+            .into_iter()
+            .collect(),
+        offline_mode: false,
+        discord_api_base_url: format!("http://127.0.0.1:{}", mock.port),
+        transcript_encryption_key: None,
+        transcript_active_key_id: "v1".to_string(),
+        transcript_keyring: None,
+        ticket_transcripts_disabled: true,
+        metrics_token: None,
+        metrics_allowed_ips: std::collections::HashSet::new(),
+    };
+
+    let app = AppState::bootstrap(config)
+        .await
+        .expect("bootstrap app state");
+    let permissions_cache = Arc::new(DashMap::new());
+    let web_state = WebState {
+        app: app.clone(),
+        login_rate_limiter: Arc::new(LoginRateLimiter::new()),
+        permissions_cache: permissions_cache.clone(),
+    };
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let base_url = format!("http://{addr}");
+    let router = build_router(web_state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let http_client = reqwest::Client::new();
+
+    // 1. Setup session for manager (User 333333333333333333 with MANAGE_GUILD)
+    let session_id = "test_broadcast_manager_session";
+    let user = DashboardUser {
+        id: "333333333333333333".to_owned(),
+        username: "manager_user".to_owned(),
+        global_name: None,
+        avatar: None,
+    };
+    let guilds = vec![DashboardGuild {
+        id: "100".to_owned(),
+        name: "Test Guild".to_owned(),
+        icon: None,
+        owner: false,
+        permissions: "32".to_owned(), // MANAGE_GUILD
+    }];
+    let csrf_token = "valid_csrf_token_broadcast";
+    let expires_at = chrono::Utc::now() + chrono::Duration::hours(24);
+    web_state
+        .app
+        .sessions
+        .save_session(
+            session_id,
+            user,
+            guilds,
+            csrf_token.to_owned(),
+            expires_at,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let session_cookie = format!("rusty_discord_bot_session={session_id}");
+
+    let baseline_requests = mock.modifying_requests_count.load(Ordering::SeqCst);
+
+    // Test A: Target hidden-private channel 103 (deny VIEW_CHANNEL)
+    let resp_103 = http_client
+        .post(format!("{base_url}/api/guilds/100/broadcast"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "target_channels": ["103"],
+            "title": "Confidential Staff Update",
+            "description": "Unauthorized announcement attempt"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp_103.status(), reqwest::StatusCode::OK);
+    let body_103: serde_json::Value = resp_103.json().await.unwrap();
+    assert_eq!(body_103["success_count"], 0);
+    assert_eq!(body_103["failure_count"], 1);
+    let err_103 = body_103["failures"][0]["error"].as_str().unwrap();
+    assert!(
+        err_103.contains("VIEW_CHANNEL"),
+        "Error must mention VIEW_CHANNEL: {err_103}"
+    );
+    assert_eq!(
+        mock.modifying_requests_count.load(Ordering::SeqCst),
+        baseline_requests,
+        "Zero POST requests dispatched for hidden channel"
+    );
+
+    // Test B: Target visible-no-send channel 104 (deny SEND_MESSAGES)
+    let resp_104 = http_client
+        .post(format!("{base_url}/api/guilds/100/broadcast"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "target_channels": ["104"],
+            "title": "Read-Only Announcement",
+            "description": "Unauthorized announcement attempt"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp_104.status(), reqwest::StatusCode::OK);
+    let body_104: serde_json::Value = resp_104.json().await.unwrap();
+    assert_eq!(body_104["success_count"], 0);
+    assert_eq!(body_104["failure_count"], 1);
+    let err_104 = body_104["failures"][0]["error"].as_str().unwrap();
+    assert!(
+        err_104.contains("SEND_MESSAGES"),
+        "Error must mention SEND_MESSAGES: {err_104}"
+    );
+    assert_eq!(
+        mock.modifying_requests_count.load(Ordering::SeqCst),
+        baseline_requests,
+        "Zero POST requests dispatched for read-only channel"
+    );
+
+    // Test C: Target visible-no-embed channel 108 (deny EMBED_LINKS)
+    let resp_108 = http_client
+        .post(format!("{base_url}/api/guilds/100/broadcast"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "target_channels": ["108"],
+            "title": "No-Embed Announcement",
+            "description": "Unauthorized announcement attempt"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp_108.status(), reqwest::StatusCode::OK);
+    let body_108: serde_json::Value = resp_108.json().await.unwrap();
+    assert_eq!(body_108["success_count"], 0);
+    assert_eq!(body_108["failure_count"], 1);
+    let err_108 = body_108["failures"][0]["error"].as_str().unwrap();
+    assert!(
+        err_108.contains("EMBED_LINKS"),
+        "Error must mention EMBED_LINKS: {err_108}"
+    );
+    assert_eq!(
+        mock.modifying_requests_count.load(Ordering::SeqCst),
+        baseline_requests,
+        "Zero POST requests dispatched for channel denying EMBED_LINKS"
+    );
+
+    // Test D: Target private thread 105 where manager is not a member
+    let resp_105 = http_client
+        .post(format!("{base_url}/api/guilds/100/broadcast"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "target_channels": ["105"],
+            "title": "Private Thread Announcement",
+            "description": "Unauthorized announcement attempt"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp_105.status(), reqwest::StatusCode::OK);
+    let body_105: serde_json::Value = resp_105.json().await.unwrap();
+    assert_eq!(body_105["success_count"], 0);
+    assert_eq!(body_105["failure_count"], 1);
+    assert_eq!(
+        mock.modifying_requests_count.load(Ordering::SeqCst),
+        baseline_requests,
+        "Zero POST requests dispatched for non-member private thread"
+    );
+
+    // Test E: Target channel 201 from another guild (foreign guild 200)
+    let resp_201 = http_client
+        .post(format!("{base_url}/api/guilds/100/broadcast"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "target_channels": ["201"],
+            "title": "Cross-Guild Announcement",
+            "description": "Unauthorized announcement attempt"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp_201.status(), reqwest::StatusCode::OK);
+    let body_201: serde_json::Value = resp_201.json().await.unwrap();
+    assert_eq!(body_201["success_count"], 0);
+    assert_eq!(body_201["failure_count"], 1);
+    assert_eq!(
+        mock.modifying_requests_count.load(Ordering::SeqCst),
+        baseline_requests,
+        "Zero POST requests dispatched for cross-guild channel"
+    );
+
+    // Test F: Target valid public channel 101 with full permissions -> succeeds!
+    let resp_101 = http_client
+        .post(format!("{base_url}/api/guilds/100/broadcast"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "target_channels": ["101"],
+            "title": "Legitimate Server Announcement",
+            "description": "Welcome everyone!"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp_101.status(), reqwest::StatusCode::OK);
+    let body_101: serde_json::Value = resp_101.json().await.unwrap();
+    assert_eq!(body_101["success_count"], 1);
+    assert_eq!(body_101["failure_count"], 0);
+    assert_eq!(body_101["successes"][0], "101");
+    assert_eq!(
+        mock.modifying_requests_count.load(Ordering::SeqCst),
+        baseline_requests + 1,
+        "Exactly 1 message POST request dispatched for legitimate channel"
+    );
+
+    // Test G: Partial batch with 1 valid and 2 invalid channels: ["103", "101", "104"]
+    let resp_batch = http_client
+        .post(format!("{base_url}/api/guilds/100/broadcast"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "target_channels": ["103", "101", "104"],
+            "title": "Batch Announcement",
+            "description": "Testing partial delivery authorization"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp_batch.status(), reqwest::StatusCode::OK);
+    let body_batch: serde_json::Value = resp_batch.json().await.unwrap();
+    assert_eq!(body_batch["success_count"], 1);
+    assert_eq!(body_batch["failure_count"], 2);
+    assert_eq!(body_batch["successes"][0], "101");
+    assert_eq!(
+        mock.modifying_requests_count.load(Ordering::SeqCst),
+        baseline_requests + 2,
+        "Only the authorized channel received a POST dispatch"
+    );
+
+    // Test H: Server Owner / Administrator (User 111111111111111111) bypasses overwrites
+    let admin_session_id = "test_broadcast_admin_session";
+    let admin_user = DashboardUser {
+        id: "111111111111111111".to_owned(),
+        username: "owner_user".to_owned(),
+        global_name: None,
+        avatar: None,
+    };
+    let admin_guilds = vec![DashboardGuild {
+        id: "100".to_owned(),
+        name: "Test Guild".to_owned(),
+        icon: None,
+        owner: true,
+        permissions: "8".to_owned(), // ADMINISTRATOR
+    }];
+    let expires_at_admin = chrono::Utc::now() + chrono::Duration::hours(24);
+    web_state
+        .app
+        .sessions
+        .save_session(
+            admin_session_id,
+            admin_user,
+            admin_guilds,
+            csrf_token.to_owned(),
+            expires_at_admin,
+            None,
+        )
+        .await
+        .unwrap();
+    let admin_cookie = format!("rusty_discord_bot_session={admin_session_id}");
+
+    let resp_admin = http_client
+        .post(format!("{base_url}/api/guilds/100/broadcast"))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "target_channels": ["103", "104"],
+            "title": "Admin Announcement",
+            "description": "Administrator bypasses channel overwrites"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp_admin.status(), reqwest::StatusCode::OK);
+    let body_admin: serde_json::Value = resp_admin.json().await.unwrap();
+    assert_eq!(body_admin["success_count"], 2);
+    assert_eq!(body_admin["failure_count"], 0);
 
     shard_manager.shutdown_all().await;
 }

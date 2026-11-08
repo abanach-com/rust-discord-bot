@@ -419,11 +419,12 @@ pub fn calculate_effective_channel_permissions(
     perms
 }
 
-pub async fn ensure_scheduled_delivery_access(
+pub async fn ensure_channel_delivery_access(
     http: &Http,
     guild_id: GuildId,
     actor_id: UserId,
     target_channel_id: ChannelId,
+    require_embed: bool,
 ) -> Result<()> {
     let channel = target_channel_id
         .to_channel(http)
@@ -496,6 +497,10 @@ pub async fn ensure_scheduled_delivery_access(
         anyhow::bail!("creator lacks SEND_MESSAGES permission in channel {target_channel_id}");
     }
 
+    if require_embed && !creator_perms.contains(Permissions::EMBED_LINKS) {
+        anyhow::bail!("creator lacks EMBED_LINKS permission in channel {target_channel_id}");
+    }
+
     if guild_channel.kind == ChannelType::PrivateThread
         && !creator_perms.contains(Permissions::ADMINISTRATOR)
         && !creator_perms.contains(Permissions::MANAGE_THREADS)
@@ -543,6 +548,10 @@ pub async fn ensure_scheduled_delivery_access(
         anyhow::bail!("bot lacks SEND_MESSAGES permission in channel {target_channel_id}");
     }
 
+    if require_embed && !bot_perms.contains(Permissions::EMBED_LINKS) {
+        anyhow::bail!("bot lacks EMBED_LINKS permission in channel {target_channel_id}");
+    }
+
     if guild_channel.kind == ChannelType::PrivateThread
         && !bot_perms.contains(Permissions::ADMINISTRATOR)
         && !bot_perms.contains(Permissions::MANAGE_THREADS)
@@ -559,6 +568,15 @@ pub async fn ensure_scheduled_delivery_access(
     }
 
     Ok(())
+}
+
+pub async fn ensure_scheduled_delivery_access(
+    http: &Http,
+    guild_id: GuildId,
+    actor_id: UserId,
+    target_channel_id: ChannelId,
+) -> Result<()> {
+    ensure_channel_delivery_access(http, guild_id, actor_id, target_channel_id, false).await
 }
 
 fn format_job_list(jobs: &[ScheduledJob], include_owner: bool) -> String {
