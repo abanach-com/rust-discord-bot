@@ -14269,3 +14269,429 @@ async fn test_sticky_messages_validation_and_crud() {
     let get_after_json: serde_json::Value = get_after_del.json().await.unwrap();
     assert!(get_after_json.is_null());
 }
+
+#[tokio::test]
+async fn test_sticky_messages_view_authorization_and_isolation_issue_320() {
+    use axum::{response::IntoResponse, routing::get};
+
+    // 1. Build Discord mock router for online permission checks
+    let discord_mock_app = axum::Router::new()
+        .route(
+            "/channels/{channel_id}",
+            get(
+                |axum::extract::Path(cid): axum::extract::Path<String>| async move {
+                    match cid.as_str() {
+                        "111000000000000101" => axum::Json(serde_json::json!({
+                            "id": "111000000000000101",
+                            "guild_id": "100000000000000001",
+                            "type": 0
+                        }))
+                        .into_response(),
+                        "111000000000000102" => axum::Json(serde_json::json!({
+                            "id": "111000000000000102",
+                            "guild_id": "100000000000000001",
+                            "type": 0
+                        }))
+                        .into_response(),
+                        "111000000000000103" => axum::Json(serde_json::json!({
+                            "id": "111000000000000103",
+                            "guild_id": "100000000000000001",
+                            "type": 12
+                        }))
+                        .into_response(),
+                        "222000000000000201" => axum::Json(serde_json::json!({
+                            "id": "222000000000000201",
+                            "guild_id": "888000000000000888",
+                            "type": 0
+                        }))
+                        .into_response(),
+                        "777000000000000777" => (
+                            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                            axum::Json(serde_json::json!({
+                                "code": 0,
+                                "message": "Internal Discord Error"
+                            })),
+                        )
+                            .into_response(),
+                        _ => (
+                            reqwest::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({
+                                "code": 10003,
+                                "message": "Unknown Channel"
+                            })),
+                        )
+                            .into_response(),
+                    }
+                },
+            ),
+        )
+        .route(
+            "/channels/{channel_id}/permissions/member/{user_id}",
+            get(
+                |axum::extract::Path((channel_id, user_id)): axum::extract::Path<(
+                    String,
+                    String,
+                )>| async move {
+                    if channel_id == "111000000000000102" && user_id == "200000000000000001" {
+                        // User 200000000000000001 is denied VIEW_CHANNEL in private channel 102
+                        axum::Json(serde_json::json!({
+                            "permissions": "0"
+                        }))
+                        .into_response()
+                    } else if user_id == "200000000000000002" || user_id == "200000000000000001" {
+                        // User has VIEW_CHANNEL (bit 1024)
+                        axum::Json(serde_json::json!({
+                            "permissions": "1024"
+                        }))
+                        .into_response()
+                    } else {
+                        (
+                            reqwest::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({
+                                "code": 10003,
+                                "message": "Unknown Channel or Member"
+                            })),
+                        )
+                            .into_response()
+                    }
+                },
+            ),
+        )
+        .route(
+            "/channels/{channel_id}/thread-members/{user_id}",
+            get(
+                |axum::extract::Path((_channel_id, user_id)): axum::extract::Path<(
+                    String,
+                    String,
+                )>| async move {
+                    if user_id == "200000000000000002" {
+                        axum::Json(serde_json::json!({
+                            "user_id": user_id,
+                            "join_timestamp": "2026-11-08T07:00:00Z"
+                        }))
+                        .into_response()
+                    } else {
+                        (
+                            reqwest::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({
+                                "code": 10003,
+                                "message": "Not a thread member"
+                            })),
+                        )
+                            .into_response()
+                    }
+                },
+            ),
+        )
+        .route(
+            "/guilds/{guild_id}/members/{user_id}",
+            get(
+                |axum::extract::Path((_guild_id, user_id)): axum::extract::Path<(
+                    String,
+                    String,
+                )>| async move {
+                    axum::Json(serde_json::json!({
+                        "user": { "id": user_id },
+                        "roles": []
+                    }))
+                    .into_response()
+                },
+            ),
+        );
+
+    let discord_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind discord mock");
+    let discord_addr = discord_listener.local_addr().expect("discord mock addr");
+    tokio::spawn(async move {
+        axum::serve(discord_listener, discord_mock_app)
+            .await
+            .unwrap();
+    });
+
+    // 2. Configure app state in live mode pointing to discord mock
+    let mut config = test_config();
+    config.discord_token = "live_bot_token_production_secret".to_string();
+    config.offline_mode = false;
+    config.discord_api_base_url = format!("http://{discord_addr}");
+
+    let app = AppState::bootstrap(config).await.expect("bootstrap");
+    let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
+    let web_state = WebState {
+        app,
+        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        permissions_cache: permissions_cache.clone(),
+    };
+    web_state
+        .app
+        .is_gateway_ready
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind web listener");
+    let web_addr = web_listener.local_addr().expect("web addr");
+    let router = build_router(web_state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            web_listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{web_addr}");
+
+    let guild_id = "100000000000000001";
+    let u_forbidden_id = "200000000000000001";
+    let u_allowed_id = "200000000000000002";
+
+    let session_forbidden = "session_u_forbidden";
+    let csrf_forbidden = "csrf_forbidden";
+
+    let session_allowed = "session_u_allowed";
+    let csrf_allowed = "csrf_allowed";
+
+    // Setup sessions with MANAGE_GUILD
+    web_state
+        .app
+        .sessions
+        .save_session(
+            session_forbidden,
+            DashboardUser {
+                id: u_forbidden_id.to_string(),
+                username: "UserWithoutViewChannel".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Guild Test".to_string(),
+                icon: None,
+                owner: false,
+                permissions: "32".to_string(), // MANAGE_GUILD
+            }],
+            csrf_forbidden.to_string(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    web_state
+        .app
+        .sessions
+        .save_session(
+            session_allowed,
+            DashboardUser {
+                id: u_allowed_id.to_string(),
+                username: "UserWithViewChannel".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Guild Test".to_string(),
+                icon: None,
+                owner: false,
+                permissions: "32".to_string(), // MANAGE_GUILD
+            }],
+            csrf_allowed.to_string(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    permissions_cache.insert(
+        (u_forbidden_id.to_string(), guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    permissions_cache.insert(
+        (u_allowed_id.to_string(), guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    // Pre-populate sticky messages in storage
+    web_state
+        .app
+        .storage
+        .set_sticky_message(
+            guild_id,
+            "111000000000000102",
+            "",
+            "Confidential Staff Note",
+            5,
+        )
+        .await
+        .unwrap();
+
+    web_state
+        .app
+        .storage
+        .set_sticky_message(
+            guild_id,
+            "111000000000000103",
+            "",
+            "Confidential Thread Note",
+            5,
+        )
+        .await
+        .unwrap();
+
+    let cookie_forbidden = format!("rusty_discord_bot_session={session_forbidden}");
+    let cookie_allowed = format!("rusty_discord_bot_session={session_allowed}");
+
+    // Test 1: U with MANAGE_GUILD but lacking VIEW_CHANNEL -> GET returns 403 Forbidden without content
+    let get_forbidden = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/sticky/111000000000000102"
+        ))
+        .header(COOKIE, &cookie_forbidden)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_forbidden.status(), reqwest::StatusCode::FORBIDDEN);
+    let body_text = get_forbidden.text().await.unwrap();
+    assert!(!body_text.contains("Confidential Staff Note"));
+
+    // Test 2: U with MANAGE_GUILD but lacking VIEW_CHANNEL -> DELETE returns 403 Forbidden and preserves DB record
+    let del_forbidden = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/sticky/111000000000000102"
+        ))
+        .header(COOKIE, &cookie_forbidden)
+        .header("x-csrf-token", csrf_forbidden)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del_forbidden.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let preserved = web_state
+        .app
+        .storage
+        .get_sticky_message(guild_id, "111000000000000102")
+        .await
+        .unwrap();
+    assert!(
+        preserved.is_some(),
+        "Sticky record must not be deleted by unauthorized user"
+    );
+
+    // Test 3: U with VIEW_CHANNEL -> GET returns 200 OK with content
+    let get_allowed = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/sticky/111000000000000102"
+        ))
+        .header(COOKIE, &cookie_allowed)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_allowed.status(), reqwest::StatusCode::OK);
+    let allowed_json: serde_json::Value = get_allowed.json().await.unwrap();
+    assert_eq!(allowed_json["content"], "Confidential Staff Note");
+
+    // Test 4: U with VIEW_CHANNEL -> DELETE returns 200 OK and deletes record
+    let del_allowed = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/sticky/111000000000000102"
+        ))
+        .header(COOKIE, &cookie_allowed)
+        .header("x-csrf-token", csrf_allowed)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del_allowed.status(), reqwest::StatusCode::OK);
+
+    let after_delete = web_state
+        .app
+        .storage
+        .get_sticky_message(guild_id, "111000000000000102")
+        .await
+        .unwrap();
+    assert!(
+        after_delete.is_none(),
+        "Sticky record must be deleted by authorized user"
+    );
+
+    // Test 5: Private thread without membership -> both GET and DELETE return 403 Forbidden
+    let thread_get_forbidden = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/sticky/111000000000000103"
+        ))
+        .header(COOKIE, &cookie_forbidden)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        thread_get_forbidden.status(),
+        reqwest::StatusCode::FORBIDDEN
+    );
+
+    let thread_del_forbidden = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/sticky/111000000000000103"
+        ))
+        .header(COOKIE, &cookie_forbidden)
+        .header("x-csrf-token", csrf_forbidden)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        thread_del_forbidden.status(),
+        reqwest::StatusCode::FORBIDDEN
+    );
+
+    // Test 6: Channel belonging to another guild -> returns 403 Forbidden without mutation
+    let foreign_get = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/sticky/222000000000000201"
+        ))
+        .header(COOKIE, &cookie_allowed)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(foreign_get.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let foreign_del = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/sticky/222000000000000201"
+        ))
+        .header(COOKIE, &cookie_allowed)
+        .header("x-csrf-token", csrf_allowed)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(foreign_del.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Test 7: Nonexistent channel (404 from Discord API) -> fails closed with 403 Forbidden
+    let nonexist_get = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/sticky/999000000000000999"
+        ))
+        .header(COOKIE, &cookie_allowed)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(nonexist_get.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Test 8: Discord API 5xx error -> fails closed with 403 Forbidden
+    let err_get = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/sticky/777000000000000777"
+        ))
+        .header(COOKIE, &cookie_allowed)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(err_get.status(), reqwest::StatusCode::FORBIDDEN);
+}

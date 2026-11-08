@@ -594,6 +594,8 @@ pub async fn get_sticky(
     crate::storage::validate_snowflake("channel_id", &channel_id)
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
+    ensure_channel_view_access(&state, &session, &guild_id, &channel_id).await?;
+
     let msg = state
         .app
         .storage
@@ -703,6 +705,8 @@ pub async fn delete_sticky(
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
     crate::storage::validate_snowflake("channel_id", &channel_id)
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    ensure_channel_view_access(&state, &session, &guild_id, &channel_id).await?;
 
     let deleted = state
         .app
