@@ -5265,7 +5265,7 @@ impl Storage {
         mapping: TelegramMessageMapping,
     ) -> anyhow::Result<TelegramMessageMapping> {
         match self {
-            Self::Memory(store) => Ok(store.record_telegram_message_mapping(mapping)),
+            Self::Memory(store) => store.record_telegram_message_mapping(mapping),
 
             Self::Postgres(store) => store.record_telegram_message_mapping(mapping).await,
         }

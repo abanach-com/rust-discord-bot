@@ -192,6 +192,8 @@ pub struct MemoryStore {
 
     telegram_mappings: Arc<DashMap<Uuid, TelegramMessageMapping>>,
 
+    telegram_bridge_lock: Arc<Mutex<()>>,
+
     workflows: Arc<DashMap<Uuid, WorkflowDefinition>>,
 
     workflow_runs: Arc<DashMap<Uuid, WorkflowRunExecution>>,
@@ -5332,6 +5334,10 @@ impl MemoryStore {
     // Agent 10 (#99): Telegram Bridge
 
     pub fn create_telegram_bridge(&self, bridge: TelegramBridge) -> TelegramBridge {
+        let _guard = self
+            .telegram_bridge_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let key = (bridge.guild_id.clone(), bridge.discord_channel_id.clone());
         use dashmap::mapref::entry::Entry;
         match self.telegram_bridges.entry(key) {
@@ -5364,21 +5370,30 @@ impl MemoryStore {
 
     pub fn record_telegram_message_mapping(
         &self,
-
         mapping: TelegramMessageMapping,
-    ) -> TelegramMessageMapping {
+    ) -> anyhow::Result<TelegramMessageMapping> {
+        let _guard = self
+            .telegram_bridge_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let bridge_exists = self
+            .telegram_bridges
+            .iter()
+            .any(|e| e.value().id == mapping.bridge_id);
+        if !bridge_exists {
+            anyhow::bail!(
+                "foreign key violation: telegram bridge {} does not exist",
+                mapping.bridge_id
+            );
+        }
         self.telegram_mappings.insert(mapping.id, mapping.clone());
-
-        mapping
+        Ok(mapping)
     }
 
     pub fn get_telegram_message_mapping(
         &self,
-
         bridge_id: Uuid,
-
         msg_id: &str,
-
         direction: &str,
     ) -> Option<TelegramMessageMapping> {
         self.telegram_mappings
@@ -5392,13 +5407,22 @@ impl MemoryStore {
     }
 
     pub fn delete_telegram_bridge(&self, bridge_id: Uuid) -> bool {
+        let _guard = self
+            .telegram_bridge_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let found_key = self
             .telegram_bridges
             .iter()
             .find(|e| e.value().id == bridge_id)
             .map(|e| e.key().clone());
         if let Some(key) = found_key {
-            self.telegram_bridges.remove(&key).is_some()
+            let removed = self.telegram_bridges.remove(&key).is_some();
+            if removed {
+                self.telegram_mappings
+                    .retain(|_, m| m.bridge_id != bridge_id);
+            }
+            removed
         } else {
             false
         }

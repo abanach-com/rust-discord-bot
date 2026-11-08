@@ -1403,4 +1403,259 @@ async fn test_telegram_bridge_upsert_deduplication_and_identity_stability_issue_
         after_delete.is_none(),
         "Bridge was cleanly removed from storage"
     );
+
+    // Verify ON DELETE CASCADE: mapping referencing parsed_bridge_id must now be gone
+    let mapping_after_delete = web_state
+        .app
+        .storage
+        .get_telegram_message_mapping(parsed_bridge_id, "tg_msg_101", "telegram_to_discord")
+        .await
+        .unwrap();
+    assert!(
+        mapping_after_delete.is_none(),
+        "Cascade deletion must remove all mappings for deleted bridge"
+    );
+}
+
+#[tokio::test]
+async fn test_telegram_bridge_mapping_fk_and_cascade_lifecycle_issue_330() {
+    let mut config = test_config();
+    config.offline_mode = true;
+    let app = AppState::bootstrap(config).await.expect("bootstrap");
+    let storage = app.storage.clone();
+
+    // 1. Zapis mapping z losowym, nieistniejącym bridge_id jest odrzucany (FK violation)
+    let random_bridge_id = Uuid::new_v4();
+    let orphan_mapping = rusty_discord_bot::storage::TelegramMessageMapping {
+        id: Uuid::new_v4(),
+        bridge_id: random_bridge_id,
+        telegram_message_id: "orphan_tg_1".to_string(),
+        discord_message_id: "orphan_dc_1".to_string(),
+        direction: "telegram_to_discord".to_string(),
+        created_at: Utc::now(),
+    };
+    let orphan_res = storage
+        .record_telegram_message_mapping(orphan_mapping)
+        .await;
+    assert!(
+        orphan_res.is_err(),
+        "MemoryStore must reject mapping with non-existent bridge_id"
+    );
+    assert!(
+        storage
+            .get_telegram_message_mapping(random_bridge_id, "orphan_tg_1", "telegram_to_discord")
+            .await
+            .unwrap()
+            .is_none(),
+        "No orphan mapping may be recorded"
+    );
+
+    // 2. Utworzenie dwóch niezależnych mostów: Bridge A i Bridge B (cross-guild / cross-bridge)
+    let guild_a = "111000000000000001";
+    let channel_a = "222000000000000001";
+    let bridge_a = storage
+        .create_telegram_bridge(rusty_discord_bot::storage::TelegramBridge {
+            id: Uuid::new_v4(),
+            guild_id: guild_a.to_string(),
+            telegram_chat_id: "-100111111111".to_string(),
+            discord_channel_id: channel_a.to_string(),
+            secret_token: "secret_a".to_string(),
+            paused: false,
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    let guild_b = "111000000000000002";
+    let channel_b = "222000000000000002";
+    let bridge_b = storage
+        .create_telegram_bridge(rusty_discord_bot::storage::TelegramBridge {
+            id: Uuid::new_v4(),
+            guild_id: guild_b.to_string(),
+            telegram_chat_id: "-100222222222".to_string(),
+            discord_channel_id: channel_b.to_string(),
+            secret_token: "secret_b".to_string(),
+            paused: false,
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    // Dodanie mapowań dla Bridge A i Bridge B
+    let mapping_a1 = rusty_discord_bot::storage::TelegramMessageMapping {
+        id: Uuid::new_v4(),
+        bridge_id: bridge_a.id,
+        telegram_message_id: "tg_a1".to_string(),
+        discord_message_id: "dc_a1".to_string(),
+        direction: "telegram_to_discord".to_string(),
+        created_at: Utc::now(),
+    };
+    let mapping_a2 = rusty_discord_bot::storage::TelegramMessageMapping {
+        id: Uuid::new_v4(),
+        bridge_id: bridge_a.id,
+        telegram_message_id: "tg_a2".to_string(),
+        discord_message_id: "dc_a2".to_string(),
+        direction: "discord_to_telegram".to_string(),
+        created_at: Utc::now(),
+    };
+    let mapping_b1 = rusty_discord_bot::storage::TelegramMessageMapping {
+        id: Uuid::new_v4(),
+        bridge_id: bridge_b.id,
+        telegram_message_id: "tg_b1".to_string(),
+        discord_message_id: "dc_b1".to_string(),
+        direction: "telegram_to_discord".to_string(),
+        created_at: Utc::now(),
+    };
+
+    storage
+        .record_telegram_message_mapping(mapping_a1.clone())
+        .await
+        .unwrap();
+    storage
+        .record_telegram_message_mapping(mapping_a2.clone())
+        .await
+        .unwrap();
+    storage
+        .record_telegram_message_mapping(mapping_b1.clone())
+        .await
+        .unwrap();
+
+    // 3. UPSERT istniejącego Bridge A (to samo guild_id i channel_id) nie kasuje mapowań
+    let mut upsert_a = bridge_a.clone();
+    upsert_a.id = Uuid::new_v4(); // candidate ID
+    upsert_a.telegram_chat_id = "-100999999999".to_string();
+    let upserted_a = storage.create_telegram_bridge(upsert_a).await.unwrap();
+    assert_eq!(upserted_a.id, bridge_a.id, "UPSERT must retain stable id");
+    assert_eq!(
+        upserted_a.created_at, bridge_a.created_at,
+        "UPSERT must retain original created_at"
+    );
+
+    // Sprawdzenie, że mapowania A1 i A2 nadal istnieją po UPSERT
+    let a1_still_there = storage
+        .get_telegram_message_mapping(bridge_a.id, "tg_a1", "telegram_to_discord")
+        .await
+        .unwrap();
+    assert!(a1_still_there.is_some(), "UPSERT must not wipe mappings");
+    let a2_still_there = storage
+        .get_telegram_message_mapping(bridge_a.id, "dc_a2", "discord_to_telegram")
+        .await
+        .unwrap();
+    assert!(a2_still_there.is_some(), "UPSERT must not wipe mappings");
+
+    // 4. ON DELETE CASCADE: Usunięcie Bridge A usuwa kaskadowo jego mapowania, nie naruszając Bridge B
+    let deleted_a = storage.delete_telegram_bridge(bridge_a.id).await.unwrap();
+    assert!(deleted_a, "Bridge A was deleted");
+
+    // Bridge A i jego mapowania zniknęły
+    assert!(
+        storage
+            .get_telegram_bridge(guild_a, channel_a)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        storage
+            .get_telegram_message_mapping(bridge_a.id, "tg_a1", "telegram_to_discord")
+            .await
+            .unwrap()
+            .is_none(),
+        "Cascade delete must remove mapping A1"
+    );
+    assert!(
+        storage
+            .get_telegram_message_mapping(bridge_a.id, "dc_a2", "discord_to_telegram")
+            .await
+            .unwrap()
+            .is_none(),
+        "Cascade delete must remove mapping A2"
+    );
+
+    // Bridge B i jego mapowanie B1 są nietknięte
+    let bridge_b_check = storage
+        .get_telegram_bridge(guild_b, channel_b)
+        .await
+        .unwrap();
+    assert!(bridge_b_check.is_some(), "Bridge B must remain intact");
+    let b1_check = storage
+        .get_telegram_message_mapping(bridge_b.id, "tg_b1", "telegram_to_discord")
+        .await
+        .unwrap();
+    assert!(b1_check.is_some(), "Bridge B's mapping must remain intact");
+
+    // 5. Jednoczesny `record` i `delete` (bariera / synchronizacja, 100 powtórzeń)
+    for i in 0..100 {
+        let race_guild = format!("race_g_{i}");
+        let race_channel = format!("race_c_{i}");
+        let race_bridge = storage
+            .create_telegram_bridge(rusty_discord_bot::storage::TelegramBridge {
+                id: Uuid::new_v4(),
+                guild_id: race_guild.clone(),
+                telegram_chat_id: format!("-100race{i}"),
+                discord_channel_id: race_channel.clone(),
+                secret_token: format!("race_tok_{i}"),
+                paused: false,
+                created_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let bridge_id = race_bridge.id;
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+
+        let barrier_record = barrier.clone();
+        let storage_record = storage.clone();
+        let record_handle = tokio::spawn(async move {
+            barrier_record.wait().await;
+            let mapping = rusty_discord_bot::storage::TelegramMessageMapping {
+                id: Uuid::new_v4(),
+                bridge_id,
+                telegram_message_id: format!("tg_race_{i}"),
+                discord_message_id: format!("dc_race_{i}"),
+                direction: "telegram_to_discord".to_string(),
+                created_at: Utc::now(),
+            };
+            storage_record
+                .record_telegram_message_mapping(mapping)
+                .await
+        });
+
+        let barrier_delete = barrier.clone();
+        let storage_delete = storage.clone();
+        let delete_handle = tokio::spawn(async move {
+            barrier_delete.wait().await;
+            storage_delete.delete_telegram_bridge(bridge_id).await
+        });
+
+        let (record_res, delete_res) = tokio::join!(record_handle, delete_handle);
+        let record_res = record_res.unwrap();
+        let delete_res = delete_res.unwrap().unwrap();
+
+        // Po zakończeniu obu operacji:
+        // Sprawdź czy most istnieje
+        let bridge_exists = storage
+            .get_telegram_bridge(&race_guild, &race_channel)
+            .await
+            .unwrap()
+            .is_some();
+
+        let mapping_found = storage
+            .get_telegram_message_mapping(bridge_id, &format!("tg_race_{i}"), "telegram_to_discord")
+            .await
+            .unwrap();
+
+        if !bridge_exists {
+            // Jeśli most został usunięty, NIGDY nie może istnieć osierocone mapowanie!
+            assert!(
+                mapping_found.is_none(),
+                "Iter {i}: Orphan mapping found after bridge deletion! record_res: {record_res:?}, delete_res: {delete_res}"
+            );
+        } else {
+            // Jeśli most istnieje (delete nie wygrał lub zwrócił false), a record się powiódł:
+            if record_res.is_ok() {
+                assert!(mapping_found.is_some());
+            }
+        }
+    }
 }

@@ -2897,8 +2897,8 @@ async fn test_postgres_integration_suite() {
         .expect("list reaction role bindings in pg");
     assert_eq!(rr_list.len(), 1);
 
-    let original_rr_id = rr_binding.id;
-    let original_rr_created_at = rr_binding.created_at;
+    let original_rr_id = rr_created.id;
+    let original_rr_created_at = rr_created.created_at;
 
     // Upsert update (Issue #287)
     let mut rr_updated = rr_binding.clone();
@@ -3486,4 +3486,73 @@ async fn test_postgres_integration_suite() {
         .delete_sticky_message(sticky_guild, sticky_channel)
         .await
         .expect("delete final");
+
+    // 24. Telegram Bridge foreign key and ON DELETE CASCADE (#330)
+    let tg_guild = "666000000000000001";
+    let tg_channel = "666000000000000002";
+    let tg_bridge = store
+        .create_telegram_bridge(rusty_discord_bot::storage::TelegramBridge {
+            id: uuid::Uuid::new_v4(),
+            guild_id: tg_guild.to_string(),
+            telegram_chat_id: "-1007777777".to_string(),
+            discord_channel_id: tg_channel.to_string(),
+            secret_token: "pg_secret_bridge".to_string(),
+            paused: false,
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("create telegram bridge in pg");
+
+    // 24.1. FK violation: recording mapping with non-existent bridge_id fails
+    let orphan_mapping = rusty_discord_bot::storage::TelegramMessageMapping {
+        id: uuid::Uuid::new_v4(),
+        bridge_id: uuid::Uuid::new_v4(),
+        telegram_message_id: "tg_pg_orphan".to_string(),
+        discord_message_id: "dc_pg_orphan".to_string(),
+        direction: "telegram_to_discord".to_string(),
+        created_at: Utc::now(),
+    };
+    let orphan_res = store.record_telegram_message_mapping(orphan_mapping).await;
+    assert!(
+        orphan_res.is_err(),
+        "PostgreSQL must reject mapping with non-existent bridge_id due to foreign key"
+    );
+
+    // 24.2. Valid mapping succeeds
+    let valid_mapping = rusty_discord_bot::storage::TelegramMessageMapping {
+        id: uuid::Uuid::new_v4(),
+        bridge_id: tg_bridge.id,
+        telegram_message_id: "tg_pg_valid".to_string(),
+        discord_message_id: "dc_pg_valid".to_string(),
+        direction: "telegram_to_discord".to_string(),
+        created_at: Utc::now(),
+    };
+    let rec_res = store
+        .record_telegram_message_mapping(valid_mapping.clone())
+        .await
+        .expect("record valid telegram mapping in pg");
+    assert_eq!(rec_res.telegram_message_id, "tg_pg_valid");
+
+    let read_mapping = store
+        .get_telegram_message_mapping(tg_bridge.id, "tg_pg_valid", "telegram_to_discord")
+        .await
+        .expect("get mapping in pg")
+        .expect("mapping must exist");
+    assert_eq!(read_mapping.discord_message_id, "dc_pg_valid");
+
+    // 24.3. ON DELETE CASCADE: deleting bridge cleans up all mappings
+    let deleted_bridge = store
+        .delete_telegram_bridge(tg_bridge.id)
+        .await
+        .expect("delete telegram bridge in pg");
+    assert!(deleted_bridge);
+
+    let mapping_after_cascade = store
+        .get_telegram_message_mapping(tg_bridge.id, "tg_pg_valid", "telegram_to_discord")
+        .await
+        .expect("get mapping after bridge delete in pg");
+    assert!(
+        mapping_after_cascade.is_none(),
+        "PostgreSQL ON DELETE CASCADE must delete mappings when bridge is deleted"
+    );
 }
