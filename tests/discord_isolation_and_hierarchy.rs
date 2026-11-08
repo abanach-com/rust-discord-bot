@@ -7729,6 +7729,7 @@ async fn test_sticky_race_worker_stale_ok_none_does_not_clobber_invalidation_iss
     let pause = rusty_discord_bot::discord::sticky::StickyTestPause {
         worker_reached_ok_none: Arc::new(tokio::sync::Notify::new()),
         allow_worker_to_proceed: Arc::new(tokio::sync::Notify::new()),
+        ..Default::default()
     };
     state.sticky_coordinator.set_test_pause(pause.clone());
 
@@ -8071,6 +8072,142 @@ async fn test_sticky_cooldown_interrupted_by_web_config_mutation_or_deletion_iss
         state.sticky_coordinator.active_worker_count(),
         0,
         "Worker terminated cleanly on deletion signal without leaks"
+    );
+
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn test_sticky_config_change_and_deletion_not_lost_when_mpsc_queue_full_issue_325() {
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state_with_port(mock.port).await;
+
+    // 1. Configure sticky message on channel 101 with long cooldown (3600 seconds)
+    state
+        .storage
+        .set_sticky_message(
+            "100",
+            "101",
+            "",
+            "📌 Rules: Long 1-Hour Cooldown Before Queue Saturation!",
+            3600,
+        )
+        .await
+        .expect("set sticky message");
+
+    // 2. Setup deterministic pause hook to reliably catch worker entering cooldown
+    let pause = rusty_discord_bot::discord::sticky::StickyTestPause {
+        worker_entered_cooldown: Arc::new(tokio::sync::Notify::new()),
+        ..Default::default()
+    };
+    state.sticky_coordinator.set_test_pause(pause.clone());
+
+    // 3. Trigger initial sticky message delivery
+    state.sticky_coordinator.enqueue_refresh(
+        ctx.http.clone(),
+        GuildId::new(100),
+        ChannelId::new(101),
+        MessageId::new(8201),
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    {
+        let recorded = mock.recorded_calls.lock().await;
+        let posts: Vec<_> = recorded
+            .iter()
+            .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+            .collect();
+        assert_eq!(posts.len(), 1, "Initial sticky message delivered");
+    }
+
+    // 4. Send second message to enter cooldown
+    let cooldown_notified = pause.worker_entered_cooldown.notified();
+    state.sticky_coordinator.enqueue_refresh(
+        ctx.http.clone(),
+        GuildId::new(100),
+        ChannelId::new(101),
+        MessageId::new(8202),
+    );
+
+    // Wait until worker is deterministically inside cooldown sleep
+    cooldown_notified.await;
+    assert_eq!(state.sticky_coordinator.active_worker_count(), 1);
+
+    // 5. Flood the channel with 70 triggers to completely saturate mpsc buffer (capacity 64)
+    for i in 0..70 {
+        state.sticky_coordinator.enqueue_refresh(
+            ctx.http.clone(),
+            GuildId::new(100),
+            ChannelId::new(101),
+            MessageId::new(8210 + i),
+        );
+    }
+
+    // 6. While mpsc queue is 100% full, admin updates config via web:
+    // updates content and sets new config revision while retaining cooldown.
+    let re_entered_cooldown = pause.worker_entered_cooldown.notified();
+    state
+        .storage
+        .set_sticky_message(
+            "100",
+            "101",
+            "",
+            "📌 Rules: Updated Immediately Despite Full MPSC Queue!",
+            3600,
+        )
+        .await
+        .expect("set sticky message");
+
+    // Invalidate channel: watch channel must deliver notification even if mpsc is full
+    state.sticky_coordinator.invalidate_channel("100", "101");
+
+    // Worker must wake up immediately without waiting 3600s and re-enter cooldown after delivery
+    re_entered_cooldown.await;
+
+    {
+        let recorded = mock.recorded_calls.lock().await;
+        let posts: Vec<_> = recorded
+            .iter()
+            .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+            .collect();
+        assert_eq!(
+            posts.len(),
+            2,
+            "Worker woke up immediately despite full mpsc queue and delivered updated sticky"
+        );
+        assert!(
+            posts[1]
+                .1
+                .contains("Updated Immediately Despite Full MPSC Queue")
+        );
+    }
+
+    // 7. Verify deletion while worker is in cooldown with a fully saturated mpsc queue
+    // Flood mpsc queue again with 70 triggers
+    for i in 0..70 {
+        state.sticky_coordinator.enqueue_refresh(
+            ctx.http.clone(),
+            GuildId::new(100),
+            ChannelId::new(101),
+            MessageId::new(8310 + i),
+        );
+    }
+
+    // Admin deletes sticky while mpsc is completely full
+    state
+        .storage
+        .delete_sticky_message("100", "101")
+        .await
+        .expect("delete sticky");
+
+    state.sticky_coordinator.remove_channel("100", "101");
+
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    assert_eq!(
+        state.sticky_coordinator.active_worker_count(),
+        0,
+        "Worker terminated cleanly on deletion signal via watch channel even with full mpsc queue"
     );
 
     shard_manager.shutdown_all().await;
