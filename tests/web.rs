@@ -14695,3 +14695,374 @@ async fn test_sticky_messages_view_authorization_and_isolation_issue_320() {
         .unwrap();
     assert_eq!(err_get.status(), reqwest::StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn test_scrub_snapshot_pii_comprehensive_issue_328() {
+    use rusty_discord_bot::web::features::{is_sensitive_key, scrub_snapshot_pii};
+
+    // 1. Verify key sensitivity classifier
+    assert!(is_sensitive_key("token"));
+    assert!(is_sensitive_key("Token"));
+    assert!(is_sensitive_key("access_token"));
+    assert!(is_sensitive_key("accessToken"));
+    assert!(is_sensitive_key("refresh_token"));
+    assert!(is_sensitive_key("refreshToken"));
+    assert!(is_sensitive_key("client_secret"));
+    assert!(is_sensitive_key("clientSecret"));
+    assert!(is_sensitive_key("api_key"));
+    assert!(is_sensitive_key("apiKey"));
+    assert!(is_sensitive_key("webhookUrl"));
+    assert!(is_sensitive_key("webhook_url"));
+    assert!(is_sensitive_key("authorization"));
+    assert!(is_sensitive_key("password"));
+    assert!(is_sensitive_key("private_key"));
+    assert!(is_sensitive_key("bot_secret"));
+    assert!(is_sensitive_key("user_id"));
+    assert!(is_sensitive_key("stripe_api_key"));
+    assert!(is_sensitive_key("custom_token"));
+
+    // Safe structure keys must not be classified as sensitive
+    assert!(!is_sensitive_key("channels"));
+    assert!(!is_sensitive_key("roles"));
+    assert!(!is_sensitive_key("categories"));
+    assert!(!is_sensitive_key("name"));
+    assert!(!is_sensitive_key("type"));
+    assert!(!is_sensitive_key("permissions"));
+    assert!(!is_sensitive_key("color"));
+    assert!(!is_sensitive_key("modules"));
+    assert!(!is_sensitive_key("enabled"));
+
+    // 2. Multi-level nested object/array scrubbing
+    let mut payload = serde_json::json!({
+        "name": "configuration-import",
+        "channels": [
+            {
+                "name": "general",
+                "type": 0,
+                "token": "LEAKED_CHANNEL_TOKEN",
+                "webhook_url": "https://discord.invalid/webhook/1"
+            }
+        ],
+        "roles": [
+            {
+                "name": "Admin",
+                "permissions": "8",
+                "user_id": "123456789"
+            }
+        ],
+        "modules": {
+            "integrations": {
+                "token": "REDACTED_BY_CURRENT_CODE",
+                "access_token": "DEMO_ACCESS_NOT_REAL",
+                "refresh_token": "DEMO_REFRESH_NOT_REAL",
+                "client_secret": "DEMO_CLIENT_SECRET_NOT_REAL",
+                "api_key": "DEMO_API_KEY_NOT_REAL",
+                "webhookUrl": "https://example.invalid/demo",
+                "Authorization": "Bearer secret-val",
+                "nested_array": [
+                    {
+                        "Token": "UPPERCASE_TOKEN",
+                        "safe_field": "keep_this"
+                    }
+                ]
+            }
+        }
+    });
+
+    scrub_snapshot_pii(&mut payload);
+
+    let serialized = serde_json::to_string(&payload).unwrap();
+    assert!(!serialized.contains("LEAKED_CHANNEL_TOKEN"));
+    assert!(!serialized.contains("https://discord.invalid/webhook/1"));
+    assert!(!serialized.contains("123456789"));
+    assert!(!serialized.contains("REDACTED_BY_CURRENT_CODE"));
+    assert!(!serialized.contains("DEMO_ACCESS_NOT_REAL"));
+    assert!(!serialized.contains("DEMO_REFRESH_NOT_REAL"));
+    assert!(!serialized.contains("DEMO_CLIENT_SECRET_NOT_REAL"));
+    assert!(!serialized.contains("DEMO_API_KEY_NOT_REAL"));
+    assert!(!serialized.contains("https://example.invalid/demo"));
+    assert!(!serialized.contains("Bearer secret-val"));
+    assert!(!serialized.contains("UPPERCASE_TOKEN"));
+
+    // Safe fields must remain
+    assert!(payload["channels"][0]["name"] == "general");
+    assert!(payload["roles"][0]["name"] == "Admin");
+    assert!(payload["modules"]["integrations"]["nested_array"][0]["safe_field"] == "keep_this");
+}
+
+#[tokio::test]
+async fn test_snapshot_api_scrubbing_and_historic_record_isolation_issue_328() {
+    let mut config = test_config();
+    config.offline_mode = true;
+    let app = AppState::bootstrap(config).await.expect("bootstrap");
+    let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
+    let web_state = WebState {
+        app,
+        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        permissions_cache: permissions_cache.clone(),
+    };
+    web_state
+        .app
+        .is_gateway_ready
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind web listener");
+    let web_addr = web_listener.local_addr().expect("web addr");
+    let router = build_router(web_state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            web_listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{web_addr}");
+
+    let guild_id = "555000000000000001";
+    let foreign_guild_id = "666000000000000001";
+    let user_a_id = "555000000000000002";
+    let user_b_id = "555000000000000003";
+
+    let session_a = "session_user_a";
+    let csrf_a = "csrf_user_a";
+
+    let session_b = "session_user_b";
+    let csrf_b = "csrf_user_b";
+
+    // Setup session A with MANAGE_GUILD on guild_id
+    web_state
+        .app
+        .sessions
+        .save_session(
+            session_a,
+            DashboardUser {
+                id: user_a_id.to_string(),
+                username: "UserA".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Guild 555".to_string(),
+                icon: None,
+                owner: false,
+                permissions: "32".to_string(), // MANAGE_GUILD
+            }],
+            csrf_a.to_string(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Setup session B with MANAGE_GUILD on guild_id
+    web_state
+        .app
+        .sessions
+        .save_session(
+            session_b,
+            DashboardUser {
+                id: user_b_id.to_string(),
+                username: "UserB".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Guild 555".to_string(),
+                icon: None,
+                owner: false,
+                permissions: "32".to_string(), // MANAGE_GUILD
+            }],
+            csrf_b.to_string(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    permissions_cache.insert(
+        (user_a_id.to_string(), guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    permissions_cache.insert(
+        (user_b_id.to_string(), guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    let cookie_a = format!("rusty_discord_bot_session={session_a}");
+    let cookie_b = format!("rusty_discord_bot_session={session_b}");
+
+    // Test 1: User A creates snapshot containing sensitive tokens in snapshot_data
+    let create_payload = serde_json::json!({
+        "name": "Integration Snapshot With Secrets",
+        "snapshot_data": {
+            "channels": [{"name": "chat", "type": 0}],
+            "roles": [{"name": "Member", "permissions": "1"}],
+            "modules": {
+                "integrations": {
+                    "token": "BOT_SECRET_VAL",
+                    "access_token": "ACCESS_SECRET_VAL",
+                    "refresh_token": "REFRESH_SECRET_VAL",
+                    "client_secret": "CLIENT_SECRET_VAL",
+                    "api_key": "API_KEY_VAL",
+                    "webhookUrl": "https://discord.invalid/webhook/secret",
+                    "Authorization": "Bearer secret_header"
+                }
+            }
+        }
+    });
+
+    let create_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/snapshots"))
+        .header(COOKIE, &cookie_a)
+        .header("x-csrf-token", csrf_a)
+        .json(&create_payload)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(create_resp.status(), reqwest::StatusCode::OK);
+    let created_json: serde_json::Value = create_resp.json().await.unwrap();
+    let snapshot_id_str = created_json["id"].as_str().unwrap();
+    let snapshot_id = uuid::Uuid::parse_str(snapshot_id_str).unwrap();
+
+    // Verify response does not leak any secret
+    let response_str = serde_json::to_string(&created_json).unwrap();
+    assert!(!response_str.contains("ACCESS_SECRET_VAL"));
+    assert!(!response_str.contains("CLIENT_SECRET_VAL"));
+    assert!(!response_str.contains("API_KEY_VAL"));
+    assert!(!response_str.contains("https://discord.invalid/webhook/secret"));
+    assert!(!response_str.contains("Bearer secret_header"));
+
+    // Verify storage does not store the secrets
+    let stored = web_state
+        .app
+        .storage
+        .get_server_snapshot(snapshot_id)
+        .await
+        .unwrap()
+        .expect("stored snapshot");
+    let stored_str = serde_json::to_string(&stored.snapshot_json).unwrap();
+    assert!(!stored_str.contains("ACCESS_SECRET_VAL"));
+    assert!(!stored_str.contains("CLIENT_SECRET_VAL"));
+    assert!(!stored_str.contains("API_KEY_VAL"));
+
+    // Test 2: User B reads snapshot detail via GET -> secrets are absent
+    let get_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/snapshots/{snapshot_id}"
+        ))
+        .header(COOKIE, &cookie_b)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), reqwest::StatusCode::OK);
+    let get_json: serde_json::Value = get_resp.json().await.unwrap();
+    let get_str = serde_json::to_string(&get_json).unwrap();
+    assert!(!get_str.contains("ACCESS_SECRET_VAL"));
+    assert!(!get_str.contains("CLIENT_SECRET_VAL"));
+
+    // Test 3: Historic record with unscrubbed secrets directly placed in storage
+    // is scrubbed on read (GET /snapshots and GET /snapshots/{id})
+    let historic_raw = serde_json::json!({
+        "channels": [{"name": "archive", "type": 0}],
+        "legacy_creds": {
+            "access_token": "HISTORIC_ACCESS_TOKEN",
+            "client_secret": "HISTORIC_CLIENT_SECRET",
+            "apiKey": "HISTORIC_API_KEY"
+        }
+    });
+    let historic_snap = web_state
+        .app
+        .storage
+        .create_server_snapshot(
+            guild_id,
+            "Historic Unscrubbed Snapshot",
+            historic_raw,
+            user_a_id,
+        )
+        .await
+        .unwrap();
+
+    // Verify GET detail cleans historic record
+    let historic_get = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/snapshots/{}",
+            historic_snap.id
+        ))
+        .header(COOKIE, &cookie_a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(historic_get.status(), reqwest::StatusCode::OK);
+    let historic_json: serde_json::Value = historic_get.json().await.unwrap();
+    let historic_str = serde_json::to_string(&historic_json).unwrap();
+    assert!(!historic_str.contains("HISTORIC_ACCESS_TOKEN"));
+    assert!(!historic_str.contains("HISTORIC_CLIENT_SECRET"));
+    assert!(!historic_str.contains("HISTORIC_API_KEY"));
+    assert!(historic_json["snapshot_json"]["channels"][0]["name"] == "archive");
+
+    // Verify GET list cleans historic record
+    let list_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/snapshots"))
+        .header(COOKIE, &cookie_b)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_resp.status(), reqwest::StatusCode::OK);
+    let list_json: serde_json::Value = list_resp.json().await.unwrap();
+    let list_str = serde_json::to_string(&list_json).unwrap();
+    assert!(!list_str.contains("HISTORIC_ACCESS_TOKEN"));
+    assert!(!list_str.contains("HISTORIC_CLIENT_SECRET"));
+
+    // Test 4: Validation: empty name or non-object snapshot_data rejected with 400 Bad Request
+    let empty_name_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/snapshots"))
+        .header(COOKIE, &cookie_a)
+        .header("x-csrf-token", csrf_a)
+        .json(&serde_json::json!({
+            "name": "   ",
+            "snapshot_data": {}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(empty_name_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let invalid_data_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/snapshots"))
+        .header(COOKIE, &cookie_a)
+        .header("x-csrf-token", csrf_a)
+        .json(&serde_json::json!({
+            "name": "Valid Name",
+            "snapshot_data": "not a json object"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid_data_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Test 5: Authorization: foreign guild access forbidden
+    let foreign_get = client
+        .get(format!(
+            "{base_url}/api/guilds/{foreign_guild_id}/snapshots/{snapshot_id}"
+        ))
+        .header(COOKIE, &cookie_a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(foreign_get.status(), reqwest::StatusCode::FORBIDDEN);
+}

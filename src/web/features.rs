@@ -53,32 +53,31 @@ pub struct CreateSnapshotRequest {
 
 pub async fn list_snapshots(
     State(state): State<WebState>,
-
     Path(guild_id): Path<String>,
-
     headers: HeaderMap,
 ) -> Result<Json<Vec<ServerSnapshot>>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
 
     ensure_guild_access(&state, &session, &guild_id).await?;
 
-    let list = state
+    let mut list = state
         .app
         .storage
         .list_server_snapshots(&guild_id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
+    for snapshot in &mut list {
+        scrub_snapshot_pii(&mut snapshot.snapshot_json);
+    }
+
     Ok(Json(list))
 }
 
 pub async fn create_snapshot(
     State(state): State<WebState>,
-
     Path(guild_id): Path<String>,
-
     headers: HeaderMap,
-
     Json(payload): Json<CreateSnapshotRequest>,
 ) -> Result<Json<ServerSnapshot>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
@@ -87,36 +86,33 @@ pub async fn create_snapshot(
 
     ensure_guild_access(&state, &session, &guild_id).await?;
 
+    if payload.name.trim().is_empty() {
+        return Err(ApiError::bad_request("Snapshot name cannot be empty."));
+    }
+
+    if let Some(ref val) = payload.snapshot_data
+        && !val.is_object()
+    {
+        return Err(ApiError::bad_request("snapshot_data must be a JSON object"));
+    }
+
     let mut data = payload.snapshot_data.unwrap_or_else(|| {
         json!({
-
             "categories": ["General", "Staff", "Voice"],
-
             "channels": [
-
                 {"name": "welcome", "type": 0, "parent": "General"},
-
                 {"name": "rules", "type": 0, "parent": "General"},
-
                 {"name": "staff-chat", "type": 0, "parent": "Staff", "private": true}
-
             ],
-
             "roles": [
-
                 {"name": "@everyone", "permissions": "0"},
-
                 {"name": "Admin", "permissions": "8"}
-
             ],
-
             "modules": {"welcome": {"enabled": true}, "automod": {"enabled": true}}
-
         })
     });
 
     // Scrub PII, tokens, and webhooks
-
     scrub_snapshot_pii(&mut data);
 
     let snapshot = state
@@ -126,41 +122,107 @@ pub async fn create_snapshot(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    Ok(Json(snapshot))
+    let mut safe_snapshot = snapshot;
+    scrub_snapshot_pii(&mut safe_snapshot.snapshot_json);
+
+    Ok(Json(safe_snapshot))
 }
 
-fn scrub_snapshot_pii(val: &mut Value) {
-    if let Value::Object(map) = val {
-        map.remove("token");
+pub fn is_sensitive_key(key: &str) -> bool {
+    let norm: String = key
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
 
-        map.remove("webhook_url");
+    if norm.is_empty() {
+        return false;
+    }
 
-        map.remove("bot_secret");
+    const EXACT_MATCHES: &[&str] = &[
+        "token",
+        "tokens",
+        "accesstoken",
+        "refreshtoken",
+        "idtoken",
+        "authtoken",
+        "oauthtoken",
+        "clientsecret",
+        "botsecret",
+        "appsecret",
+        "sharedsecret",
+        "secret",
+        "secrets",
+        "apikey",
+        "apikeys",
+        "webhook",
+        "webhooks",
+        "webhookurl",
+        "webhookurls",
+        "authorization",
+        "auth",
+        "password",
+        "passwd",
+        "pwd",
+        "privatekey",
+        "privatekeys",
+        "privkey",
+        "certificate",
+        "cert",
+        "credentials",
+        "credential",
+        "userid",
+        "userids",
+    ];
 
-        map.remove("user_id");
+    if EXACT_MATCHES.contains(&norm.as_str()) {
+        return true;
+    }
 
-        for v in map.values_mut() {
-            scrub_snapshot_pii(v);
+    norm.ends_with("token")
+        || norm.ends_with("tokens")
+        || norm.ends_with("secret")
+        || norm.ends_with("secrets")
+        || norm.ends_with("apikey")
+        || norm.ends_with("apikeys")
+        || norm.ends_with("password")
+        || norm.ends_with("passwd")
+        || norm.ends_with("privatekey")
+        || norm.ends_with("webhookurl")
+        || norm.ends_with("userid")
+        || norm.contains("webhook")
+        || norm.contains("accesstoken")
+        || norm.contains("refreshtoken")
+        || norm.contains("clientsecret")
+}
+
+pub fn scrub_snapshot_pii(val: &mut Value) {
+    match val {
+        Value::Object(map) => {
+            map.retain(|k, _| !is_sensitive_key(k));
+            for v in map.values_mut() {
+                scrub_snapshot_pii(v);
+            }
         }
-    } else if let Value::Array(arr) = val {
-        for v in arr.iter_mut() {
-            scrub_snapshot_pii(v);
+        Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                scrub_snapshot_pii(v);
+            }
         }
+        _ => {}
     }
 }
 
 pub async fn get_snapshot(
     State(state): State<WebState>,
-
     Path((guild_id, snapshot_id)): Path<(String, Uuid)>,
-
     headers: HeaderMap,
 ) -> Result<Json<ServerSnapshot>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
 
     ensure_guild_access(&state, &session, &guild_id).await?;
 
-    let snapshot = state
+    let mut snapshot = state
         .app
         .storage
         .get_server_snapshot(snapshot_id)
@@ -173,6 +235,8 @@ pub async fn get_snapshot(
             "Snapshot does not belong to this guild.",
         ));
     }
+
+    scrub_snapshot_pii(&mut snapshot.snapshot_json);
 
     Ok(Json(snapshot))
 }
@@ -215,7 +279,7 @@ pub async fn diff_snapshot(
 
     ensure_guild_access(&state, &session, &guild_id).await?;
 
-    let snapshot = state
+    let mut snapshot = state
         .app
         .storage
         .get_server_snapshot(snapshot_id)
@@ -228,6 +292,8 @@ pub async fn diff_snapshot(
             "Snapshot does not belong to this guild.",
         ));
     }
+
+    scrub_snapshot_pii(&mut snapshot.snapshot_json);
 
     // Generate structural diff dynamically from snapshot data (#119)
 
@@ -298,7 +364,7 @@ pub async fn restore_snapshot(
 
     ensure_guild_access(&state, &session, &guild_id).await?;
 
-    let snapshot = state
+    let mut snapshot = state
         .app
         .storage
         .get_server_snapshot(snapshot_id)
@@ -311,6 +377,8 @@ pub async fn restore_snapshot(
             "Snapshot does not belong to this guild.",
         ));
     }
+
+    scrub_snapshot_pii(&mut snapshot.snapshot_json);
 
     // Controlled restore building dynamic ID remap table from actual snapshot (#119)
 
