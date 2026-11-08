@@ -7712,15 +7712,151 @@ async fn test_sticky_negative_caching_and_invalidation_issue_322() {
 
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 
-    let recorded_after = mock.recorded_calls.lock().await.clone();
-    let posts_after: Vec<_> = recorded_after
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn test_sticky_race_worker_stale_ok_none_does_not_clobber_invalidation_issue_323() {
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state_with_port(mock.port).await;
+
+    // 1. Channel 101 on Guild 100 has NO sticky message configured initially
+    assert_eq!(state.sticky_coordinator.negative_cache_len(), 0);
+
+    // 2. Setup deterministic pause hook: freeze worker right after receiving Ok(None)
+    let pause = rusty_discord_bot::discord::sticky::StickyTestPause {
+        worker_reached_ok_none: Arc::new(tokio::sync::Notify::new()),
+        allow_worker_to_proceed: Arc::new(tokio::sync::Notify::new()),
+    };
+    state.sticky_coordinator.set_test_pause(pause.clone());
+
+    // 3. Trigger worker via user message in unconfigured channel
+    state.sticky_coordinator.enqueue_refresh(
+        ctx.http.clone(),
+        GuildId::new(100),
+        ChannelId::new(101),
+        MessageId::new(7001),
+    );
+
+    // 4. Wait deterministically for worker to query DB, receive Ok(None), and pause
+    pause.worker_reached_ok_none.notified().await;
+
+    // 5. While worker is paused, admin configures sticky message and invalidates cache!
+    state
+        .storage
+        .set_sticky_message(
+            "100",
+            "101",
+            "",
+            "📌 Rules: Configured Concurrently With Stale Worker!",
+            1,
+        )
+        .await
+        .expect("set sticky message concurrently");
+
+    state.sticky_coordinator.invalidate_channel("100", "101");
+
+    // 6. Release the stale worker; it must NOT clobber the invalidation with MissingUntil!
+    pause.allow_worker_to_proceed.notify_one();
+
+    // Give worker time to complete exit
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Negative cache length must be 0 because the channel was invalidated, not marked missing
+    assert_eq!(
+        state.sticky_coordinator.negative_cache_len(),
+        0,
+        "Channel 101 must not be marked as missing after invalidation"
+    );
+
+    // 7. Next user message arrives: coordinator MUST spawn worker and deliver sticky message immediately!
+    state.sticky_coordinator.clear_test_pause();
+    state.sticky_coordinator.enqueue_refresh(
+        ctx.http.clone(),
+        GuildId::new(100),
+        ChannelId::new(101),
+        MessageId::new(7002),
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    // 8. Verify sticky message was posted with zero delay / no 60s lockout
+    let recorded = mock.recorded_calls.lock().await.clone();
+    let posts: Vec<_> = recorded
         .iter()
         .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
         .collect();
     assert_eq!(
-        posts_after.len(),
+        posts.len(),
         1,
-        "Sticky message posted immediately once configured and cache invalidated"
+        "Sticky message posted immediately without 60-second negative cache lockout"
+    );
+
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn test_sticky_reverse_order_invalidation_overwrites_existing_missing_entry_issue_323() {
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state_with_port(mock.port).await;
+
+    // 1. Channel 101 on Guild 100 has NO sticky message initially
+    state.sticky_coordinator.enqueue_refresh(
+        ctx.http.clone(),
+        GuildId::new(100),
+        ChannelId::new(101),
+        MessageId::new(8001),
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Verify channel is in negative cache
+    assert_eq!(
+        state.sticky_coordinator.negative_cache_len(),
+        1,
+        "Channel 101 is cached as missing"
+    );
+
+    // 2. Admin configures sticky message and invalidates cache
+    state
+        .storage
+        .set_sticky_message(
+            "100",
+            "101",
+            "",
+            "📌 Rules: Configured After MissingUntil!",
+            1,
+        )
+        .await
+        .expect("set sticky message");
+
+    state.sticky_coordinator.invalidate_channel("100", "101");
+
+    assert_eq!(
+        state.sticky_coordinator.negative_cache_len(),
+        0,
+        "MissingUntil entry overwritten by invalidation"
+    );
+
+    // 3. Next message immediately delivers sticky
+    state.sticky_coordinator.enqueue_refresh(
+        ctx.http.clone(),
+        GuildId::new(100),
+        ChannelId::new(101),
+        MessageId::new(8002),
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    let recorded = mock.recorded_calls.lock().await.clone();
+    let posts: Vec<_> = recorded
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+        .collect();
+    assert_eq!(
+        posts.len(),
+        1,
+        "Sticky message delivered immediately on next message after invalidation"
     );
 
     shard_manager.shutdown_all().await;

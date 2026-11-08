@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -7,10 +10,23 @@ use serenity::all::{
     Channel, ChannelId, ChannelType, CreateAllowedMentions, CreateMessage, GuildId, Http,
     MessageId, Permissions,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use uuid::Uuid;
 
 use crate::storage::Storage;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StickyCacheEntry {
+    MissingUntil(std::time::Instant),
+    InvalidatedUntil(std::time::Instant),
+}
+
+#[doc(hidden)]
+#[derive(Clone, Default)]
+pub struct StickyTestPause {
+    pub worker_reached_ok_none: Arc<Notify>,
+    pub allow_worker_to_proceed: Arc<Notify>,
+}
 
 #[derive(Clone, Debug)]
 pub struct StickyRefresh {
@@ -25,10 +41,30 @@ struct WorkerHandle {
     tx: mpsc::Sender<MessageId>,
 }
 
+#[derive(Clone)]
+struct WorkerEnv {
+    storage: Storage,
+    channel_senders: Arc<DashMap<(GuildId, ChannelId), WorkerHandle>>,
+    negative_cache: Arc<DashMap<(GuildId, ChannelId), StickyCacheEntry>>,
+    test_pause: Arc<RwLock<Option<StickyTestPause>>>,
+}
+
+/// Coordinates sticky message delivery across channels within a single bot process.
+///
+/// # Concurrency & Multi-Process Model
+/// Negative caching uses a two-state token ([`StickyCacheEntry::MissingUntil`] vs
+/// [`StickyCacheEntry::InvalidatedUntil`]) to guarantee that concurrent local web mutations
+/// (`set_sticky`) are never overwritten by stale worker reads (`Ok(None)`).
+/// In a single-process deployment (or per-shard bot process), invalidations take effect immediately.
+/// For clustered / multi-process bot deployments sharing a PostgreSQL database, cache invalidation
+/// across independent process boundaries relies on the maximum 60-second TTL bound, or can be
+/// augmented with PostgreSQL LISTEN/NOTIFY.
 pub struct StickyCoordinator {
     storage: Storage,
     channel_senders: Arc<DashMap<(GuildId, ChannelId), WorkerHandle>>,
-    negative_until: Arc<DashMap<(GuildId, ChannelId), std::time::Instant>>,
+    negative_cache: Arc<DashMap<(GuildId, ChannelId), StickyCacheEntry>>,
+    #[doc(hidden)]
+    test_pause: Arc<RwLock<Option<StickyTestPause>>>,
 }
 
 impl StickyCoordinator {
@@ -36,7 +72,8 @@ impl StickyCoordinator {
         Self {
             storage,
             channel_senders: Arc::new(DashMap::new()),
-            negative_until: Arc::new(DashMap::new()),
+            negative_cache: Arc::new(DashMap::new()),
+            test_pause: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -45,14 +82,35 @@ impl StickyCoordinator {
     }
 
     pub fn negative_cache_len(&self) -> usize {
-        self.negative_until.len()
+        let now = std::time::Instant::now();
+        self.negative_cache
+            .iter()
+            .filter(|entry| match entry.value() {
+                StickyCacheEntry::MissingUntil(expiry) => *expiry > now,
+                StickyCacheEntry::InvalidatedUntil(_) => false,
+            })
+            .count()
     }
 
     pub fn invalidate_channel(&self, guild_id: &str, channel_id: &str) {
         if let (Ok(gid), Ok(cid)) = (guild_id.parse::<u64>(), channel_id.parse::<u64>()) {
             let key = (GuildId::new(gid), ChannelId::new(cid));
-            self.negative_until.remove(&key);
+            let now = std::time::Instant::now();
+            self.negative_cache.insert(
+                key,
+                StickyCacheEntry::InvalidatedUntil(now + Duration::from_secs(60)),
+            );
         }
+    }
+
+    #[doc(hidden)]
+    pub fn set_test_pause(&self, pause: StickyTestPause) {
+        *self.test_pause.write().unwrap() = Some(pause);
+    }
+
+    #[doc(hidden)]
+    pub fn clear_test_pause(&self) {
+        *self.test_pause.write().unwrap() = None;
     }
 
     pub fn enqueue_refresh(
@@ -66,17 +124,31 @@ impl StickyCoordinator {
 
         // Fast-path: Check negative cache (channels known not to have sticky messages)
         let now = std::time::Instant::now();
-        if let Some(expiry) = self.negative_until.get(&key) {
-            if *expiry > now {
-                return;
+        if let Some(entry) = self.negative_cache.get(&key) {
+            match *entry {
+                StickyCacheEntry::MissingUntil(expiry) => {
+                    if expiry > now {
+                        return;
+                    }
+                    drop(entry);
+                    self.negative_cache.remove(&key);
+                }
+                StickyCacheEntry::InvalidatedUntil(expiry) => {
+                    if expiry <= now {
+                        drop(entry);
+                        self.negative_cache.remove(&key);
+                    }
+                    // InvalidatedUntil forces normal worker execution; do not return early
+                }
             }
-            drop(expiry);
-            self.negative_until.remove(&key);
         }
 
         // Opportunistic cleanup of negative cache if it grows large
-        if self.negative_until.len() >= 4096 {
-            self.negative_until.retain(|_, expiry| *expiry > now);
+        if self.negative_cache.len() >= 4096 {
+            self.negative_cache.retain(|_, entry| match entry {
+                StickyCacheEntry::MissingUntil(expiry) => *expiry > now,
+                StickyCacheEntry::InvalidatedUntil(expiry) => *expiry > now,
+            });
         }
 
         use dashmap::mapref::entry::Entry;
@@ -103,20 +175,14 @@ impl StickyCoordinator {
         };
 
         if let Some((rx, owner_id)) = spawn_info {
-            let storage = self.storage.clone();
-            let channel_senders = self.channel_senders.clone();
-            let negative_until = self.negative_until.clone();
+            let env = WorkerEnv {
+                storage: self.storage.clone(),
+                channel_senders: self.channel_senders.clone(),
+                negative_cache: self.negative_cache.clone(),
+                test_pause: self.test_pause.clone(),
+            };
             tokio::spawn(async move {
-                run_channel_worker(
-                    key,
-                    owner_id,
-                    rx,
-                    http,
-                    storage,
-                    channel_senders,
-                    negative_until,
-                )
-                .await;
+                run_channel_worker(key, owner_id, rx, http, env).await;
             });
         }
     }
@@ -125,7 +191,7 @@ impl StickyCoordinator {
         if let (Ok(gid), Ok(cid)) = (guild_id.parse::<u64>(), channel_id.parse::<u64>()) {
             let key = (GuildId::new(gid), ChannelId::new(cid));
             self.channel_senders.remove(&key);
-            self.negative_until.remove(&key);
+            self.negative_cache.remove(&key);
         }
     }
 }
@@ -217,9 +283,7 @@ async fn run_channel_worker(
     owner_id: Uuid,
     mut rx: mpsc::Receiver<MessageId>,
     http: Arc<Http>,
-    storage: Storage,
-    channel_senders: Arc<DashMap<(GuildId, ChannelId), WorkerHandle>>,
-    negative_until: Arc<DashMap<(GuildId, ChannelId), std::time::Instant>>,
+    env: WorkerEnv,
 ) {
     let gid_str = key.0.get().to_string();
     let cid_str = key.1.get().to_string();
@@ -237,19 +301,64 @@ async fn run_channel_worker(
         let mut delivery_attempts = 0;
         while delivery_attempts < 3 {
             // 1. Fetch current sticky configuration
-            let sticky = match storage.get_sticky_message(&gid_str, &cid_str).await {
-                Ok(Some(s)) => s,
+            let sticky = match env.storage.get_sticky_message(&gid_str, &cid_str).await {
+                Ok(Some(s)) => {
+                    // Successful read of configured sticky message: clear any lingering InvalidatedUntil token
+                    if let Some(entry) = env.negative_cache.get(&key)
+                        && matches!(*entry, StickyCacheEntry::InvalidatedUntil(_))
+                    {
+                        drop(entry);
+                        env.negative_cache.remove(&key);
+                    }
+                    s
+                }
                 Ok(None) => {
-                    // No sticky configured for this channel: cache negative result for 60s
-                    negative_until.insert(key, std::time::Instant::now() + Duration::from_secs(60));
-                    channel_senders.remove_if(&key, |_, h| h.owner_id == owner_id);
+                    // Test hook: allow test to freeze worker right after receiving Ok(None)
+                    let pause_hook = env.test_pause.read().unwrap().clone();
+                    if let Some(pause) = pause_hook {
+                        pause.worker_reached_ok_none.notify_one();
+                        pause.allow_worker_to_proceed.notified().await;
+                    }
+
+                    // No sticky configured for this channel: atomically insert MissingUntil only if not InvalidatedUntil
+                    use dashmap::mapref::entry::Entry;
+                    let now = std::time::Instant::now();
+                    match env.negative_cache.entry(key) {
+                        Entry::Occupied(mut occ) => {
+                            match *occ.get() {
+                                StickyCacheEntry::InvalidatedUntil(expiry) if expiry > now => {
+                                    // An invalidation occurred while this worker was fetching from DB.
+                                    // Do NOT overwrite with MissingUntil!
+                                    // If we received another trigger message in the meantime, loop to deliver immediately.
+                                    if let Ok(next_trigger) = rx.try_recv() {
+                                        trigger_id = next_trigger;
+                                        continue;
+                                    }
+                                }
+                                _ => {
+                                    occ.insert(StickyCacheEntry::MissingUntil(
+                                        now + Duration::from_secs(60),
+                                    ));
+                                }
+                            }
+                        }
+                        Entry::Vacant(vac) => {
+                            vac.insert(StickyCacheEntry::MissingUntil(
+                                now + Duration::from_secs(60),
+                            ));
+                        }
+                    }
+
+                    env.channel_senders
+                        .remove_if(&key, |_, h| h.owner_id == owner_id);
                     return;
                 }
                 Err(err) => {
                     tracing::error!(
                         "Database error fetching sticky message for {gid_str}/{cid_str}: {err}"
                     );
-                    channel_senders.remove_if(&key, |_, h| h.owner_id == owner_id);
+                    env.channel_senders
+                        .remove_if(&key, |_, h| h.owner_id == owner_id);
                     return;
                 }
             };
@@ -286,7 +395,8 @@ async fn run_channel_worker(
                         }
 
                         if channel_closed {
-                            channel_senders.remove_if(&key, |_, h| h.owner_id == owner_id);
+                            env.channel_senders
+                                .remove_if(&key, |_, h| h.owner_id == owner_id);
                             return;
                         }
 
@@ -322,7 +432,8 @@ async fn run_channel_worker(
 
             // 5. Commit delivery state to storage with optimistic concurrency control (CAS)
             let now = Utc::now();
-            let commit_res = storage
+            let commit_res = env
+                .storage
                 .update_sticky_posted_message(
                     &gid_str,
                     &cid_str,
@@ -378,5 +489,6 @@ async fn run_channel_worker(
     }
 
     // Worker timed out or channel closed; clean up only if still registered owner
-    channel_senders.remove_if(&key, |_, h| h.owner_id == owner_id);
+    env.channel_senders
+        .remove_if(&key, |_, h| h.owner_id == owner_id);
 }
