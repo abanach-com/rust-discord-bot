@@ -403,11 +403,13 @@ async fn mock_discord_handler(
     // Send Message: POST /api/v10/channels/{channel_id}/messages
 
     if method == Method::POST && path.contains("/messages") {
+        let count = mock.modifying_requests_count.load(Ordering::SeqCst);
+        let msg_id = format!("900000000000000{:03}", count);
         return (
             StatusCode::OK,
             Json(json!({
 
-                "id": "900000000000000001",
+                "id": msg_id,
 
                 "channel_id": "101",
 
@@ -6652,6 +6654,446 @@ async fn test_web_broadcast_destination_channel_authorization_suite() {
     let body_admin: serde_json::Value = resp_admin.json().await.unwrap();
     assert_eq!(body_admin["success_count"], 2);
     assert_eq!(body_admin["failure_count"], 0);
+
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn test_sticky_messages_end_to_end_delivery_and_anti_recursion() {
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state_with_port(mock.port).await;
+    let handler = Handler::new(state.clone());
+
+    // 1. Configure sticky message on channel 101 in guild 100 with cooldown 5s
+    state
+        .storage
+        .set_sticky_message(
+            "100",
+            "101",
+            "",
+            "📌 Important Server Rules: Be respectful to all members!",
+            5,
+        )
+        .await
+        .expect("set sticky message");
+
+    let initial = state
+        .storage
+        .get_sticky_message("100", "101")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(initial.last_posted_message_id, None);
+    assert_eq!(initial.last_bumped_at, None);
+    assert_eq!(initial.generation, 0);
+
+    // Step A: Member sends a normal message in channel 101
+    let member_msg: Message = serde_json::from_value(json!({
+        "id": "111000000000000001",
+        "channel_id": "101",
+        "guild_id": "100",
+        "author": {
+            "id": "222222222222222222",
+            "username": "NormalUser",
+            "discriminator": "0000",
+            "avatar": null,
+            "bot": false,
+        },
+        "content": "Hello world from member!",
+        "timestamp": "2026-11-08T07:00:00Z",
+        "tts": false,
+        "mention_everyone": false,
+        "mentions": [],
+        "mention_roles": [],
+        "attachments": [],
+        "embeds": [],
+        "pinned": false,
+        "type": 0,
+    }))
+    .expect("deserialize member_msg");
+
+    handler.message(ctx.clone(), member_msg).await;
+
+    // Wait for channel worker to deliver
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Verify: Exactly 1 POST /channels/101/messages was dispatched
+    let recorded = mock.recorded_calls.lock().await.clone();
+    let channel_101_posts: Vec<_> = recorded
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+        .collect();
+    assert_eq!(
+        channel_101_posts.len(),
+        1,
+        "Exactly 1 sticky message should be posted to channel 101"
+    );
+
+    // Verify content and safe mentions (no @everyone or user pings)
+    let post_body = &channel_101_posts[0].1;
+    assert!(post_body.contains("Important Server Rules"));
+    assert!(post_body.contains("\"allowed_mentions\""));
+
+    // Verify storage was committed with live message ID from mock
+    let updated = state
+        .storage
+        .get_sticky_message("100", "101")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        updated.last_posted_message_id.as_deref(),
+        Some("900000000000000001")
+    );
+    assert_eq!(updated.message_id, "900000000000000001");
+    assert!(updated.last_bumped_at.is_some());
+    assert!(updated.generation >= 1);
+
+    // Step B: Bot message in channel 101 MUST NOT trigger recursion
+    let bot_msg: Message = serde_json::from_value(json!({
+        "id": "900000000000000001",
+        "channel_id": "101",
+        "guild_id": "100",
+        "author": {
+            "id": "999999999999999999",
+            "username": "MockBot",
+            "discriminator": "0000",
+            "avatar": null,
+            "bot": true,
+        },
+        "content": "📌 Important Server Rules: Be respectful to all members!",
+        "timestamp": "2026-11-08T07:00:01Z",
+        "tts": false,
+        "mention_everyone": false,
+        "mentions": [],
+        "mention_roles": [],
+        "attachments": [],
+        "embeds": [],
+        "pinned": false,
+        "type": 0,
+    }))
+    .expect("deserialize bot_msg");
+
+    handler.message(ctx.clone(), bot_msg).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Check that no additional message was posted
+    let recorded_after_bot = mock.recorded_calls.lock().await.clone();
+    let posts_after_bot: Vec<_> = recorded_after_bot
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+        .collect();
+    assert_eq!(
+        posts_after_bot.len(),
+        1,
+        "Bot messages must NOT trigger recursive sticky refresh"
+    );
+
+    // Step C: Burst of 30 member messages within cooldown window
+    for i in 2..=31 {
+        let burst_msg: Message = serde_json::from_value(json!({
+            "id": format!("1110000000000000{:02}", i),
+            "channel_id": "101",
+            "guild_id": "100",
+            "author": {
+                "id": "222222222222222222",
+                "username": "NormalUser",
+                "discriminator": "0000",
+                "avatar": null,
+                "bot": false,
+            },
+            "content": format!("Chatter message {i}"),
+            "timestamp": "2026-11-08T07:00:02Z",
+            "tts": false,
+            "mention_everyone": false,
+            "mentions": [],
+            "mention_roles": [],
+            "attachments": [],
+            "embeds": [],
+            "pinned": false,
+            "type": 0,
+        }))
+        .expect("deserialize burst_msg");
+
+        handler.message(ctx.clone(), burst_msg).await;
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    // Verify: across all 30 messages in burst, total posts is STILL exactly 1!
+    let recorded_after_burst = mock.recorded_calls.lock().await.clone();
+    let posts_after_burst: Vec<_> = recorded_after_burst
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+        .collect();
+    assert_eq!(
+        posts_after_burst.len(),
+        1,
+        "Burst of 30 messages within cooldown must result in AT MOST 1 delivery"
+    );
+
+    // Step D: Message after cooldown expires triggers refresh and deletes old message
+    let past_time = chrono::Utc::now() - chrono::Duration::seconds(15);
+    state
+        .storage
+        .update_sticky_posted_message("100", "101", "900000000000000001", past_time)
+        .await
+        .unwrap();
+
+    let post_cooldown_msg: Message = serde_json::from_value(json!({
+        "id": "111000000000000032",
+        "channel_id": "101",
+        "guild_id": "100",
+        "author": {
+            "id": "222222222222222222",
+            "username": "NormalUser",
+            "discriminator": "0000",
+            "avatar": null,
+            "bot": false,
+        },
+        "content": "Message after cooldown elapsed!",
+        "timestamp": "2026-11-08T07:00:20Z",
+        "tts": false,
+        "mention_everyone": false,
+        "mentions": [],
+        "mention_roles": [],
+        "attachments": [],
+        "embeds": [],
+        "pinned": false,
+        "type": 0,
+    }))
+    .expect("deserialize post_cooldown_msg");
+
+    handler.message(ctx.clone(), post_cooldown_msg).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let recorded_after_refresh = mock.recorded_calls.lock().await.clone();
+    let posts_after_refresh: Vec<_> = recorded_after_refresh
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+        .collect();
+    assert_eq!(
+        posts_after_refresh.len(),
+        2,
+        "New user message after cooldown must refresh the sticky message"
+    );
+
+    // Verify old sticky message was deleted
+    let deletes_recorded: Vec<_> = recorded_after_refresh
+        .iter()
+        .filter(|(m, p)| {
+            *m == Method::DELETE && p.contains("/channels/101/messages/900000000000000001")
+        })
+        .collect();
+    assert_eq!(
+        deletes_recorded.len(),
+        1,
+        "Old sticky message must be deleted when sticky message is refreshed"
+    );
+
+    // Step E: After DELETE /sticky/101, subsequent messages produce 0 deliveries
+    state
+        .storage
+        .delete_sticky_message("100", "101")
+        .await
+        .unwrap();
+    state.sticky_coordinator.remove_channel("100", "101");
+
+    let post_delete_msg: Message = serde_json::from_value(json!({
+        "id": "111000000000000033",
+        "channel_id": "101",
+        "guild_id": "100",
+        "author": {
+            "id": "222222222222222222",
+            "username": "NormalUser",
+            "discriminator": "0000",
+            "avatar": null,
+            "bot": false,
+        },
+        "content": "Message after sticky deleted!",
+        "timestamp": "2026-11-08T07:00:25Z",
+        "tts": false,
+        "mention_everyone": false,
+        "mentions": [],
+        "mention_roles": [],
+        "attachments": [],
+        "embeds": [],
+        "pinned": false,
+        "type": 0,
+    }))
+    .expect("deserialize post_delete_msg");
+
+    handler.message(ctx.clone(), post_delete_msg).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let recorded_final = mock.recorded_calls.lock().await.clone();
+    let posts_final: Vec<_> = recorded_final
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+        .collect();
+    assert_eq!(
+        posts_final.len(),
+        2,
+        "No new sticky deliveries after configuration was deleted"
+    );
+
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn test_sticky_messages_channel_guards_and_permissions() {
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state_with_port(mock.port).await;
+    let handler = Handler::new(state.clone());
+
+    // 1. Channel 401: Category channel guard
+    state
+        .storage
+        .set_sticky_message("100", "401", "", "Sticky in category", 5)
+        .await
+        .unwrap();
+
+    let cat_msg: Message = serde_json::from_value(json!({
+        "id": "111000000000000401",
+        "channel_id": "401",
+        "guild_id": "100",
+        "author": {
+            "id": "222222222222222222",
+            "username": "NormalUser",
+            "discriminator": "0000",
+            "avatar": null,
+            "bot": false,
+        },
+        "content": "Message in category channel",
+        "timestamp": "2026-11-08T07:00:00Z",
+        "tts": false,
+        "mention_everyone": false,
+        "mentions": [],
+        "mention_roles": [],
+        "attachments": [],
+        "embeds": [],
+        "pinned": false,
+        "type": 0,
+    }))
+    .unwrap();
+    handler.message(ctx.clone(), cat_msg).await;
+
+    // 2. Channel 201: Cross-guild isolation (belongs to guild 200, but configured in 100)
+    state
+        .storage
+        .set_sticky_message("100", "201", "", "Sticky cross guild", 5)
+        .await
+        .unwrap();
+
+    let cross_msg: Message = serde_json::from_value(json!({
+        "id": "111000000000000201",
+        "channel_id": "201",
+        "guild_id": "100",
+        "author": {
+            "id": "222222222222222222",
+            "username": "NormalUser",
+            "discriminator": "0000",
+            "avatar": null,
+            "bot": false,
+        },
+        "content": "Message targeting foreign channel",
+        "timestamp": "2026-11-08T07:00:00Z",
+        "tts": false,
+        "mention_everyone": false,
+        "mentions": [],
+        "mention_roles": [],
+        "attachments": [],
+        "embeds": [],
+        "pinned": false,
+        "type": 0,
+    }))
+    .unwrap();
+    handler.message(ctx.clone(), cross_msg).await;
+
+    // 3. Channel 999: Non-existent channel (returns 404 from Discord)
+    state
+        .storage
+        .set_sticky_message("100", "999", "", "Sticky missing channel", 5)
+        .await
+        .unwrap();
+
+    let missing_msg: Message = serde_json::from_value(json!({
+        "id": "111000000000000999",
+        "channel_id": "999",
+        "guild_id": "100",
+        "author": {
+            "id": "222222222222222222",
+            "username": "NormalUser",
+            "discriminator": "0000",
+            "avatar": null,
+            "bot": false,
+        },
+        "content": "Message in 404 channel",
+        "timestamp": "2026-11-08T07:00:00Z",
+        "tts": false,
+        "mention_everyone": false,
+        "mentions": [],
+        "mention_roles": [],
+        "attachments": [],
+        "embeds": [],
+        "pinned": false,
+        "type": 0,
+    }))
+    .unwrap();
+    handler.message(ctx.clone(), missing_msg).await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    let recorded = mock.recorded_calls.lock().await.clone();
+
+    // Verify 0 deliveries to category 401
+    assert!(
+        recorded
+            .iter()
+            .all(|(m, p)| !(*m == Method::POST && p.contains("/channels/401/messages"))),
+        "Category channel must NOT receive sticky deliveries"
+    );
+
+    // Verify 0 deliveries to foreign channel 201
+    assert!(
+        recorded
+            .iter()
+            .all(|(m, p)| !(*m == Method::POST && p.contains("/channels/201/messages"))),
+        "Cross-guild channel must NOT receive sticky deliveries"
+    );
+
+    // Verify 0 deliveries to missing channel 999
+    assert!(
+        recorded
+            .iter()
+            .all(|(m, p)| !(*m == Method::POST && p.contains("/channels/999/messages"))),
+        "404 channel must NOT receive sticky deliveries"
+    );
+
+    // Verify none of the rejected channels have confirmed delivery state
+    let cat_state = state
+        .storage
+        .get_sticky_message("100", "401")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cat_state.last_posted_message_id, None);
+
+    let cross_state = state
+        .storage
+        .get_sticky_message("100", "201")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cross_state.last_posted_message_id, None);
+
+    let missing_state = state
+        .storage
+        .get_sticky_message("100", "999")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(missing_state.last_posted_message_id, None);
 
     shard_manager.shutdown_all().await;
 }

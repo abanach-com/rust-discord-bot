@@ -1618,6 +1618,11 @@ impl MemoryStore {
 
         cooldown_seconds: i32,
     ) -> StickyMessage {
+        let key = (guild_id.to_owned(), channel_id.to_owned());
+        let (old_last_posted, old_gen) = match self.sticky_messages.get(&key) {
+            Some(e) => (e.last_posted_message_id.clone(), e.generation + 1),
+            None => (None, 0),
+        };
         let entry = StickyMessage {
             guild_id: guild_id.to_owned(),
 
@@ -1630,12 +1635,36 @@ impl MemoryStore {
             cooldown_seconds,
 
             last_updated_at: Utc::now(),
+
+            last_posted_message_id: old_last_posted,
+
+            last_bumped_at: None,
+
+            generation: old_gen,
         };
 
-        self.sticky_messages
-            .insert((guild_id.to_owned(), channel_id.to_owned()), entry.clone());
+        self.sticky_messages.insert(key, entry.clone());
 
         entry
+    }
+
+    pub fn update_sticky_posted_message(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        posted_message_id: &str,
+        bumped_at: DateTime<Utc>,
+    ) -> Option<StickyMessage> {
+        let key = (guild_id.to_owned(), channel_id.to_owned());
+        if let Some(mut entry) = self.sticky_messages.get_mut(&key) {
+            entry.last_posted_message_id = Some(posted_message_id.to_owned());
+            entry.message_id = posted_message_id.to_owned();
+            entry.last_bumped_at = Some(bumped_at);
+            entry.generation += 1;
+            Some(entry.clone())
+        } else {
+            None
+        }
     }
 
     pub fn delete_sticky_message(&self, guild_id: &str, channel_id: &str) -> bool {

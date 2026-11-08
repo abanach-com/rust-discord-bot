@@ -253,6 +253,16 @@ pub struct StickyMessage {
     pub cooldown_seconds: i32,
 
     pub last_updated_at: DateTime<Utc>,
+
+    #[serde(default)]
+    pub last_posted_message_id: Option<String>,
+
+    #[serde(default)]
+    pub last_bumped_at: Option<DateTime<Utc>>,
+
+    #[serde(default)]
+    #[sqlx(default)]
+    pub generation: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -2499,6 +2509,33 @@ impl Storage {
             Self::Memory(store) => Ok(store.delete_sticky_message(guild_id, channel_id)),
 
             Self::Postgres(store) => store.delete_sticky_message(guild_id, channel_id).await,
+        }
+    }
+
+    pub async fn update_sticky_posted_message(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        posted_message_id: &str,
+        bumped_at: DateTime<Utc>,
+    ) -> anyhow::Result<Option<StickyMessage>> {
+        match self {
+            Self::Memory(store) => Ok(store.update_sticky_posted_message(
+                guild_id,
+                channel_id,
+                posted_message_id,
+                bumped_at,
+            )),
+            Self::Postgres(store) => {
+                store
+                    .update_sticky_posted_message(
+                        guild_id,
+                        channel_id,
+                        posted_message_id,
+                        bumped_at,
+                    )
+                    .await
+            }
         }
     }
 

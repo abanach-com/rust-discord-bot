@@ -14053,3 +14053,219 @@ async fn test_recruitment_track_concurrency_and_slug_uniqueness_suite() {
             .contains("belongs to another guild")
     );
 }
+
+#[tokio::test]
+async fn test_sticky_messages_validation_and_crud() {
+    let (state, perms_cache) = test_web_state().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+
+    let guild_id = "100000000000000001";
+    let user_id = "200000000000000001";
+    let session_id = "test_sticky_web_session";
+    let csrf_token = "csrf_sticky_token";
+
+    state
+        .app
+        .sessions
+        .save_session(
+            session_id,
+            DashboardUser {
+                id: user_id.to_string(),
+                username: "StickyTester".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Sticky Guild".to_string(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_string(),
+            }],
+            csrf_token.to_string(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    perms_cache.insert(
+        (user_id.to_string(), guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    let session_cookie = format!("rusty_discord_bot_session={session_id}");
+
+    // 1. Invalid snowflake channel_id -> 400 Bad Request
+    let bad_chan_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/sticky"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "channel_id": "non_snowflake_chan",
+            "content": "Valid content",
+            "cooldown_seconds": 5
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_chan_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 2. Cooldown <= 0 -> 400 Bad Request
+    let zero_cd_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/sticky"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "channel_id": "111000000000000101",
+            "content": "Valid content",
+            "cooldown_seconds": 0
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(zero_cd_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let neg_cd_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/sticky"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "channel_id": "111000000000000101",
+            "content": "Valid content",
+            "cooldown_seconds": -10
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(neg_cd_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 3. Cooldown > 86400 -> 400 Bad Request
+    let huge_cd_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/sticky"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "channel_id": "111000000000000101",
+            "content": "Valid content",
+            "cooldown_seconds": 100_000
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(huge_cd_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 4. Empty content -> 400 Bad Request
+    let empty_content_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/sticky"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "channel_id": "111000000000000101",
+            "content": "   ",
+            "cooldown_seconds": 5
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        empty_content_resp.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+
+    // 5. Content > 2000 chars -> 400 Bad Request
+    let long_content = "a".repeat(2001);
+    let long_content_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/sticky"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "channel_id": "111000000000000101",
+            "content": long_content,
+            "cooldown_seconds": 5
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(long_content_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 6. Valid sticky configuration -> 200 OK
+    let valid_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/sticky"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "channel_id": "111000000000000101",
+            "content": "Proper Sticky Message",
+            "cooldown_seconds": 15
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(valid_resp.status(), reqwest::StatusCode::OK);
+    let valid_json: serde_json::Value = valid_resp.json().await.unwrap();
+    assert_eq!(valid_json["channel_id"], "111000000000000101");
+    assert_eq!(valid_json["content"], "Proper Sticky Message");
+    assert_eq!(valid_json["cooldown_seconds"], 15);
+
+    // 7. GET sticky -> 200 OK
+    let get_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/sticky/111000000000000101"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), reqwest::StatusCode::OK);
+    let get_json: serde_json::Value = get_resp.json().await.unwrap();
+    assert_eq!(get_json["channel_id"], "111000000000000101");
+    assert_eq!(get_json["content"], "Proper Sticky Message");
+
+    // 8. DELETE sticky -> 200 OK
+    let del_resp = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/sticky/111000000000000101"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del_resp.status(), reqwest::StatusCode::OK);
+    let del_json: serde_json::Value = del_resp.json().await.unwrap();
+    assert_eq!(del_json["deleted"], true);
+
+    // 9. GET after DELETE returns null
+    let get_after_del = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/sticky/111000000000000101"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_after_del.status(), reqwest::StatusCode::OK);
+    let get_after_json: serde_json::Value = get_after_del.json().await.unwrap();
+    assert!(get_after_json.is_null());
+}

@@ -2140,7 +2140,8 @@ impl PostgresStore {
         let row = sqlx::query_as::<_, StickyMessage>(
             r#"
 
-            SELECT guild_id, channel_id, message_id, content, cooldown_seconds, last_updated_at
+            SELECT guild_id, channel_id, message_id, content, cooldown_seconds, last_updated_at,
+                   last_posted_message_id, last_bumped_at, generation
 
             FROM sticky_messages
 
@@ -2172,37 +2173,61 @@ impl PostgresStore {
         let now = Utc::now();
 
         let rec = sqlx::query_as::<_, StickyMessage>(
-
             r#"
 
-            INSERT INTO sticky_messages (guild_id, channel_id, message_id, content, cooldown_seconds, last_updated_at)
+            INSERT INTO sticky_messages (
+                guild_id, channel_id, message_id, content, cooldown_seconds, last_updated_at,
+                last_posted_message_id, last_bumped_at, generation
+            )
 
-            VALUES ($1, $2, $3, $4, $5, $6)
+            VALUES ($1, $2, $3, $4, $5, $6, NULL, NULL, 0)
 
             ON CONFLICT (guild_id, channel_id) DO UPDATE
 
-            SET message_id = $3, content = $4, cooldown_seconds = $5, last_updated_at = $6
+            SET message_id = $3, content = $4, cooldown_seconds = $5, last_updated_at = $6,
+                last_bumped_at = NULL, generation = sticky_messages.generation + 1
 
-            RETURNING guild_id, channel_id, message_id, content, cooldown_seconds, last_updated_at
+            RETURNING guild_id, channel_id, message_id, content, cooldown_seconds, last_updated_at,
+                      last_posted_message_id, last_bumped_at, generation
 
             "#,
-
         )
-
         .bind(guild_id)
-
         .bind(channel_id)
-
         .bind(message_id)
-
         .bind(content)
-
         .bind(cooldown_seconds)
-
         .bind(now)
-
         .fetch_one(&self.pool)
+        .await?;
 
+        Ok(rec)
+    }
+
+    pub async fn update_sticky_posted_message(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        posted_message_id: &str,
+        bumped_at: DateTime<Utc>,
+    ) -> anyhow::Result<Option<StickyMessage>> {
+        let rec = sqlx::query_as::<_, StickyMessage>(
+            r#"
+            UPDATE sticky_messages
+            SET last_posted_message_id = $3,
+                last_bumped_at = $4,
+                generation = generation + 1,
+                message_id = $3
+            WHERE guild_id = $1 AND channel_id = $2
+            RETURNING guild_id, channel_id, message_id, content, cooldown_seconds, last_updated_at,
+                      last_posted_message_id, last_bumped_at, generation
+            "#,
+        )
+        .bind(guild_id)
+        .bind(channel_id)
+        .bind(posted_message_id)
+        .bind(bumped_at)
+        .fetch_optional(&self.pool)
         .await?;
 
         Ok(rec)

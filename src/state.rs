@@ -36,6 +36,7 @@ pub struct AppState {
     pub guild_events: tokio::sync::broadcast::Sender<GuildRealtimeEvent>,
     pub asset_analytics: Arc<crate::asset_analytics::AssetAnalyticsBatcher>,
     pub delete_coordinator: Arc<crate::discord::delete_queue::DeleteCoordinator>,
+    pub sticky_coordinator: Arc<crate::discord::sticky::StickyCoordinator>,
     pub is_gateway_ready: Arc<std::sync::atomic::AtomicBool>,
     pub is_shutting_down: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -153,6 +154,9 @@ impl AppState {
         let delete_coordinator = Arc::new(crate::discord::delete_queue::DeleteCoordinator::new(
             100, 256,
         ));
+        let sticky_coordinator = Arc::new(crate::discord::sticky::StickyCoordinator::new(
+            storage.clone(),
+        ));
         let is_gateway_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let is_shutting_down = Arc::new(std::sync::atomic::AtomicBool::new(false));
         Ok(Self {
@@ -171,6 +175,7 @@ impl AppState {
             guild_events,
             asset_analytics,
             delete_coordinator,
+            sticky_coordinator,
             is_gateway_ready,
             is_shutting_down,
         })

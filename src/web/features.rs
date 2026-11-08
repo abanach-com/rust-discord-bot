@@ -565,11 +565,11 @@ pub async fn test_automation(
 // ==========================================
 
 #[derive(Debug, Deserialize)]
-
 pub struct SetStickyRequest {
     pub channel_id: String,
 
-    pub message_id: String,
+    #[serde(default)]
+    pub message_id: Option<String>,
 
     pub content: String,
 
@@ -583,14 +583,16 @@ fn default_cooldown() -> i32 {
 
 pub async fn get_sticky(
     State(state): State<WebState>,
-
     Path((guild_id, channel_id)): Path<(String, String)>,
-
     headers: HeaderMap,
 ) -> Result<Json<Option<StickyMessage>>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
-
     ensure_guild_access(&state, &session, &guild_id).await?;
+
+    crate::storage::validate_snowflake("guild_id", &guild_id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    crate::storage::validate_snowflake("channel_id", &channel_id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     let msg = state
         .app
@@ -604,26 +606,81 @@ pub async fn get_sticky(
 
 pub async fn set_sticky(
     State(state): State<WebState>,
-
     Path(guild_id): Path<String>,
-
     headers: HeaderMap,
-
     Json(payload): Json<SetStickyRequest>,
 ) -> Result<Json<StickyMessage>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
-
     verify_csrf(&headers, &session)?;
-
     ensure_guild_access(&state, &session, &guild_id).await?;
 
+    crate::storage::validate_snowflake("guild_id", &guild_id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    crate::storage::validate_snowflake("channel_id", &payload.channel_id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    if payload.cooldown_seconds <= 0 || payload.cooldown_seconds > 86400 {
+        return Err(ApiError::bad_request(
+            "cooldown_seconds must be between 1 and 86400",
+        ));
+    }
+
+    if payload.content.trim().is_empty() {
+        return Err(ApiError::bad_request("content cannot be empty"));
+    }
+
+    if payload.content.len() > 2000 {
+        return Err(ApiError::bad_request(
+            "content exceeds maximum limit of 2000 characters",
+        ));
+    }
+
+    if !state.app.config.is_offline_mode() {
+        let token = &state.app.config.discord_token;
+        let http = if state.app.config.discord_api_base_url.starts_with("http://") {
+            serenity::http::HttpBuilder::new(token)
+                .proxy(&state.app.config.discord_api_base_url)
+                .ratelimiter_disabled(true)
+                .build()
+        } else {
+            serenity::all::Http::new(token)
+        };
+        let c_num = payload
+            .channel_id
+            .parse::<u64>()
+            .map_err(|_| ApiError::bad_request("Invalid channel ID"))?;
+        let chan_id = serenity::all::ChannelId::new(c_num);
+        let g_id = serenity::all::GuildId::new(
+            guild_id
+                .parse::<u64>()
+                .map_err(|_| ApiError::bad_request("Invalid guild ID"))?,
+        );
+        let actor_id = serenity::all::UserId::new(
+            session
+                .user
+                .id
+                .parse::<u64>()
+                .map_err(|_| ApiError::forbidden("Invalid actor user ID"))?,
+        );
+        if let Err(err) = crate::discord::scheduler::ensure_channel_delivery_access(
+            &http, g_id, actor_id, chan_id, false,
+        )
+        .await
+        {
+            return Err(ApiError::bad_request(format!(
+                "Channel access denied: {err}"
+            )));
+        }
+    }
+
+    let message_id = payload.message_id.as_deref().unwrap_or("");
     let msg = state
         .app
         .storage
         .set_sticky_message(
             &guild_id,
             &payload.channel_id,
-            &payload.message_id,
+            message_id,
             &payload.content,
             payload.cooldown_seconds,
         )
@@ -635,16 +692,17 @@ pub async fn set_sticky(
 
 pub async fn delete_sticky(
     State(state): State<WebState>,
-
     Path((guild_id, channel_id)): Path<(String, String)>,
-
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
-
     verify_csrf(&headers, &session)?;
-
     ensure_guild_access(&state, &session, &guild_id).await?;
+
+    crate::storage::validate_snowflake("guild_id", &guild_id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    crate::storage::validate_snowflake("channel_id", &channel_id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     let deleted = state
         .app
@@ -652,6 +710,11 @@ pub async fn delete_sticky(
         .delete_sticky_message(&guild_id, &channel_id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    state
+        .app
+        .sticky_coordinator
+        .remove_channel(&guild_id, &channel_id);
 
     Ok(Json(json!({"deleted": deleted})))
 }

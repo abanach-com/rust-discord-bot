@@ -18,6 +18,8 @@ pub mod quotes;
 pub mod reaction_roles;
 pub mod scheduler;
 pub mod starboard;
+pub mod sticky;
+pub use sticky::{StickyCoordinator, StickyRefresh};
 pub mod tags;
 pub mod tickets;
 

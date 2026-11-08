@@ -317,11 +317,30 @@ async fn test_phase2_community_operations_and_media_suite() {
     assert!(verify_module_manifest_checksum(manifest_content, &hash));
 
     // ==========================================
-    // 4. Agent 10 (#81): Sticky Messages & Broadcast
+    // 4. Agent 10 (#81): Sticky Messages & Broadcast (#316)
     // ==========================================
-    let sticky_req = serde_json::json!({
+    // 1. Non-snowflake channel IDs are rejected
+    let bad_sticky_req = serde_json::json!({
         "channel_id": "chan_sticky_1",
         "message_id": "msg_sticky_1",
+        "content": "Please read our guidelines above!",
+        "cooldown_seconds": 10
+    });
+
+    let bad_sticky_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/sticky"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&bad_sticky_req)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_sticky_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 2. Valid sticky configuration CRUD
+    let valid_sticky_req = serde_json::json!({
+        "channel_id": "100000000000000101",
+        "message_id": "100000000000000201",
         "content": "Please read our guidelines above!",
         "cooldown_seconds": 10
     });
@@ -330,7 +349,7 @@ async fn test_phase2_community_operations_and_media_suite() {
         .post(format!("{base_url}/api/guilds/{guild_id}/sticky"))
         .header(COOKIE, &session_cookie)
         .header("x-csrf-token", csrf_token)
-        .json(&sticky_req)
+        .json(&valid_sticky_req)
         .send()
         .await
         .unwrap();
@@ -339,7 +358,7 @@ async fn test_phase2_community_operations_and_media_suite() {
     // Read sticky
     let get_sticky_resp = client
         .get(format!(
-            "{base_url}/api/guilds/{guild_id}/sticky/chan_sticky_1"
+            "{base_url}/api/guilds/{guild_id}/sticky/100000000000000101"
         ))
         .header(COOKIE, &session_cookie)
         .send()

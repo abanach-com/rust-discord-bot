@@ -3313,4 +3313,84 @@ async fn test_postgres_integration_suite() {
         crime_outcome,
         rusty_discord_bot::storage::CrimeClaimOutcome::Success { .. }
     ));
+
+    // ==========================================
+    // 25. Sticky Messages (Migration 0051 & generation CAS) (#316)
+    // ==========================================
+    let sticky_guild = "pg_sticky_guild_1";
+    let sticky_channel = "pg_sticky_channel_1";
+
+    // 1. Initial state: None
+    let init_sticky = store
+        .get_sticky_message(sticky_guild, sticky_channel)
+        .await
+        .expect("get initial sticky");
+    assert!(init_sticky.is_none());
+
+    // 2. Set sticky message
+    let created_sticky = store
+        .set_sticky_message(
+            sticky_guild,
+            sticky_channel,
+            "legacy_msg_id",
+            "PG Sticky Content",
+            10,
+        )
+        .await
+        .expect("set sticky message");
+    assert_eq!(created_sticky.guild_id, sticky_guild);
+    assert_eq!(created_sticky.channel_id, sticky_channel);
+    assert_eq!(created_sticky.content, "PG Sticky Content");
+    assert_eq!(created_sticky.cooldown_seconds, 10);
+    assert_eq!(created_sticky.last_posted_message_id, None);
+    assert_eq!(created_sticky.last_bumped_at, None);
+    assert_eq!(created_sticky.generation, 0);
+
+    // 3. Update sticky posted message (delivery confirmation)
+    let bump_time = Utc::now();
+    let updated_sticky = store
+        .update_sticky_posted_message(
+            sticky_guild,
+            sticky_channel,
+            "real_discord_msg_101",
+            bump_time,
+        )
+        .await
+        .expect("update sticky posted message")
+        .expect("sticky message row should exist");
+    assert_eq!(
+        updated_sticky.last_posted_message_id.as_deref(),
+        Some("real_discord_msg_101")
+    );
+    assert_eq!(updated_sticky.message_id, "real_discord_msg_101");
+    assert_eq!(updated_sticky.generation, 1);
+    assert!(updated_sticky.last_bumped_at.is_some());
+
+    // 4. Update configuration again preserves generation and clears bump timestamp for immediate re-trigger
+    let reconfigured_sticky = store
+        .set_sticky_message(
+            sticky_guild,
+            sticky_channel,
+            "real_discord_msg_101",
+            "Updated Content",
+            15,
+        )
+        .await
+        .expect("reconfigure sticky message");
+    assert_eq!(reconfigured_sticky.content, "Updated Content");
+    assert_eq!(reconfigured_sticky.cooldown_seconds, 15);
+    assert_eq!(reconfigured_sticky.last_bumped_at, None);
+    assert_eq!(reconfigured_sticky.generation, 2);
+
+    // 5. Delete sticky message
+    let deleted_res = store
+        .delete_sticky_message(sticky_guild, sticky_channel)
+        .await
+        .expect("delete sticky");
+    assert!(deleted_res);
+    let after_delete = store
+        .get_sticky_message(sticky_guild, sticky_channel)
+        .await
+        .expect("get after delete");
+    assert!(after_delete.is_none());
 }

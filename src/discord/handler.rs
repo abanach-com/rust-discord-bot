@@ -367,13 +367,20 @@ impl EventHandler for Handler {
             .discord_events_total
             .fetch_add(1, Ordering::Relaxed);
 
-        if message.author.bot {
+        if message.author.bot || message.webhook_id.is_some() {
             return;
         }
 
         let Some(guild_id) = message.guild_id else {
             return;
         };
+
+        self.state.sticky_coordinator.enqueue_refresh(
+            ctx.http.clone(),
+            guild_id,
+            message.channel_id,
+            message.id,
+        );
 
         let stickers: Vec<crate::asset_analytics::ParsedSticker> = message
             .sticker_items
