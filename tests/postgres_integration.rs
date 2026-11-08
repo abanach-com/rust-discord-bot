@@ -1001,6 +1001,56 @@ async fn test_postgres_integration_suite() {
         "Postgres rollback ensures failed event does not commit marker (Issue #312)"
     );
 
+    // 7.7. Rejection of non-finite USD in AI metering (#313)
+    let finite_guild = format!("pg_ai_finite_{}", Uuid::new_v4().simple());
+    let inf_res = store
+        .record_metering_event_once(&finite_guild, "provider_pg", "req_inf", 100, f64::INFINITY)
+        .await;
+    assert!(
+        inf_res.is_err(),
+        "+Infinity USD must be rejected in postgres (#313)"
+    );
+
+    let neg_inf_res = store
+        .record_metering_event_once(
+            &finite_guild,
+            "provider_pg",
+            "req_neg_inf",
+            100,
+            f64::NEG_INFINITY,
+        )
+        .await;
+    assert!(
+        neg_inf_res.is_err(),
+        "-Infinity USD must be rejected in postgres (#313)"
+    );
+
+    let nan_res = store
+        .record_metering_event_once(&finite_guild, "provider_pg", "req_nan", 100, f64::NAN)
+        .await;
+    assert!(
+        nan_res.is_err(),
+        "NaN USD must be rejected in postgres (#313)"
+    );
+
+    // Ensure budget is still unmutated and clean
+    let b_clean = store
+        .get_or_create_ai_budget(&finite_guild)
+        .await
+        .expect("get budget for finite guild");
+    assert_eq!(b_clean.used_tokens, 0);
+    assert_eq!(b_clean.used_usd, 0.0);
+    assert!(!b_clean.is_halted);
+
+    // Retrying with the same request_id and valid finite USD succeeds
+    let retry_finite = store
+        .record_metering_event_once(&finite_guild, "provider_pg", "req_inf", 100, 0.05)
+        .await
+        .expect("retry with valid finite USD must succeed in postgres");
+    assert_eq!(retry_finite.used_tokens, 100);
+    assert!((retry_finite.used_usd - 0.05).abs() < 1e-6);
+    assert!(!retry_finite.is_halted);
+
     let count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM ai_guild_budgets WHERE guild_id = $1")
             .bind(&concurrent_guild)

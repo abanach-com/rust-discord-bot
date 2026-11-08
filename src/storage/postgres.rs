@@ -7979,7 +7979,10 @@ impl PostgresStore {
     ) -> anyhow::Result<AiGuildBudget> {
         anyhow::ensure!(tokens >= 0, "tokens must be non-negative");
 
-        anyhow::ensure!(usd >= 0.0, "usd must be non-negative");
+        anyhow::ensure!(
+            usd.is_finite() && usd >= 0.0,
+            "usd must be finite and non-negative"
+        );
 
         let mut tx = self.pool.begin().await?;
 
@@ -8034,6 +8037,7 @@ impl PostgresStore {
             .ok_or_else(|| anyhow::anyhow!("token overflow"))?;
 
         let new_usd = budget.used_usd + usd;
+        anyhow::ensure!(new_usd.is_finite(), "usd accumulation overflow");
 
         let is_halted =
             new_tokens >= budget.monthly_token_limit || new_usd >= budget.monthly_usd_limit;
@@ -8072,7 +8076,10 @@ impl PostgresStore {
         usd: f64,
     ) -> anyhow::Result<AiGuildBudget> {
         anyhow::ensure!(tokens >= 0, "tokens must be non-negative");
-        anyhow::ensure!(usd >= 0.0, "usd must be non-negative");
+        anyhow::ensure!(
+            usd.is_finite() && usd >= 0.0,
+            "usd must be finite and non-negative"
+        );
         anyhow::ensure!(!guild_id.is_empty(), "guild_id cannot be empty");
         anyhow::ensure!(!provider.is_empty(), "provider cannot be empty");
         anyhow::ensure!(!request_id.is_empty(), "request_id cannot be empty");
@@ -8136,6 +8143,7 @@ impl PostgresStore {
             .ok_or_else(|| anyhow::anyhow!("token overflow"))?;
 
         let new_usd = budget.used_usd + usd;
+        anyhow::ensure!(new_usd.is_finite(), "usd accumulation overflow");
         let is_halted =
             new_tokens >= budget.monthly_token_limit || new_usd >= budget.monthly_usd_limit;
 

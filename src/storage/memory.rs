@@ -5532,7 +5532,10 @@ impl MemoryStore {
     ) -> anyhow::Result<AiGuildBudget> {
         anyhow::ensure!(tokens >= 0, "tokens must be non-negative");
 
-        anyhow::ensure!(usd >= 0.0, "usd must be non-negative");
+        anyhow::ensure!(
+            usd.is_finite() && usd >= 0.0,
+            "usd must be finite and non-negative"
+        );
 
         let mut budget = self
             .ai_budgets
@@ -5574,9 +5577,12 @@ impl MemoryStore {
             .checked_add(tokens)
             .ok_or_else(|| anyhow::anyhow!("token overflow"))?;
 
+        let new_usd = budget.used_usd + usd;
+        anyhow::ensure!(new_usd.is_finite(), "usd accumulation overflow");
+
         budget.used_tokens = new_tokens;
 
-        budget.used_usd += usd;
+        budget.used_usd = new_usd;
 
         if budget.used_tokens >= budget.monthly_token_limit
             || budget.used_usd >= budget.monthly_usd_limit
@@ -5596,7 +5602,10 @@ impl MemoryStore {
         usd: f64,
     ) -> anyhow::Result<AiGuildBudget> {
         anyhow::ensure!(tokens >= 0, "tokens must be non-negative");
-        anyhow::ensure!(usd >= 0.0, "usd must be non-negative");
+        anyhow::ensure!(
+            usd.is_finite() && usd >= 0.0,
+            "usd must be finite and non-negative"
+        );
         anyhow::ensure!(!guild_id.is_empty(), "guild_id cannot be empty");
         anyhow::ensure!(!provider.is_empty(), "provider cannot be empty");
         anyhow::ensure!(!request_id.is_empty(), "request_id cannot be empty");

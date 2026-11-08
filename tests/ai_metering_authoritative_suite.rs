@@ -474,3 +474,75 @@ async fn test_concurrent_identical_and_distinct_metering_requests() {
     );
     assert!((b_after_distinct.used_usd - 0.03).abs() < 1e-6);
 }
+
+#[tokio::test]
+async fn test_metering_rejects_non_finite_usd_values_without_mutating_budget_or_idempotency_marker()
+{
+    let (state, _) = test_web_state().await;
+    let guild_id = "777000000000000006";
+
+    // 1. Rejection of f64::INFINITY (#313)
+    let inf_res = state
+        .app
+        .storage
+        .record_metering_event_once(guild_id, "provider_fin", "req_inf", 100, f64::INFINITY)
+        .await;
+    assert!(inf_res.is_err(), "+Infinity USD must be rejected (#313)");
+
+    // Verify budget remains completely unchanged at 0
+    let b0 = state
+        .app
+        .storage
+        .get_or_create_ai_budget(guild_id)
+        .await
+        .unwrap();
+    assert_eq!(b0.used_tokens, 0);
+    assert_eq!(b0.used_usd, 0.0);
+    assert!(!b0.is_halted);
+
+    // 2. Rejection of f64::NEG_INFINITY (#313)
+    let neg_inf_res = state
+        .app
+        .storage
+        .record_metering_event_once(
+            guild_id,
+            "provider_fin",
+            "req_neg_inf",
+            100,
+            f64::NEG_INFINITY,
+        )
+        .await;
+    assert!(
+        neg_inf_res.is_err(),
+        "-Infinity USD must be rejected (#313)"
+    );
+
+    // 3. Rejection of f64::NAN (#313)
+    let nan_res = state
+        .app
+        .storage
+        .record_metering_event_once(guild_id, "provider_fin", "req_nan", 100, f64::NAN)
+        .await;
+    assert!(nan_res.is_err(), "NaN USD must be rejected (#313)");
+
+    // 4. Retrying with the same request_id that previously failed with Infinity now using a valid finite amount succeeds
+    let retry_valid = state
+        .app
+        .storage
+        .record_metering_event_once(guild_id, "provider_fin", "req_inf", 100, 0.05)
+        .await
+        .expect("valid finite retry must succeed");
+    assert_eq!(retry_valid.used_tokens, 100);
+    assert!((retry_valid.used_usd - 0.05).abs() < 1e-6);
+    assert!(!retry_valid.is_halted);
+
+    // 5. Subsequent duplicate of the valid attempt is properly idempotent (no second charge)
+    let dup_valid = state
+        .app
+        .storage
+        .record_metering_event_once(guild_id, "provider_fin", "req_inf", 100, 0.05)
+        .await
+        .expect("duplicate valid event must be idempotent");
+    assert_eq!(dup_valid.used_tokens, 100);
+    assert!((dup_valid.used_usd - 0.05).abs() < 1e-6);
+}
