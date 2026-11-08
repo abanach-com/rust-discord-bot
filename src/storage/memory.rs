@@ -1641,6 +1641,8 @@ impl MemoryStore {
             last_bumped_at: None,
 
             generation: old_gen,
+
+            config_revision: Uuid::new_v4(),
         };
 
         self.sticky_messages.insert(key, entry.clone());
@@ -1654,14 +1656,21 @@ impl MemoryStore {
         channel_id: &str,
         posted_message_id: &str,
         bumped_at: DateTime<Utc>,
+        expected_generation: i64,
+        expected_revision: Uuid,
     ) -> Option<StickyMessage> {
         let key = (guild_id.to_owned(), channel_id.to_owned());
         if let Some(mut entry) = self.sticky_messages.get_mut(&key) {
-            entry.last_posted_message_id = Some(posted_message_id.to_owned());
-            entry.message_id = posted_message_id.to_owned();
-            entry.last_bumped_at = Some(bumped_at);
-            entry.generation += 1;
-            Some(entry.clone())
+            if entry.generation == expected_generation && entry.config_revision == expected_revision
+            {
+                entry.last_posted_message_id = Some(posted_message_id.to_owned());
+                entry.message_id = posted_message_id.to_owned();
+                entry.last_bumped_at = Some(bumped_at);
+                entry.generation += 1;
+                Some(entry.clone())
+            } else {
+                None
+            }
         } else {
             None
         }

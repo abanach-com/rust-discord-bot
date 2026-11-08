@@ -6888,9 +6888,22 @@ async fn test_sticky_messages_end_to_end_delivery_and_anti_recursion() {
 
     // Step D: Message after cooldown expires triggers refresh and deletes old message
     let past_time = chrono::Utc::now() - chrono::Duration::seconds(15);
+    let cur_sticky = state
+        .storage
+        .get_sticky_message("100", "101")
+        .await
+        .unwrap()
+        .unwrap();
     state
         .storage
-        .update_sticky_posted_message("100", "101", "900000000000000001", past_time)
+        .update_sticky_posted_message(
+            "100",
+            "101",
+            "900000000000000001",
+            past_time,
+            cur_sticky.generation,
+            cur_sticky.config_revision,
+        )
         .await
         .unwrap();
 
@@ -7301,6 +7314,208 @@ async fn test_sticky_coordinator_unconfigured_channel_cleans_up_without_posts_is
         modifying_calls.len(),
         0,
         "Unconfigured channel refresh must make 0 modifying calls"
+    );
+
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn test_sticky_optimistic_concurrency_cas_and_aba_memory_store_issue_319() {
+    let state = create_test_state().await;
+
+    // 1. Configure Sticky A
+    let cfg_a = state
+        .storage
+        .set_sticky_message("100", "101", "", "Sticky Content A", 10)
+        .await
+        .unwrap();
+    assert_eq!(cfg_a.generation, 0);
+
+    // 2. In-flight simulation: worker fetched cfg_a. Meanwhile admin updates to cfg_b
+    let cfg_b = state
+        .storage
+        .set_sticky_message("100", "101", "", "Sticky Content B", 30)
+        .await
+        .unwrap();
+    assert_eq!(cfg_b.generation, 1);
+    assert_ne!(cfg_a.config_revision, cfg_b.config_revision);
+
+    // 3. Worker tries to commit delivery of A with stale generation and stale revision
+    let stale_commit = state
+        .storage
+        .update_sticky_posted_message(
+            "100",
+            "101",
+            "stale_msg_a",
+            chrono::Utc::now(),
+            cfg_a.generation,
+            cfg_a.config_revision,
+        )
+        .await
+        .unwrap();
+    assert!(
+        stale_commit.is_none(),
+        "Stale delivery of A must be rejected by CAS"
+    );
+
+    // Verify B's state was not altered
+    let cur_b = state
+        .storage
+        .get_sticky_message("100", "101")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cur_b.content, "Sticky Content B");
+    assert_eq!(cur_b.generation, 1);
+    assert_eq!(cur_b.last_posted_message_id, None);
+
+    // 4. Worker delivers B with correct generation and revision
+    let b_commit = state
+        .storage
+        .update_sticky_posted_message(
+            "100",
+            "101",
+            "msg_b_101",
+            chrono::Utc::now(),
+            cfg_b.generation,
+            cfg_b.config_revision,
+        )
+        .await
+        .unwrap();
+    assert!(b_commit.is_some(), "Valid delivery of B must succeed");
+    let b_updated = b_commit.unwrap();
+    assert_eq!(
+        b_updated.last_posted_message_id.as_deref(),
+        Some("msg_b_101")
+    );
+    assert_eq!(b_updated.generation, 2);
+
+    // 5. ABA scenario: Delete B, then recreate C on the same channel
+    let deleted = state
+        .storage
+        .delete_sticky_message("100", "101")
+        .await
+        .unwrap();
+    assert!(deleted);
+
+    let cfg_c = state
+        .storage
+        .set_sticky_message("100", "101", "", "Sticky Content C", 15)
+        .await
+        .unwrap();
+    assert_eq!(cfg_c.generation, 0);
+    assert_ne!(cfg_c.config_revision, cfg_b.config_revision);
+
+    // Old delivery of B attempt must be rejected by ABA protection (mismatched config_revision)
+    let aba_attempt = state
+        .storage
+        .update_sticky_posted_message(
+            "100",
+            "101",
+            "ghost_b_msg",
+            chrono::Utc::now(),
+            cfg_b.generation,
+            cfg_b.config_revision,
+        )
+        .await
+        .unwrap();
+    assert!(
+        aba_attempt.is_none(),
+        "Old incarnation of B must fail ABA protection check"
+    );
+}
+
+#[tokio::test]
+async fn test_sticky_superseded_in_flight_delivery_compensating_delete_and_refresh_issue_319() {
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state_with_port(mock.port).await;
+
+    // 1. Initial config A
+    state
+        .storage
+        .set_sticky_message("100", "101", "", "Config A rules", 5)
+        .await
+        .unwrap();
+
+    // 2. Deliver message 1 for config A
+    state.sticky_coordinator.enqueue_refresh(
+        ctx.http.clone(),
+        GuildId::new(100),
+        ChannelId::new(101),
+        MessageId::new(1001),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    let sticky_after_a = state
+        .storage
+        .get_sticky_message("100", "101")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        sticky_after_a.last_posted_message_id.as_deref(),
+        Some("900000000000000001")
+    );
+
+    // 3. Admin updates configuration to B (generation increments, config_revision changes, last_bumped_at resets to None)
+    let config_b = state
+        .storage
+        .set_sticky_message(
+            "100",
+            "101",
+            "900000000000000001",
+            "Config B updated rules",
+            5,
+        )
+        .await
+        .unwrap();
+    assert_eq!(config_b.generation, sticky_after_a.generation + 1);
+    assert_ne!(config_b.config_revision, sticky_after_a.config_revision);
+
+    // 4. Member sends new message triggering refresh of config B
+    state.sticky_coordinator.enqueue_refresh(
+        ctx.http.clone(),
+        GuildId::new(100),
+        ChannelId::new(101),
+        MessageId::new(1002),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    let sticky_after_b = state
+        .storage
+        .get_sticky_message("100", "101")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        sticky_after_b.last_posted_message_id.as_deref(),
+        Some("900000000000000002")
+    );
+    assert_eq!(sticky_after_b.content, "Config B updated rules");
+    assert_eq!(sticky_after_b.config_revision, config_b.config_revision);
+
+    // Verify Discord mock calls:
+    // Message A posted ("900000000000000001"), then Message B posted ("900000000000000002"),
+    // and Message A deleted via DELETE /channels/101/messages/900000000000000001
+    let recorded = mock.recorded_calls.lock().await.clone();
+    let posts: Vec<_> = recorded
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+        .collect();
+    assert_eq!(posts.len(), 2, "Both A and B were posted");
+    assert!(posts[0].1.contains("Config A rules"));
+    assert!(posts[1].1.contains("Config B updated rules"));
+
+    let deletes: Vec<_> = recorded
+        .iter()
+        .filter(|(m, p)| {
+            *m == Method::DELETE && p.contains("/channels/101/messages/900000000000000001")
+        })
+        .collect();
+    assert_eq!(
+        deletes.len(),
+        1,
+        "Old sticky A was deleted after B delivery"
     );
 
     shard_manager.shutdown_all().await;

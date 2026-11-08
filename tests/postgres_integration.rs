@@ -3346,14 +3346,50 @@ async fn test_postgres_integration_suite() {
     assert_eq!(created_sticky.last_bumped_at, None);
     assert_eq!(created_sticky.generation, 0);
 
-    // 3. Update sticky posted message (delivery confirmation)
+    // 3. Stale CAS update with wrong generation or revision fails safely
     let bump_time = Utc::now();
+    let stale_gen_res = store
+        .update_sticky_posted_message(
+            sticky_guild,
+            sticky_channel,
+            "stale_msg",
+            bump_time,
+            999,
+            created_sticky.config_revision,
+        )
+        .await
+        .expect("update sticky posted message");
+    assert!(
+        stale_gen_res.is_none(),
+        "Stale generation CAS must return None"
+    );
+
+    let fake_rev = uuid::Uuid::new_v4();
+    let stale_rev_res = store
+        .update_sticky_posted_message(
+            sticky_guild,
+            sticky_channel,
+            "stale_msg",
+            bump_time,
+            created_sticky.generation,
+            fake_rev,
+        )
+        .await
+        .expect("update sticky posted message");
+    assert!(
+        stale_rev_res.is_none(),
+        "Stale revision CAS must return None"
+    );
+
+    // 4. Update sticky posted message with matching CAS (delivery confirmation)
     let updated_sticky = store
         .update_sticky_posted_message(
             sticky_guild,
             sticky_channel,
             "real_discord_msg_101",
             bump_time,
+            created_sticky.generation,
+            created_sticky.config_revision,
         )
         .await
         .expect("update sticky posted message")
@@ -3364,9 +3400,13 @@ async fn test_postgres_integration_suite() {
     );
     assert_eq!(updated_sticky.message_id, "real_discord_msg_101");
     assert_eq!(updated_sticky.generation, 1);
+    assert_eq!(
+        updated_sticky.config_revision,
+        created_sticky.config_revision
+    );
     assert!(updated_sticky.last_bumped_at.is_some());
 
-    // 4. Update configuration again preserves generation and clears bump timestamp for immediate re-trigger
+    // 5. Update configuration changes revision, advances generation, and clears bump timestamp
     let reconfigured_sticky = store
         .set_sticky_message(
             sticky_guild,
@@ -3381,8 +3421,29 @@ async fn test_postgres_integration_suite() {
     assert_eq!(reconfigured_sticky.cooldown_seconds, 15);
     assert_eq!(reconfigured_sticky.last_bumped_at, None);
     assert_eq!(reconfigured_sticky.generation, 2);
+    assert_ne!(
+        reconfigured_sticky.config_revision,
+        created_sticky.config_revision
+    );
 
-    // 5. Delete sticky message
+    // Old in-flight delivery using previous revision fails
+    let in_flight_old_rev = store
+        .update_sticky_posted_message(
+            sticky_guild,
+            sticky_channel,
+            "old_inflight_msg",
+            bump_time,
+            1,
+            created_sticky.config_revision,
+        )
+        .await
+        .expect("update sticky posted message");
+    assert!(
+        in_flight_old_rev.is_none(),
+        "In-flight delivery for superseded revision must return None"
+    );
+
+    // 6. Delete sticky message and verify ABA protection
     let deleted_res = store
         .delete_sticky_message(sticky_guild, sticky_channel)
         .await
@@ -3393,4 +3454,36 @@ async fn test_postgres_integration_suite() {
         .await
         .expect("get after delete");
     assert!(after_delete.is_none());
+
+    // Recreate same channel (ABA test): old revision must fail even on newly created row
+    let recreated = store
+        .set_sticky_message(sticky_guild, sticky_channel, "", "Brand New Sticky", 5)
+        .await
+        .expect("recreate sticky");
+    assert_eq!(recreated.generation, 0);
+    assert_ne!(
+        recreated.config_revision,
+        reconfigured_sticky.config_revision
+    );
+
+    let old_rev_after_recreate = store
+        .update_sticky_posted_message(
+            sticky_guild,
+            sticky_channel,
+            "ghost_delivery",
+            bump_time,
+            0,
+            reconfigured_sticky.config_revision,
+        )
+        .await
+        .expect("update sticky");
+    assert!(
+        old_rev_after_recreate.is_none(),
+        "Old delivery from prior incarnation must fail ABA check"
+    );
+
+    store
+        .delete_sticky_message(sticky_guild, sticky_channel)
+        .await
+        .expect("delete final");
 }

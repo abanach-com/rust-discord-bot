@@ -2141,7 +2141,7 @@ impl PostgresStore {
             r#"
 
             SELECT guild_id, channel_id, message_id, content, cooldown_seconds, last_updated_at,
-                   last_posted_message_id, last_bumped_at, generation
+                   last_posted_message_id, last_bumped_at, generation, config_revision
 
             FROM sticky_messages
 
@@ -2171,24 +2171,26 @@ impl PostgresStore {
         cooldown_seconds: i32,
     ) -> anyhow::Result<StickyMessage> {
         let now = Utc::now();
+        let new_revision = Uuid::new_v4();
 
         let rec = sqlx::query_as::<_, StickyMessage>(
             r#"
 
             INSERT INTO sticky_messages (
                 guild_id, channel_id, message_id, content, cooldown_seconds, last_updated_at,
-                last_posted_message_id, last_bumped_at, generation
+                last_posted_message_id, last_bumped_at, generation, config_revision
             )
 
-            VALUES ($1, $2, $3, $4, $5, $6, NULL, NULL, 0)
+            VALUES ($1, $2, $3, $4, $5, $6, NULL, NULL, 0, $7)
 
             ON CONFLICT (guild_id, channel_id) DO UPDATE
 
             SET message_id = $3, content = $4, cooldown_seconds = $5, last_updated_at = $6,
-                last_bumped_at = NULL, generation = sticky_messages.generation + 1
+                last_bumped_at = NULL, generation = sticky_messages.generation + 1,
+                config_revision = $7
 
             RETURNING guild_id, channel_id, message_id, content, cooldown_seconds, last_updated_at,
-                      last_posted_message_id, last_bumped_at, generation
+                      last_posted_message_id, last_bumped_at, generation, config_revision
 
             "#,
         )
@@ -2198,6 +2200,7 @@ impl PostgresStore {
         .bind(content)
         .bind(cooldown_seconds)
         .bind(now)
+        .bind(new_revision)
         .fetch_one(&self.pool)
         .await?;
 
@@ -2210,6 +2213,8 @@ impl PostgresStore {
         channel_id: &str,
         posted_message_id: &str,
         bumped_at: DateTime<Utc>,
+        expected_generation: i64,
+        expected_revision: Uuid,
     ) -> anyhow::Result<Option<StickyMessage>> {
         let rec = sqlx::query_as::<_, StickyMessage>(
             r#"
@@ -2219,14 +2224,17 @@ impl PostgresStore {
                 generation = generation + 1,
                 message_id = $3
             WHERE guild_id = $1 AND channel_id = $2
+              AND generation = $5 AND config_revision = $6
             RETURNING guild_id, channel_id, message_id, content, cooldown_seconds, last_updated_at,
-                      last_posted_message_id, last_bumped_at, generation
+                      last_posted_message_id, last_bumped_at, generation, config_revision
             "#,
         )
         .bind(guild_id)
         .bind(channel_id)
         .bind(posted_message_id)
         .bind(bumped_at)
+        .bind(expected_generation)
+        .bind(expected_revision)
         .fetch_optional(&self.pool)
         .await?;
 

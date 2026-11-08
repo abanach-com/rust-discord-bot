@@ -193,62 +193,106 @@ async fn run_channel_worker(
             trigger_id = next;
         }
 
-        // 1. Fetch current sticky configuration
-        let sticky = match storage.get_sticky_message(&gid_str, &cid_str).await {
-            Ok(Some(s)) => s,
-            _ => {
-                // If deleted or errored, remove worker if we are still registered owner and exit
-                channel_senders.remove_if(&key, |_, h| h.owner_id == owner_id);
-                return;
+        let mut delivery_attempts = 0;
+        while delivery_attempts < 3 {
+            delivery_attempts += 1;
+
+            // 1. Fetch current sticky configuration
+            let sticky = match storage.get_sticky_message(&gid_str, &cid_str).await {
+                Ok(Some(s)) => s,
+                _ => {
+                    // If deleted or errored, remove worker if we are still registered owner and exit
+                    channel_senders.remove_if(&key, |_, h| h.owner_id == owner_id);
+                    return;
+                }
+            };
+
+            // 2. Cooldown check
+            if let Some(last_bumped) = sticky.last_bumped_at {
+                let elapsed = Utc::now().signed_duration_since(last_bumped).num_seconds();
+                if elapsed < sticky.cooldown_seconds as i64 {
+                    // Still inside cooldown window; drop this burst
+                    break;
+                }
             }
-        };
 
-        // 2. Cooldown check
-        if let Some(last_bumped) = sticky.last_bumped_at {
-            let elapsed = Utc::now().signed_duration_since(last_bumped).num_seconds();
-            if elapsed < sticky.cooldown_seconds as i64 {
-                // Still inside cooldown window; drop this burst
-                continue;
+            // 3. Channel existence, guild membership, type, and bot permission check
+            if let Err(err) = check_bot_channel_permission(&http, key.0, key.1).await {
+                tracing::warn!(
+                    "Sticky message delivery guard rejected channel {}: {}",
+                    key.1,
+                    err
+                );
+                break;
             }
-        }
 
-        // 3. Channel existence, guild membership, type, and bot permission check
-        if let Err(err) = check_bot_channel_permission(&http, key.0, key.1).await {
-            tracing::warn!(
-                "Sticky message delivery guard rejected channel {}: {}",
-                key.1,
-                err
-            );
-            continue;
-        }
+            // 4. Send the new sticky message at the bottom of the channel
+            let create_msg = CreateMessage::new()
+                .content(&sticky.content)
+                .allowed_mentions(CreateAllowedMentions::new());
 
-        // 4. Send the new sticky message at the bottom of the channel
-        let create_msg = CreateMessage::new()
-            .content(&sticky.content)
-            .allowed_mentions(CreateAllowedMentions::new());
+            let new_msg = match key.1.send_message(&http, create_msg).await {
+                Ok(msg) => msg,
+                Err(e) => {
+                    tracing::error!("Failed to post sticky message in channel {}: {}", key.1, e);
+                    break;
+                }
+            };
 
-        let new_msg = match key.1.send_message(&http, create_msg).await {
-            Ok(msg) => msg,
-            Err(e) => {
-                tracing::error!("Failed to post sticky message in channel {}: {}", key.1, e);
-                continue;
+            // 5. Commit delivery state to storage with optimistic concurrency control (CAS)
+            let now = Utc::now();
+            let commit_res = storage
+                .update_sticky_posted_message(
+                    &gid_str,
+                    &cid_str,
+                    &new_msg.id.to_string(),
+                    now,
+                    sticky.generation,
+                    sticky.config_revision,
+                )
+                .await;
+
+            match commit_res {
+                Ok(Some(_updated)) => {
+                    // 6. Delete previously posted sticky message (if any)
+                    if let Some(ref old_id_str) = sticky.last_posted_message_id
+                        && old_id_str != &new_msg.id.to_string()
+                        && old_id_str != &trigger_id.to_string()
+                        && let Ok(old_id_num) = old_id_str.parse::<u64>()
+                    {
+                        let old_mid = MessageId::new(old_id_num);
+                        let _ = key.1.delete_message(&http, old_mid).await;
+                    }
+                    break;
+                }
+                Ok(None) => {
+                    // Stale configuration: config changed during flight.
+                    // Compensate by deleting the newly posted obsolete message.
+                    tracing::warn!(
+                        "Sticky message in channel {} was superseded during delivery (expected gen={}, rev={}); deleting stale message {}",
+                        key.1,
+                        sticky.generation,
+                        sticky.config_revision,
+                        new_msg.id
+                    );
+                    let _ = key.1.delete_message(&http, new_msg.id).await;
+                    // Drain any newer triggers that arrived while we were sending
+                    while let Ok(next) = rx.try_recv() {
+                        trigger_id = next;
+                    }
+                    // Loop again: fetch updated config and deliver immediately without waiting for another user message
+                    continue;
+                }
+                Err(err) => {
+                    tracing::error!(
+                        "Failed to commit sticky message delivery to storage in channel {}: {}",
+                        key.1,
+                        err
+                    );
+                    let _ = key.1.delete_message(&http, new_msg.id).await;
+                    break;
+                }
             }
-        };
-
-        // 5. Commit delivery state to storage
-        let now = Utc::now();
-        let _ = storage
-            .update_sticky_posted_message(&gid_str, &cid_str, &new_msg.id.to_string(), now)
-            .await;
-
-        // 6. Delete previously posted sticky message (if any)
-        if let Some(ref old_id_str) = sticky.last_posted_message_id
-            && old_id_str != &new_msg.id.to_string()
-            && old_id_str != &trigger_id.to_string()
-            && let Ok(old_id_num) = old_id_str.parse::<u64>()
-        {
-            let old_mid = MessageId::new(old_id_num);
-            let _ = key.1.delete_message(&http, old_mid).await;
         }
     }
 

@@ -263,6 +263,10 @@ pub struct StickyMessage {
     #[serde(default)]
     #[sqlx(default)]
     pub generation: i64,
+
+    #[serde(default = "uuid::Uuid::new_v4")]
+    #[sqlx(default)]
+    pub config_revision: Uuid,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -2518,6 +2522,8 @@ impl Storage {
         channel_id: &str,
         posted_message_id: &str,
         bumped_at: DateTime<Utc>,
+        expected_generation: i64,
+        expected_revision: Uuid,
     ) -> anyhow::Result<Option<StickyMessage>> {
         match self {
             Self::Memory(store) => Ok(store.update_sticky_posted_message(
@@ -2525,6 +2531,8 @@ impl Storage {
                 channel_id,
                 posted_message_id,
                 bumped_at,
+                expected_generation,
+                expected_revision,
             )),
             Self::Postgres(store) => {
                 store
@@ -2533,6 +2541,8 @@ impl Storage {
                         channel_id,
                         posted_message_id,
                         bumped_at,
+                        expected_generation,
+                        expected_revision,
                     )
                     .await
             }
