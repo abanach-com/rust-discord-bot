@@ -603,6 +603,13 @@ async fn test_http_oauth_flow_browser_binding() {
         .to_str()
         .expect("location str");
     let parsed_url = url::Url::parse(location).expect("parsed oauth url");
+    assert!(
+        parsed_url
+            .query_pairs()
+            .find(|(k, _)| k == "prompt")
+            .is_none(),
+        "OAuth authorize URL must not force prompt=none (#337)"
+    );
     let state_param = parsed_url
         .query_pairs()
         .find(|(k, _)| k == "state")
@@ -652,9 +659,26 @@ async fn test_http_oauth_flow_browser_binding() {
         "OAuth login was not initiated in this browser."
     );
 
-    // State must still be preserved in server memory (not burned by malicious/mismatched requests)
+    // 4. Discord denial / error callback (?error=access_denied&state=...) with matching browser cookie (#337)
+    let denial_resp = client
+        .get(format!(
+            "{base_url}/auth/discord/callback?error=access_denied&state={state_param}"
+        ))
+        .header(COOKIE, format!("rusty_oauth_state={state_param}"))
+        .send()
+        .await
+        .expect("denial callback request");
+
+    assert_eq!(denial_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let denial_body: serde_json::Value = denial_resp.json().await.expect("json denial body");
+    assert_eq!(
+        denial_body["error"],
+        "Discord authorization was denied or requires new consent. Please log in again."
+    );
+
+    // State must have been consumed atomically by the denial callback
     assert!(
-        state
+        !state
             .app
             .sessions
             .consume_oauth_state(&state_param)

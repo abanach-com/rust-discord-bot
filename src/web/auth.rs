@@ -119,8 +119,13 @@ pub use crate::session::{DashboardGuild, DashboardUser, Session};
 
 #[derive(Deserialize, Clone)]
 pub struct OAuthCallback {
-    code: String,
-    state: String,
+    pub state: String,
+    #[serde(default)]
+    pub code: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub error_description: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -176,8 +181,7 @@ pub async fn login(
         .append_pair("redirect_uri", &state.app.config.discord_oauth_redirect_url)
         .append_pair("response_type", "code")
         .append_pair("scope", "identify guilds")
-        .append_pair("state", &csrf_state)
-        .append_pair("prompt", "none");
+        .append_pair("state", &csrf_state);
 
     let mut response = Redirect::temporary(url.as_str()).into_response();
     response.headers_mut().insert(
@@ -214,6 +218,23 @@ pub async fn callback(
         ));
     }
 
+    if let Some(ref err) = query.error {
+        tracing::warn!(
+            oauth_error = %err,
+            error_description = ?query.error_description,
+            "Discord OAuth authorization was denied or returned an error"
+        );
+        return Err(ApiError::bad_request(
+            "Discord authorization was denied or requires new consent. Please log in again.",
+        ));
+    }
+
+    let code = query
+        .code
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| ApiError::bad_request("Missing Discord authorization code."))?;
+
     let token = state
         .app
         .http_client
@@ -224,7 +245,7 @@ pub async fn callback(
         )
         .form(&[
             ("grant_type", "authorization_code"),
-            ("code", query.code.as_str()),
+            ("code", code),
             (
                 "redirect_uri",
                 state.app.config.discord_oauth_redirect_url.as_str(),
@@ -1371,6 +1392,10 @@ mod tests {
         assert!(set_cookie.contains("Max-Age=600"));
 
         let url = Url::parse(loc).unwrap();
+        assert!(
+            url.query_pairs().find(|(k, _)| k == "prompt").is_none(),
+            "login authorize URL must not force prompt=none (#337)"
+        );
         let state_param = url
             .query_pairs()
             .find(|(k, _)| k == "state")
@@ -1409,8 +1434,10 @@ mod tests {
         // 1. Missing cookie -> rejected with 400 Bad Request
         let mut headers = HeaderMap::new();
         let query = OAuthCallback {
-            code: "dummy_code".to_string(),
+            code: Some("dummy_code".to_string()),
             state: test_state.to_string(),
+            error: None,
+            error_description: None,
         };
         let err = callback(State(state.clone()), headers.clone(), Query(query.clone()))
             .await
@@ -1452,8 +1479,10 @@ mod tests {
             HeaderValue::from_static("rusty_oauth_state=unknown-state"),
         );
         let query_unknown = OAuthCallback {
-            code: "dummy_code".to_string(),
+            code: Some("dummy_code".to_string()),
             state: "unknown-state".to_string(),
+            error: None,
+            error_description: None,
         };
         let err = callback(
             State(state.clone()),
@@ -1467,5 +1496,86 @@ mod tests {
             err.message,
             "Invalid OAuth2 login state or session expired."
         );
+    }
+
+    #[tokio::test]
+    async fn test_oauth_callback_handles_denial_error_and_missing_code() {
+        let app = crate::state::AppState::bootstrap(test_config())
+            .await
+            .expect("bootstrap");
+        let state = WebState {
+            app,
+            login_rate_limiter: Arc::new(LoginRateLimiter::new()),
+            permissions_cache: Arc::new(DashMap::new()),
+        };
+
+        let test_state = "error-oauth-state-12345";
+        state
+            .app
+            .sessions
+            .save_oauth_state(test_state)
+            .await
+            .expect("save oauth state");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            COOKIE,
+            HeaderValue::from_str(&format!("rusty_oauth_state={test_state}")).unwrap(),
+        );
+
+        // 1. Denial callback with error=access_denied
+        let denial_query = OAuthCallback {
+            state: test_state.to_string(),
+            code: None,
+            error: Some("access_denied".to_string()),
+            error_description: Some("The user denied any required permissions".to_string()),
+        };
+
+        let err = callback(State(state.clone()), headers.clone(), Query(denial_query))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            err.message,
+            "Discord authorization was denied or requires new consent. Please log in again."
+        );
+
+        // State was consumed atomically
+        assert!(
+            !state
+                .app
+                .sessions
+                .consume_oauth_state(test_state)
+                .await
+                .unwrap()
+        );
+
+        // 2. Missing authorization code when error is also missing
+        let test_state_2 = "missing-code-oauth-state-67890";
+        state
+            .app
+            .sessions
+            .save_oauth_state(test_state_2)
+            .await
+            .expect("save oauth state 2");
+
+        let mut headers_2 = HeaderMap::new();
+        headers_2.insert(
+            COOKIE,
+            HeaderValue::from_str(&format!("rusty_oauth_state={test_state_2}")).unwrap(),
+        );
+
+        let missing_code_query = OAuthCallback {
+            state: test_state_2.to_string(),
+            code: None,
+            error: None,
+            error_description: None,
+        };
+
+        let err_missing = callback(State(state.clone()), headers_2, Query(missing_code_query))
+            .await
+            .unwrap_err();
+        assert_eq!(err_missing.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err_missing.message, "Missing Discord authorization code.");
     }
 }
