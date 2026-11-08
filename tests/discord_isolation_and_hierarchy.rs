@@ -7622,3 +7622,106 @@ async fn test_sticky_cooldown_deferred_bump_after_silence_issue_321() {
 
     shard_manager.shutdown_all().await;
 }
+
+#[tokio::test]
+async fn test_sticky_negative_caching_and_invalidation_issue_322() {
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state_with_port(mock.port).await;
+
+    // 1. Channel 101 on Guild 100 has NO sticky message configured initially
+    assert_eq!(state.sticky_coordinator.negative_cache_len(), 0);
+    assert_eq!(state.sticky_coordinator.active_worker_count(), 0);
+
+    // 2. First message triggers worker spawn, checks storage, finds None, records negative cache
+    state.sticky_coordinator.enqueue_refresh(
+        ctx.http.clone(),
+        GuildId::new(100),
+        ChannelId::new(101),
+        MessageId::new(5001),
+    );
+
+    // Give worker time to query storage and exit
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    assert_eq!(
+        state.sticky_coordinator.negative_cache_len(),
+        1,
+        "Channel 101 should now be in negative cache"
+    );
+    assert_eq!(
+        state.sticky_coordinator.active_worker_count(),
+        0,
+        "Worker should have terminated after noticing unconfigured channel"
+    );
+
+    // 3. Flood of 100 subsequent messages should be dropped on fast-path without spawning workers
+    for i in 2..=101 {
+        state.sticky_coordinator.enqueue_refresh(
+            ctx.http.clone(),
+            GuildId::new(100),
+            ChannelId::new(101),
+            MessageId::new(5000 + i),
+        );
+    }
+
+    assert_eq!(
+        state.sticky_coordinator.active_worker_count(),
+        0,
+        "No workers spawned for negative cache hits"
+    );
+    assert_eq!(
+        state.sticky_coordinator.negative_cache_len(),
+        1,
+        "Negative cache entry remains active"
+    );
+
+    let recorded = mock.recorded_calls.lock().await.clone();
+    let posts: Vec<_> = recorded
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+        .collect();
+    assert_eq!(posts.len(), 0, "No messages posted in unconfigured channel");
+
+    // 4. Configure sticky message and invalidate cache
+    state
+        .storage
+        .set_sticky_message(
+            "100",
+            "101",
+            "",
+            "📌 Rules: Activated After Negative Cache Invalidation!",
+            1,
+        )
+        .await
+        .expect("set sticky message");
+
+    state.sticky_coordinator.invalidate_channel("100", "101");
+    assert_eq!(
+        state.sticky_coordinator.negative_cache_len(),
+        0,
+        "Negative cache entry removed after invalidation"
+    );
+
+    // 5. Next message spawns worker and delivers sticky message immediately
+    state.sticky_coordinator.enqueue_refresh(
+        ctx.http.clone(),
+        GuildId::new(100),
+        ChannelId::new(101),
+        MessageId::new(6001),
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    let recorded_after = mock.recorded_calls.lock().await.clone();
+    let posts_after: Vec<_> = recorded_after
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+        .collect();
+    assert_eq!(
+        posts_after.len(),
+        1,
+        "Sticky message posted immediately once configured and cache invalidated"
+    );
+
+    shard_manager.shutdown_all().await;
+}

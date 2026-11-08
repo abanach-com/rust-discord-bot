@@ -28,6 +28,7 @@ struct WorkerHandle {
 pub struct StickyCoordinator {
     storage: Storage,
     channel_senders: Arc<DashMap<(GuildId, ChannelId), WorkerHandle>>,
+    negative_until: Arc<DashMap<(GuildId, ChannelId), std::time::Instant>>,
 }
 
 impl StickyCoordinator {
@@ -35,11 +36,23 @@ impl StickyCoordinator {
         Self {
             storage,
             channel_senders: Arc::new(DashMap::new()),
+            negative_until: Arc::new(DashMap::new()),
         }
     }
 
     pub fn active_worker_count(&self) -> usize {
         self.channel_senders.len()
+    }
+
+    pub fn negative_cache_len(&self) -> usize {
+        self.negative_until.len()
+    }
+
+    pub fn invalidate_channel(&self, guild_id: &str, channel_id: &str) {
+        if let (Ok(gid), Ok(cid)) = (guild_id.parse::<u64>(), channel_id.parse::<u64>()) {
+            let key = (GuildId::new(gid), ChannelId::new(cid));
+            self.negative_until.remove(&key);
+        }
     }
 
     pub fn enqueue_refresh(
@@ -50,6 +63,22 @@ impl StickyCoordinator {
         trigger_message_id: MessageId,
     ) {
         let key = (guild_id, channel_id);
+
+        // Fast-path: Check negative cache (channels known not to have sticky messages)
+        let now = std::time::Instant::now();
+        if let Some(expiry) = self.negative_until.get(&key) {
+            if *expiry > now {
+                return;
+            }
+            drop(expiry);
+            self.negative_until.remove(&key);
+        }
+
+        // Opportunistic cleanup of negative cache if it grows large
+        if self.negative_until.len() >= 4096 {
+            self.negative_until.retain(|_, expiry| *expiry > now);
+        }
+
         use dashmap::mapref::entry::Entry;
 
         let spawn_info = match self.channel_senders.entry(key) {
@@ -76,8 +105,18 @@ impl StickyCoordinator {
         if let Some((rx, owner_id)) = spawn_info {
             let storage = self.storage.clone();
             let channel_senders = self.channel_senders.clone();
+            let negative_until = self.negative_until.clone();
             tokio::spawn(async move {
-                run_channel_worker(key, owner_id, rx, http, storage, channel_senders).await;
+                run_channel_worker(
+                    key,
+                    owner_id,
+                    rx,
+                    http,
+                    storage,
+                    channel_senders,
+                    negative_until,
+                )
+                .await;
             });
         }
     }
@@ -86,6 +125,7 @@ impl StickyCoordinator {
         if let (Ok(gid), Ok(cid)) = (guild_id.parse::<u64>(), channel_id.parse::<u64>()) {
             let key = (GuildId::new(gid), ChannelId::new(cid));
             self.channel_senders.remove(&key);
+            self.negative_until.remove(&key);
         }
     }
 }
@@ -179,6 +219,7 @@ async fn run_channel_worker(
     http: Arc<Http>,
     storage: Storage,
     channel_senders: Arc<DashMap<(GuildId, ChannelId), WorkerHandle>>,
+    negative_until: Arc<DashMap<(GuildId, ChannelId), std::time::Instant>>,
 ) {
     let gid_str = key.0.get().to_string();
     let cid_str = key.1.get().to_string();
@@ -198,8 +239,16 @@ async fn run_channel_worker(
             // 1. Fetch current sticky configuration
             let sticky = match storage.get_sticky_message(&gid_str, &cid_str).await {
                 Ok(Some(s)) => s,
-                _ => {
-                    // If deleted or errored, remove worker if we are still registered owner and exit
+                Ok(None) => {
+                    // No sticky configured for this channel: cache negative result for 60s
+                    negative_until.insert(key, std::time::Instant::now() + Duration::from_secs(60));
+                    channel_senders.remove_if(&key, |_, h| h.owner_id == owner_id);
+                    return;
+                }
+                Err(err) => {
+                    tracing::error!(
+                        "Database error fetching sticky message for {gid_str}/{cid_str}: {err}"
+                    );
                     channel_senders.remove_if(&key, |_, h| h.owner_id == owner_id);
                     return;
                 }

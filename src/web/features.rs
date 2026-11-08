@@ -689,6 +689,11 @@ pub async fn set_sticky(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
+    state
+        .app
+        .sticky_coordinator
+        .invalidate_channel(&guild_id, &payload.channel_id);
+
     Ok(Json(msg))
 }
 
