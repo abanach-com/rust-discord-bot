@@ -7520,3 +7520,105 @@ async fn test_sticky_superseded_in_flight_delivery_compensating_delete_and_refre
 
     shard_manager.shutdown_all().await;
 }
+
+#[tokio::test]
+async fn test_sticky_cooldown_deferred_bump_after_silence_issue_321() {
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state_with_port(mock.port).await;
+
+    // 1. Configure sticky message on channel 101 with 1 second cooldown
+    state
+        .storage
+        .set_sticky_message(
+            "100",
+            "101",
+            "",
+            "📌 Rules: Deferred Bump Cooldown Test!",
+            1,
+        )
+        .await
+        .expect("set sticky message");
+
+    // 2. Initial message triggers first delivery
+    state.sticky_coordinator.enqueue_refresh(
+        ctx.http.clone(),
+        GuildId::new(100),
+        ChannelId::new(101),
+        MessageId::new(1001),
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    // Verify first post delivered
+    let recorded = mock.recorded_calls.lock().await.clone();
+    let posts_1: Vec<_> = recorded
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+        .collect();
+    assert_eq!(posts_1.len(), 1, "First sticky message posted");
+
+    // 3. Burst of 10 messages sent during the 1-second cooldown window
+    for i in 2..=11 {
+        state.sticky_coordinator.enqueue_refresh(
+            ctx.http.clone(),
+            GuildId::new(100),
+            ChannelId::new(101),
+            MessageId::new(1000 + i),
+        );
+    }
+
+    // Wait 200ms - still inside the 1-second cooldown window
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Verify: still exactly 1 post during cooldown
+    let recorded_cooldown = mock.recorded_calls.lock().await.clone();
+    let posts_cd: Vec<_> = recorded_cooldown
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+        .collect();
+    assert_eq!(
+        posts_cd.len(),
+        1,
+        "Zero new deliveries while inside cooldown window"
+    );
+
+    // 4. Channel goes completely SILENT! No new messages.
+    // Wait for the 1-second cooldown deadline to expire (sleep 1.1s total)
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+    // Verify: deferred bump automatically posted after cooldown without any new message!
+    let recorded_after_deadline = mock.recorded_calls.lock().await.clone();
+    let posts_deferred: Vec<_> = recorded_after_deadline
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+        .collect();
+    assert_eq!(
+        posts_deferred.len(),
+        2,
+        "Deferred bump must execute automatically after cooldown without new messages"
+    );
+
+    // Verify old sticky was deleted
+    let deletes: Vec<_> = recorded_after_deadline
+        .iter()
+        .filter(|(m, p)| {
+            *m == Method::DELETE && p.contains("/channels/101/messages/900000000000000001")
+        })
+        .collect();
+    assert_eq!(deletes.len(), 1, "Old sticky was deleted by deferred bump");
+
+    // 5. Subsequent silence causes 0 additional posts
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let recorded_final = mock.recorded_calls.lock().await.clone();
+    let posts_final: Vec<_> = recorded_final
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+        .collect();
+    assert_eq!(
+        posts_final.len(),
+        2,
+        "No additional posts without new user messages"
+    );
+
+    shard_manager.shutdown_all().await;
+}

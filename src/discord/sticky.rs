@@ -195,8 +195,6 @@ async fn run_channel_worker(
 
         let mut delivery_attempts = 0;
         while delivery_attempts < 3 {
-            delivery_attempts += 1;
-
             // 1. Fetch current sticky configuration
             let sticky = match storage.get_sticky_message(&gid_str, &cid_str).await {
                 Ok(Some(s)) => s,
@@ -207,14 +205,48 @@ async fn run_channel_worker(
                 }
             };
 
-            // 2. Cooldown check
+            // 2. Cooldown check: if inside cooldown, sleep until deadline while draining incoming triggers
             if let Some(last_bumped) = sticky.last_bumped_at {
-                let elapsed = Utc::now().signed_duration_since(last_bumped).num_seconds();
-                if elapsed < sticky.cooldown_seconds as i64 {
-                    // Still inside cooldown window; drop this burst
-                    break;
+                let elapsed = Utc::now().signed_duration_since(last_bumped);
+                let cooldown_dur = chrono::Duration::seconds(i64::from(sticky.cooldown_seconds));
+                if elapsed < cooldown_dur {
+                    let remaining = (cooldown_dur - elapsed).to_std().unwrap_or_default();
+                    if !remaining.is_zero() {
+                        let sleep_fut = tokio::time::sleep(remaining);
+                        tokio::pin!(sleep_fut);
+
+                        let mut channel_closed = false;
+                        tokio::select! {
+                            () = &mut sleep_fut => {
+                                // Deadline elapsed with no further messages; loop back to verify storage and deliver
+                            }
+                            maybe_next = rx.recv() => {
+                                match maybe_next {
+                                    Some(next_id) => {
+                                        trigger_id = next_id;
+                                        while let Ok(id) = rx.try_recv() {
+                                            trigger_id = id;
+                                        }
+                                        // New message arrived; loop back to re-check storage and re-evaluate cooldown
+                                    }
+                                    None => {
+                                        channel_closed = true;
+                                    }
+                                }
+                            }
+                        }
+
+                        if channel_closed {
+                            channel_senders.remove_if(&key, |_, h| h.owner_id == owner_id);
+                            return;
+                        }
+
+                        continue;
+                    }
                 }
             }
+
+            delivery_attempts += 1;
 
             // 3. Channel existence, guild membership, type, and bot permission check
             if let Err(err) = check_bot_channel_permission(&http, key.0, key.1).await {
