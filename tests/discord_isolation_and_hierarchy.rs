@@ -6907,6 +6907,8 @@ async fn test_sticky_messages_end_to_end_delivery_and_anti_recursion() {
         .await
         .unwrap();
 
+    state.sticky_coordinator.invalidate_channel("100", "101");
+
     let post_cooldown_msg: Message = serde_json::from_value(json!({
         "id": "111000000000000032",
         "channel_id": "101",
@@ -7857,6 +7859,218 @@ async fn test_sticky_reverse_order_invalidation_overwrites_existing_missing_entr
         posts.len(),
         1,
         "Sticky message delivered immediately on next message after invalidation"
+    );
+
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn test_sticky_cooldown_avoids_repeated_storage_selects_issue_324() {
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state_with_port(mock.port).await;
+
+    // 1. Configure sticky message on channel 101 with 1 second cooldown
+    state
+        .storage
+        .set_sticky_message(
+            "100",
+            "101",
+            "",
+            "📌 Rules: O(1) Storage Reads During Cooldown!",
+            1,
+        )
+        .await
+        .expect("set sticky message");
+
+    // Initial message triggers first delivery
+    state.sticky_coordinator.enqueue_refresh(
+        ctx.http.clone(),
+        GuildId::new(100),
+        ChannelId::new(101),
+        MessageId::new(9001),
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    // Verify first post delivered
+    let recorded = mock.recorded_calls.lock().await.clone();
+    let posts_1: Vec<_> = recorded
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+        .collect();
+    assert_eq!(posts_1.len(), 1, "First sticky message posted");
+
+    let initial_fetch_count = state.sticky_coordinator.storage_fetch_count();
+    assert!(
+        initial_fetch_count >= 1,
+        "Initial delivery fetched config from storage"
+    );
+
+    // 2. Send 1 message into cooldown: this triggers exactly 1 storage fetch to verify cooldown
+    state.sticky_coordinator.enqueue_refresh(
+        ctx.http.clone(),
+        GuildId::new(100),
+        ChannelId::new(101),
+        MessageId::new(9002),
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let cooldown_fetch_count = state.sticky_coordinator.storage_fetch_count();
+    assert_eq!(
+        cooldown_fetch_count,
+        initial_fetch_count + 1,
+        "Exactly 1 storage fetch to evaluate cooldown and start sleep"
+    );
+
+    // Now flood 100 messages into the channel while worker is sleeping in cooldown
+    for i in 3..=102 {
+        state.sticky_coordinator.enqueue_refresh(
+            ctx.http.clone(),
+            GuildId::new(100),
+            ChannelId::new(101),
+            MessageId::new(9000 + i),
+        );
+    }
+
+    // Wait 200ms - still inside the 1-second cooldown window
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Verify: exactly 1 post during cooldown (no premature deliveries)
+    let recorded_cooldown = mock.recorded_calls.lock().await.clone();
+    let posts_cd: Vec<_> = recorded_cooldown
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+        .collect();
+    assert_eq!(
+        posts_cd.len(),
+        1,
+        "Zero new deliveries while inside cooldown window"
+    );
+
+    // CRITICAL ASSERTION FOR ISSUE #324:
+    // Storage fetches MUST NOT grow with incoming messages in cooldown!
+    // The worker coalesces 100 triggers in-memory without querying storage on each message.
+    let burst_fetch_count = state.sticky_coordinator.storage_fetch_count();
+    assert_eq!(
+        burst_fetch_count, cooldown_fetch_count,
+        "Zero additional storage fetches for 100 messages while worker sleeps in cooldown"
+    );
+
+    // 3. Silence: wait for cooldown deadline to expire (sleep 1.1s)
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+    // Verify: deferred bump delivered after cooldown
+    let recorded_after = mock.recorded_calls.lock().await.clone();
+    let posts_after: Vec<_> = recorded_after
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+        .collect();
+    assert_eq!(
+        posts_after.len(),
+        2,
+        "Deferred bump delivered after cooldown expiry"
+    );
+
+    // Exactly 1 additional storage fetch at deadline expiry to check CAS & deliver
+    let final_fetch_count = state.sticky_coordinator.storage_fetch_count();
+    assert_eq!(
+        final_fetch_count,
+        cooldown_fetch_count + 1,
+        "Exactly 1 storage fetch at cooldown deadline (O(1) total reads, not 100)"
+    );
+
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn test_sticky_cooldown_interrupted_by_web_config_mutation_or_deletion_issue_324() {
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state_with_port(mock.port).await;
+
+    // 1. Configure sticky message on channel 101 with long cooldown (3600 seconds)
+    state
+        .storage
+        .set_sticky_message("100", "101", "", "📌 Rules: Long 1-Hour Cooldown!", 3600)
+        .await
+        .expect("set sticky message");
+
+    // Initial message triggers first delivery
+    state.sticky_coordinator.enqueue_refresh(
+        ctx.http.clone(),
+        GuildId::new(100),
+        ChannelId::new(101),
+        MessageId::new(9501),
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    // Next message puts worker into 1-hour sleep
+    state.sticky_coordinator.enqueue_refresh(
+        ctx.http.clone(),
+        GuildId::new(100),
+        ChannelId::new(101),
+        MessageId::new(9502),
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(state.sticky_coordinator.active_worker_count(), 1);
+
+    // 2. While worker is sleeping in 1-hour cooldown, admin updates config via web:
+    // changes cooldown to 0 (immediate) and new content!
+    state
+        .storage
+        .set_sticky_message(
+            "100",
+            "101",
+            "",
+            "📌 Rules: Updated Web Config Should Wake Worker Immediately!",
+            0,
+        )
+        .await
+        .expect("set sticky message");
+
+    // invalidate_channel sends ConfigChanged signal to sleeping worker
+    state.sticky_coordinator.invalidate_channel("100", "101");
+
+    // Worker must wake up immediately without waiting 3600s and deliver updated config!
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let recorded = mock.recorded_calls.lock().await.clone();
+    let posts: Vec<_> = recorded
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+        .collect();
+    assert_eq!(
+        posts.len(),
+        2,
+        "Worker woke up immediately on ConfigChanged and delivered updated sticky"
+    );
+    assert!(posts[1].1.contains("Updated Web Config"));
+
+    // 3. Now send another message and then DELETE sticky while worker is sleeping
+    state.sticky_coordinator.enqueue_refresh(
+        ctx.http.clone(),
+        GuildId::new(100),
+        ChannelId::new(101),
+        MessageId::new(9503),
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    state
+        .storage
+        .delete_sticky_message("100", "101")
+        .await
+        .expect("delete sticky");
+
+    state.sticky_coordinator.remove_channel("100", "101");
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    assert_eq!(
+        state.sticky_coordinator.active_worker_count(),
+        0,
+        "Worker terminated cleanly on deletion signal without leaks"
     );
 
     shard_manager.shutdown_all().await;

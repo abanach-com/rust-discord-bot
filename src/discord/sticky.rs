@@ -1,5 +1,8 @@
 use std::{
-    sync::{Arc, RwLock},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -21,6 +24,13 @@ pub enum StickyCacheEntry {
     InvalidatedUntil(std::time::Instant),
 }
 
+#[derive(Clone, Debug)]
+pub enum WorkerSignal {
+    Trigger(MessageId),
+    ConfigChanged,
+    Deleted,
+}
+
 #[doc(hidden)]
 #[derive(Clone, Default)]
 pub struct StickyTestPause {
@@ -38,7 +48,7 @@ pub struct StickyRefresh {
 #[derive(Clone)]
 struct WorkerHandle {
     owner_id: Uuid,
-    tx: mpsc::Sender<MessageId>,
+    tx: mpsc::Sender<WorkerSignal>,
 }
 
 #[derive(Clone)]
@@ -47,6 +57,7 @@ struct WorkerEnv {
     channel_senders: Arc<DashMap<(GuildId, ChannelId), WorkerHandle>>,
     negative_cache: Arc<DashMap<(GuildId, ChannelId), StickyCacheEntry>>,
     test_pause: Arc<RwLock<Option<StickyTestPause>>>,
+    storage_fetch_count: Arc<AtomicUsize>,
 }
 
 /// Coordinates sticky message delivery across channels within a single bot process.
@@ -65,6 +76,8 @@ pub struct StickyCoordinator {
     negative_cache: Arc<DashMap<(GuildId, ChannelId), StickyCacheEntry>>,
     #[doc(hidden)]
     test_pause: Arc<RwLock<Option<StickyTestPause>>>,
+    #[doc(hidden)]
+    storage_fetch_count: Arc<AtomicUsize>,
 }
 
 impl StickyCoordinator {
@@ -74,11 +87,17 @@ impl StickyCoordinator {
             channel_senders: Arc::new(DashMap::new()),
             negative_cache: Arc::new(DashMap::new()),
             test_pause: Arc::new(RwLock::new(None)),
+            storage_fetch_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     pub fn active_worker_count(&self) -> usize {
         self.channel_senders.len()
+    }
+
+    #[doc(hidden)]
+    pub fn storage_fetch_count(&self) -> usize {
+        self.storage_fetch_count.load(Ordering::SeqCst)
     }
 
     pub fn negative_cache_len(&self) -> usize {
@@ -100,6 +119,9 @@ impl StickyCoordinator {
                 key,
                 StickyCacheEntry::InvalidatedUntil(now + Duration::from_secs(60)),
             );
+            if let Some(handle) = self.channel_senders.get(&key) {
+                let _ = handle.tx.try_send(WorkerSignal::ConfigChanged);
+            }
         }
     }
 
@@ -155,19 +177,22 @@ impl StickyCoordinator {
 
         let spawn_info = match self.channel_senders.entry(key) {
             Entry::Occupied(entry) if !entry.get().tx.is_closed() => {
-                let _ = entry.get().tx.try_send(trigger_message_id);
+                let _ = entry
+                    .get()
+                    .tx
+                    .try_send(WorkerSignal::Trigger(trigger_message_id));
                 None
             }
             Entry::Occupied(mut entry) => {
-                let (tx, rx) = mpsc::channel(32);
-                let _ = tx.try_send(trigger_message_id);
+                let (tx, rx) = mpsc::channel(64);
+                let _ = tx.try_send(WorkerSignal::Trigger(trigger_message_id));
                 let owner_id = Uuid::new_v4();
                 entry.insert(WorkerHandle { owner_id, tx });
                 Some((rx, owner_id))
             }
             Entry::Vacant(entry) => {
-                let (tx, rx) = mpsc::channel(32);
-                let _ = tx.try_send(trigger_message_id);
+                let (tx, rx) = mpsc::channel(64);
+                let _ = tx.try_send(WorkerSignal::Trigger(trigger_message_id));
                 let owner_id = Uuid::new_v4();
                 entry.insert(WorkerHandle { owner_id, tx });
                 Some((rx, owner_id))
@@ -180,6 +205,7 @@ impl StickyCoordinator {
                 channel_senders: self.channel_senders.clone(),
                 negative_cache: self.negative_cache.clone(),
                 test_pause: self.test_pause.clone(),
+                storage_fetch_count: self.storage_fetch_count.clone(),
             };
             tokio::spawn(async move {
                 run_channel_worker(key, owner_id, rx, http, env).await;
@@ -190,7 +216,9 @@ impl StickyCoordinator {
     pub fn remove_channel(&self, guild_id: &str, channel_id: &str) {
         if let (Ok(gid), Ok(cid)) = (guild_id.parse::<u64>(), channel_id.parse::<u64>()) {
             let key = (GuildId::new(gid), ChannelId::new(cid));
-            self.channel_senders.remove(&key);
+            if let Some((_, handle)) = self.channel_senders.remove(&key) {
+                let _ = handle.tx.try_send(WorkerSignal::Deleted);
+            }
             self.negative_cache.remove(&key);
         }
     }
@@ -281,26 +309,62 @@ pub async fn check_bot_channel_permission(
 async fn run_channel_worker(
     key: (GuildId, ChannelId),
     owner_id: Uuid,
-    mut rx: mpsc::Receiver<MessageId>,
+    mut rx: mpsc::Receiver<WorkerSignal>,
     http: Arc<Http>,
     env: WorkerEnv,
 ) {
     let gid_str = key.0.get().to_string();
     let cid_str = key.1.get().to_string();
 
-    while let Ok(maybe_trigger) = tokio::time::timeout(Duration::from_secs(300), rx.recv()).await {
-        let Some(mut trigger_id) = maybe_trigger else {
+    while let Ok(maybe_signal) = tokio::time::timeout(Duration::from_secs(300), rx.recv()).await {
+        let Some(signal) = maybe_signal else {
             break;
+        };
+
+        let mut trigger_id = match signal {
+            WorkerSignal::Trigger(id) => id,
+            WorkerSignal::ConfigChanged => {
+                let mut found_trigger = None;
+                while let Ok(next) = rx.try_recv() {
+                    match next {
+                        WorkerSignal::Trigger(id) => found_trigger = Some(id),
+                        WorkerSignal::ConfigChanged => {}
+                        WorkerSignal::Deleted => {
+                            env.channel_senders
+                                .remove_if(&key, |_, h| h.owner_id == owner_id);
+                            return;
+                        }
+                    }
+                }
+                match found_trigger {
+                    Some(id) => id,
+                    None => continue,
+                }
+            }
+            WorkerSignal::Deleted => {
+                env.channel_senders
+                    .remove_if(&key, |_, h| h.owner_id == owner_id);
+                return;
+            }
         };
 
         // Drain pending burst triggers to coalesce into the latest
         while let Ok(next) = rx.try_recv() {
-            trigger_id = next;
+            match next {
+                WorkerSignal::Trigger(id) => trigger_id = id,
+                WorkerSignal::ConfigChanged => {}
+                WorkerSignal::Deleted => {
+                    env.channel_senders
+                        .remove_if(&key, |_, h| h.owner_id == owner_id);
+                    return;
+                }
+            }
         }
 
         let mut delivery_attempts = 0;
         while delivery_attempts < 3 {
             // 1. Fetch current sticky configuration
+            env.storage_fetch_count.fetch_add(1, Ordering::SeqCst);
             let sticky = match env.storage.get_sticky_message(&gid_str, &cid_str).await {
                 Ok(Some(s)) => {
                     // Successful read of configured sticky message: clear any lingering InvalidatedUntil token
@@ -323,30 +387,42 @@ async fn run_channel_worker(
                     // No sticky configured for this channel: atomically insert MissingUntil only if not InvalidatedUntil
                     use dashmap::mapref::entry::Entry;
                     let now = std::time::Instant::now();
+                    let mut recheck_after_invalidation = false;
                     match env.negative_cache.entry(key) {
-                        Entry::Occupied(mut occ) => {
-                            match *occ.get() {
-                                StickyCacheEntry::InvalidatedUntil(expiry) if expiry > now => {
-                                    // An invalidation occurred while this worker was fetching from DB.
-                                    // Do NOT overwrite with MissingUntil!
-                                    // If we received another trigger message in the meantime, loop to deliver immediately.
-                                    if let Ok(next_trigger) = rx.try_recv() {
-                                        trigger_id = next_trigger;
-                                        continue;
+                        Entry::Occupied(mut occ) => match *occ.get() {
+                            StickyCacheEntry::InvalidatedUntil(expiry) if expiry > now => {
+                                while let Ok(next) = rx.try_recv() {
+                                    match next {
+                                        WorkerSignal::Trigger(next_id) => {
+                                            trigger_id = next_id;
+                                            recheck_after_invalidation = true;
+                                        }
+                                        WorkerSignal::ConfigChanged => {
+                                            recheck_after_invalidation = true;
+                                        }
+                                        WorkerSignal::Deleted => {
+                                            env.channel_senders
+                                                .remove_if(&key, |_, h| h.owner_id == owner_id);
+                                            return;
+                                        }
                                     }
                                 }
-                                _ => {
-                                    occ.insert(StickyCacheEntry::MissingUntil(
-                                        now + Duration::from_secs(60),
-                                    ));
-                                }
                             }
-                        }
+                            _ => {
+                                occ.insert(StickyCacheEntry::MissingUntil(
+                                    now + Duration::from_secs(60),
+                                ));
+                            }
+                        },
                         Entry::Vacant(vac) => {
                             vac.insert(StickyCacheEntry::MissingUntil(
                                 now + Duration::from_secs(60),
                             ));
                         }
+                    }
+
+                    if recheck_after_invalidation {
+                        continue;
                     }
 
                     env.channel_senders
@@ -363,43 +439,60 @@ async fn run_channel_worker(
                 }
             };
 
-            // 2. Cooldown check: if inside cooldown, sleep until deadline while draining incoming triggers
+            // 2. Cooldown check: if inside cooldown, sleep until fixed deadline while coalescing triggers WITHOUT querying storage
             if let Some(last_bumped) = sticky.last_bumped_at {
                 let elapsed = Utc::now().signed_duration_since(last_bumped);
                 let cooldown_dur = chrono::Duration::seconds(i64::from(sticky.cooldown_seconds));
                 if elapsed < cooldown_dur {
                     let remaining = (cooldown_dur - elapsed).to_std().unwrap_or_default();
                     if !remaining.is_zero() {
-                        let sleep_fut = tokio::time::sleep(remaining);
-                        tokio::pin!(sleep_fut);
+                        let deadline = tokio::time::Instant::now() + remaining;
 
-                        let mut channel_closed = false;
-                        tokio::select! {
-                            () = &mut sleep_fut => {
-                                // Deadline elapsed with no further messages; loop back to verify storage and deliver
-                            }
-                            maybe_next = rx.recv() => {
-                                match maybe_next {
-                                    Some(next_id) => {
-                                        trigger_id = next_id;
-                                        while let Ok(id) = rx.try_recv() {
+                        loop {
+                            tokio::select! {
+                                _ = tokio::time::sleep_until(deadline) => {
+                                    // Cooldown deadline expired; break sleep loop and proceed to storage query & delivery
+                                    break;
+                                }
+                                maybe_signal = rx.recv() => {
+                                    match maybe_signal {
+                                        Some(WorkerSignal::Trigger(id)) => {
                                             trigger_id = id;
+                                            let mut config_changed = false;
+                                            while let Ok(next) = rx.try_recv() {
+                                                match next {
+                                                    WorkerSignal::Trigger(id) => trigger_id = id,
+                                                    WorkerSignal::ConfigChanged => {
+                                                        config_changed = true;
+                                                        break;
+                                                    }
+                                                    WorkerSignal::Deleted => {
+                                                        env.channel_senders
+                                                            .remove_if(&key, |_, h| h.owner_id == owner_id);
+                                                        return;
+                                                    }
+                                                }
+                                            }
+                                            if config_changed {
+                                                break;
+                                            }
+                                            // Coalesce trigger; continue sleeping until the fixed deadline without querying storage!
                                         }
-                                        // New message arrived; loop back to re-check storage and re-evaluate cooldown
-                                    }
-                                    None => {
-                                        channel_closed = true;
+                                        Some(WorkerSignal::ConfigChanged) => {
+                                            // Config changed via web; break sleep loop immediately to re-read config
+                                            break;
+                                        }
+                                        Some(WorkerSignal::Deleted) | None => {
+                                            env.channel_senders
+                                                .remove_if(&key, |_, h| h.owner_id == owner_id);
+                                            return;
+                                        }
                                     }
                                 }
                             }
                         }
 
-                        if channel_closed {
-                            env.channel_senders
-                                .remove_if(&key, |_, h| h.owner_id == owner_id);
-                            return;
-                        }
-
+                        // Re-query storage and evaluate CAS/delivery after deadline or config change
                         continue;
                     }
                 }
@@ -470,7 +563,15 @@ async fn run_channel_worker(
                     let _ = key.1.delete_message(&http, new_msg.id).await;
                     // Drain any newer triggers that arrived while we were sending
                     while let Ok(next) = rx.try_recv() {
-                        trigger_id = next;
+                        match next {
+                            WorkerSignal::Trigger(id) => trigger_id = id,
+                            WorkerSignal::ConfigChanged => {}
+                            WorkerSignal::Deleted => {
+                                env.channel_senders
+                                    .remove_if(&key, |_, h| h.owner_id == owner_id);
+                                return;
+                            }
+                        }
                     }
                     // Loop again: fetch updated config and deliver immediately without waiting for another user message
                     continue;
