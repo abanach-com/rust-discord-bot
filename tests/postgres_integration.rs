@@ -979,6 +979,28 @@ async fn test_postgres_integration_suite() {
     assert_eq!(m2.used_tokens, 3500);
     assert!((m2.used_usd - 0.07).abs() < 1e-6);
 
+    // Exceeding limit halts the budget
+    let m_halt = store
+        .record_metering_event_once(&meter_guild, "provider_pg", "req_id_halt", 1_000_000, 15.0)
+        .await
+        .expect("overflow postgres metering event");
+    assert!(m_halt.is_halted);
+
+    // Subsequent metering event fails
+    let m_err = store
+        .record_metering_event_once(&meter_guild, "provider_pg", "req_id_after_halt", 50, 0.5)
+        .await;
+    assert!(m_err.is_err());
+
+    // Retrying the same failed request ID must return Err again (Issue #312 parity)
+    let m_retry = store
+        .record_metering_event_once(&meter_guild, "provider_pg", "req_id_after_halt", 50, 0.5)
+        .await;
+    assert!(
+        m_retry.is_err(),
+        "Postgres rollback ensures failed event does not commit marker (Issue #312)"
+    );
+
     let count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM ai_guild_budgets WHERE guild_id = $1")
             .bind(&concurrent_guild)

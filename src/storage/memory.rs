@@ -210,6 +210,8 @@ pub struct MemoryStore {
 
     ai_metering_events: Arc<DashMap<(String, String, String), AiMeteringEvent>>,
 
+    ai_metering_write_lock: Arc<Mutex<()>>,
+
     ai_documents: Arc<DashMap<Uuid, AiKnowledgeDocument>>,
 
     mcp_tool_auths: Arc<DashMap<(String, String), McpToolAuthorization>>,
@@ -5599,30 +5601,40 @@ impl MemoryStore {
         anyhow::ensure!(!provider.is_empty(), "provider cannot be empty");
         anyhow::ensure!(!request_id.is_empty(), "request_id cannot be empty");
 
+        let _guard = self
+            .ai_metering_write_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("AI metering write lock poisoned"))?;
+
         let key = (
             guild_id.to_string(),
             provider.to_string(),
             request_id.to_string(),
         );
-        match self.ai_metering_events.entry(key) {
-            dashmap::mapref::entry::Entry::Occupied(_) => {
-                // Idempotent duplicate: already recorded, return current budget without recharging
-                Ok(self.get_or_create_ai_budget(guild_id))
-            }
-            dashmap::mapref::entry::Entry::Vacant(vacant) => {
-                let event = AiMeteringEvent {
-                    id: Uuid::new_v4(),
-                    guild_id: guild_id.to_string(),
-                    provider: provider.to_string(),
-                    request_id: request_id.to_string(),
-                    tokens,
-                    usd,
-                    created_at: Utc::now(),
-                };
-                vacant.insert(event);
-                self.record_ai_usage(guild_id, tokens, usd)
-            }
+
+        if self.ai_metering_events.contains_key(&key) {
+            // Idempotent duplicate: already recorded, return current budget without recharging
+            return Ok(self.get_or_create_ai_budget(guild_id));
         }
+
+        // Atomically record AI usage. If record_ai_usage fails (e.g. budget halted or token overflow),
+        // we propagate the error immediately and DO NOT insert the event marker, guaranteeing parity with PostgreSQL rollback.
+        let updated = self.record_ai_usage(guild_id, tokens, usd)?;
+
+        self.ai_metering_events.insert(
+            key,
+            AiMeteringEvent {
+                id: Uuid::new_v4(),
+                guild_id: guild_id.to_string(),
+                provider: provider.to_string(),
+                request_id: request_id.to_string(),
+                tokens,
+                usd,
+                created_at: Utc::now(),
+            },
+        );
+
+        Ok(updated)
     }
 
     pub fn create_ai_document(&self, doc: AiKnowledgeDocument) -> AiKnowledgeDocument {

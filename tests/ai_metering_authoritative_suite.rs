@@ -354,3 +354,123 @@ async fn test_authoritative_metering_idempotency_and_quota_halt() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn test_metering_failure_when_halted_does_not_persist_idempotency_marker() {
+    let (state, _) = test_web_state().await;
+    let guild_id = "777000000000000004";
+
+    // 1. Bring budget to halted state
+    let halted_budget = state
+        .app
+        .storage
+        .record_metering_event_once(
+            guild_id,
+            "provider_halt",
+            "req_bring_to_halt",
+            1_000_000,
+            10.0,
+        )
+        .await
+        .expect("halt budget");
+    assert!(halted_budget.is_halted);
+    let original_tokens = halted_budget.used_tokens;
+    let original_usd = halted_budget.used_usd;
+
+    // 2. Next metering event fails with Err because budget is halted
+    let err_res = state
+        .app
+        .storage
+        .record_metering_event_once(guild_id, "provider_halt", "req_attempt_after_halt", 50, 0.5)
+        .await;
+    assert!(err_res.is_err(), "Metering after halt must return error");
+
+    // 3. Retrying the EXACT same request_id must NOT return false success (#312)!
+    // It must return Err again because the event marker was NOT committed without charging.
+    let retry_res = state
+        .app
+        .storage
+        .record_metering_event_once(guild_id, "provider_halt", "req_attempt_after_halt", 50, 0.5)
+        .await;
+    assert!(
+        retry_res.is_err(),
+        "Retrying failed metering attempt must not return false Ok (Issue #312)"
+    );
+
+    // 4. Verify budget counters remain untouched
+    let current_budget = state
+        .app
+        .storage
+        .get_or_create_ai_budget(guild_id)
+        .await
+        .unwrap();
+    assert_eq!(current_budget.used_tokens, original_tokens);
+    assert!((current_budget.used_usd - original_usd).abs() < 1e-6);
+}
+
+#[tokio::test]
+async fn test_concurrent_identical_and_distinct_metering_requests() {
+    let (state, _) = test_web_state().await;
+    let guild_id = "777000000000000005";
+
+    // 1. 20 concurrent tasks sending the EXACT SAME (guild, provider, request_id)
+    let mut identical_handles = Vec::new();
+    for _ in 0..20 {
+        let storage = state.app.storage.clone();
+        let gid = guild_id.to_string();
+        identical_handles.push(tokio::spawn(async move {
+            storage
+                .record_metering_event_once(&gid, "provider_conc", "req_concurrent_same", 500, 0.01)
+                .await
+        }));
+    }
+
+    for h in identical_handles {
+        let res = h.await.unwrap();
+        assert!(res.is_ok());
+    }
+
+    // Exactly one charge occurred: 500 tokens, 0.01 usd
+    let b_after_same = state
+        .app
+        .storage
+        .get_or_create_ai_budget(guild_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        b_after_same.used_tokens, 500,
+        "20 concurrent identical requests must charge exactly once"
+    );
+    assert!((b_after_same.used_usd - 0.01).abs() < 1e-6);
+
+    // 2. 10 concurrent tasks sending DISTINCT request_ids
+    let mut distinct_handles = Vec::new();
+    for i in 0..10 {
+        let storage = state.app.storage.clone();
+        let gid = guild_id.to_string();
+        let req_id = format!("req_concurrent_distinct_{i}");
+        distinct_handles.push(tokio::spawn(async move {
+            storage
+                .record_metering_event_once(&gid, "provider_conc", &req_id, 100, 0.002)
+                .await
+        }));
+    }
+
+    for h in distinct_handles {
+        let res = h.await.unwrap();
+        assert!(res.is_ok());
+    }
+
+    // Exactly 500 + (10 * 100) = 1500 tokens, and 0.01 + 0.02 = 0.03 usd
+    let b_after_distinct = state
+        .app
+        .storage
+        .get_or_create_ai_budget(guild_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        b_after_distinct.used_tokens, 1500,
+        "10 distinct requests must all be charged exactly once"
+    );
+    assert!((b_after_distinct.used_usd - 0.03).abs() < 1e-6);
+}
