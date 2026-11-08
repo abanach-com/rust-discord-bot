@@ -5051,16 +5051,30 @@ impl PostgresStore {
         let mut tx = self.pool.begin().await?;
 
         let (capacity, start_time, end_time): (Option<i32>, DateTime<Utc>, Option<DateTime<Utc>>) =
-            sqlx::query_as(
-                "SELECT max_participants, start_time, end_time FROM scheduled_events WHERE id = $1 FOR UPDATE",
+            match sqlx::query_as(
+                "SELECT max_participants, start_time, end_time FROM scheduled_events WHERE id = $1",
             )
             .bind(event_id)
             .fetch_optional(&mut *tx)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Scheduled event not found"))?;
+            {
+                Some(data) => data,
+                None => {
+                    let _ = tx.rollback().await;
+                    anyhow::bail!("Scheduled event not found");
+                }
+            };
 
         let deadline = end_time.unwrap_or(start_time + chrono::Duration::hours(1));
-        anyhow::ensure!(Utc::now() < deadline, "Event registration is closed");
+        if Utc::now() >= deadline {
+            let _ = tx.rollback().await;
+            anyhow::bail!("Event registration is closed");
+        }
+
+        let _ = sqlx::query("SELECT 1 FROM scheduled_events WHERE id = $1 FOR UPDATE")
+            .bind(event_id)
+            .execute(&mut *tx)
+            .await?;
 
         let existing = sqlx::query_as::<_, EventRoster>(
             r#"

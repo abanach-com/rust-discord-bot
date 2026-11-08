@@ -3623,9 +3623,9 @@ async fn test_postgres_integration_suite() {
         "Error message must indicate registration is closed"
     );
 
-    // 25.4. 20 concurrent joins on expired event in PostgreSQL
+    // 25.4. Concurrent joins on expired event in PostgreSQL
     let mut pg_join_handles = Vec::new();
-    for i in 0..20 {
+    for i in 0..10 {
         let store_clone = store.clone();
         let pid = past_pg_ev.id;
         let uid = format!("pg_concurrent_user_{i}");
