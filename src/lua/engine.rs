@@ -1115,6 +1115,10 @@ fn decode_and_validate_actions(
                 script: display_name.to_string(),
                 source,
             })?;
+
+        // Preflight complexity guard: inspect raw action table before invoking serde/from_value
+        preflight_action_complexity(&raw_val, module_id, display_name)?;
+
         let action: LuaAction =
             lua.from_value(raw_val)
                 .map_err(|source| LuaEngineError::Runtime {
@@ -1131,6 +1135,78 @@ fn decode_and_validate_actions(
     }
 
     Ok(actions)
+}
+
+const MAX_ACTION_DEPTH: usize = 16;
+const MAX_ACTION_NODES: usize = 512;
+const MAX_ACTION_STRING_BYTES: usize = 32_768;
+
+struct ActionComplexityBudget {
+    remaining_nodes: usize,
+    remaining_string_bytes: usize,
+}
+
+fn preflight_action_complexity(
+    val: &Value,
+    module_id: &str,
+    display_name: &str,
+) -> Result<(), LuaEngineError> {
+    let mut budget = ActionComplexityBudget {
+        remaining_nodes: MAX_ACTION_NODES,
+        remaining_string_bytes: MAX_ACTION_STRING_BYTES,
+    };
+    inspect_value_complexity(val, 0, &mut budget, module_id, display_name)
+}
+
+fn inspect_value_complexity(
+    val: &Value,
+    depth: usize,
+    budget: &mut ActionComplexityBudget,
+    module_id: &str,
+    display_name: &str,
+) -> Result<(), LuaEngineError> {
+    if depth > MAX_ACTION_DEPTH {
+        return Err(LuaEngineError::InvalidModule {
+            script: module_id.to_owned(),
+            message: format!("action payload nesting depth exceeded limit of {MAX_ACTION_DEPTH}"),
+        });
+    }
+    if budget.remaining_nodes == 0 {
+        return Err(LuaEngineError::InvalidModule {
+            script: module_id.to_owned(),
+            message: format!(
+                "action payload complexity exceeded budget of {MAX_ACTION_NODES} nodes"
+            ),
+        });
+    }
+    budget.remaining_nodes -= 1;
+
+    match val {
+        Value::Table(tbl) => {
+            for pair in tbl.pairs::<Value, Value>() {
+                let (k, v) = pair.map_err(|source| LuaEngineError::Runtime {
+                    script: display_name.to_string(),
+                    source,
+                })?;
+                inspect_value_complexity(&k, depth + 1, budget, module_id, display_name)?;
+                inspect_value_complexity(&v, depth + 1, budget, module_id, display_name)?;
+            }
+        }
+        Value::String(s) => {
+            let len = s.as_bytes().len();
+            if len > budget.remaining_string_bytes {
+                return Err(LuaEngineError::InvalidModule {
+                    script: module_id.to_owned(),
+                    message: format!(
+                        "action payload string content exceeded limit of {MAX_ACTION_STRING_BYTES} bytes"
+                    ),
+                });
+            }
+            budget.remaining_string_bytes -= len;
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn sandboxed_lua(limits: LuaLimits) -> mlua::Result<Lua> {

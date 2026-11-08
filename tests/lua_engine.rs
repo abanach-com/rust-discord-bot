@@ -735,3 +735,107 @@ async fn test_action_decoder_fails_early_on_invalid_element_issue_335() {
         "expected Runtime error on non-table return, got: {err_non_table}"
     );
 }
+
+#[tokio::test]
+async fn test_action_audit_dag_amplification_rejected_before_from_value_issue_340() {
+    let directory = TempDir::new().expect("tempdir");
+
+    std::fs::write(
+        directory.path().join("dag_module.lua"),
+        r#"
+        return {
+            manifest = {
+                id = "dag_module",
+                name = "DAG Module",
+                version = "1.0.0",
+                description = "Tests rejection of shared table DAG amplification in Audit.",
+                category = "test",
+                commands = {
+                    { name = "audit_dag", description = "Audit with nested DAG." },
+                    { name = "publish_dag", description = "PublishSubmission with nested DAG." },
+                    { name = "cyclic_table", description = "Cyclic table payload." },
+                    { name = "valid_audit", description = "Normal small audit payload." }
+                }
+            },
+            on_command = function(cmd)
+                if cmd == "audit_dag" then
+                    local node = { leaf = "ok" }
+                    for _ = 1, 12 do
+                        node = { left = node, right = node }
+                    end
+                    return {
+                        { type = "audit", event = "diagnostic", data = { payload = node } }
+                    }
+                elseif cmd == "publish_dag" then
+                    local node = { leaf = "ok" }
+                    for _ = 1, 12 do
+                        node = { left = node, right = node }
+                    end
+                    return {
+                        {
+                            type = "publish_submission",
+                            channel_id = "100000000000000001",
+                            content = "submission content",
+                            success_reply = "saved",
+                            audit_event = "pub_event",
+                            audit_data = { payload = node }
+                        }
+                    }
+                elseif cmd == "cyclic_table" then
+                    local t = { leaf = "ok" }
+                    t.self = t
+                    return {
+                        { type = "audit", event = "diagnostic", data = { payload = t } }
+                    }
+                elseif cmd == "valid_audit" then
+                    return {
+                        { type = "audit", event = "normal_event", data = { user = "123", action = "test" } }
+                    }
+                end
+                return {}
+            end
+        }
+        "#,
+    )
+    .expect("write test script");
+
+    let engine = LuaEngine::load(directory.path(), limits()).expect("load engine");
+
+    // 1. Audit with shared DAG amplification is rejected by preflight complexity check
+    let err_dag = engine
+        .execute_command("dag_module", "audit_dag", context())
+        .await
+        .expect_err("DAG amplification must fail preflight");
+    assert!(
+        matches!(err_dag, LuaEngineError::InvalidModule { ref message, .. } if message.contains("complexity exceeded budget")),
+        "expected InvalidModule on complexity budget, got: {err_dag}"
+    );
+
+    // 2. PublishSubmission with shared DAG amplification is also rejected
+    let err_pub_dag = engine
+        .execute_command("dag_module", "publish_dag", context())
+        .await
+        .expect_err("PublishSubmission DAG must fail preflight");
+    assert!(
+        matches!(err_pub_dag, LuaEngineError::InvalidModule { ref message, .. } if message.contains("complexity exceeded budget")),
+        "expected InvalidModule on complexity budget, got: {err_pub_dag}"
+    );
+
+    // 3. Cyclic table is safely stopped at MAX_ACTION_DEPTH
+    let err_cycle = engine
+        .execute_command("dag_module", "cyclic_table", context())
+        .await
+        .expect_err("Cyclic table must fail depth check safely without recursion loop");
+    assert!(
+        matches!(err_cycle, LuaEngineError::InvalidModule { ref message, .. } if message.contains("nesting depth exceeded limit")),
+        "expected InvalidModule on nesting depth, got: {err_cycle}"
+    );
+
+    // 4. Valid normal audit payload succeeds
+    let res_valid = engine
+        .execute_command("dag_module", "valid_audit", context())
+        .await
+        .expect("Valid audit must succeed");
+    assert_eq!(res_valid.len(), 1);
+    assert!(matches!(res_valid[0], LuaAction::Audit { ref event, .. } if event == "normal_event"));
+}

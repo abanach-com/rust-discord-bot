@@ -77,7 +77,7 @@ that a later stage succeeded:
 | Discovery and module loading | Invalid XML, unreadable source, bytecode marker, Lua syntax error, duplicate IDs, invalid manifest or schema | No callback action list exists |
 | Dispatch and callback lookup | Unknown module/command/event, disabled module, missing callback | No list has been executed |
 | Lua execution | Indexing `nil`, failed helper conversion, memory or instruction budget | Callback fails before action execution |
-| Action bounded preflight | More than 25 actions (fast O(1) reject), sparse table with gaps, out-of-bounds index, map/string keys | Rejected before any host action deserialization occurs |
+| Action bounded preflight | More than 25 actions (fast O(1) reject), sparse table with gaps, out-of-bounds index, map/string keys, DAG/cyclic payload exceeding complexity budget (max 16 levels, 512 nodes, 32 KiB strings) | Rejected before any host action deserialization occurs |
 | Action bounded decode & validation | Wrong action variant shape, missing required fields, audit payload budget exceeded (>64 keys or >16 KiB JSON), text/numeric bounds | Each element deserialized and validated one by one; stops on first invalid element |
 | Host execution | Permission, hierarchy, service policy, rate limit, Discord or database error | Earlier successful effects may already exist |
 
