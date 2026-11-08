@@ -79,6 +79,9 @@ pub struct StickyCoordinator {
     test_pause: Arc<RwLock<Option<StickyTestPause>>>,
     #[doc(hidden)]
     storage_fetch_count: Arc<AtomicUsize>,
+    last_negative_sweep: Arc<std::sync::Mutex<std::time::Instant>>,
+    #[doc(hidden)]
+    negative_cache_sweeps_total: Arc<AtomicUsize>,
 }
 
 impl StickyCoordinator {
@@ -89,6 +92,12 @@ impl StickyCoordinator {
             negative_cache: Arc::new(DashMap::new()),
             test_pause: Arc::new(RwLock::new(None)),
             storage_fetch_count: Arc::new(AtomicUsize::new(0)),
+            last_negative_sweep: Arc::new(std::sync::Mutex::new(
+                std::time::Instant::now()
+                    .checked_sub(Duration::from_secs(10))
+                    .unwrap_or_else(std::time::Instant::now),
+            )),
+            negative_cache_sweeps_total: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -99,6 +108,26 @@ impl StickyCoordinator {
     #[doc(hidden)]
     pub fn storage_fetch_count(&self) -> usize {
         self.storage_fetch_count.load(Ordering::SeqCst)
+    }
+
+    #[doc(hidden)]
+    pub fn negative_cache_sweeps_total(&self) -> usize {
+        self.negative_cache_sweeps_total.load(Ordering::SeqCst)
+    }
+
+    #[doc(hidden)]
+    pub fn negative_cache_raw_len(&self) -> usize {
+        self.negative_cache.len()
+    }
+
+    #[doc(hidden)]
+    pub fn insert_negative_cache_for_test(
+        &self,
+        guild_id: GuildId,
+        channel_id: ChannelId,
+        entry: StickyCacheEntry,
+    ) {
+        self.negative_cache.insert((guild_id, channel_id), entry);
     }
 
     pub fn negative_cache_len(&self) -> usize {
@@ -170,12 +199,42 @@ impl StickyCoordinator {
             }
         }
 
-        // Opportunistic cleanup of negative cache if it grows large
+        // Opportunistic rate-limited cleanup of negative cache if it grows large
         if self.negative_cache.len() >= 4096 {
-            self.negative_cache.retain(|_, entry| match entry {
-                StickyCacheEntry::MissingUntil(expiry) => *expiry > now,
-                StickyCacheEntry::InvalidatedUntil(expiry) => *expiry > now,
-            });
+            let should_sweep = {
+                let mut last = self
+                    .last_negative_sweep
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                if now.duration_since(*last) >= Duration::from_secs(5) {
+                    *last = now;
+                    true
+                } else {
+                    false
+                }
+            };
+            if should_sweep {
+                self.negative_cache_sweeps_total
+                    .fetch_add(1, Ordering::SeqCst);
+                self.negative_cache.retain(|_, entry| match entry {
+                    StickyCacheEntry::MissingUntil(expiry) => *expiry > now,
+                    StickyCacheEntry::InvalidatedUntil(expiry) => *expiry > now,
+                });
+
+                // Hard cap protection: if still exceeding 8192 entries after TTL eviction,
+                // evict excess MissingUntil entries (never InvalidatedUntil to preserve #323 safety)
+                if self.negative_cache.len() >= 8192 {
+                    let mut evicted = 0;
+                    self.negative_cache.retain(|_, entry| {
+                        if evicted < 2048 && matches!(entry, StickyCacheEntry::MissingUntil(_)) {
+                            evicted += 1;
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                }
+            }
         }
 
         use dashmap::mapref::entry::Entry;

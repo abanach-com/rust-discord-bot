@@ -8212,3 +8212,122 @@ async fn test_sticky_config_change_and_deletion_not_lost_when_mpsc_queue_full_is
 
     shard_manager.shutdown_all().await;
 }
+
+#[tokio::test]
+async fn test_sticky_negative_cache_sweep_throttling_and_hard_cap_issue_327() {
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state_with_port(mock.port).await;
+
+    // 1. Configure a valid sticky message on channel 101 so triggers proceed past fast-path
+    state
+        .storage
+        .set_sticky_message(
+            "100",
+            "101",
+            "",
+            "📌 Rules: Test Sticky Message for Cache Sweep Throttling",
+            3600,
+        )
+        .await
+        .expect("set sticky message");
+
+    // 2. Pre-populate negative cache with 4200 fresh entries (> 4096 threshold)
+    let now = std::time::Instant::now();
+    for i in 1..=4200 {
+        state.sticky_coordinator.insert_negative_cache_for_test(
+            GuildId::new(200),
+            ChannelId::new(20000 + i),
+            rusty_discord_bot::discord::sticky::StickyCacheEntry::MissingUntil(
+                now + std::time::Duration::from_secs(60),
+            ),
+        );
+    }
+    assert_eq!(state.sticky_coordinator.negative_cache_raw_len(), 4200);
+    assert_eq!(state.sticky_coordinator.negative_cache_sweeps_total(), 0);
+
+    // 3. First trigger should run a sweep because last_sweep was initialized > 5s ago
+    state.sticky_coordinator.enqueue_refresh(
+        ctx.http.clone(),
+        GuildId::new(100),
+        ChannelId::new(101),
+        MessageId::new(9901),
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(
+        state.sticky_coordinator.negative_cache_sweeps_total(),
+        1,
+        "First trigger ran initial sweep"
+    );
+
+    // 4. Send 150 consecutive triggers in the same 5-second window
+    for i in 0..150 {
+        state.sticky_coordinator.enqueue_refresh(
+            ctx.http.clone(),
+            GuildId::new(100),
+            ChannelId::new(101),
+            MessageId::new(9902 + i),
+        );
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(
+        state.sticky_coordinator.negative_cache_sweeps_total(),
+        1,
+        "Sweeps total must remain 1: all 150 triggers in 5s window are rate-limited in O(1)"
+    );
+
+    // 5. Test hard cap eviction: populate to 9000 entries (exceeding 8192 hard cap)
+    // Include an InvalidatedUntil entry to ensure it is NEVER evicted by hard cap
+    let protected_key = (GuildId::new(999), ChannelId::new(888));
+    state.sticky_coordinator.insert_negative_cache_for_test(
+        protected_key.0,
+        protected_key.1,
+        rusty_discord_bot::discord::sticky::StickyCacheEntry::InvalidatedUntil(
+            now + std::time::Duration::from_secs(60),
+        ),
+    );
+
+    for i in 4201..=9000 {
+        state.sticky_coordinator.insert_negative_cache_for_test(
+            GuildId::new(300),
+            ChannelId::new(30000 + i),
+            rusty_discord_bot::discord::sticky::StickyCacheEntry::MissingUntil(
+                now + std::time::Duration::from_secs(60),
+            ),
+        );
+    }
+    assert!(state.sticky_coordinator.negative_cache_raw_len() >= 9000);
+
+    // Trigger after sweeping interval expires or when rate limit allows
+    // Wait for 5 seconds rate limit window to pass
+    tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
+
+    state.sticky_coordinator.enqueue_refresh(
+        ctx.http.clone(),
+        GuildId::new(100),
+        ChannelId::new(101),
+        MessageId::new(10001),
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    assert_eq!(
+        state.sticky_coordinator.negative_cache_sweeps_total(),
+        2,
+        "Sweep executed after 5s interval elapsed"
+    );
+    assert!(
+        state.sticky_coordinator.negative_cache_raw_len() < 9000,
+        "Hard cap evicted excess entries"
+    );
+
+    // Verify InvalidatedUntil entry was not evicted by hard cap
+    assert_eq!(
+        state.sticky_coordinator.negative_cache_len(),
+        state.sticky_coordinator.negative_cache_raw_len() - 1,
+        "Protected InvalidatedUntil entry is preserved"
+    );
+
+    shard_manager.shutdown_all().await;
+}
