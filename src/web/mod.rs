@@ -94,6 +94,20 @@ pub async fn serve_with_shutdown(
                         Ordering::Relaxed,
                     );
             }
+            let ai_metering_cutoff = chrono::Utc::now() - chrono::Duration::days(90);
+            let pruned_ai_metering = cleanup_state
+                .app
+                .storage
+                .prune_ai_metering_events(ai_metering_cutoff, 500)
+                .await
+                .unwrap_or(0);
+            if pruned_ai_metering > 0 {
+                cleanup_state
+                    .app
+                    .metrics
+                    .ai_metering_pruned_total
+                    .fetch_add(pruned_ai_metering, Ordering::Relaxed);
+            }
             if states > 0
                 || sessions > 0
                 || perms > 0
@@ -102,6 +116,7 @@ pub async fn serve_with_shutdown(
                 || pruned_transcripts > 0
                 || pruned_purchase_reqs > 0
                 || pruned_economy_idem > 0
+                || pruned_ai_metering > 0
             {
                 tracing::debug!(
                     states,

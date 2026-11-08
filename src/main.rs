@@ -36,6 +36,7 @@ async fn main() -> Result<()> {
     let asset_analytics_shutdown_rx = shutdown_tx.subscribe();
     let companion_janitor_shutdown_rx = shutdown_tx.subscribe();
     let delete_janitor_shutdown_rx = shutdown_tx.subscribe();
+    let ai_metering_janitor_shutdown_rx = shutdown_tx.subscribe();
 
     let web_handle = tokio::spawn(rusty_discord_bot::web::serve_with_shutdown(
         state.clone(),
@@ -58,6 +59,19 @@ async fn main() -> Result<()> {
             std::time::Duration::from_secs(3600),
             chrono::Duration::hours(24),
         ));
+    let ai_metering_retention_days = std::env::var("AI_METERING_RETENTION_DAYS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(90);
+    let ai_metering_janitor_handle = tokio::spawn(
+        rusty_discord_bot::storage::run_ai_metering_idempotency_janitor(
+            state.storage.clone(),
+            Some(state.metrics.clone()),
+            ai_metering_janitor_shutdown_rx,
+            std::time::Duration::from_secs(3600),
+            chrono::Duration::days(ai_metering_retention_days),
+        ),
+    );
     let duty_handle = tokio::spawn(rusty_discord_bot::duty::run_moderator_duty_reconciler_loop(
         state.clone(),
         duty_shutdown_rx,
@@ -93,6 +107,7 @@ async fn main() -> Result<()> {
     tokio::pin!(discord_handle);
     tokio::pin!(janitor_handle);
     tokio::pin!(economy_janitor_handle);
+    tokio::pin!(ai_metering_janitor_handle);
     tokio::pin!(duty_handle);
     tokio::pin!(help_forum_handle);
     tokio::pin!(asset_analytics_handle);
@@ -154,6 +169,9 @@ async fn main() -> Result<()> {
         }
         if !economy_janitor_handle.is_finished() {
             let _ = (&mut economy_janitor_handle).await;
+        }
+        if !ai_metering_janitor_handle.is_finished() {
+            let _ = (&mut ai_metering_janitor_handle).await;
         }
         if !duty_handle.is_finished() {
             let _ = (&mut duty_handle).await;

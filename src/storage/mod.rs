@@ -575,6 +575,54 @@ pub async fn run_economy_idempotency_janitor(
     }
 }
 
+/// Background janitor periodically pruning expired AI metering idempotency events (#314).
+pub async fn run_ai_metering_idempotency_janitor(
+    storage: Storage,
+    metrics: Option<std::sync::Arc<crate::metrics::Metrics>>,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+    interval: std::time::Duration,
+    retention: chrono::Duration,
+) {
+    let mut timer = tokio::time::interval(interval);
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    tracing::info!(
+        interval_secs = interval.as_secs(),
+        retention_days = retention.num_days(),
+        "started AI metering idempotency janitor"
+    );
+
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.recv() => {
+                tracing::info!("AI metering idempotency janitor received shutdown signal");
+                break;
+            }
+            _ = timer.tick() => {
+                let cutoff = chrono::Utc::now() - retention;
+                let pruned = match storage.prune_ai_metering_events(cutoff, 1000).await {
+                    Ok(n) => n,
+                    Err(err) => {
+                        tracing::warn!(?err, "failed to prune expired AI metering events");
+                        0
+                    }
+                };
+                if pruned > 0 {
+                    if let Some(m) = &metrics {
+                        m.ai_metering_pruned_total.fetch_add(pruned, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    tracing::info!(
+                        pruned,
+                        "pruned expired AI metering events"
+                    );
+                } else {
+                    tracing::debug!("AI metering idempotency janitor check completed (0 pruned)");
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct MemberIdentityRecord {
     pub id: Uuid,
@@ -5457,6 +5505,17 @@ impl Storage {
                     .record_metering_event_once(guild_id, provider, request_id, tokens, usd)
                     .await
             }
+        }
+    }
+
+    pub async fn prune_ai_metering_events(
+        &self,
+        cutoff: DateTime<Utc>,
+        limit: usize,
+    ) -> anyhow::Result<u64> {
+        match self {
+            Self::Memory(store) => Ok(store.prune_ai_metering_events(cutoff, limit)),
+            Self::Postgres(store) => store.prune_ai_metering_events(cutoff, limit).await,
         }
     }
 

@@ -5646,6 +5646,30 @@ impl MemoryStore {
         Ok(updated)
     }
 
+    pub fn prune_ai_metering_events(&self, cutoff: DateTime<Utc>, limit: usize) -> u64 {
+        let _guard = match self.ai_metering_write_lock.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        let mut to_remove = Vec::new();
+        for entry in self.ai_metering_events.iter() {
+            if entry.value().created_at < cutoff {
+                to_remove.push(entry.key().clone());
+                if to_remove.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        let count = to_remove.len() as u64;
+        for k in to_remove {
+            self.ai_metering_events.remove(&k);
+        }
+
+        count
+    }
+
     pub fn create_ai_document(&self, doc: AiKnowledgeDocument) -> AiKnowledgeDocument {
         self.ai_documents.insert(doc.id, doc.clone());
 

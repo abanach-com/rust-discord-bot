@@ -546,3 +546,116 @@ async fn test_metering_rejects_non_finite_usd_values_without_mutating_budget_or_
     assert_eq!(dup_valid.used_tokens, 100);
     assert!((dup_valid.used_usd - 0.05).abs() < 1e-6);
 }
+
+#[tokio::test]
+async fn test_ai_metering_events_retention_pruning_and_ttl_semantics() {
+    let (state, _) = test_web_state().await;
+    let guild_id = "777000000000000007";
+
+    // 1. Record two metering events
+    let b1 = state
+        .app
+        .storage
+        .record_metering_event_once(guild_id, "provider_ret", "req_r1", 400, 0.01)
+        .await
+        .expect("record event 1");
+    assert_eq!(b1.used_tokens, 400);
+
+    let b2 = state
+        .app
+        .storage
+        .record_metering_event_once(guild_id, "provider_ret", "req_r2", 600, 0.02)
+        .await
+        .expect("record event 2");
+    assert_eq!(b2.used_tokens, 1000);
+    assert!((b2.used_usd - 0.03).abs() < 1e-6);
+
+    // 2. Duplicate attempts within retention window are deduplicated
+    let b2_dup = state
+        .app
+        .storage
+        .record_metering_event_once(guild_id, "provider_ret", "req_r2", 600, 0.02)
+        .await
+        .expect("duplicate event 2");
+    assert_eq!(b2_dup.used_tokens, 1000);
+
+    // 3. Past cutoff prunes nothing
+    let past_cutoff = chrono::Utc::now() - chrono::Duration::hours(2);
+    let pruned_none = state
+        .app
+        .storage
+        .prune_ai_metering_events(past_cutoff, 100)
+        .await
+        .expect("prune with past cutoff");
+    assert_eq!(pruned_none, 0);
+
+    // 4. Chunked pruning with future cutoff and limit = 1
+    let future_cutoff = chrono::Utc::now() + chrono::Duration::hours(1);
+    let pruned_chunk = state
+        .app
+        .storage
+        .prune_ai_metering_events(future_cutoff, 1)
+        .await
+        .expect("chunked prune");
+    assert_eq!(pruned_chunk, 1, "chunk limit 1 must prune exactly 1 record");
+
+    // Prune the remainder
+    let pruned_rest = state
+        .app
+        .storage
+        .prune_ai_metering_events(future_cutoff, 100)
+        .await
+        .expect("prune rest");
+    assert_eq!(pruned_rest, 1, "remaining 1 record should be pruned");
+
+    // 5. Pruning does NOT mutate or clear budget counters
+    let b_intact = state
+        .app
+        .storage
+        .get_or_create_ai_budget(guild_id)
+        .await
+        .expect("get budget");
+    assert_eq!(b_intact.used_tokens, 1000);
+    assert!((b_intact.used_usd - 0.03).abs() < 1e-6);
+
+    // 6. Post-TTL retry semantics: request_id whose marker was pruned can be processed again
+    let b_retry = state
+        .app
+        .storage
+        .record_metering_event_once(guild_id, "provider_ret", "req_r1", 400, 0.01)
+        .await
+        .expect("retry after TTL");
+    assert_eq!(b_retry.used_tokens, 1400);
+    assert!((b_retry.used_usd - 0.04).abs() < 1e-6);
+}
+
+#[tokio::test]
+async fn test_ai_metering_concurrent_recording_and_pruning() {
+    let (state, _) = test_web_state().await;
+    let gid = "777000000000000008".to_string();
+
+    let storage = state.app.storage.clone();
+    let gid_clone = gid.clone();
+    let writer = tokio::spawn(async move {
+        for i in 0..50 {
+            let req_id = format!("req_conc_{i}");
+            let _ = storage
+                .record_metering_event_once(&gid_clone, "prov_c", &req_id, 10, 0.001)
+                .await;
+        }
+    });
+
+    let storage_pruner = state.app.storage.clone();
+    let pruner = tokio::spawn(async move {
+        for _ in 0..10 {
+            let _ = storage_pruner
+                .prune_ai_metering_events(chrono::Utc::now() + chrono::Duration::hours(1), 5)
+                .await;
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+    });
+
+    let (res_w, res_p) = tokio::join!(writer, pruner);
+    assert!(res_w.is_ok());
+    assert!(res_p.is_ok());
+}

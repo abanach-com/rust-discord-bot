@@ -1051,6 +1051,70 @@ async fn test_postgres_integration_suite() {
     assert!((retry_finite.used_usd - 0.05).abs() < 1e-6);
     assert!(!retry_finite.is_halted);
 
+    // 7.8. AI metering events retention pruning and TTL retry semantics (#314)
+    let prune_guild = format!("pg_ai_prune_{}", Uuid::new_v4().simple());
+    let _e1 = store
+        .record_metering_event_once(&prune_guild, "provider_pg", "req_p1", 500, 0.01)
+        .await
+        .expect("insert event 1");
+    let e2 = store
+        .record_metering_event_once(&prune_guild, "provider_pg", "req_p2", 300, 0.005)
+        .await
+        .expect("insert event 2");
+    assert_eq!(e2.used_tokens, 800);
+
+    // Prune with past cutoff deletes nothing
+    let past_cutoff = Utc::now() - chrono::Duration::hours(1);
+    let deleted_past = store
+        .prune_ai_metering_events(past_cutoff, 100)
+        .await
+        .expect("prune with past cutoff");
+    assert_eq!(deleted_past, 0);
+
+    // Make event 1 older in DB to test precise cutoff boundary
+    sqlx::query(
+        "UPDATE ai_metering_events SET created_at = $1 WHERE guild_id = $2 AND request_id = $3",
+    )
+    .bind(Utc::now() - chrono::Duration::days(100))
+    .bind(&prune_guild)
+    .bind("req_p1")
+    .execute(store.pool())
+    .await
+    .expect("backdate event 1");
+
+    let retention_cutoff = Utc::now() - chrono::Duration::days(90);
+    let deleted = store
+        .prune_ai_metering_events(retention_cutoff, 100)
+        .await
+        .expect("prune expired events");
+    assert_eq!(deleted, 1, "exactly the backdated event should be pruned");
+
+    // Event 2 is still retained (duplicate attempt is idempotent and not charged)
+    let dup_e2 = store
+        .record_metering_event_once(&prune_guild, "provider_pg", "req_p2", 300, 0.005)
+        .await
+        .expect("duplicate retained event 2");
+    assert_eq!(
+        dup_e2.used_tokens, 800,
+        "tokens must not increase for retained event"
+    );
+
+    // Budget was NOT cleared or mutated by pruning
+    let b_after_prune = store
+        .get_or_create_ai_budget(&prune_guild)
+        .await
+        .expect("get budget after prune");
+    assert_eq!(b_after_prune.used_tokens, 800);
+    assert!((b_after_prune.used_usd - 0.015).abs() < 1e-6);
+
+    // Event 1 whose marker was pruned can now be recorded again (post-TTL retry semantics)
+    let re_e1 = store
+        .record_metering_event_once(&prune_guild, "provider_pg", "req_p1", 500, 0.01)
+        .await
+        .expect("retry after TTL pruning");
+    assert_eq!(re_e1.used_tokens, 1300);
+    assert!((re_e1.used_usd - 0.025).abs() < 1e-6);
+
     let count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM ai_guild_budgets WHERE guild_id = $1")
             .bind(&concurrent_guild)

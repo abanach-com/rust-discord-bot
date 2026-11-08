@@ -21,6 +21,7 @@ pub struct Metrics {
     pub economy_idempotency_pruned_total: AtomicU64,
     pub discord_rest_requests_total: AtomicU64,
     pub afk_notifications_suppressed_total: AtomicU64,
+    pub ai_metering_pruned_total: AtomicU64,
 }
 
 impl Default for Metrics {
@@ -44,6 +45,7 @@ impl Default for Metrics {
             economy_idempotency_pruned_total: AtomicU64::new(0),
             discord_rest_requests_total: AtomicU64::new(0),
             afk_notifications_suppressed_total: AtomicU64::new(0),
+            ai_metering_pruned_total: AtomicU64::new(0),
         }
     }
 }
@@ -139,7 +141,11 @@ impl Metrics {
              # HELP rusty_discord_bot_afk_notifications_suppressed_total Total number of AFK mention notifications suppressed by rate limiter\n\
              # TYPE rusty_discord_bot_afk_notifications_suppressed_total counter\n\
              rusty_discord_bot_afk_notifications_suppressed_total {18}\n\
-             zuckerbot_afk_notifications_suppressed_total {18}\n",
+             zuckerbot_afk_notifications_suppressed_total {18}\n\
+             # HELP rusty_discord_bot_ai_metering_pruned_total Total number of expired AI metering events pruned\n\
+             # TYPE rusty_discord_bot_ai_metering_pruned_total counter\n\
+             rusty_discord_bot_ai_metering_pruned_total {19}\n\
+             zuckerbot_ai_metering_pruned_total {19}\n",
             self.uptime_seconds(),
             self.discord_events_total.load(Ordering::Relaxed),
             self.lua_commands_total.load(Ordering::Relaxed),
@@ -164,6 +170,7 @@ impl Metrics {
             self.discord_rest_requests_total.load(Ordering::Relaxed),
             self.afk_notifications_suppressed_total
                 .load(Ordering::Relaxed),
+            self.ai_metering_pruned_total.load(Ordering::Relaxed),
         )
     }
 }
@@ -201,6 +208,9 @@ mod tests {
         metrics
             .afk_notifications_suppressed_total
             .store(5, Ordering::Relaxed);
+        metrics
+            .ai_metering_pruned_total
+            .store(11, Ordering::Relaxed);
 
         let rendered = metrics.render_prometheus(3, 2);
         assert!(rendered.contains("zuckerbot_discord_events_total 15"));
@@ -217,6 +227,8 @@ mod tests {
         assert!(rendered.contains("rusty_discord_bot_discord_rest_requests_total 13"));
         assert!(rendered.contains("zuckerbot_afk_notifications_suppressed_total 5"));
         assert!(rendered.contains("rusty_discord_bot_afk_notifications_suppressed_total 5"));
+        assert!(rendered.contains("zuckerbot_ai_metering_pruned_total 11"));
+        assert!(rendered.contains("rusty_discord_bot_ai_metering_pruned_total 11"));
         assert!(rendered.contains("zuckerbot_active_sessions 3"));
         assert!(rendered.contains("zuckerbot_uptime_seconds"));
     }
