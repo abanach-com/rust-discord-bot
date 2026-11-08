@@ -8,6 +8,7 @@ use serenity::all::{
     MessageId, Permissions,
 };
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
 use crate::storage::Storage;
 
@@ -18,9 +19,15 @@ pub struct StickyRefresh {
     pub trigger_message_id: MessageId,
 }
 
+#[derive(Clone)]
+struct WorkerHandle {
+    owner_id: Uuid,
+    tx: mpsc::Sender<MessageId>,
+}
+
 pub struct StickyCoordinator {
     storage: Storage,
-    channel_senders: Arc<DashMap<(GuildId, ChannelId), mpsc::Sender<MessageId>>>,
+    channel_senders: Arc<DashMap<(GuildId, ChannelId), WorkerHandle>>,
 }
 
 impl StickyCoordinator {
@@ -31,6 +38,10 @@ impl StickyCoordinator {
         }
     }
 
+    pub fn active_worker_count(&self) -> usize {
+        self.channel_senders.len()
+    }
+
     pub fn enqueue_refresh(
         &self,
         http: Arc<Http>,
@@ -39,28 +50,36 @@ impl StickyCoordinator {
         trigger_message_id: MessageId,
     ) {
         let key = (guild_id, channel_id);
-        if let Some(sender) = self.channel_senders.get(&key)
-            && !sender.is_closed()
-        {
-            let _ = sender.try_send(trigger_message_id);
-            return;
+        use dashmap::mapref::entry::Entry;
+
+        let spawn_info = match self.channel_senders.entry(key) {
+            Entry::Occupied(entry) if !entry.get().tx.is_closed() => {
+                let _ = entry.get().tx.try_send(trigger_message_id);
+                None
+            }
+            Entry::Occupied(mut entry) => {
+                let (tx, rx) = mpsc::channel(32);
+                let _ = tx.try_send(trigger_message_id);
+                let owner_id = Uuid::new_v4();
+                entry.insert(WorkerHandle { owner_id, tx });
+                Some((rx, owner_id))
+            }
+            Entry::Vacant(entry) => {
+                let (tx, rx) = mpsc::channel(32);
+                let _ = tx.try_send(trigger_message_id);
+                let owner_id = Uuid::new_v4();
+                entry.insert(WorkerHandle { owner_id, tx });
+                Some((rx, owner_id))
+            }
+        };
+
+        if let Some((rx, owner_id)) = spawn_info {
+            let storage = self.storage.clone();
+            let channel_senders = self.channel_senders.clone();
+            tokio::spawn(async move {
+                run_channel_worker(key, owner_id, rx, http, storage, channel_senders).await;
+            });
         }
-
-        let storage = self.storage.clone();
-        let channel_senders = self.channel_senders.clone();
-        tokio::spawn(async move {
-            let gid_str = guild_id.get().to_string();
-            let cid_str = channel_id.get().to_string();
-            let Ok(Some(_sticky)) = storage.get_sticky_message(&gid_str, &cid_str).await else {
-                return;
-            };
-
-            let (tx, rx) = mpsc::channel(32);
-            let _ = tx.try_send(trigger_message_id);
-            channel_senders.insert(key, tx);
-
-            run_channel_worker(key, rx, http, storage, channel_senders).await;
-        });
     }
 
     pub fn remove_channel(&self, guild_id: &str, channel_id: &str) {
@@ -155,10 +174,11 @@ pub async fn check_bot_channel_permission(
 
 async fn run_channel_worker(
     key: (GuildId, ChannelId),
+    owner_id: Uuid,
     mut rx: mpsc::Receiver<MessageId>,
     http: Arc<Http>,
     storage: Storage,
-    channel_senders: Arc<DashMap<(GuildId, ChannelId), mpsc::Sender<MessageId>>>,
+    channel_senders: Arc<DashMap<(GuildId, ChannelId), WorkerHandle>>,
 ) {
     let gid_str = key.0.get().to_string();
     let cid_str = key.1.get().to_string();
@@ -177,8 +197,8 @@ async fn run_channel_worker(
         let sticky = match storage.get_sticky_message(&gid_str, &cid_str).await {
             Ok(Some(s)) => s,
             _ => {
-                // If deleted or errored, remove worker and exit
-                channel_senders.remove(&key);
+                // If deleted or errored, remove worker if we are still registered owner and exit
+                channel_senders.remove_if(&key, |_, h| h.owner_id == owner_id);
                 return;
             }
         };
@@ -232,6 +252,6 @@ async fn run_channel_worker(
         }
     }
 
-    // Worker timed out after inactivity; clean up
-    channel_senders.remove(&key);
+    // Worker timed out or channel closed; clean up only if still registered owner
+    channel_senders.remove_if(&key, |_, h| h.owner_id == owner_id);
 }

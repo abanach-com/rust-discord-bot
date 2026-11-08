@@ -32,7 +32,9 @@ use rusty_discord_bot::{
 use serde_json::{Value, json};
 
 use serenity::{
-    all::{ChannelId, GatewayIntents, GuildId, Message, MessageUpdateEvent, Ready, UserId},
+    all::{
+        ChannelId, GatewayIntents, GuildId, Message, MessageId, MessageUpdateEvent, Ready, UserId,
+    },
     client::{Context, EventHandler},
     http::HttpBuilder,
 };
@@ -7146,6 +7148,160 @@ async fn test_sticky_messages_channel_guards_and_permissions() {
         .unwrap()
         .unwrap();
     assert_eq!(missing_state.last_posted_message_id, None);
+
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn test_sticky_coordinator_cold_burst_concurrency_issue_318() {
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state_with_port(mock.port).await;
+
+    // 1. Configure sticky message on channel 101 in guild 100 with cooldown 5s
+    state
+        .storage
+        .set_sticky_message(
+            "100",
+            "101",
+            "",
+            "📌 Important Server Rules: Cold Burst Test!",
+            5,
+        )
+        .await
+        .expect("set sticky message");
+
+    // Cold burst: 50 calls to enqueue_refresh without ANY await between them
+    for i in 1..=50 {
+        state.sticky_coordinator.enqueue_refresh(
+            ctx.http.clone(),
+            GuildId::new(100),
+            ChannelId::new(101),
+            MessageId::new(1000 + i),
+        );
+    }
+
+    // Wait for the single channel worker to complete delivery
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // Exactly 1 worker handle should be registered for channel 101
+    assert_eq!(
+        state.sticky_coordinator.active_worker_count(),
+        1,
+        "Exactly 1 active worker must exist for channel 101 despite 50 cold burst calls"
+    );
+
+    // Verify exactly 1 POST /channels/101/messages was dispatched
+    let recorded = mock.recorded_calls.lock().await.clone();
+    let channel_101_posts: Vec<_> = recorded
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+        .collect();
+    assert_eq!(
+        channel_101_posts.len(),
+        1,
+        "Exactly 1 sticky message should be posted to channel 101 for the cold burst"
+    );
+
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn test_sticky_coordinator_barrier_multitask_spawn_concurrency_issue_318() {
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state_with_port(mock.port).await;
+
+    state
+        .storage
+        .set_sticky_message(
+            "100",
+            "101",
+            "",
+            "📌 Important Server Rules: Multitask Barrier Test!",
+            5,
+        )
+        .await
+        .expect("set sticky message");
+
+    let num_tasks = 40;
+    let barrier = Arc::new(tokio::sync::Barrier::new(num_tasks));
+    let mut join_set = tokio::task::JoinSet::new();
+
+    for i in 0..num_tasks {
+        let b = barrier.clone();
+        let coordinator = state.sticky_coordinator.clone();
+        let http = ctx.http.clone();
+        join_set.spawn(async move {
+            b.wait().await;
+            coordinator.enqueue_refresh(
+                http,
+                GuildId::new(100),
+                ChannelId::new(101),
+                MessageId::new(5000 + i as u64),
+            );
+        });
+    }
+
+    while let Some(res) = join_set.join_next().await {
+        res.expect("task join");
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    assert_eq!(
+        state.sticky_coordinator.active_worker_count(),
+        1,
+        "Barrier cold-start burst must produce exactly 1 active worker"
+    );
+
+    let recorded = mock.recorded_calls.lock().await.clone();
+    let channel_101_posts: Vec<_> = recorded
+        .iter()
+        .filter(|(m, p)| *m == Method::POST && p.contains("/channels/101/messages"))
+        .collect();
+    assert_eq!(
+        channel_101_posts.len(),
+        1,
+        "Exactly 1 sticky message must be dispatched from barrier burst"
+    );
+
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn test_sticky_coordinator_unconfigured_channel_cleans_up_without_posts_issue_318() {
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state_with_port(mock.port).await;
+
+    // Do NOT set sticky message for channel 102.
+    // Dispatch burst of 20 refreshes.
+    for i in 1..=20 {
+        state.sticky_coordinator.enqueue_refresh(
+            ctx.http.clone(),
+            GuildId::new(100),
+            ChannelId::new(102),
+            MessageId::new(7000 + i),
+        );
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // Worker should have detected no sticky message configured and removed itself
+    assert_eq!(
+        state.sticky_coordinator.active_worker_count(),
+        0,
+        "Unconfigured channel worker should clean itself up via remove_if"
+    );
+
+    let recorded = mock.recorded_calls.lock().await.clone();
+    let modifying_calls: Vec<_> = recorded
+        .iter()
+        .filter(|(m, _)| *m == Method::POST || *m == Method::DELETE || *m == Method::PATCH)
+        .collect();
+    assert_eq!(
+        modifying_calls.len(),
+        0,
+        "Unconfigured channel refresh must make 0 modifying calls"
+    );
 
     shard_manager.shutdown_all().await;
 }
