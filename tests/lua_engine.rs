@@ -442,3 +442,296 @@ fn test_lua_command_limit_accounts_for_host_commands_issue_250() {
         "error message must describe exceeding limit of 95: got {err_msg}"
     );
 }
+
+#[tokio::test]
+async fn test_action_limit_25_accepted_and_26_rejected_issue_335() {
+    let directory = TempDir::new().expect("tempdir");
+
+    std::fs::write(
+        directory.path().join("action_limits.lua"),
+        r#"
+        return {
+            manifest = {
+                id = "action_limits",
+                name = "Action Limits",
+                version = "1.0.0",
+                description = "Tests 25 vs 26 actions.",
+                category = "test",
+                commands = {
+                    { name = "exact_25", description = "Returns 25 actions." },
+                    { name = "excess_26", description = "Returns 26 actions." }
+                }
+            },
+            on_command = function(cmd)
+                if cmd == "exact_25" then
+                    local actions = {}
+                    for i = 1, 25 do
+                        actions[i] = { type = "reply", content = "reply " .. i, ephemeral = true }
+                    end
+                    return actions
+                elseif cmd == "excess_26" then
+                    local actions = {}
+                    for i = 1, 26 do
+                        actions[i] = { type = "reply", content = "reply " .. i, ephemeral = true }
+                    end
+                    return actions
+                end
+                return {}
+            end
+        }
+        "#,
+    )
+    .expect("write test script");
+
+    let engine = LuaEngine::load(directory.path(), limits()).expect("load engine");
+
+    // 25 actions must succeed
+    let res_25 = engine
+        .execute_command("action_limits", "exact_25", context())
+        .await;
+    let actions = res_25.expect("25 actions must be accepted");
+    assert_eq!(actions.len(), 25);
+    for (idx, action) in actions.iter().enumerate() {
+        assert!(
+            matches!(action, LuaAction::Reply { content, ephemeral: true } if content == &format!("reply {}", idx + 1))
+        );
+    }
+
+    // 26 actions must fail before execution with InvalidModule
+    let res_26 = engine
+        .execute_command("action_limits", "excess_26", context())
+        .await;
+    assert!(res_26.is_err());
+    let err = res_26.expect_err("26 actions must fail");
+    assert!(
+        matches!(err, LuaEngineError::InvalidModule { ref message, .. } if message.contains("returned 26 actions; the limit is 25")),
+        "expected InvalidModule with 26 actions limit error, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_action_limit_fast_preflight_for_huge_arrays_issue_335() {
+    let directory = TempDir::new().expect("tempdir");
+
+    std::fs::write(
+        directory.path().join("huge_arrays.lua"),
+        r#"
+        return {
+            manifest = {
+                id = "huge_arrays",
+                name = "Huge Arrays",
+                version = "1.0.0",
+                description = "Tests fast preflight rejection for large returned arrays.",
+                category = "test",
+                commands = {
+                    { name = "array_1000", description = "Returns 1000 actions." },
+                    { name = "array_20000", description = "Returns 20000 actions." }
+                }
+            },
+            on_command = function(cmd)
+                local shared = { type = "reply", content = "ok", ephemeral = true }
+                local result = {}
+                local count = (cmd == "array_1000") and 1000 or 20000
+                for i = 1, count do
+                    result[i] = shared
+                end
+                return result
+            end
+        }
+        "#,
+    )
+    .expect("write test script");
+
+    // Give sufficient Lua memory for the Lua VM itself to create the table
+    let mut custom_limits = limits();
+    custom_limits.memory_bytes = 16 * 1024 * 1024;
+    custom_limits.instruction_limit = 1_000_000;
+
+    let engine = LuaEngine::load(directory.path(), custom_limits).expect("load engine");
+
+    let res_1000 = engine
+        .execute_command("huge_arrays", "array_1000", context())
+        .await;
+    assert!(res_1000.is_err());
+    let err_1000 = res_1000.expect_err("1000 actions must fail");
+    assert!(
+        matches!(err_1000, LuaEngineError::InvalidModule { ref message, .. } if message.contains("returned 1000 actions; the limit is 25")),
+        "got: {err_1000}"
+    );
+
+    let res_20000 = engine
+        .execute_command("huge_arrays", "array_20000", context())
+        .await;
+    assert!(res_20000.is_err());
+    let err_20000 = res_20000.expect_err("20000 actions must fail");
+    assert!(
+        matches!(err_20000, LuaEngineError::InvalidModule { ref message, .. } if message.contains("returned 20000 actions; the limit is 25")),
+        "got: {err_20000}"
+    );
+}
+
+#[tokio::test]
+async fn test_action_decoder_rejects_sparse_arrays_and_extreme_indices_issue_335() {
+    let directory = TempDir::new().expect("tempdir");
+
+    std::fs::write(
+        directory.path().join("sparse_modules.lua"),
+        r#"
+        return {
+            manifest = {
+                id = "sparse_modules",
+                name = "Sparse Modules",
+                version = "1.0.0",
+                description = "Tests rejection of sparse tables and out-of-bounds indices.",
+                category = "test",
+                commands = {
+                    { name = "extreme_index", description = "Table with [1000000] index." },
+                    { name = "gap_in_sequence", description = "Table with gap at index 2." },
+                    { name = "negative_index", description = "Table with negative index." },
+                    { name = "map_not_array", description = "Table with string keys." }
+                }
+            },
+            on_command = function(cmd)
+                if cmd == "extreme_index" then
+                    local t = {}
+                    t[1000000] = { type = "reply", content = "hi", ephemeral = true }
+                    return t
+                elseif cmd == "gap_in_sequence" then
+                    local t = {}
+                    t[1] = { type = "reply", content = "1", ephemeral = true }
+                    t[3] = { type = "reply", content = "3", ephemeral = true }
+                    return t
+                elseif cmd == "negative_index" then
+                    local t = {}
+                    t[-1] = { type = "reply", content = "neg", ephemeral = true }
+                    return t
+                elseif cmd == "map_not_array" then
+                    return { foo = "bar" }
+                end
+                return {}
+            end
+        }
+        "#,
+    )
+    .expect("write test script");
+
+    let engine = LuaEngine::load(directory.path(), limits()).expect("load engine");
+
+    // Extreme index
+    let err_extreme = engine
+        .execute_command("sparse_modules", "extreme_index", context())
+        .await
+        .expect_err("extreme index must fail");
+    assert!(
+        matches!(err_extreme, LuaEngineError::InvalidModule { ref message, .. } if message.contains("out-of-bounds index 1000000")),
+        "expected out-of-bounds index error, got: {err_extreme}"
+    );
+
+    // Gap in sequence
+    let err_gap = engine
+        .execute_command("sparse_modules", "gap_in_sequence", context())
+        .await
+        .expect_err("gap in sequence must fail");
+    assert!(
+        matches!(err_gap, LuaEngineError::InvalidModule { ref message, .. } if message.contains("sparse array")),
+        "expected sparse array error, got: {err_gap}"
+    );
+
+    // Negative index
+    let err_neg = engine
+        .execute_command("sparse_modules", "negative_index", context())
+        .await
+        .expect_err("negative index must fail");
+    assert!(
+        matches!(err_neg, LuaEngineError::InvalidModule { ref message, .. } if message.contains("non-positive index -1")),
+        "expected non-positive index error, got: {err_neg}"
+    );
+
+    // Map instead of array
+    let err_map = engine
+        .execute_command("sparse_modules", "map_not_array", context())
+        .await
+        .expect_err("map table must fail");
+    assert!(
+        matches!(err_map, LuaEngineError::InvalidModule { ref message, .. } if message.contains("non-integer keys")),
+        "expected non-integer keys error, got: {err_map}"
+    );
+}
+
+#[tokio::test]
+async fn test_action_decoder_fails_early_on_invalid_element_issue_335() {
+    let directory = TempDir::new().expect("tempdir");
+
+    std::fs::write(
+        directory.path().join("invalid_element.lua"),
+        r#"
+        return {
+            manifest = {
+                id = "invalid_element",
+                name = "Invalid Element",
+                version = "1.0.0",
+                description = "Tests early failure on bad element types or shapes.",
+                category = "test",
+                commands = {
+                    { name = "unknown_type", description = "Unknown action type." },
+                    { name = "bad_audit_payload", description = "Audit action exceeding payload." },
+                    { name = "non_table_return", description = "Returns integer instead of array." }
+                }
+            },
+            on_command = function(cmd)
+                if cmd == "unknown_type" then
+                    return {
+                        { type = "reply", content = "valid first", ephemeral = true },
+                        { type = "unknown_action_type", foo = "bar" },
+                        { type = "reply", content = "never reached", ephemeral = true }
+                    }
+                elseif cmd == "bad_audit_payload" then
+                    local big_data = {}
+                    for i = 1, 100 do
+                        big_data["key_" .. i] = "val"
+                    end
+                    return {
+                        { type = "audit", event = "excessive_audit", data = big_data }
+                    }
+                elseif cmd == "non_table_return" then
+                    return 12345
+                end
+                return {}
+            end
+        }
+        "#,
+    )
+    .expect("write test script");
+
+    let engine = LuaEngine::load(directory.path(), limits()).expect("load engine");
+
+    // Unknown action type fails during bounded element deserialization with Runtime error
+    let err_unknown = engine
+        .execute_command("invalid_element", "unknown_type", context())
+        .await
+        .expect_err("unknown action type must fail");
+    assert!(
+        matches!(err_unknown, LuaEngineError::Runtime { .. }),
+        "expected Runtime error on unknown action variant, got: {err_unknown}"
+    );
+
+    // Bad audit payload (> 64 keys) fails during immediate element validation with InvalidModule
+    let err_audit = engine
+        .execute_command("invalid_element", "bad_audit_payload", context())
+        .await
+        .expect_err("excessive audit keys must fail");
+    assert!(
+        matches!(err_audit, LuaEngineError::InvalidModule { ref message, .. } if message.contains("audit data cannot contain more than 64 entries")),
+        "expected InvalidModule on audit data limit, got: {err_audit}"
+    );
+
+    // Non-table return fails with Runtime error (canonical mlua deserialization error)
+    let err_non_table = engine
+        .execute_command("invalid_element", "non_table_return", context())
+        .await
+        .expect_err("non-table return must fail");
+    assert!(
+        matches!(err_non_table, LuaEngineError::Runtime { .. }),
+        "expected Runtime error on non-table return, got: {err_non_table}"
+    );
+}

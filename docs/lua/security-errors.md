@@ -51,7 +51,7 @@ These are host environment settings, not fields that a Lua manifest can override
 | `LUA_MAX_PARALLEL` | 32 | Positive `usize`; global pool concurrency limit |
 | `LUA_MAX_PER_GUILD` | 8 | Positive `usize`, `<= LUA_MAX_PARALLEL`; per-guild concurrency limit |
 | `LUA_COMMAND_TIMEOUT_MS` | 3,000 ms | Positive `u64`; command admission timeout before returning busy |
-| Returned action count | 25 | Fixed engine maximum, after deserialization |
+| Returned action count | 25 | Fixed engine maximum, enforced via preflight and bounded decoding prior to deserialization |
 
 Defaults and accepted configuration are in [config.rs](../../src/config.rs);
 [state construction](../../src/state.rs) passes them into the engine.
@@ -77,20 +77,20 @@ that a later stage succeeded:
 | Discovery and module loading | Invalid XML, unreadable source, bytecode marker, Lua syntax error, duplicate IDs, invalid manifest or schema | No callback action list exists |
 | Dispatch and callback lookup | Unknown module/command/event, disabled module, missing callback | No list has been executed |
 | Lua execution | Indexing `nil`, failed helper conversion, memory or instruction budget | Callback fails before action execution |
-| Serde conversion | Wrong result shape, missing required field, unknown action/operation tag, wrong field type | The whole returned list is rejected |
-| Action validation | More than 25 actions, invalid ID, text or numeric bound violation | No returned action starts, even if earlier entries were valid |
+| Action bounded preflight | More than 25 actions (fast O(1) reject), sparse table with gaps, out-of-bounds index, map/string keys | Rejected before any host action deserialization occurs |
+| Action bounded decode & validation | Wrong action variant shape, missing required fields, audit payload budget exceeded (>64 keys or >16 KiB JSON), text/numeric bounds | Each element deserialized and validated one by one; stops on first invalid element |
 | Host execution | Permission, hierarchy, service policy, rate limit, Discord or database error | Earlier successful effects may already exist |
 
 [LuaEngineError](../../src/lua/engine.rs#L65-L100) carries script/module context.
-Callback and Serde errors are wrapped as runtime errors; explicit action validation errors use
-`InvalidModule`. [execute_handler](../../src/lua/engine.rs#L579-L653) validates the entire list.
+Callback and Serde errors are wrapped as runtime errors; structural and explicit action validation errors use
+`InvalidModule`. [execute_handler](../../src/lua/engine.rs#L579-L653) inspects the shape and decodes each entry
+with bounded capacity (`MAX_ACTIONS_PER_EXECUTION = 25`), rejecting oversized arrays before materializing elements.
 An interaction ACK can already have been sent by the separate defer path when Lua or validation fails.
 
 Use the field names and enum tags in [the action model](../../src/lua/model.rs#L223-L450).
-Always return a dense action array rather than one bare action object; do not rely on a malformed
-table producing an error, and test the actual Rust decoding. Returning 26 otherwise valid actions
-is an engine count failure. These are different from a valid
-`progression` action rejected later because its module ID is not `progression`.
+Always return a dense sequential action array rather than a sparse table or bare object.
+Returning 26 otherwise valid actions is an engine count failure rejected before deserialization.
+These are different from a valid `progression` action rejected later because its module ID is not `progression`.
 
 ## Execution order and partial effects
 

@@ -989,29 +989,145 @@ fn execute_handler<T: serde::Serialize>(
                 script: module.display_name.to_string(),
                 source,
             })?;
-    let actions: Vec<LuaAction> =
-        lua.from_value(output)
-            .map_err(|source| LuaEngineError::Runtime {
-                script: module.display_name.to_string(),
-                source,
-            })?;
 
-    if actions.len() > MAX_ACTIONS_PER_EXECUTION {
+    decode_and_validate_actions(&lua, output, module_id, module.display_name.as_ref())
+}
+
+fn decode_and_validate_actions(
+    lua: &Lua,
+    output: Value,
+    module_id: &str,
+    display_name: &str,
+) -> Result<Vec<LuaAction>, LuaEngineError> {
+    let table = match output {
+        Value::Table(table) => table,
+        other => {
+            // Propagate canonical mlua FromLuaConversionError as Runtime error if output is not a table
+            let _: Vec<LuaAction> =
+                lua.from_value(other)
+                    .map_err(|source| LuaEngineError::Runtime {
+                        script: display_name.to_string(),
+                        source,
+                    })?;
+            return Ok(Vec::new());
+        }
+    };
+
+    // Fast preflight length check (O(1)) for regular sequential Lua arrays
+    let raw_len = table.raw_len();
+    if raw_len > MAX_ACTIONS_PER_EXECUTION {
         return Err(LuaEngineError::InvalidModule {
             script: module_id.to_owned(),
             message: format!(
-                "a script returned {} actions; the limit is {MAX_ACTIONS_PER_EXECUTION}",
-                actions.len()
+                "a script returned {raw_len} actions; the limit is {MAX_ACTIONS_PER_EXECUTION}"
             ),
         });
     }
-    for action in &actions {
+
+    // Bounded inspection of table keys and shape before any serde deserialization.
+    // This rejects sparse arrays, maps, non-integer keys, out-of-bounds keys,
+    // and excess pairs beyond MAX_ACTIONS_PER_EXECUTION without deserializing items.
+    let mut pair_count = 0usize;
+    let mut seen = [false; MAX_ACTIONS_PER_EXECUTION + 1];
+    let mut max_idx = 0usize;
+
+    for pair in table.pairs::<Value, Value>() {
+        let (key, _val) = pair.map_err(|source| LuaEngineError::Runtime {
+            script: display_name.to_string(),
+            source,
+        })?;
+
+        pair_count += 1;
+        if pair_count > MAX_ACTIONS_PER_EXECUTION {
+            return Err(LuaEngineError::InvalidModule {
+                script: module_id.to_owned(),
+                message: format!(
+                    "a script returned more than {MAX_ACTIONS_PER_EXECUTION} actions; the limit is {MAX_ACTIONS_PER_EXECUTION}"
+                ),
+            });
+        }
+
+        let idx = match key {
+            Value::Integer(i) => i,
+            Value::Number(n) if n.fract() == 0.0 => n as i64,
+            _ => {
+                return Err(LuaEngineError::InvalidModule {
+                    script: module_id.to_owned(),
+                    message: "a script returned an action array with non-integer keys; expected a sequential array of actions".to_owned(),
+                });
+            }
+        };
+
+        if idx < 1 {
+            return Err(LuaEngineError::InvalidModule {
+                script: module_id.to_owned(),
+                message: format!("a script returned an action array with non-positive index {idx}"),
+            });
+        }
+
+        if idx > MAX_ACTIONS_PER_EXECUTION as i64 {
+            return Err(LuaEngineError::InvalidModule {
+                script: module_id.to_owned(),
+                message: format!(
+                    "a script returned an action array with out-of-bounds index {idx}; the limit is {MAX_ACTIONS_PER_EXECUTION}"
+                ),
+            });
+        }
+
+        let u_idx = idx as usize;
+        if seen[u_idx] {
+            return Err(LuaEngineError::InvalidModule {
+                script: module_id.to_owned(),
+                message: format!("a script returned duplicate array index {idx}"),
+            });
+        }
+        seen[u_idx] = true;
+        if u_idx > max_idx {
+            max_idx = u_idx;
+        }
+    }
+
+    if pair_count != max_idx {
+        return Err(LuaEngineError::InvalidModule {
+            script: module_id.to_owned(),
+            message: "a script returned a sparse array with missing elements; expected a sequential array of actions".to_owned(),
+        });
+    }
+
+    for (i, &is_seen) in seen.iter().enumerate().take(max_idx + 1).skip(1) {
+        if !is_seen {
+            return Err(LuaEngineError::InvalidModule {
+                script: module_id.to_owned(),
+                message: format!(
+                    "a script returned a sparse array missing index {i}; expected a sequential array of actions"
+                ),
+            });
+        }
+    }
+
+    // Bounded decoder: deserialize each element individually up to max_idx (<= MAX_ACTIONS_PER_EXECUTION)
+    // and validate immediately to fail early without deserializing further items.
+    let mut actions = Vec::with_capacity(max_idx);
+    for i in 1..=max_idx {
+        let raw_val: Value = table
+            .raw_get(i as i64)
+            .map_err(|source| LuaEngineError::Runtime {
+                script: display_name.to_string(),
+                source,
+            })?;
+        let action: LuaAction =
+            lua.from_value(raw_val)
+                .map_err(|source| LuaEngineError::Runtime {
+                    script: display_name.to_string(),
+                    source,
+                })?;
         action
             .validate()
             .map_err(|message| LuaEngineError::InvalidModule {
                 script: module_id.to_owned(),
                 message,
             })?;
+        actions.push(action);
     }
 
     Ok(actions)

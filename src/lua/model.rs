@@ -519,7 +519,7 @@ impl LuaAction {
                 content,
                 success_reply,
                 audit_event,
-                ..
+                audit_data,
             } => {
                 validate_snowflake(channel_id)?;
                 validate_content(content)?;
@@ -527,12 +527,14 @@ impl LuaAction {
                 if audit_event.trim().is_empty() || audit_event.len() > 64 {
                     return Err("audit event must contain 1 to 64 bytes".to_owned());
                 }
+                validate_audit_data(audit_data)?;
                 Ok(())
             }
-            Self::Audit { event, .. } => {
+            Self::Audit { event, data } => {
                 if event.trim().is_empty() || event.len() > 64 {
                     return Err("audit event must contain 1 to 64 bytes".to_owned());
                 }
+                validate_audit_data(data)?;
                 Ok(())
             }
         }
@@ -584,6 +586,35 @@ fn validate_snowflake(value: &str) -> Result<(), String> {
         .map_err(|_| format!("{value:?} is not a Discord snowflake"))?;
     if parsed == 0 {
         return Err("Discord snowflakes must be greater than zero".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_audit_data(data: &BTreeMap<String, Value>) -> Result<(), String> {
+    const MAX_AUDIT_KEYS: usize = 64;
+    const MAX_KEY_LENGTH: usize = 64;
+    const MAX_TOTAL_JSON_BYTES: usize = 16_384;
+
+    if data.len() > MAX_AUDIT_KEYS {
+        return Err(format!(
+            "audit data cannot contain more than {MAX_AUDIT_KEYS} entries; got {}",
+            data.len()
+        ));
+    }
+    for key in data.keys() {
+        if key.trim().is_empty() || key.len() > MAX_KEY_LENGTH {
+            return Err(format!(
+                "audit data key {key:?} must contain between 1 and {MAX_KEY_LENGTH} bytes"
+            ));
+        }
+    }
+    let serialized = serde_json::to_vec(data)
+        .map_err(|e| format!("audit data failed to serialize to JSON: {e}"))?;
+    if serialized.len() > MAX_TOTAL_JSON_BYTES {
+        return Err(format!(
+            "audit data JSON representation exceeds {MAX_TOTAL_JSON_BYTES} bytes (size: {} bytes)",
+            serialized.len()
+        ));
     }
     Ok(())
 }
@@ -691,5 +722,48 @@ mod tests {
             ]
         }));
         assert!(valid.validate_options_order().is_ok());
+    }
+
+    #[test]
+    fn test_audit_action_validation_and_payload_limits() {
+        use super::LuaAction;
+        use std::collections::BTreeMap;
+
+        let mut data = BTreeMap::new();
+        data.insert("user_id".to_owned(), json!("123456789012345678"));
+        data.insert("reason".to_owned(), json!("spamming"));
+
+        let valid_audit = LuaAction::Audit {
+            event: "test_event".to_owned(),
+            data: data.clone(),
+        };
+        assert!(valid_audit.validate().is_ok());
+
+        // Reject empty or whitespace-only event
+        let empty_event = LuaAction::Audit {
+            event: "   ".to_owned(),
+            data: data.clone(),
+        };
+        assert!(empty_event.validate().is_err());
+
+        // Reject > 64 keys
+        let mut excessive_keys = BTreeMap::new();
+        for i in 0..65 {
+            excessive_keys.insert(format!("key_{i}"), json!("val"));
+        }
+        let too_many_keys = LuaAction::Audit {
+            event: "test_event".to_owned(),
+            data: excessive_keys,
+        };
+        assert!(too_many_keys.validate().is_err());
+
+        // Reject > 16 KiB serialized JSON
+        let mut large_data = BTreeMap::new();
+        large_data.insert("large".to_owned(), json!("a".repeat(20_000)));
+        let too_large = LuaAction::Audit {
+            event: "test_event".to_owned(),
+            data: large_data,
+        };
+        assert!(too_large.validate().is_err());
     }
 }
