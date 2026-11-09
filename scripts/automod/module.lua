@@ -32,47 +32,128 @@ local function host_allowed(host, allowlist)
     return false
 end
 
+local function clean_host(candidate)
+    candidate = string.match(candidate, "^([^/%?#]+)") or candidate
+    local after_at = string.match(candidate, "@([%w%._%-:]+)$")
+    if after_at then candidate = after_at end
+    candidate = string.match(candidate, "^([^:]+)") or candidate
+    candidate = string.gsub(candidate, "^[%.,:;!?%s%-_]+", "")
+    candidate = string.gsub(candidate, "[%.,:;!?%s%-_]+$", "")
+    return lower(candidate)
+end
+
+local INVITE_HOSTS = {
+    ["discord.gg"] = true,
+    ["dsc.gg"] = true,
+    ["discord.me"] = true,
+    ["discord.io"] = true,
+    ["discord.li"] = true,
+    ["discord.link"] = true,
+    ["invite.gg"] = true,
+    ["discord.gift"] = true,
+}
+
+local INVITE_PATH_HOSTS = {
+    ["discord.com"] = true,
+    ["discordapp.com"] = true,
+}
+
+local function is_invite_host(host)
+    host = lower(host)
+    if INVITE_HOSTS[host] then
+        return true
+    end
+    for target in pairs(INVITE_HOSTS) do
+        if string.sub(host, -(#target + 1)) == "." .. target then
+            return true
+        end
+    end
+    return false
+end
+
+local function is_invite_path_host(host)
+    host = lower(host)
+    if INVITE_PATH_HOSTS[host] then
+        return true
+    end
+    for target in pairs(INVITE_PATH_HOSTS) do
+        if string.sub(host, -(#target + 1)) == "." .. target then
+            return true
+        end
+    end
+    return false
+end
+
 local function check_discord_invites(content)
+    if not content or content == "" then return nil end
+
     local sanitized = string.gsub(content, "\\", "/")
     sanitized = string.gsub(sanitized, "[\u{200B}\u{200C}\u{200D}\u{FEFF}]", "")
 
-    local invite_patterns = {
-        "discord%.gg/[%w%-_]+",
-        "discord%.com/invite/[%w%-_]+",
-        "discordapp%.com/invite/[%w%-_]+",
-        "dsc%.gg/[%w%-_]+",
-        "discord%.me/[%w%-_]+",
-        "discord%.io/[%w%-_]+",
-        "discord%.li/[%w%-_]+",
-        "discord%.link/[%w%-_]+",
-        "invite%.gg/[%w%-_]+",
-        "discord%.gift/[%w%-_]+",
-    }
+    local remaining = sanitized
 
-    for _, pattern in ipairs(invite_patterns) do
-        local match = string.match(sanitized, pattern)
-        if match then
-            return match
+    -- 1. Scan explicit URLs (https?://...)
+    for full_url, raw_url in string.gmatch(sanitized, "(https?://([^%s%c\"'<>()]+))") do
+        local host_part = string.match(raw_url, "^([^/%?#]+)") or raw_url
+        local path_part = string.match(raw_url, "^[^/%?#]+(.*)") or ""
+        local host = clean_host(host_part)
+
+        if is_invite_host(host) then
+            local code = string.match(path_part, "^/([%w%-_]+)")
+            if code and code ~= "" then
+                return host .. "/" .. code
+            end
+            return host
+        end
+
+        if is_invite_path_host(host) then
+            local code = string.match(path_part, "^/invite/([%w%-_]+)")
+            if code and code ~= "" then
+                return host .. "/invite/" .. code
+            end
+        end
+
+        -- Mask out explicit URL so its path / parameters cannot falsely trigger naked link detection
+        local escaped_url = string.gsub(full_url, "[%(%)%.%%%+%-%*%?%[%]%^%$]", "%%%1")
+        remaining = string.gsub(remaining, escaped_url, " ", 1)
+    end
+
+    -- 2. Scan naked candidates without explicit scheme
+    for candidate in string.gmatch(remaining, "([^%s%c\"'<>()]+)") do
+        local host_part = string.match(candidate, "^([^/%?#]+)")
+        local path_part = string.match(candidate, "^[^/%?#]+(.*)") or ""
+        if host_part then
+            local host = clean_host(host_part)
+            if is_invite_host(host) then
+                local code = string.match(path_part, "^/([%w%-_]+)")
+                if code and code ~= "" then
+                    return host .. "/" .. code
+                end
+                return host
+            end
+
+            if is_invite_path_host(host) then
+                local code = string.match(path_part, "^/invite/([%w%-_]+)")
+                if code and code ~= "" then
+                    return host .. "/invite/" .. code
+                end
+            end
         end
     end
 
-    if string.match(sanitized, "discord%s*%.%s*gg") then
-        return "discord.gg"
+    -- 3. Obfuscated discord.gg with whitespace around dot, bounded by non-alphanumeric chars
+    local padded = " " .. remaining .. " "
+    if string.match(padded, "[^%w]discord%s*%.%s*gg[^%w]") then
+        -- Ensure it's not a subdomain like discord.gg.somethingelse.com
+        if not string.match(padded, "[^%w]discord%s*%.%s*gg%s*%.%s*[%w]") then
+            return "discord.gg"
+        end
     end
 
     return nil
 end
 
 local function matched_domain(content, config)
-    local function clean_host(candidate)
-        candidate = string.match(candidate, "^([^/%?#]+)") or candidate
-        local after_at = string.match(candidate, "@([%w%._%-:]+)$")
-        if after_at then candidate = after_at end
-        candidate = string.match(candidate, "^([^:]+)") or candidate
-        candidate = string.gsub(candidate, "^[%.,:;!?%s%-_]+", "")
-        candidate = string.gsub(candidate, "[%.,:;!?%s%-_]+$", "")
-        return lower(candidate)
-    end
 
     local function is_valid_domain(host)
         local tld = string.match(host, "%.(%a%a+)$")
@@ -206,7 +287,7 @@ local function evaluate(ctx)
     end
 
     if config.block_invites ~= false then
-        local invite = check_discord_invites(content)
+        local invite = check_discord_invites(original)
         if invite then
             return "discord_invite", invite
         end

@@ -439,6 +439,166 @@ async fn automod_detects_naked_domains_and_userinfo_urls() {
 }
 
 #[tokio::test]
+async fn automod_discord_invites_avoids_false_positives_for_notdiscord_and_subpaths_issue_350() {
+    let engine = engine();
+
+    // 1. False positive candidate: https://notdiscord.gg/info
+    // Must NOT trigger DeleteMessage or discord_invite audit.
+    let event_false1 = LuaEventContext {
+        name: "message_create".to_owned(),
+        guild_id: Some("100000000000000001".to_owned()),
+        channel_id: Some("100000000000000002".to_owned()),
+        actor_id: Some("100000000000000003".to_owned()),
+        data: json!({
+            "message_id": "100000000000000020",
+            "content": "Check out documentation at https://notdiscord.gg/info for details",
+            "attachments": []
+        }),
+        config: json!({
+            "block_invites": true,
+            "block_all_links": false,
+            "delete_messages": true
+        }),
+    };
+    let actions_false1 = engine
+        .execute_event("automod", "message_create", event_false1)
+        .await
+        .expect("automod event should execute");
+    assert!(
+        actions_false1.is_empty(),
+        "expected no actions for notdiscord.gg/info (false positive avoidance)"
+    );
+
+    // 2. False positive candidate: https://notdiscord.com/invite/training
+    let event_false2 = LuaEventContext {
+        name: "message_create".to_owned(),
+        guild_id: Some("100000000000000001".to_owned()),
+        channel_id: Some("100000000000000002".to_owned()),
+        actor_id: Some("100000000000000003".to_owned()),
+        data: json!({
+            "message_id": "100000000000000021",
+            "content": "Enroll in the workshop here: https://notdiscord.com/invite/training",
+            "attachments": []
+        }),
+        config: json!({
+            "block_invites": true,
+            "block_all_links": false,
+            "delete_messages": true
+        }),
+    };
+    let actions_false2 = engine
+        .execute_event("automod", "message_create", event_false2)
+        .await
+        .expect("automod event should execute");
+    assert!(
+        actions_false2.is_empty(),
+        "expected no actions for notdiscord.com/invite/training (false positive avoidance)"
+    );
+
+    // 3. False positive candidate: https://example.org/guide/discord.gg/abcd
+    // discord.gg is merely a directory in the path of example.org
+    let event_false3 = LuaEventContext {
+        name: "message_create".to_owned(),
+        guild_id: Some("100000000000000001".to_owned()),
+        channel_id: Some("100000000000000002".to_owned()),
+        actor_id: Some("100000000000000003".to_owned()),
+        data: json!({
+            "message_id": "100000000000000022",
+            "content": "Guide located at https://example.org/guide/discord.gg/abcd for reference",
+            "attachments": []
+        }),
+        config: json!({
+            "block_invites": true,
+            "block_all_links": false,
+            "delete_messages": true
+        }),
+    };
+    let actions_false3 = engine
+        .execute_event("automod", "message_create", event_false3)
+        .await
+        .expect("automod event should execute");
+    assert!(
+        actions_false3.is_empty(),
+        "expected no actions for foreign url containing discord.gg in path (false positive avoidance)"
+    );
+
+    // 4. True positive: naked discord.gg/abcd
+    let event_true1 = LuaEventContext {
+        name: "message_create".to_owned(),
+        guild_id: Some("100000000000000001".to_owned()),
+        channel_id: Some("100000000000000002".to_owned()),
+        actor_id: Some("100000000000000003".to_owned()),
+        data: json!({
+            "message_id": "100000000000000023",
+            "content": "Join our official community discord.gg/abcd right now!",
+            "attachments": []
+        }),
+        config: json!({
+            "block_invites": true,
+            "delete_messages": true
+        }),
+    };
+    let actions_true1 = engine
+        .execute_event("automod", "message_create", event_true1)
+        .await
+        .expect("automod event should execute");
+    assert!(
+        matches!(actions_true1.first(), Some(LuaAction::DeleteMessage { .. })),
+        "expected delete message for genuine naked discord.gg invite"
+    );
+
+    // 5. True positive: full https://discord.com/invite/community
+    let event_true2 = LuaEventContext {
+        name: "message_create".to_owned(),
+        guild_id: Some("100000000000000001".to_owned()),
+        channel_id: Some("100000000000000002".to_owned()),
+        actor_id: Some("100000000000000003".to_owned()),
+        data: json!({
+            "message_id": "100000000000000024",
+            "content": "Check https://discord.com/invite/community for gaming",
+            "attachments": []
+        }),
+        config: json!({
+            "block_invites": true,
+            "delete_messages": true
+        }),
+    };
+    let actions_true2 = engine
+        .execute_event("automod", "message_create", event_true2)
+        .await
+        .expect("automod event should execute");
+    assert!(
+        matches!(actions_true2.first(), Some(LuaAction::DeleteMessage { .. })),
+        "expected delete message for full discord.com/invite invite"
+    );
+
+    // 6. message_update check: safe URL edit must not trigger deletion
+    let event_update_safe = LuaEventContext {
+        name: "message_update".to_owned(),
+        guild_id: Some("100000000000000001".to_owned()),
+        channel_id: Some("100000000000000002".to_owned()),
+        actor_id: Some("100000000000000003".to_owned()),
+        data: json!({
+            "id": "100000000000000025",
+            "content": "Edited: https://notdiscord.gg/info and https://notdiscord.com/invite/training",
+            "attachments": []
+        }),
+        config: json!({
+            "block_invites": true,
+            "delete_messages": true
+        }),
+    };
+    let actions_update_safe = engine
+        .execute_event("automod", "message_update", event_update_safe)
+        .await
+        .expect("automod event should execute");
+    assert!(
+        actions_update_safe.is_empty(),
+        "expected no actions on message_update with notdiscord domains"
+    );
+}
+
+#[tokio::test]
 async fn join_guard_detects_raid_burst_and_triggers_lockdown() {
     let event = LuaEventContext {
         name: "guild_member_add".to_owned(),
