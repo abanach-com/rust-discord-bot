@@ -457,19 +457,14 @@ pub async fn execute_event_actions(
             LuaAction::DeleteMessage { .. } => {
                 if let Err(err) = execute_action(ctx, state, module_id, &origin, &action).await {
                     last_action_succeeded = false;
-
                     message_delete_failed = true;
 
+                    let action_type = action.policy_action_key();
                     tracing::warn!(
-
                         error = %err,
-
                         module_id,
-
-                        ?action,
-
+                        action_type,
                         "Błąd lub odmowa wykonania akcji zdarzenia"
-
                     );
 
                     let _ = audit_action(
@@ -478,13 +473,10 @@ pub async fn execute_event_actions(
                         module_id,
                         "action_denied",
                         serde_json::json!({
-
                             "module_id": module_id,
-
-                            "action": format!("{action:?}"),
-
+                            "action": action_type,
+                            "action_type": action_type,
                             "error": err.to_string(),
-
                         }),
                     )
                     .await;
@@ -497,16 +489,12 @@ pub async fn execute_event_actions(
                 if let Err(err) = execute_action(ctx, state, module_id, &origin, &action).await {
                     last_action_succeeded = false;
 
+                    let action_type = action.policy_action_key();
                     tracing::warn!(
-
                         error = %err,
-
                         module_id,
-
-                        ?action,
-
+                        action_type,
                         "Błąd lub odmowa wykonania akcji zdarzenia"
-
                     );
 
                     let _ = audit_action(
@@ -515,13 +503,10 @@ pub async fn execute_event_actions(
                         module_id,
                         "action_denied",
                         serde_json::json!({
-
                             "module_id": module_id,
-
-                            "action": format!("{action:?}"),
-
+                            "action": action_type,
+                            "action_type": action_type,
                             "error": err.to_string(),
-
                         }),
                     )
                     .await;

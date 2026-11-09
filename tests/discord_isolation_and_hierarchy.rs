@@ -1306,16 +1306,14 @@ async fn test_event_action_failures_suppress_sent_audit_and_adjust_message_delet
     );
 
     // 2. Goodbye action failure: channel "999" does not exist
-
+    let canary_goodbye = "SENSITIVE_CANARY_GOODBYE_SECRET_123";
     let goodbye_actions = vec![
         LuaAction::SendMessage {
             channel_id: Some("999".to_string()),
-
-            content: "Żegnaj!".to_string(),
+            content: canary_goodbye.to_string(),
         },
         LuaAction::Audit {
             event: "goodbye_sent".to_string(),
-
             data: BTreeMap::from([
                 ("user_id".to_string(), json!("123456")),
                 ("channel_id".to_string(), json!("999")),
@@ -1342,6 +1340,54 @@ async fn test_event_action_failures_suppress_sent_audit_and_adjust_message_delet
         !audit_events_after.iter().any(|e| e.event == "goodbye_sent"),
         "failed goodbye SendMessage must not emit false positive goodbye_sent audit event"
     );
+
+    // Issue #357: action_denied must record action_type without leaking sensitive content into audit_events
+    let denied_events: Vec<_> = audit_events_after
+        .iter()
+        .filter(|e| e.event == "action_denied")
+        .collect();
+    assert!(!denied_events.is_empty(), "action_denied must be logged");
+    for entry in &denied_events {
+        let entry_str = serde_json::to_string(&entry.data).unwrap();
+        assert!(
+            !entry_str.contains(canary_goodbye),
+            "Sensitive message content must NEVER be saved in audit_events: {entry_str}"
+        );
+        assert_eq!(
+            entry.data.get("action_type").and_then(|v| v.as_str()),
+            Some("send_message")
+        );
+    }
+
+    // 2b. Direct message failure test: canary content must NOT be recorded in audit_events (Issue #357)
+    let canary_dm = "SENSITIVE_CANARY_DM_SECRET_456";
+    let dm_actions = vec![LuaAction::SendDirectMessage {
+        user_id: "000000000000000000".to_string(), // Invalid user / DM fails
+        content: canary_dm.to_string(),
+    }];
+    let res_dm = execute_event_actions(
+        &ctx,
+        &state,
+        "welcome",
+        Some(guild_id),
+        None,
+        Some(UserId::new(123456)),
+        &dm_actions,
+    )
+    .await;
+    assert!(res_dm.is_ok());
+
+    let audit_events_dm = state.storage.list_audit_events("100", 20).await.unwrap();
+    for entry in audit_events_dm
+        .iter()
+        .filter(|e| e.event == "action_denied")
+    {
+        let entry_str = serde_json::to_string(&entry.data).unwrap();
+        assert!(
+            !entry_str.contains(canary_dm),
+            "Sensitive DM content must NEVER be saved in audit_events: {entry_str}"
+        );
+    }
 
     // 3. AutoMod message deletion failure:
 
