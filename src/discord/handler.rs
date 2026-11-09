@@ -475,43 +475,56 @@ impl EventHandler for Handler {
         )
         .await;
 
-        let guild_id_str = guild_id.get().to_string();
-        let channel_id_str = message.channel_id.get().to_string();
-        let author_id_str = message.author.id.get().to_string();
-        let member_roles: Vec<String> = message
-            .member
-            .as_ref()
-            .map(|m| m.roles.iter().map(|r| r.to_string()).collect())
-            .unwrap_or_default();
+        let is_definitely_non_thread = ctx
+            .cache
+            .guild(guild_id)
+            .and_then(|guild| {
+                guild
+                    .channels
+                    .get(&message.channel_id)
+                    .map(|channel| !is_thread_channel_type(channel.kind))
+            })
+            .unwrap_or(false);
 
-        let storage = self.state.storage.clone();
-        tokio::spawn(async move {
-            if let Ok(Some(session)) = storage
-                .get_help_forum_session(&guild_id_str, &channel_id_str)
-                .await
-                && session.status == "open"
-            {
-                let is_helper = if let Ok(Some(cfg)) = storage
-                    .get_help_forum_config(&guild_id_str, &session.forum_channel_id)
+        if !is_definitely_non_thread {
+            let guild_id_str = guild_id.get().to_string();
+            let channel_id_str = message.channel_id.get().to_string();
+            let author_id_str = message.author.id.get().to_string();
+            let member_roles: Vec<String> = message
+                .member
+                .as_ref()
+                .map(|m| m.roles.iter().map(|r| r.to_string()).collect())
+                .unwrap_or_default();
+
+            let storage = self.state.storage.clone();
+            tokio::spawn(async move {
+                if let Ok(Some(session)) = storage
+                    .get_help_forum_session(&guild_id_str, &channel_id_str)
                     .await
+                    && session.status == "open"
                 {
-                    cfg.helper_role_ids
-                        .0
-                        .iter()
-                        .any(|r| member_roles.iter().any(|mr| mr == r))
-                } else {
-                    false
-                };
-                let _ = storage
-                    .record_help_forum_activity(
-                        &guild_id_str,
-                        &channel_id_str,
-                        &author_id_str,
-                        is_helper,
-                    )
-                    .await;
-            }
-        });
+                    let is_helper = if let Ok(Some(cfg)) = storage
+                        .get_help_forum_config(&guild_id_str, &session.forum_channel_id)
+                        .await
+                    {
+                        cfg.helper_role_ids
+                            .0
+                            .iter()
+                            .any(|r| member_roles.iter().any(|mr| mr == r))
+                    } else {
+                        false
+                    };
+                    let _ = storage
+                        .record_help_forum_activity(
+                            &guild_id_str,
+                            &channel_id_str,
+                            &author_id_str,
+                            is_helper,
+                        )
+                        .await;
+                }
+            });
+        }
     }
 
     async fn message_update(

@@ -401,8 +401,11 @@ pub async fn deliver_giveaway_announcement(
     let chan_id = ChannelId::new(chan_num);
     let validation = validate_giveaway_delivery_channel(http, chan_id, &ga.guild_id).await;
 
-    if let Err(err_msg) = validation {
-        if err_msg.contains("tenant isolation violation") {
+    if let Err(validation_err) = validation {
+        let err_msg = validation_err.message();
+        if let GiveawayChannelValidationError::CrossGuildTenantViolation { detected_guild_id } =
+            validation_err
+        {
             tracing::error!(
                 giveaway_id = %ga.id,
                 expected_guild = %ga.guild_id,
@@ -420,6 +423,7 @@ pub async fn deliver_giveaway_announcement(
                         "giveaway_id": ga.id.to_string(),
                         "channel_id": ga.channel_id,
                         "expected_guild_id": ga.guild_id,
+                        "detected_guild_id": detected_guild_id,
                         "error": err_msg,
                         if is_reroll { "new_winners" } else { "winners" }: winners,
                     }),
@@ -429,7 +433,7 @@ pub async fn deliver_giveaway_announcement(
                 delivered: false,
                 status: "cross_guild_blocked",
                 message_id: None,
-                error: Some(err_msg.to_string()),
+                error: Some(err_msg),
             };
         }
 
@@ -549,23 +553,51 @@ pub async fn deliver_giveaway_announcement(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GiveawayChannelValidationError {
+    InaccessibleOrNotFound,
+    NotAGuildChannel,
+    CrossGuildTenantViolation { detected_guild_id: String },
+    CategoryChannelNotAllowed,
+}
+
+impl GiveawayChannelValidationError {
+    pub fn message(&self) -> String {
+        match self {
+            Self::InaccessibleOrNotFound => "channel inaccessible or not found".to_string(),
+            Self::NotAGuildChannel => "channel is not a guild channel".to_string(),
+            Self::CrossGuildTenantViolation { detected_guild_id } => {
+                format!(
+                    "tenant isolation violation: channel belongs to different guild ({detected_guild_id})"
+                )
+            }
+            Self::CategoryChannelNotAllowed => {
+                "cannot send messages to category channels".to_string()
+            }
+        }
+    }
+}
+
 pub async fn validate_giveaway_delivery_channel(
     http: &serenity::http::Http,
     chan_id: ChannelId,
     expected_guild_id: &str,
-) -> Result<serenity::model::channel::GuildChannel, &'static str> {
+) -> Result<serenity::model::channel::GuildChannel, GiveawayChannelValidationError> {
     let channel = match http.get_channel(chan_id).await {
         Ok(c) => c,
-        Err(_) => return Err("channel inaccessible or not found"),
+        Err(_) => return Err(GiveawayChannelValidationError::InaccessibleOrNotFound),
     };
     let Some(guild_chan) = channel.guild() else {
-        return Err("channel is not a guild channel");
+        return Err(GiveawayChannelValidationError::NotAGuildChannel);
     };
-    if guild_chan.guild_id.get().to_string() != expected_guild_id {
-        return Err("tenant isolation violation: channel belongs to different guild");
+    let detected_guild_id = guild_chan.guild_id.get().to_string();
+    if detected_guild_id != expected_guild_id {
+        return Err(GiveawayChannelValidationError::CrossGuildTenantViolation {
+            detected_guild_id,
+        });
     }
     if guild_chan.kind == ChannelType::Category {
-        return Err("cannot send messages to category channels");
+        return Err(GiveawayChannelValidationError::CategoryChannelNotAllowed);
     }
     Ok(guild_chan)
 }
