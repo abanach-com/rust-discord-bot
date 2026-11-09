@@ -484,3 +484,94 @@ async fn test_install_xml_oversized_file_rejected_issue_336() {
         "active registry must be preserved after reload failure"
     );
 }
+
+#[tokio::test]
+async fn test_lua_module_source_oversized_rejected_issue_343() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path();
+
+    let valid_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<installer version="1.0.0">
+    <modules>
+        <module id="mod_big" enabled="true">
+            <folder>big</folder>
+            <entry>module.lua</entry>
+        </module>
+    </modules>
+</installer>"#;
+    std::fs::write(base.join("install.xml"), valid_xml).expect("write valid install.xml");
+
+    let big_mod_dir = base.join("big");
+    std::fs::create_dir_all(&big_mod_dir).expect("create big mod dir");
+
+    // Write module.lua exceeding 1 MiB (e.g. 1 MiB + 10 bytes of comments)
+    let mut oversized_lua = String::from(
+        "return { manifest = { id = \"mod_big\", name = \"Big\", version = \"1.0.0\", description = \"Big\", category = \"test\", commands = {} } } --",
+    );
+    oversized_lua.push_str(&"-".repeat(1024 * 1024 + 10));
+    std::fs::write(big_mod_dir.join("module.lua"), oversized_lua)
+        .expect("write oversized module.lua");
+
+    let load_res = LuaEngine::load(base, limits());
+    assert!(
+        load_res.is_err(),
+        "engine load must fail when module source exceeds MAX_MODULE_SOURCE_BYTES"
+    );
+    match load_res.err().unwrap() {
+        LuaEngineError::InvalidModule { message, .. } => {
+            assert!(
+                message.contains("exceeds 1048576 bytes limit"),
+                "unexpected message: {message}"
+            );
+        }
+        other => panic!("expected InvalidModule error, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_lua_config_json_oversized_rejected_issue_343() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path();
+
+    let valid_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<installer version="1.0.0">
+    <modules>
+        <module id="mod_cfg" enabled="true">
+            <folder>cfg</folder>
+            <entry>module.lua</entry>
+            <config>config.json</config>
+        </module>
+    </modules>
+</installer>"#;
+    std::fs::write(base.join("install.xml"), valid_xml).expect("write valid install.xml");
+
+    let cfg_mod_dir = base.join("cfg");
+    std::fs::create_dir_all(&cfg_mod_dir).expect("create cfg mod dir");
+    std::fs::write(
+        cfg_mod_dir.join("module.lua"),
+        r#"return { manifest = { id = "mod_cfg", name = "Cfg", version = "1.0.0", description = "Cfg", category = "test", commands = {} } }"#,
+    )
+    .expect("write module.lua");
+
+    // Write config.json exceeding 256 KiB
+    let mut oversized_json = String::from("{\"key\":\"");
+    oversized_json.push_str(&"x".repeat(256 * 1024 + 20));
+    oversized_json.push_str("\"}");
+    std::fs::write(cfg_mod_dir.join("config.json"), oversized_json)
+        .expect("write oversized config.json");
+
+    let load_res = LuaEngine::load(base, limits());
+    assert!(
+        load_res.is_err(),
+        "engine load must fail when config.json exceeds MAX_DEFAULT_CONFIG_BYTES"
+    );
+    match load_res.err().unwrap() {
+        LuaEngineError::InvalidConfigSchema { message, .. } => {
+            assert!(
+                message.contains("exceeds 262144 bytes limit"),
+                "unexpected message: {message}"
+            );
+        }
+        other => panic!("expected InvalidConfigSchema error, got: {other:?}"),
+    }
+}

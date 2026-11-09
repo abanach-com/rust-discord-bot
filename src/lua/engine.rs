@@ -30,6 +30,9 @@ pub const MAX_LUA_COMMANDS: usize = MAX_CHAT_INPUT_COMMANDS - HOST_COMMAND_COUNT
 const MAX_OPTIONS_PER_LEVEL: usize = 25;
 const MAX_DISCOVERY_DEPTH: usize = 16;
 const MAX_DISCOVERY_FILES: usize = 512;
+pub const MAX_MODULE_SOURCE_BYTES: u64 = 1024 * 1024;
+pub const MAX_DEFAULT_CONFIG_BYTES: u64 = 256 * 1024;
+pub const MAX_REGISTRY_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug)]
 pub struct LuaLimits {
@@ -488,10 +491,68 @@ fn read_install_xml_bounded(path: &Path) -> Result<String, LuaEngineError> {
     })
 }
 
+fn read_package_config_bounded(path: &Path, max_bytes: u64) -> Result<String, LuaEngineError> {
+    use std::io::Read;
+    let file = fs::File::open(path).map_err(|source| LuaEngineError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+
+    let mut bytes = Vec::new();
+    file.take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| LuaEngineError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    if bytes.len() as u64 > max_bytes {
+        return Err(LuaEngineError::InvalidConfigSchema {
+            script: path.display().to_string(),
+            message: format!("default config exceeds {max_bytes} bytes limit"),
+        });
+    }
+
+    String::from_utf8(bytes).map_err(|e| LuaEngineError::InvalidConfigSchema {
+        script: path.display().to_string(),
+        message: format!("default config is not valid UTF-8: {e}"),
+    })
+}
+
+fn read_package_source_bounded(path: &Path, max_bytes: u64) -> Result<String, LuaEngineError> {
+    use std::io::Read;
+    let file = fs::File::open(path).map_err(|source| LuaEngineError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+
+    let mut bytes = Vec::new();
+    file.take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| LuaEngineError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    if bytes.len() as u64 > max_bytes {
+        return Err(LuaEngineError::InvalidModule {
+            script: path.display().to_string(),
+            message: format!("Lua source exceeds {max_bytes} bytes limit"),
+        });
+    }
+
+    String::from_utf8(bytes).map_err(|e| LuaEngineError::InvalidModule {
+        script: path.display().to_string(),
+        message: format!("Lua source is not valid UTF-8: {e}"),
+    })
+}
+
 fn build_registry(scripts_dir: &Path, limits: LuaLimits) -> Result<Registry, LuaEngineError> {
+    let mut total_registry_bytes: u64 = 0;
     let install_xml_path = scripts_dir.join("install.xml");
     let installer_manifest = if install_xml_path.is_file() {
         let content = read_install_xml_bounded(&install_xml_path)?;
+        total_registry_bytes += content.len() as u64;
         let manifest =
             InstallManifest::parse(&content).map_err(|err| LuaEngineError::InvalidInstallXml {
                 path: install_xml_path.clone(),
@@ -611,12 +672,17 @@ fn build_registry(scripts_dir: &Path, limits: LuaLimits) -> Result<Registry, Lua
                 let config_candidate = folder_dir.join(config_rel);
                 let default_config = if config_candidate.is_file() {
                     let canonical_config = ensure_confined_path(&folder_dir, config_rel)?;
-                    let text = fs::read_to_string(&canonical_config).map_err(|source| {
-                        LuaEngineError::Io {
-                            path: canonical_config.clone(),
-                            source,
-                        }
-                    })?;
+                    let text =
+                        read_package_config_bounded(&canonical_config, MAX_DEFAULT_CONFIG_BYTES)?;
+                    total_registry_bytes += text.len() as u64;
+                    if total_registry_bytes > MAX_REGISTRY_SOURCE_BYTES {
+                        return Err(LuaEngineError::InvalidConfigSchema {
+                            script: canonical_config.display().to_string(),
+                            message: format!(
+                                "total registry source and configuration size exceeds {MAX_REGISTRY_SOURCE_BYTES} bytes limit"
+                            ),
+                        });
+                    }
                     serde_json::from_str(&text).map_err(|err| {
                         LuaEngineError::InvalidConfigSchema {
                             script: canonical_config.display().to_string(),
@@ -674,12 +740,19 @@ fn build_registry(scripts_dir: &Path, limits: LuaLimits) -> Result<Registry, Lua
                                 message: "config path escapes allowed scripts root".into(),
                             });
                         }
-                        let text = fs::read_to_string(&canonical_config).map_err(|source| {
-                            LuaEngineError::Io {
-                                path: canonical_config.clone(),
-                                source,
-                            }
-                        })?;
+                        let text = read_package_config_bounded(
+                            &canonical_config,
+                            MAX_DEFAULT_CONFIG_BYTES,
+                        )?;
+                        total_registry_bytes += text.len() as u64;
+                        if total_registry_bytes > MAX_REGISTRY_SOURCE_BYTES {
+                            return Err(LuaEngineError::InvalidConfigSchema {
+                                script: canonical_config.display().to_string(),
+                                message: format!(
+                                    "total registry source and configuration size exceeds {MAX_REGISTRY_SOURCE_BYTES} bytes limit"
+                                ),
+                            });
+                        }
                         serde_json::from_str(&text).map_err(|err| {
                             LuaEngineError::InvalidConfigSchema {
                                 script: canonical_config.display().to_string(),
@@ -698,10 +771,16 @@ fn build_registry(scripts_dir: &Path, limits: LuaLimits) -> Result<Registry, Lua
         };
 
     for (path, installer_entry, default_config) in candidate_paths {
-        let source = fs::read_to_string(&path).map_err(|source| LuaEngineError::Io {
-            path: path.clone(),
-            source,
-        })?;
+        let source = read_package_source_bounded(&path, MAX_MODULE_SOURCE_BYTES)?;
+        total_registry_bytes += source.len() as u64;
+        if total_registry_bytes > MAX_REGISTRY_SOURCE_BYTES {
+            return Err(LuaEngineError::InvalidModule {
+                script: path.display().to_string(),
+                message: format!(
+                    "total registry source and configuration size exceeds {MAX_REGISTRY_SOURCE_BYTES} bytes limit"
+                ),
+            });
+        }
         let display_name = path.display().to_string();
         let mut manifest = inspect_manifest(&source, &display_name, limits)?;
         validate_manifest(&manifest, &display_name)?;
