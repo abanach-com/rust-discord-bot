@@ -71,6 +71,8 @@ pub struct MemoryStore {
 
     active_pending_appeals: Arc<DashMap<(String, i64, String), Uuid>>,
 
+    appeals_write_lock: Arc<Mutex<()>>,
+
     timed_roles: Arc<DashMap<Uuid, TimedRoleGrant>>,
 
     persistent_roles: Arc<DashMap<MemberKey, Vec<String>>>,
@@ -1402,6 +1404,11 @@ impl MemoryStore {
     }
 
     pub fn create_appeal(&self, appeal: ModerationAppeal) -> super::CreateAppealOutcome {
+        let _guard = self
+            .appeals_write_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+
         if appeal.status == "pending" {
             let key = (
                 appeal.guild_id.clone(),
@@ -1472,6 +1479,11 @@ impl MemoryStore {
         status: &str,
         staff_notes: Option<&str>,
     ) -> bool {
+        let _guard = self
+            .appeals_write_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+
         if let Some(mut entry) = self.appeals.get_mut(&appeal_id) {
             let appeal = entry.value_mut();
             if appeal.guild_id != guild_id {
@@ -1492,7 +1504,8 @@ impl MemoryStore {
                     appeal.case_number,
                     appeal.user_id.clone(),
                 );
-                self.active_pending_appeals.remove(&key);
+                self.active_pending_appeals
+                    .remove_if(&key, |_, id| *id == appeal_id);
             }
 
             true

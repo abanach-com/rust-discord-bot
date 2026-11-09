@@ -5776,6 +5776,104 @@ async fn test_moderation_appeal_duplicate_prevention_issue_345() {
 }
 
 #[tokio::test]
+async fn test_moderation_appeal_concurrent_create_and_decide_deadlock_free_issue_366() {
+    let (state, _) = test_web_state().await;
+    let guild_id = "111222333444555666";
+    let case_number = 42;
+    let user_id = "999888777666555444";
+
+    // Initial appeal so there is an active appeal to decide concurrently
+    let initial_appeal = rusty_discord_bot::storage::ModerationAppeal {
+        id: uuid::Uuid::new_v4(),
+        guild_id: guild_id.to_string(),
+        case_number,
+        user_id: user_id.to_string(),
+        status: "pending".to_string(),
+        reason: "Initial appeal for concurrent testing".to_string(),
+        evidence_url: None,
+        staff_notes: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    state
+        .app
+        .storage
+        .create_appeal(&initial_appeal)
+        .await
+        .unwrap();
+
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(40));
+    let mut handles = Vec::new();
+
+    // 20 concurrent tasks creating appeals for the exact same case and user
+    for i in 0..20 {
+        let storage = state.app.storage.clone();
+        let b = barrier.clone();
+        handles.push(tokio::spawn(async move {
+            b.wait().await;
+            let appeal = rusty_discord_bot::storage::ModerationAppeal {
+                id: uuid::Uuid::new_v4(),
+                guild_id: guild_id.to_string(),
+                case_number,
+                user_id: user_id.to_string(),
+                status: "pending".to_string(),
+                reason: format!("Concurrent appeal {i}"),
+                evidence_url: None,
+                staff_notes: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            };
+            storage.create_appeal(&appeal).await.unwrap()
+        }));
+    }
+
+    // 20 concurrent tasks deciding appeals (triggering update_appeal_status concurrently with create_appeal)
+    for i in 0..20 {
+        let storage = state.app.storage.clone();
+        let b = barrier.clone();
+        let target_id = initial_appeal.id;
+        handles.push(tokio::spawn(async move {
+            b.wait().await;
+            let _ = storage
+                .update_appeal_status(
+                    guild_id,
+                    target_id,
+                    if i % 2 == 0 { "rejected" } else { "approved" },
+                    Some("Concurrent decision"),
+                )
+                .await;
+            rusty_discord_bot::storage::CreateAppealOutcome::Created(target_id)
+        }));
+    }
+
+    // Must finish within 5 seconds without deadlock
+    let timeout_res = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        for h in handles {
+            h.await.unwrap();
+        }
+    })
+    .await;
+
+    assert!(
+        timeout_res.is_ok(),
+        "Concurrent create and decide must complete without deadlock"
+    );
+
+    // Verify storage consistency: at most one pending appeal ever exists
+    let pending_appeals = state
+        .app
+        .storage
+        .list_appeals(guild_id, Some("pending"), Some(100))
+        .await
+        .unwrap();
+    assert!(
+        pending_appeals.len() <= 1,
+        "At most 1 pending appeal can exist for the case, found: {}",
+        pending_appeals.len()
+    );
+}
+
+#[tokio::test]
 async fn test_diagnostics_discord_permissions_and_failure_states() {
     // 1. Setup mock Discord API server
     let mock_status = std::sync::Arc::new(std::sync::atomic::AtomicU16::new(200));
