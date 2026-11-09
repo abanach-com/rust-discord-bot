@@ -885,18 +885,13 @@ pub async fn list_game_statuses(
 }
 
 pub async fn get_poe_leagues(Path(version): Path<String>) -> Result<Json<Value>, ApiError> {
-    // Strictly isolate PoE 1 from PoE 2
-    match version.to_lowercase().as_str() {
-        "poe1" => Ok(Json(json!({
-            "game": "Path of Exile 1",
-            "leagues": ["Standard", "Hardcore", "Settlers of Kalguur", "HC Settlers of Kalguur"]
-        }))),
-        "poe2" => Ok(Json(json!({
-            "game": "Path of Exile 2",
-            "leagues": ["Standard 2", "Hardcore 2", "Early Access League"]
-        }))),
-        _ => Err(ApiError::bad_request("Version must be 'poe1' or 'poe2'")),
-    }
+    let catalog = crate::integrations::providers::gaming_hub::global_poe_catalog();
+    let res = catalog
+        .get_leagues(&version, Utc::now())
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(
+        serde_json::to_value(res).map_err(|e| ApiError::internal(e.to_string()))?,
+    ))
 }
 
 // ==========================================

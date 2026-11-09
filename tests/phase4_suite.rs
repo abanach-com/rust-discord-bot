@@ -537,15 +537,27 @@ async fn test_phase4_integrations_and_extensibility_suite() {
         .send()
         .await
         .unwrap();
+    assert_eq!(poe1_resp.status(), reqwest::StatusCode::OK);
     let poe1_data: serde_json::Value = poe1_resp.json().await.unwrap();
+    assert_eq!(poe1_data["game"], "Path of Exile 1");
+    assert_eq!(poe1_data["status"], "unavailable");
     let poe1_leagues = poe1_data["leagues"].as_array().unwrap();
+    assert!(
+        !poe1_leagues.contains(&serde_json::json!("Settlers of Kalguur")),
+        "Historical Settlers of Kalguur must NOT be returned as active league"
+    );
+    assert!(poe1_leagues.contains(&serde_json::json!("Standard")));
+    assert!(poe1_leagues.contains(&serde_json::json!("Hardcore")));
 
     let poe2_resp = client
         .get(format!("{base_url}/api/gaming-hub/leagues/poe2"))
         .send()
         .await
         .unwrap();
+    assert_eq!(poe2_resp.status(), reqwest::StatusCode::OK);
     let poe2_data: serde_json::Value = poe2_resp.json().await.unwrap();
+    assert_eq!(poe2_data["game"], "Path of Exile 2");
+    assert_eq!(poe2_data["status"], "unavailable");
     let poe2_leagues = poe2_data["leagues"].as_array().unwrap();
 
     // PoE 2 must never return PoE 1 leagues! (AC-1)
@@ -555,6 +567,14 @@ async fn test_phase4_integrations_and_extensibility_suite() {
             "PoE 2 must never contain PoE 1 leagues"
         );
     }
+
+    // Invalid version must return HTTP 400 Bad Request
+    let poe_invalid_resp = client
+        .get(format!("{base_url}/api/gaming-hub/leagues/poe3"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(poe_invalid_resp.status(), reqwest::StatusCode::BAD_REQUEST);
 
     // ==========================================
     // 9. Agent 16 (#105, #338): Social Publisher Approvals & Two-Person Policy
