@@ -26,17 +26,17 @@ use crate::{
 const MAX_TRANSCRIPT_BYTES: usize = 7 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
-pub(super) struct TicketExecutionContext {
-    guild_id: Option<GuildId>,
-    channel_id: Option<ChannelId>,
-    actor_id: Option<UserId>,
-    actor_permissions: Permissions,
-    app_permissions: Permissions,
-    command_context: bool,
+pub struct TicketExecutionContext {
+    pub guild_id: Option<GuildId>,
+    pub channel_id: Option<ChannelId>,
+    pub actor_id: Option<UserId>,
+    pub actor_permissions: Permissions,
+    pub app_permissions: Permissions,
+    pub command_context: bool,
 }
 
 impl TicketExecutionContext {
-    pub(super) const fn new(
+    pub const fn new(
         guild_id: Option<GuildId>,
         channel_id: Option<ChannelId>,
         actor_id: Option<UserId>,
@@ -55,7 +55,7 @@ impl TicketExecutionContext {
     }
 }
 
-pub(super) async fn execute(
+pub async fn execute(
     ctx: &Context,
     state: &AppState,
     module_id: &str,
@@ -151,16 +151,36 @@ pub(super) async fn execute(
             .await?;
             match state.tickets.claim_ticket(&ticket.id, &actor_key).await? {
                 TicketMutationOutcome::Updated(updated) => {
-                    send_system_message(
+                    let notify_res = send_system_message(
                         ctx,
                         channel_id,
                         &format!("🧑‍💻 Ticket claimed by <@{}>.", actor_id.get()),
                         Some(actor_id),
                     )
-                    .await?;
-                    audit_ticket(state, &updated, Some(&actor_key), "ticket_claimed").await?;
+                    .await;
+                    if let Err(ref err) = notify_res {
+                        tracing::warn!(
+                            ticket_id = %ticket.id,
+                            error = %err,
+                            "Failed to send ticket claim notification message to channel"
+                        );
+                    }
+                    if let Err(ref err) =
+                        audit_ticket(state, &updated, Some(&actor_key), "ticket_claimed").await
+                    {
+                        tracing::error!(
+                            ticket_id = %ticket.id,
+                            error = %err,
+                            "Failed to record ticket claim audit event"
+                        );
+                    }
+                    let notice = if notify_res.is_err() {
+                        " (ostrzeżenie: nie udało się wysłać powiadomienia na kanale)"
+                    } else {
+                        ""
+                    };
                     Ok(Some(format!(
-                        "✅ Claimed ticket **#{}**.",
+                        "✅ Claimed ticket **#{}**.{notice}",
                         updated.display_number()
                     )))
                 }
@@ -185,16 +205,36 @@ pub(super) async fn execute(
                 .await?
             {
                 TicketMutationOutcome::Updated(updated) => {
-                    send_system_message(
+                    let notify_res = send_system_message(
                         ctx,
                         channel_id,
                         &format!("↩️ <@{}> released the ticket.", actor_id.get()),
                         Some(actor_id),
                     )
-                    .await?;
-                    audit_ticket(state, &updated, Some(&actor_key), "ticket_unclaimed").await?;
+                    .await;
+                    if let Err(ref err) = notify_res {
+                        tracing::warn!(
+                            ticket_id = %ticket.id,
+                            error = %err,
+                            "Failed to send ticket unclaim notification message to channel"
+                        );
+                    }
+                    if let Err(ref err) =
+                        audit_ticket(state, &updated, Some(&actor_key), "ticket_unclaimed").await
+                    {
+                        tracing::error!(
+                            ticket_id = %ticket.id,
+                            error = %err,
+                            "Failed to record ticket unclaim audit event"
+                        );
+                    }
+                    let notice = if notify_res.is_err() {
+                        " (ostrzeżenie: nie udało się wysłać powiadomienia na kanale)"
+                    } else {
+                        ""
+                    };
                     Ok(Some(format!(
-                        "✅ Zwolniono ticket **#{}**.",
+                        "✅ Zwolniono ticket **#{}**.{notice}",
                         updated.display_number()
                     )))
                 }
@@ -309,16 +349,36 @@ pub(super) async fn execute(
                             .rename_ticket(&updated.id, &actor_key, &reopened_name)
                             .await;
                     }
-                    send_system_message(
+                    let notify_res = send_system_message(
                         ctx,
                         channel_id,
                         &format!("🔓 Ticket reopened by <@{}>.", actor_id.get()),
                         Some(actor_id),
                     )
-                    .await?;
-                    audit_ticket(state, &updated, Some(&actor_key), "ticket_reopened").await?;
+                    .await;
+                    if let Err(ref err) = notify_res {
+                        tracing::warn!(
+                            ticket_id = %ticket.id,
+                            error = %err,
+                            "Failed to send ticket reopened notification message to channel"
+                        );
+                    }
+                    if let Err(ref err) =
+                        audit_ticket(state, &updated, Some(&actor_key), "ticket_reopened").await
+                    {
+                        tracing::error!(
+                            ticket_id = %ticket.id,
+                            error = %err,
+                            "Failed to record ticket reopened audit event"
+                        );
+                    }
+                    let notice = if notify_res.is_err() {
+                        " (ostrzeżenie: nie udało się wysłać powiadomienia na kanale)"
+                    } else {
+                        ""
+                    };
                     Ok(Some(format!(
-                        "✅ Ponownie otwarto ticket **#{}**.",
+                        "✅ Ponownie otwarto ticket **#{}**.{notice}",
                         updated.display_number()
                     )))
                 }
@@ -420,19 +480,43 @@ pub(super) async fn execute(
             channel_id
                 .edit(&ctx.http, EditChannel::new().name(&sanitized_name))
                 .await?;
-            match state
+            let rename_res = state
                 .tickets
                 .rename_ticket(&ticket.id, &actor_key, &sanitized_name)
-                .await?
-            {
+                .await;
+            let outcome = match rename_res {
+                Ok(outcome) => outcome,
+                Err(db_err) => {
+                    tracing::error!(
+                        ticket_id = %ticket.id,
+                        error = %db_err,
+                        "Storage rename_ticket failed; rolling back Discord channel name"
+                    );
+                    if let Some(ref prev) = previous_name {
+                        let _ = channel_id
+                            .edit(&ctx.http, EditChannel::new().name(prev))
+                            .await;
+                    }
+                    return Err(db_err);
+                }
+            };
+            match outcome {
                 TicketMutationOutcome::Updated(updated) => {
-                    audit_ticket(state, &updated, Some(&actor_key), "ticket_renamed").await?;
+                    if let Err(ref err) =
+                        audit_ticket(state, &updated, Some(&actor_key), "ticket_renamed").await
+                    {
+                        tracing::error!(
+                            ticket_id = %ticket.id,
+                            error = %err,
+                            "Failed to record ticket renamed audit event"
+                        );
+                    }
                     Ok(Some(format!(
                         "✅ Ticket name changed to `{sanitized_name}`."
                     )))
                 }
                 outcome => {
-                    if let Some(previous_name) = previous_name {
+                    if let Some(ref previous_name) = previous_name {
                         let _ = channel_id
                             .edit(&ctx.http, EditChannel::new().name(previous_name))
                             .await;
@@ -930,22 +1014,58 @@ async fn manage_participant(
 
     if add {
         restore_member_access(ctx, channel_id, target_id).await?;
-        match state
+        let add_res = state
             .tickets
             .add_participant(&ticket.id, user_id, &actor_key)
-            .await?
-        {
+            .await;
+        let outcome = match add_res {
+            Ok(outcome) => outcome,
+            Err(db_err) => {
+                tracing::error!(
+                    ticket_id = %ticket.id,
+                    target_id = %target_id,
+                    error = %db_err,
+                    "Storage add_participant failed; rolling back Discord channel overwrite"
+                );
+                let _ = channel_id
+                    .delete_permission(&ctx.http, PermissionOverwriteType::Member(target_id))
+                    .await;
+                return Err(db_err);
+            }
+        };
+
+        match outcome {
             ParticipantMutationOutcome::Added(_) => {
-                send_system_message(
+                let notify_res = send_system_message(
                     ctx,
                     channel_id,
                     &format!("➕ <@{}> has been added to the ticket.", target_id.get()),
                     Some(target_id),
                 )
-                .await?;
-                audit_ticket(state, &ticket, Some(&actor_key), "ticket_participant_added").await?;
+                .await;
+                if let Err(ref err) = notify_res {
+                    tracing::warn!(
+                        ticket_id = %ticket.id,
+                        error = %err,
+                        "Failed to send ticket participant added notification message to channel"
+                    );
+                }
+                if let Err(ref err) =
+                    audit_ticket(state, &ticket, Some(&actor_key), "ticket_participant_added").await
+                {
+                    tracing::error!(
+                        ticket_id = %ticket.id,
+                        error = %err,
+                        "Failed to record ticket participant added audit event"
+                    );
+                }
+                let notice = if notify_res.is_err() {
+                    " (ostrzeżenie: nie udało się wysłać powiadomienia na kanale)"
+                } else {
+                    ""
+                };
                 Ok(Some(format!(
-                    "✅ Dodano <@{}> do ticketu.",
+                    "✅ Dodano <@{}> do ticketu.{notice}",
                     target_id.get()
                 )))
             }
@@ -960,13 +1080,27 @@ async fn manage_participant(
         channel_id
             .delete_permission(&ctx.http, PermissionOverwriteType::Member(target_id))
             .await?;
-        match state
+        let rem_res = state
             .tickets
             .remove_participant(&ticket.id, user_id, &actor_key)
-            .await?
-        {
+            .await;
+        let outcome = match rem_res {
+            Ok(outcome) => outcome,
+            Err(db_err) => {
+                tracing::error!(
+                    ticket_id = %ticket.id,
+                    target_id = %target_id,
+                    error = %db_err,
+                    "Storage remove_participant failed; rolling back Discord channel overwrite"
+                );
+                let _ = restore_member_access(ctx, channel_id, target_id).await;
+                return Err(db_err);
+            }
+        };
+
+        match outcome {
             ParticipantMutationOutcome::Removed => {
-                send_system_message(
+                let notify_res = send_system_message(
                     ctx,
                     channel_id,
                     &format!(
@@ -975,16 +1109,35 @@ async fn manage_participant(
                     ),
                     Some(target_id),
                 )
-                .await?;
-                audit_ticket(
+                .await;
+                if let Err(ref err) = notify_res {
+                    tracing::warn!(
+                        ticket_id = %ticket.id,
+                        error = %err,
+                        "Failed to send ticket participant removed notification message to channel"
+                    );
+                }
+                if let Err(ref err) = audit_ticket(
                     state,
                     &ticket,
                     Some(&actor_key),
                     "ticket_participant_removed",
                 )
-                .await?;
+                .await
+                {
+                    tracing::error!(
+                        ticket_id = %ticket.id,
+                        error = %err,
+                        "Failed to record ticket participant removed audit event"
+                    );
+                }
+                let notice = if notify_res.is_err() {
+                    " (ostrzeżenie: nie udało się wysłać powiadomienia na kanale)"
+                } else {
+                    ""
+                };
                 Ok(Some(format!(
-                    "✅ Removed <@{}> from ticket.",
+                    "✅ Removed <@{}> from ticket.{notice}",
                     target_id.get()
                 )))
             }

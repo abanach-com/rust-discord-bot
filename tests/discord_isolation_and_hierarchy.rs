@@ -402,6 +402,44 @@ async fn mock_discord_handler(
         };
     }
 
+    // Modify Channel: PATCH /api/v10/channels/{channel_id}
+    if method == Method::PATCH
+        && path.starts_with("/api/v10/channels/")
+        && !path.contains("/permissions/")
+    {
+        let channel_id = path
+            .trim_start_matches("/api/v10/channels/")
+            .split('/')
+            .next()
+            .unwrap_or("101");
+        let name = serde_json::from_str::<serde_json::Value>(&body_str)
+            .ok()
+            .and_then(|v| {
+                v.get("name")
+                    .and_then(|n| n.as_str().map(|s| s.to_string()))
+            })
+            .unwrap_or_else(|| "general".to_string());
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "id": channel_id,
+                "guild_id": "100",
+                "type": 0,
+                "name": name,
+                "position": 0
+            })),
+        )
+            .into_response();
+    }
+
+    // Permission Overwrites: PUT/DELETE /api/v10/channels/{channel_id}/permissions/{overwrite_id}
+    if (method == Method::PUT || method == Method::DELETE)
+        && path.starts_with("/api/v10/channels/")
+        && path.contains("/permissions/")
+    {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+
     // Send Message: POST /api/v10/channels/{channel_id}/messages
 
     if method == Method::POST && path.contains("/messages") {
@@ -8651,6 +8689,175 @@ async fn test_progression_role_rewards_o1_amplification_and_cooldown_issue_365()
         0,
         "During cooldown (awarded == 0), no Discord HTTP calls should be made (was {:?})",
         calls2
+    );
+
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn test_ticket_claim_unclaim_rename_and_participant_resilience_issues_361_360_358() {
+    let (ctx, _mock_state, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state().await;
+
+    let guild_id = GuildId::new(100);
+    let channel_id = ChannelId::new(101);
+    let owner_id = UserId::new(111111111111111111); // Server owner (has ADMINISTRATOR)
+
+    // Reserve and activate a test ticket in channel 101
+    let reservation = rusty_discord_bot::tickets::NewTicketReservation {
+        guild_id: "100".to_string(),
+        creator_user_id: "222222222222222222".to_string(),
+        subject: "Pomoc techniczna".to_string(),
+        description: "Opis problemu".to_string(),
+        queue: "support".to_string(),
+    };
+    let reserved = state.tickets.reserve_ticket(reservation, 5).await.unwrap();
+    let ticket_id = match reserved {
+        rusty_discord_bot::tickets::ReserveTicketOutcome::Reserved(t) => t.id,
+        _ => panic!("reservation failed"),
+    };
+    let activated = state
+        .tickets
+        .activate_ticket(&ticket_id, "101", "ticket-000001-pomoc-techniczna")
+        .await
+        .unwrap();
+    assert!(matches!(
+        activated,
+        rusty_discord_bot::tickets::TicketMutationOutcome::Updated(_)
+    ));
+
+    let execution = rusty_discord_bot::discord::tickets::TicketExecutionContext::new(
+        Some(guild_id),
+        Some(channel_id),
+        Some(owner_id),
+        serenity::all::Permissions::all(),
+        serenity::all::Permissions::all(),
+        true, // command context
+    );
+
+    // 1. Claim ticket (Issue #361): even if channel notification or audit fails, claim succeeds in DB
+    let claim_op = rusty_discord_bot::lua::TicketOperation::Claim {
+        support_role_ids: vec![],
+    };
+    let claim_res =
+        rusty_discord_bot::discord::tickets::execute(&ctx, &state, "tickets", execution, &claim_op)
+            .await;
+    assert!(claim_res.is_ok(), "Claim execution should succeed");
+    let claim_msg = claim_res.unwrap().expect("claim should return message");
+    assert!(claim_msg.contains("Claimed ticket"));
+
+    // DB state must be claimed
+    let ticket_after_claim = state
+        .tickets
+        .get_by_channel("100", "101")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ticket_after_claim.status,
+        rusty_discord_bot::tickets::STATUS_CLAIMED
+    );
+    assert_eq!(
+        ticket_after_claim.claimed_by_user_id.as_deref(),
+        Some("111111111111111111")
+    );
+
+    // 2. Unclaim ticket (Issue #361)
+    let unclaim_op = rusty_discord_bot::lua::TicketOperation::Unclaim {
+        support_role_ids: vec![],
+    };
+    let unclaim_res = rusty_discord_bot::discord::tickets::execute(
+        &ctx,
+        &state,
+        "tickets",
+        execution,
+        &unclaim_op,
+    )
+    .await;
+    assert!(unclaim_res.is_ok(), "Unclaim execution should succeed");
+    let unclaim_msg = unclaim_res.unwrap().expect("unclaim should return message");
+    assert!(unclaim_msg.contains("Zwolniono ticket"));
+
+    // DB state must be open again
+    let ticket_after_unclaim = state
+        .tickets
+        .get_by_channel("100", "101")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ticket_after_unclaim.status,
+        rusty_discord_bot::tickets::STATUS_OPEN
+    );
+    assert!(ticket_after_unclaim.claimed_by_user_id.is_none());
+
+    // 3. Rename ticket (Issue #358)
+    let rename_op = rusty_discord_bot::lua::TicketOperation::Rename {
+        name: "ticket-new-name".to_string(),
+        support_role_ids: vec![],
+        creator_can_rename: false,
+    };
+    let rename_res = rusty_discord_bot::discord::tickets::execute(
+        &ctx, &state, "tickets", execution, &rename_op,
+    )
+    .await;
+    assert!(
+        rename_res.is_ok(),
+        "Rename execution failed with: {:?}",
+        rename_res.as_ref().err()
+    );
+    let rename_msg = rename_res.unwrap().expect("rename should return message");
+    assert!(rename_msg.contains("Ticket name changed"));
+
+    let ticket_after_rename = state
+        .tickets
+        .get_by_channel("100", "101")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ticket_after_rename.channel_name.as_deref(),
+        Some("ticket-new-name")
+    );
+
+    // 4. Add participant (Issue #360)
+    let add_op = rusty_discord_bot::lua::TicketOperation::AddMember {
+        user_id: "555555555555555555".to_string(),
+        support_role_ids: vec![],
+        creator_can_manage_participants: false,
+    };
+    let add_res =
+        rusty_discord_bot::discord::tickets::execute(&ctx, &state, "tickets", execution, &add_op)
+            .await;
+    assert!(add_res.is_ok(), "Add member should succeed");
+    let add_msg = add_res.unwrap().expect("add member message");
+    assert!(add_msg.contains("Dodano <@555555555555555555> do ticketu"));
+
+    let participants = state.tickets.list_participants(&ticket_id).await.unwrap();
+    assert!(
+        participants
+            .iter()
+            .any(|p| p.user_id == "555555555555555555")
+    );
+
+    // 5. Remove participant (Issue #360)
+    let rem_op = rusty_discord_bot::lua::TicketOperation::RemoveMember {
+        user_id: "555555555555555555".to_string(),
+        support_role_ids: vec![],
+        creator_can_manage_participants: false,
+    };
+    let rem_res =
+        rusty_discord_bot::discord::tickets::execute(&ctx, &state, "tickets", execution, &rem_op)
+            .await;
+    assert!(rem_res.is_ok(), "Remove member should succeed");
+    let rem_msg = rem_res.unwrap().expect("remove member message");
+    assert!(rem_msg.contains("Removed <@555555555555555555> from ticket"));
+
+    let participants_after = state.tickets.list_participants(&ticket_id).await.unwrap();
+    assert!(
+        !participants_after
+            .iter()
+            .any(|p| p.user_id == "555555555555555555")
     );
 
     shard_manager.shutdown_all().await;
