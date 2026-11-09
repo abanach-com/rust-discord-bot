@@ -2117,19 +2117,26 @@ pub async fn submit_moderation_appeal(
         updated_at: Utc::now(),
     };
 
-    state
+    let outcome = state
         .app
         .storage
         .create_appeal(&appeal)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    Ok(Json(json!({
-        "status": "appeal_submitted",
-        "appeal_id": appeal.id,
-        "case_number": case_number,
-        "created_at": appeal.created_at
-    })))
+    match outcome {
+        crate::storage::CreateAppealOutcome::Created(appeal_id) => Ok(Json(json!({
+            "status": "appeal_submitted",
+            "appeal_id": appeal_id,
+            "case_number": case_number,
+            "created_at": appeal.created_at
+        }))),
+        crate::storage::CreateAppealOutcome::AlreadyPending(existing_id) => {
+            Err(ApiError::conflict(format!(
+                "An appeal is already pending for case #{case_number} (existing appeal: {existing_id})."
+            )))
+        }
+    }
 }
 
 pub async fn list_guild_appeals(
@@ -2142,10 +2149,15 @@ pub async fn list_guild_appeals(
     ensure_guild_access(&state, &session, &guild_id).await?;
 
     let status_filter = query.get("status").map(|s| s.as_str());
+    let limit = query
+        .get("limit")
+        .and_then(|l| l.parse::<i64>().ok())
+        .unwrap_or(100)
+        .clamp(1, 100);
     let appeals = state
         .app
         .storage
-        .list_appeals(&guild_id, status_filter)
+        .list_appeals(&guild_id, status_filter, Some(limit))
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 

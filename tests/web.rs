@@ -5656,6 +5656,125 @@ async fn test_moderation_appeal_cross_guild_tenant_isolation() {
 }
 
 #[tokio::test]
+async fn test_moderation_appeal_duplicate_prevention_issue_345() {
+    let (state, _) = test_web_state().await;
+
+    let guild_id = "111000000000000001";
+    let user_id = "888000000000000001";
+    let case_number = 42;
+
+    // 1. Initial appeal creation succeeds
+    let appeal1 = rusty_discord_bot::storage::ModerationAppeal {
+        id: uuid::Uuid::new_v4(),
+        guild_id: guild_id.to_string(),
+        case_number,
+        user_id: user_id.to_string(),
+        status: "pending".to_string(),
+        reason: "Initial appeal".to_string(),
+        evidence_url: None,
+        staff_notes: None,
+        created_at: Utc::now() - Duration::hours(1),
+        updated_at: Utc::now() - Duration::hours(1),
+    };
+
+    let outcome1 = state.app.storage.create_appeal(&appeal1).await.unwrap();
+    assert_eq!(
+        outcome1,
+        rusty_discord_bot::storage::CreateAppealOutcome::Created(appeal1.id)
+    );
+
+    // 2. Duplicate appeal creation for same (guild_id, case_number, user_id) with pending status fails
+    let appeal2 = rusty_discord_bot::storage::ModerationAppeal {
+        id: uuid::Uuid::new_v4(),
+        guild_id: guild_id.to_string(),
+        case_number,
+        user_id: user_id.to_string(),
+        status: "pending".to_string(),
+        reason: "Spam duplicate appeal".to_string(),
+        evidence_url: None,
+        staff_notes: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+
+    let outcome2 = state.app.storage.create_appeal(&appeal2).await.unwrap();
+    assert_eq!(
+        outcome2,
+        rusty_discord_bot::storage::CreateAppealOutcome::AlreadyPending(appeal1.id)
+    );
+
+    // List appeals verifies only 1 pending appeal is present
+    let pending_list = state
+        .app
+        .storage
+        .list_appeals(guild_id, Some("pending"), Some(10))
+        .await
+        .unwrap();
+    assert_eq!(pending_list.len(), 1);
+    assert_eq!(pending_list[0].id, appeal1.id);
+
+    // 3. Different user or different case number can create appeal without being blocked
+    let appeal_other_case = rusty_discord_bot::storage::ModerationAppeal {
+        id: uuid::Uuid::new_v4(),
+        guild_id: guild_id.to_string(),
+        case_number: 43,
+        user_id: user_id.to_string(),
+        status: "pending".to_string(),
+        reason: "Appeal for another case".to_string(),
+        evidence_url: None,
+        staff_notes: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    let outcome_other = state
+        .app
+        .storage
+        .create_appeal(&appeal_other_case)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome_other,
+        rusty_discord_bot::storage::CreateAppealOutcome::Created(appeal_other_case.id)
+    );
+
+    // 4. Once first appeal is decided (e.g. rejected), submitting a new appeal succeeds
+    let updated = state
+        .app
+        .storage
+        .update_appeal_status(guild_id, appeal1.id, "rejected", Some("Denied by staff"))
+        .await
+        .unwrap();
+    assert!(updated);
+
+    let appeal3 = rusty_discord_bot::storage::ModerationAppeal {
+        id: uuid::Uuid::new_v4(),
+        guild_id: guild_id.to_string(),
+        case_number,
+        user_id: user_id.to_string(),
+        status: "pending".to_string(),
+        reason: "Second appeal after denial".to_string(),
+        evidence_url: None,
+        staff_notes: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    let outcome3 = state.app.storage.create_appeal(&appeal3).await.unwrap();
+    assert_eq!(
+        outcome3,
+        rusty_discord_bot::storage::CreateAppealOutcome::Created(appeal3.id)
+    );
+
+    // 5. Test pagination limit
+    let appeals_page = state
+        .app
+        .storage
+        .list_appeals(guild_id, None, Some(2))
+        .await
+        .unwrap();
+    assert_eq!(appeals_page.len(), 2);
+}
+
+#[tokio::test]
 async fn test_diagnostics_discord_permissions_and_failure_states() {
     // 1. Setup mock Discord API server
     let mock_status = std::sync::Arc::new(std::sync::atomic::AtomicU16::new(200));

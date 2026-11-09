@@ -174,6 +174,12 @@ pub struct ModuleDraftConfig {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CreateAppealOutcome {
+    Created(Uuid),
+    AlreadyPending(Uuid),
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ModerationAppeal {
     pub id: Uuid,
@@ -2273,13 +2279,12 @@ impl Storage {
         }
     }
 
-    pub async fn create_appeal(&self, appeal: &ModerationAppeal) -> anyhow::Result<()> {
+    pub async fn create_appeal(
+        &self,
+        appeal: &ModerationAppeal,
+    ) -> anyhow::Result<CreateAppealOutcome> {
         match self {
-            Self::Memory(store) => {
-                store.create_appeal(appeal.clone());
-
-                Ok(())
-            }
+            Self::Memory(store) => Ok(store.create_appeal(appeal.clone())),
 
             Self::Postgres(store) => store.create_appeal(appeal).await,
         }
@@ -2291,11 +2296,14 @@ impl Storage {
         guild_id: &str,
 
         status: Option<&str>,
+        limit: Option<i64>,
     ) -> anyhow::Result<Vec<ModerationAppeal>> {
         match self {
-            Self::Memory(store) => Ok(store.list_appeals(guild_id, status)),
+            Self::Memory(store) => {
+                Ok(store.list_appeals(guild_id, status, limit.map(|l| l as usize)))
+            }
 
-            Self::Postgres(store) => store.list_appeals(guild_id, status).await,
+            Self::Postgres(store) => store.list_appeals(guild_id, status, limit).await,
         }
     }
 

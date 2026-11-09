@@ -69,6 +69,8 @@ pub struct MemoryStore {
 
     appeals: Arc<DashMap<Uuid, ModerationAppeal>>,
 
+    active_pending_appeals: Arc<DashMap<(String, i64, String), Uuid>>,
+
     timed_roles: Arc<DashMap<Uuid, TimedRoleGrant>>,
 
     persistent_roles: Arc<DashMap<MemberKey, Vec<String>>>,
@@ -1399,11 +1401,45 @@ impl MemoryStore {
             .is_some()
     }
 
-    pub fn create_appeal(&self, appeal: ModerationAppeal) {
-        self.appeals.insert(appeal.id, appeal);
+    pub fn create_appeal(&self, appeal: ModerationAppeal) -> super::CreateAppealOutcome {
+        if appeal.status == "pending" {
+            let key = (
+                appeal.guild_id.clone(),
+                appeal.case_number,
+                appeal.user_id.clone(),
+            );
+            match self.active_pending_appeals.entry(key) {
+                dashmap::mapref::entry::Entry::Occupied(mut occ) => {
+                    let existing_id = *occ.get();
+                    if self
+                        .appeals
+                        .get(&existing_id)
+                        .is_some_and(|existing| existing.status == "pending")
+                    {
+                        return super::CreateAppealOutcome::AlreadyPending(existing_id);
+                    }
+                    occ.insert(appeal.id);
+                    self.appeals.insert(appeal.id, appeal.clone());
+                    super::CreateAppealOutcome::Created(appeal.id)
+                }
+                dashmap::mapref::entry::Entry::Vacant(vac) => {
+                    vac.insert(appeal.id);
+                    self.appeals.insert(appeal.id, appeal.clone());
+                    super::CreateAppealOutcome::Created(appeal.id)
+                }
+            }
+        } else {
+            self.appeals.insert(appeal.id, appeal.clone());
+            super::CreateAppealOutcome::Created(appeal.id)
+        }
     }
 
-    pub fn list_appeals(&self, guild_id: &str, status: Option<&str>) -> Vec<ModerationAppeal> {
+    pub fn list_appeals(
+        &self,
+        guild_id: &str,
+        status: Option<&str>,
+        limit: Option<usize>,
+    ) -> Vec<ModerationAppeal> {
         let mut results: Vec<ModerationAppeal> = self
             .appeals
             .iter()
@@ -1411,7 +1447,16 @@ impl MemoryStore {
             .map(|e| e.value().clone())
             .collect();
 
-        results.sort_by_key(|a| std::cmp::Reverse(a.created_at));
+        results.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+
+        let lim = limit.unwrap_or(100).min(100);
+        if results.len() > lim {
+            results.truncate(lim);
+        }
 
         results
     }
@@ -1440,6 +1485,15 @@ impl MemoryStore {
             }
 
             appeal.updated_at = Utc::now();
+
+            if status != "pending" {
+                let key = (
+                    appeal.guild_id.clone(),
+                    appeal.case_number,
+                    appeal.user_id.clone(),
+                );
+                self.active_pending_appeals.remove(&key);
+            }
 
             true
         } else {

@@ -12,8 +12,8 @@ use super::{
     AdjustMemberProgressParams, AfkRecord, AiGuildBudget, AiKnowledgeDocument, AuditLogEntry,
     BirthdayRecord, CardCollection, CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome,
     CommandPolicyRule, CommunityPoll, CompanionChannelLease, CompanionChannelMapping,
-    CompanionMappingItem, CountingGame, CrimeClaimOutcome, CustomAutomation, DailyClaimOutcome,
-    DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink,
+    CompanionMappingItem, CountingGame, CreateAppealOutcome, CrimeClaimOutcome, CustomAutomation,
+    DailyClaimOutcome, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink,
     GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway, GuildModuleSettings,
     HelpForumConfig, HelpForumSession, HelpForumStats, IntegrationConnection,
     IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking, KickStreamSubscription,
@@ -1712,79 +1712,83 @@ impl PostgresStore {
         Ok(res.rows_affected() > 0)
     }
 
-    pub async fn create_appeal(&self, appeal: &ModerationAppeal) -> anyhow::Result<()> {
-        sqlx::query(
-
+    pub async fn create_appeal(
+        &self,
+        appeal: &ModerationAppeal,
+    ) -> anyhow::Result<CreateAppealOutcome> {
+        let res = sqlx::query(
             r#"
-
             INSERT INTO moderation_appeals (
-
                 id, guild_id, case_number, user_id, status, reason, evidence_url, staff_notes, created_at, updated_at
-
             )
-
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-
             "#,
-
         )
-
         .bind(appeal.id)
-
         .bind(&appeal.guild_id)
-
         .bind(appeal.case_number)
-
         .bind(&appeal.user_id)
-
         .bind(&appeal.status)
-
         .bind(&appeal.reason)
-
         .bind(&appeal.evidence_url)
-
         .bind(&appeal.staff_notes)
-
         .bind(appeal.created_at)
-
         .bind(appeal.updated_at)
-
         .execute(&self.pool)
+        .await;
 
-        .await?;
+        match res {
+            Ok(_) => Ok(CreateAppealOutcome::Created(appeal.id)),
+            Err(err) => {
+                if let sqlx::Error::Database(ref dberr) = err {
+                    let is_unique =
+                        dberr.is_unique_violation() || dberr.code().as_deref() == Some("23505");
+                    let matches_constraint = dberr
+                        .constraint()
+                        .is_none_or(|c| c == "moderation_appeals_one_pending_per_case");
+                    if is_unique && matches_constraint {
+                        let existing_id = sqlx::query_scalar::<_, Uuid>(
+                            r#"
+                            SELECT id FROM moderation_appeals
+                            WHERE guild_id = $1 AND case_number = $2 AND user_id = $3 AND status = 'pending'
+                            LIMIT 1
+                            "#,
+                        )
+                        .bind(&appeal.guild_id)
+                        .bind(appeal.case_number)
+                        .bind(&appeal.user_id)
+                        .fetch_optional(&self.pool)
+                        .await?
+                        .unwrap_or(appeal.id);
 
-        Ok(())
+                        return Ok(CreateAppealOutcome::AlreadyPending(existing_id));
+                    }
+                }
+                Err(err.into())
+            }
+        }
     }
 
     pub async fn list_appeals(
         &self,
-
         guild_id: &str,
-
         status: Option<&str>,
+        limit: Option<i64>,
     ) -> anyhow::Result<Vec<ModerationAppeal>> {
+        let lim = limit.unwrap_or(100).clamp(1, 100);
         let results = sqlx::query_as::<_, ModerationAppeal>(
-
             r#"
-
             SELECT id, guild_id, case_number, user_id, status, reason, evidence_url, staff_notes, created_at, updated_at
-
             FROM moderation_appeals
-
             WHERE guild_id = $1 AND ($2::text IS NULL OR status = $2)
-
-            ORDER BY created_at DESC
-
+            ORDER BY created_at DESC, id DESC
+            LIMIT $3
             "#,
-
         )
-
         .bind(guild_id)
-
         .bind(status)
-
+        .bind(lim)
         .fetch_all(&self.pool)
-
         .await?;
 
         Ok(results)
