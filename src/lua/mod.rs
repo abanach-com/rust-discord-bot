@@ -27,7 +27,7 @@ pub use model::{
     MusicOperation,
 };
 pub use moderation_cases::ModerationCaseOperation;
-pub use progression::{ProgressionMetric, ProgressionOperation};
+pub use progression::{LevelRoleReward, ProgressionMetric, ProgressionOperation};
 pub use quotes::QuoteOperation;
 pub use reaction_roles::ReactionRoleOperation;
 pub use routing::{

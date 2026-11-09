@@ -509,6 +509,77 @@ pub async fn guild_lua_event_routing(
     Ok((response_headers, Json(routes)))
 }
 
+pub fn extract_configured_roles<'a>(module_id: &str, config: &'a Value) -> Vec<&'a str> {
+    match module_id {
+        "welcome" => config
+            .get("auto_roles")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .collect(),
+        "join_guard" => config
+            .get("quarantine_role_id")
+            .and_then(|v| v.as_str())
+            .into_iter()
+            .filter(|s| !s.trim().is_empty())
+            .collect(),
+        "progression" => config
+            .get("role_rewards")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.get("role_id").and_then(|id| id.as_str()))
+            .filter(|s| !s.trim().is_empty())
+            .collect(),
+        "birthdays" => config
+            .get("birthday_role_id")
+            .and_then(|v| v.as_str())
+            .into_iter()
+            .filter(|s| !s.trim().is_empty())
+            .collect(),
+        _ => vec![],
+    }
+}
+
+pub async fn validate_module_config_and_roles(
+    state: &WebState,
+    session: &crate::web::auth::Session,
+    guild_id: &str,
+    module_id: &str,
+    config: &Value,
+) -> Result<(), ApiError> {
+    if let Err(validation_errors) = state
+        .app
+        .scripts
+        .validate_module_config(module_id, config)
+        .await
+    {
+        return Err(ApiError::validation(
+            "Module configuration violates JSON schema.",
+            validation_errors,
+        ));
+    }
+
+    let configured_roles = extract_configured_roles(module_id, config);
+    if !configured_roles.is_empty() {
+        crate::web::auth::ensure_manage_roles_access(state, session, guild_id).await?;
+        for role_id in configured_roles {
+            crate::web::features::validate_assignable_role(
+                state,
+                session,
+                guild_id,
+                role_id,
+                "do automatycznego nadawania",
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
+}
+
 pub async fn update_guild_module(
     State(state): State<WebState>,
     Path((guild_id, module_id)): Path<(String, String)>,
@@ -557,51 +628,8 @@ pub async fn update_guild_module(
         ));
     }
 
-    if let Err(validation_errors) = state
-        .app
-        .scripts
-        .validate_module_config(&module_id, &payload.config)
-        .await
-    {
-        return Err(ApiError::validation(
-            "Module configuration violates JSON schema.",
-            validation_errors,
-        ));
-    }
-
-    let configured_roles: Vec<&str> = match module_id.as_str() {
-        "welcome" => payload
-            .config
-            .get("auto_roles")
-            .and_then(|v| v.as_array())
-            .into_iter()
-            .flatten()
-            .filter_map(|v| v.as_str())
-            .filter(|s| !s.trim().is_empty())
-            .collect(),
-        "join_guard" => payload
-            .config
-            .get("quarantine_role_id")
-            .and_then(|v| v.as_str())
-            .into_iter()
-            .filter(|s| !s.trim().is_empty())
-            .collect(),
-        _ => vec![],
-    };
-
-    if !configured_roles.is_empty() {
-        crate::web::auth::ensure_manage_roles_access(&state, &session, &guild_id).await?;
-        for role_id in configured_roles {
-            crate::web::features::validate_assignable_role(
-                &state,
-                &session,
-                &guild_id,
-                role_id,
-                "do automatycznego nadawania",
-            )
-            .await?;
-        }
-    }
+    validate_module_config_and_roles(&state, &session, &guild_id, &module_id, &payload.config)
+        .await?;
 
     let settings = state
         .app
@@ -1792,6 +1820,9 @@ pub async fn publish_guild_module_draft(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
         .ok_or_else(|| ApiError::not_found("No draft version found for this module."))?;
+
+    validate_module_config_and_roles(&state, &session, &guild_id, &module_id, &draft.config_json)
+        .await?;
 
     let current = state
         .app

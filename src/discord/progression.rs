@@ -15,7 +15,7 @@ use crate::{
 };
 
 #[derive(Clone, Copy)]
-pub(super) struct ProgressionExecutionContext {
+pub struct ProgressionExecutionContext {
     guild_id: Option<GuildId>,
     channel_id: Option<ChannelId>,
     actor_id: Option<UserId>,
@@ -24,7 +24,7 @@ pub(super) struct ProgressionExecutionContext {
 }
 
 impl ProgressionExecutionContext {
-    pub(super) const fn new(
+    pub const fn new(
         guild_id: Option<GuildId>,
         channel_id: Option<ChannelId>,
         actor_id: Option<UserId>,
@@ -41,6 +41,52 @@ impl ProgressionExecutionContext {
     }
 }
 
+async fn is_safe_automatic_role_reward(
+    ctx: &Context,
+    state: &AppState,
+    guild_id: GuildId,
+    role_id: RoleId,
+) -> bool {
+    if state.config.is_offline_mode() {
+        if let Some(guild) = ctx.cache.guild(guild_id)
+            && let Some(role) = guild.roles.get(&role_id)
+            && (role.managed
+                || crate::discord::reaction_roles::is_privileged_role_permissions(role.permissions))
+        {
+            return false;
+        }
+        return true;
+    }
+
+    let role = match crate::discord::executor::ensure_role_hierarchy_with_role(
+        ctx, guild_id, None, role_id,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(err) => {
+            tracing::warn!(
+                guild_id = %guild_id,
+                role_id = %role_id,
+                error = %err,
+                "Denied progression role reward: role hierarchy check failed or role is managed/non-existent"
+            );
+            return false;
+        }
+    };
+
+    if crate::discord::reaction_roles::is_privileged_role_permissions(role.permissions) {
+        tracing::warn!(
+            guild_id = %guild_id,
+            role_id = %role_id,
+            "Denied progression role reward: role possesses privileged administrative permissions"
+        );
+        return false;
+    }
+
+    true
+}
+
 pub(super) fn is_operation_permitted(module_id: &str, operation: &ProgressionOperation) -> bool {
     let is_progression = module_id == "progression";
     let is_economy_allowed = module_id == "economy"
@@ -51,7 +97,7 @@ pub(super) fn is_operation_permitted(module_id: &str, operation: &ProgressionOpe
     is_progression || is_economy_allowed
 }
 
-pub(super) async fn execute(
+pub async fn execute(
     ctx: &Context,
     state: &AppState,
     module_id: &str,
@@ -125,6 +171,16 @@ pub(super) async fn execute(
                         .unwrap_or(false);
 
                     if already_granted {
+                        continue;
+                    }
+
+                    if !is_safe_automatic_role_reward(ctx, state, guild_id, role_snowflake).await {
+                        tracing::warn!(
+                            guild_id = %guild_id,
+                            user_id = %actor_id,
+                            role_id = %reward.role_id,
+                            "Denied unsafe progression role reward"
+                        );
                         continue;
                     }
 

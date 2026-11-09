@@ -8439,3 +8439,96 @@ async fn test_sticky_negative_cache_sweep_throttling_and_hard_cap_issue_327() {
 
     shard_manager.shutdown_all().await;
 }
+
+#[tokio::test]
+async fn test_progression_award_message_xp_defense_in_depth_issue_351() {
+    let (ctx, _mock_state, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state().await;
+
+    let guild_id = GuildId::new(100);
+    let channel_id = ChannelId::new(101);
+    let actor_id = UserId::new(222222222222222222);
+
+    // 1. AwardMessageXp with privileged role reward 1003 (SubordinateAdminRole with ADMINISTRATOR)
+    let execution = rusty_discord_bot::discord::progression::ProgressionExecutionContext::new(
+        Some(guild_id),
+        Some(channel_id),
+        Some(actor_id),
+        serenity::all::Permissions::empty(),
+        false, // event context
+    );
+
+    let op_privileged = rusty_discord_bot::lua::ProgressionOperation::AwardMessageXp {
+        amount: 50,
+        cooldown_seconds: 0,
+        announce_level_up: false,
+        level_up_message: None,
+        role_rewards: vec![rusty_discord_bot::lua::LevelRoleReward {
+            level: 1,
+            role_id: "1003".to_string(), // ADMINISTRATOR role
+        }],
+    };
+
+    let res = rusty_discord_bot::discord::progression::execute(
+        &ctx,
+        &state,
+        "progression",
+        execution,
+        &op_privileged,
+    )
+    .await;
+    assert!(res.is_ok(), "AwardMessageXp should execute and award XP");
+
+    // Privileged role must NOT be recorded as granted in storage
+    let granted_privileged = state
+        .storage
+        .is_role_reward_granted("100", "222222222222222222", "1003")
+        .await
+        .unwrap_or(false);
+    assert!(
+        !granted_privileged,
+        "Privileged role 1003 must be denied by defense-in-depth and not recorded as granted"
+    );
+
+    // XP must still be granted
+    let profile = state
+        .storage
+        .get_member_progress("100", "222222222222222222")
+        .await
+        .unwrap();
+    assert_eq!(profile.xp, 50, "XP should still be awarded to user");
+
+    // 2. AwardMessageXp with legitimate unprivileged role reward 1002 (MemberRole)
+    let op_legit = rusty_discord_bot::lua::ProgressionOperation::AwardMessageXp {
+        amount: 50,
+        cooldown_seconds: 0,
+        announce_level_up: false,
+        level_up_message: None,
+        role_rewards: vec![rusty_discord_bot::lua::LevelRoleReward {
+            level: 1,
+            role_id: "1002".to_string(), // Unprivileged MemberRole
+        }],
+    };
+
+    let res_legit = rusty_discord_bot::discord::progression::execute(
+        &ctx,
+        &state,
+        "progression",
+        execution,
+        &op_legit,
+    )
+    .await;
+    assert!(res_legit.is_ok());
+
+    let granted_legit = state
+        .storage
+        .is_role_reward_granted("100", "222222222222222222", "1002")
+        .await
+        .unwrap_or(false);
+    assert!(
+        granted_legit,
+        "Legitimate role 1002 must be safely granted and recorded"
+    );
+
+    shard_manager.shutdown_all().await;
+}
