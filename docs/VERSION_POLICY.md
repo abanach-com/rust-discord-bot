@@ -18,8 +18,21 @@ ZuckerBot tracks current stable releases rather than intentionally remaining on 
 ## Automated enforcement
 
 - `scripts/check-latest-rust.sh` compares the pinned toolchain with Rust's official stable channel manifest during CI.
+- `scripts/check-branch-protection.py` performs a read-only smoke check on `main` branch protection settings.
 - Dependabot checks Cargo, GitHub Actions and Docker dependencies every day.
 - CI resolves the pinned dependency graph, runs Clippy and tests, builds the release binary and builds the production container.
+- Concurrency in CI cancels redundant runs only for non-main refs (`cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}`), preventing cancellation of `main` branch builds.
+
+## Branch protection and quality gates
+
+To enforce quality gates before merging into `main`, repository settings should configure:
+1. **Branch Protection Rule / Ruleset for `main`**:
+   - `Require status checks to pass before merging` enabled.
+   - Required checks: `Format, lint, test and build`, `Build production container`, `Security and supply-chain gates`.
+   - `Require branches to be up to date before merging`.
+   - `Block force pushes` and `Block branch deletion`.
+   - Prevent administrative bypass where feasible.
+2. Note: Modifying GitHub repository branch rules requires administrative privileges on `abanach-com/rust-discord-bot` (Settings -> Branches / Rulesets). Token with standard write permissions cannot modify branch protection directly.
 
 ## Baseline verified on 2026-09-02
 
