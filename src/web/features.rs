@@ -3400,6 +3400,13 @@ pub async fn query_ai_assistant(
     if clean_query.is_empty() {
         return Err(ApiError::bad_request("Question cannot be empty"));
     }
+    const MAX_QUESTION_BYTES: usize = 2048;
+    const MAX_FALLBACK_TOKENS_SCANNED: usize = 16;
+    const MAX_FALLBACK_QUERIES: usize = 8;
+
+    if clean_query.len() > MAX_QUESTION_BYTES {
+        return Err(ApiError::bad_request("Question must not exceed 2048 bytes"));
+    }
 
     // Authoritative server-side monthly token budget check
     let budget = state
@@ -3427,19 +3434,29 @@ pub async fn query_ai_assistant(
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     if docs.is_empty() {
-        for word in clean_query.split_whitespace() {
-            let word = word.trim_matches(|c: char| !c.is_alphanumeric());
-            if word.len() >= 4 {
-                let found = state
-                    .app
-                    .storage
-                    .search_ai_documents(&guild_id, &[], word, 5)
-                    .await
-                    .map_err(|e| ApiError::internal(e.to_string()))?;
-                if !found.is_empty() {
-                    docs = found;
-                    break;
-                }
+        let mut seen = HashSet::new();
+        let mut issued_queries = 0usize;
+        for raw in clean_query
+            .split_whitespace()
+            .take(MAX_FALLBACK_TOKENS_SCANNED)
+        {
+            let word = raw.trim_matches(|c: char| !c.is_alphanumeric());
+            if word.len() < 4 || !seen.insert(word.to_lowercase()) {
+                continue;
+            }
+            if issued_queries >= MAX_FALLBACK_QUERIES {
+                break;
+            }
+            issued_queries += 1;
+            let found = state
+                .app
+                .storage
+                .search_ai_documents(&guild_id, &[], word, 5)
+                .await
+                .map_err(|e| ApiError::internal(e.to_string()))?;
+            if !found.is_empty() {
+                docs = found;
+                break;
             }
         }
     }

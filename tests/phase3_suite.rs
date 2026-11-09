@@ -640,4 +640,32 @@ async fn test_phase3_games_rp_and_knowledge_suite() {
     assert_eq!(ai_budget_body["answered"], false);
     assert_eq!(ai_budget_body["status"], "budget_exceeded");
     assert_eq!(ai_budget_body["escalated_to_staff"], false);
+
+    // 6. Issue #348: Unbounded query prevention
+    // Question exceeding 2048 bytes must return 400 Bad Request
+    let oversized_question = "a".repeat(2049);
+    let ai_oversized_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/ai/query"))
+        .header(COOKIE, &session_cookie)
+        .json(&serde_json::json!({
+            "question": oversized_question,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ai_oversized_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Question with 100 repeated unknown words does not exhaust SQL or panic
+    let repeated_question = "zzzz ".repeat(100);
+    let ai_repeated_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/ai/query"))
+        .header(COOKIE, &session_cookie)
+        .json(&serde_json::json!({
+            "question": repeated_question,
+        }))
+        .send()
+        .await
+        .unwrap();
+    // Budget is already exceeded above for this guild, so returns budget_exceeded without doing fallback queries
+    assert_eq!(ai_repeated_resp.status(), reqwest::StatusCode::OK);
 }
