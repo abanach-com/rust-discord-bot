@@ -1455,6 +1455,22 @@ impl PostgresStore {
         Ok(exists)
     }
 
+    pub async fn get_granted_role_rewards(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<std::collections::HashSet<String>> {
+        let roles: Vec<String> = sqlx::query_scalar(
+            "SELECT role_id FROM member_role_rewards WHERE guild_id = $1 AND user_id = $2",
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(roles.into_iter().collect())
+    }
+
     pub async fn record_role_reward_granted(
         &self,
 

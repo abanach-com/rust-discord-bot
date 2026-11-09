@@ -1272,6 +1272,18 @@ impl MemoryStore {
             .contains(&(guild_id.to_owned(), user_id.to_owned(), role_id.to_owned()))
     }
 
+    pub fn get_granted_role_rewards(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> std::collections::HashSet<String> {
+        self.role_rewards
+            .iter()
+            .filter(|entry| entry.0 == guild_id && entry.1 == user_id)
+            .map(|entry| entry.2.clone())
+            .collect()
+    }
+
     pub fn record_role_reward_granted(
         &self,
 

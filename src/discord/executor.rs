@@ -1988,7 +1988,7 @@ pub async fn ensure_role_hierarchy(
         .map(|_| ())
 }
 
-fn member_rank(member: &Member, roles: &HashMap<RoleId, Role>) -> (u16, u64) {
+pub(crate) fn member_rank(member: &Member, roles: &HashMap<RoleId, Role>) -> (u16, u64) {
     member
         .roles
         .iter()
@@ -1998,15 +1998,15 @@ fn member_rank(member: &Member, roles: &HashMap<RoleId, Role>) -> (u16, u64) {
         .unwrap_or((0, member.guild_id.get()))
 }
 
-fn role_rank(role: &Role) -> (u16, u64) {
+pub(crate) fn role_rank(role: &Role) -> (u16, u64) {
     (role.position, role.id.get())
 }
 
-fn rank_is_higher(left: (u16, u64), right: (u16, u64)) -> bool {
+pub(crate) fn rank_is_higher(left: (u16, u64), right: (u16, u64)) -> bool {
     compare_rank(left, right).is_gt()
 }
 
-fn compare_rank(left: (u16, u64), right: (u16, u64)) -> std::cmp::Ordering {
+pub(crate) fn compare_rank(left: (u16, u64), right: (u16, u64)) -> std::cmp::Ordering {
     left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1))
 }
 

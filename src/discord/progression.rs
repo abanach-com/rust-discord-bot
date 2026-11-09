@@ -41,50 +41,90 @@ impl ProgressionExecutionContext {
     }
 }
 
-async fn is_safe_automatic_role_reward(
+#[derive(Clone, Debug)]
+pub struct GuildRoleHierarchySnapshot {
+    pub roles: std::collections::HashMap<RoleId, serenity::all::Role>,
+    pub bot_highest_rank: (u16, u64),
+}
+
+impl GuildRoleHierarchySnapshot {
+    pub async fn fetch(ctx: &Context, state: &AppState, guild_id: GuildId) -> Result<Self> {
+        if state.config.is_offline_mode()
+            && let Some(guild) = ctx.cache.guild(guild_id)
+        {
+            let roles = guild.roles.clone();
+            let bot_id = ctx.cache.current_user().id;
+            let bot_rank = guild
+                .members
+                .get(&bot_id)
+                .map(|m| crate::discord::executor::member_rank(m, &roles))
+                .unwrap_or((0, guild_id.get()));
+            return Ok(Self {
+                roles,
+                bot_highest_rank: bot_rank,
+            });
+        }
+
+        let guild = guild_id.to_partial_guild(&ctx.http).await?;
+        let bot_id = {
+            let id = ctx.cache.current_user().id;
+            if id.get() == 0 {
+                ctx.http
+                    .get_current_user()
+                    .await
+                    .map(|u| u.id)
+                    .unwrap_or(id)
+            } else {
+                id
+            }
+        };
+        let bot = guild_id.member(&ctx.http, bot_id).await?;
+        let bot_rank = crate::discord::executor::member_rank(&bot, &guild.roles);
+
+        Ok(Self {
+            roles: guild.roles,
+            bot_highest_rank: bot_rank,
+        })
+    }
+
+    pub fn is_safe_role_reward(&self, role_id: RoleId) -> bool {
+        let Some(role) = self.roles.get(&role_id) else {
+            return false;
+        };
+        if role.managed {
+            return false;
+        }
+        if crate::discord::reaction_roles::is_privileged_role_permissions(role.permissions) {
+            return false;
+        }
+        if !crate::discord::executor::rank_is_higher(
+            self.bot_highest_rank,
+            crate::discord::executor::role_rank(role),
+        ) {
+            return false;
+        }
+        true
+    }
+}
+
+pub async fn is_safe_automatic_role_reward(
     ctx: &Context,
     state: &AppState,
     guild_id: GuildId,
     role_id: RoleId,
 ) -> bool {
-    if state.config.is_offline_mode() {
-        if let Some(guild) = ctx.cache.guild(guild_id)
-            && let Some(role) = guild.roles.get(&role_id)
-            && (role.managed
-                || crate::discord::reaction_roles::is_privileged_role_permissions(role.permissions))
-        {
-            return false;
-        }
-        return true;
-    }
-
-    let role = match crate::discord::executor::ensure_role_hierarchy_with_role(
-        ctx, guild_id, None, role_id,
-    )
-    .await
-    {
-        Ok(r) => r,
+    match GuildRoleHierarchySnapshot::fetch(ctx, state, guild_id).await {
+        Ok(snapshot) => snapshot.is_safe_role_reward(role_id),
         Err(err) => {
             tracing::warn!(
                 guild_id = %guild_id,
                 role_id = %role_id,
                 error = %err,
-                "Denied progression role reward: role hierarchy check failed or role is managed/non-existent"
+                "Denied progression role reward: failed to fetch role hierarchy snapshot"
             );
-            return false;
+            false
         }
-    };
-
-    if crate::discord::reaction_roles::is_privileged_role_permissions(role.permissions) {
-        tracing::warn!(
-            guild_id = %guild_id,
-            role_id = %role_id,
-            "Denied progression role reward: role possesses privileged administrative permissions"
-        );
-        return false;
     }
-
-    true
 }
 
 pub(super) fn is_operation_permitted(module_id: &str, operation: &ProgressionOperation) -> bool {
@@ -147,85 +187,115 @@ pub async fn execute(
                 )
                 .await?;
 
-            let cached_member_roles = ctx
-                .cache
-                .guild(guild_id)
-                .and_then(|g| g.members.get(&actor_id).map(|m| m.roles.clone()));
+            // If on cooldown (no XP awarded) and no level-up, avoid redundant SQL & Discord REST queries
+            if award.awarded == 0 && !award.leveled_up() {
+                return Ok(None);
+            }
 
-            let mut granted_roles = Vec::new();
+            let mut candidate_rewards: Vec<(&crate::lua::LevelRoleReward, RoleId)> = Vec::new();
             for reward in role_rewards {
                 if reward.level <= award.profile.level
                     && let Ok(role_id) = reward.role_id.parse::<u64>()
                 {
-                    let role_snowflake = RoleId::new(role_id);
-                    if let Some(ref roles) = cached_member_roles
-                        && roles.contains(&role_snowflake)
-                    {
-                        continue;
-                    }
+                    candidate_rewards.push((reward, RoleId::new(role_id)));
+                }
+            }
 
-                    let already_granted = state
+            let mut granted_roles = Vec::new();
+            if !candidate_rewards.is_empty() {
+                let cached_member_roles = ctx
+                    .cache
+                    .guild(guild_id)
+                    .and_then(|g| g.members.get(&actor_id).map(|m| m.roles.clone()));
+
+                if let Some(ref roles) = cached_member_roles {
+                    candidate_rewards
+                        .retain(|(_reward, role_snowflake)| !roles.contains(role_snowflake));
+                }
+
+                if !candidate_rewards.is_empty() {
+                    // Single O(1) query for all granted role rewards for this member
+                    let already_granted_set = state
                         .storage
-                        .is_role_reward_granted(&guild_key, &actor_key, &reward.role_id)
-                        .await
-                        .unwrap_or(false);
+                        .get_granted_role_rewards(&guild_key, &actor_key)
+                        .await?;
 
-                    if already_granted {
-                        continue;
-                    }
+                    candidate_rewards
+                        .retain(|(reward, _)| !already_granted_set.contains(&reward.role_id));
 
-                    if !is_safe_automatic_role_reward(ctx, state, guild_id, role_snowflake).await {
-                        tracing::warn!(
-                            guild_id = %guild_id,
-                            user_id = %actor_id,
-                            role_id = %reward.role_id,
-                            "Denied unsafe progression role reward"
-                        );
-                        continue;
-                    }
+                    if !candidate_rewards.is_empty() {
+                        // Single O(1) snapshot of guild roles and bot hierarchy
+                        let snapshot = match GuildRoleHierarchySnapshot::fetch(ctx, state, guild_id)
+                            .await
+                        {
+                            Ok(s) => Some(s),
+                            Err(err) => {
+                                tracing::warn!(
+                                    guild_id = %guild_id,
+                                    error = %err,
+                                    "Failed to fetch role hierarchy snapshot for progression role rewards; failing closed"
+                                );
+                                None
+                            }
+                        };
 
-                    if let Err(err) = ctx
-                        .http
-                        .add_member_role(
-                            guild_id,
-                            actor_id,
-                            role_snowflake,
-                            Some("Level reached in progression system"),
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            guild_id = %guild_id,
-                            user_id = %actor_id,
-                            role_id = %reward.role_id,
-                            error = %err,
-                            "Failed to assign level-up reward role"
-                        );
-                    } else {
-                        granted_roles.push(reward.role_id.clone());
-                        let _ = state
-                            .storage
-                            .record_role_reward_granted(
-                                &guild_key,
-                                &actor_key,
-                                &reward.role_id,
-                                reward.level as i64,
-                            )
-                            .await;
-                        state
-                            .storage
-                            .record_audit(
-                                Some(&guild_key),
-                                Some(&actor_key),
-                                module_id,
-                                "level_role_reward_granted",
-                                serde_json::json!({
-                                    "user_id": actor_key,
-                                    "level": reward.level,
-                                    "role_id": reward.role_id,
-                                }),
-                            )
-                            .await?;
+                        if let Some(snapshot) = snapshot {
+                            for (reward, role_snowflake) in candidate_rewards {
+                                if !snapshot.is_safe_role_reward(role_snowflake) {
+                                    tracing::warn!(
+                                        guild_id = %guild_id,
+                                        user_id = %actor_id,
+                                        role_id = %reward.role_id,
+                                        "Denied unsafe progression role reward"
+                                    );
+                                    continue;
+                                }
+
+                                if let Err(err) = ctx
+                                    .http
+                                    .add_member_role(
+                                        guild_id,
+                                        actor_id,
+                                        role_snowflake,
+                                        Some("Level reached in progression system"),
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        guild_id = %guild_id,
+                                        user_id = %actor_id,
+                                        role_id = %reward.role_id,
+                                        error = %err,
+                                        "Failed to assign level-up reward role"
+                                    );
+                                } else {
+                                    granted_roles.push(reward.role_id.clone());
+                                    let _ = state
+                                        .storage
+                                        .record_role_reward_granted(
+                                            &guild_key,
+                                            &actor_key,
+                                            &reward.role_id,
+                                            reward.level as i64,
+                                        )
+                                        .await;
+                                    state
+                                        .storage
+                                        .record_audit(
+                                            Some(&guild_key),
+                                            Some(&actor_key),
+                                            module_id,
+                                            "level_role_reward_granted",
+                                            serde_json::json!({
+                                                "user_id": actor_key,
+                                                "level": reward.level,
+                                                "role_id": reward.role_id,
+                                            }),
+                                        )
+                                        .await?;
+                                }
+                            }
+                        }
                     }
                 }
             }

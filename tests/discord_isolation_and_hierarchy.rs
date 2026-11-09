@@ -8532,3 +8532,126 @@ async fn test_progression_award_message_xp_defense_in_depth_issue_351() {
 
     shard_manager.shutdown_all().await;
 }
+
+#[tokio::test]
+async fn test_progression_role_rewards_o1_amplification_and_cooldown_issue_365() {
+    let (ctx, mock_state, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state().await;
+
+    let guild_id = GuildId::new(100);
+    let channel_id = ChannelId::new(101);
+    let actor_id = UserId::new(333333333333333333);
+
+    let execution = rusty_discord_bot::discord::progression::ProgressionExecutionContext::new(
+        Some(guild_id),
+        Some(channel_id),
+        Some(actor_id),
+        serenity::all::Permissions::empty(),
+        false, // event context
+    );
+
+    // Create 50 role rewards for level 1: 1 legitimate role (1002), 1 privileged role (1003),
+    // and 48 fictitious roles (2000..2048)
+    let mut role_rewards = Vec::with_capacity(50);
+    role_rewards.push(rusty_discord_bot::lua::LevelRoleReward {
+        level: 1,
+        role_id: "1002".to_string(), // Unprivileged MemberRole
+    });
+    role_rewards.push(rusty_discord_bot::lua::LevelRoleReward {
+        level: 1,
+        role_id: "1003".to_string(), // ADMINISTRATOR privileged role
+    });
+    for i in 2000..2048 {
+        role_rewards.push(rusty_discord_bot::lua::LevelRoleReward {
+            level: 1,
+            role_id: i.to_string(),
+        });
+    }
+
+    // Clear recorded HTTP calls
+    mock_state.recorded_calls.lock().await.clear();
+
+    // 1. First event: XP is awarded (cooldown_seconds = 60), leveling up to level 1
+    let op_award = rusty_discord_bot::lua::ProgressionOperation::AwardMessageXp {
+        amount: 100,
+        cooldown_seconds: 60,
+        announce_level_up: false,
+        level_up_message: None,
+        role_rewards: role_rewards.clone(),
+    };
+
+    let res1 = rusty_discord_bot::discord::progression::execute(
+        &ctx,
+        &state,
+        "progression",
+        execution,
+        &op_award,
+    )
+    .await;
+    assert!(res1.is_ok(), "First AwardMessageXp should succeed");
+
+    // Count GET calls to guild and bot member
+    let calls = mock_state.recorded_calls.lock().await.clone();
+    let guild_get_calls = calls
+        .iter()
+        .filter(|(m, p)| *m == axum::http::Method::GET && p.starts_with("/api/v10/guilds/100|"))
+        .count();
+    let member_get_calls = calls
+        .iter()
+        .filter(|(m, p)| {
+            *m == axum::http::Method::GET && p.starts_with("/api/v10/guilds/100/members/")
+        })
+        .count();
+
+    // MUST be O(1), at most 1 guild GET and 1 bot member GET across all 50 roles (NOT 50 or 100!)
+    assert!(
+        guild_get_calls <= 1,
+        "Guild hierarchy snapshot must be fetched at most once (was {guild_get_calls})"
+    );
+    assert!(
+        member_get_calls <= 1,
+        "Bot member snapshot must be fetched at most once (was {member_get_calls})"
+    );
+
+    // Legitimate role 1002 was granted, privileged role 1003 was denied
+    let granted_1002 = state
+        .storage
+        .is_role_reward_granted("100", "333333333333333333", "1002")
+        .await
+        .unwrap();
+    assert!(granted_1002, "Role 1002 must be granted");
+
+    let granted_1003 = state
+        .storage
+        .is_role_reward_granted("100", "333333333333333333", "1003")
+        .await
+        .unwrap();
+    assert!(!granted_1003, "Privileged role 1003 must be denied");
+
+    // 2. Second event immediately after: user is on cooldown (award.awarded == 0)
+    mock_state.recorded_calls.lock().await.clear();
+
+    let res2 = rusty_discord_bot::discord::progression::execute(
+        &ctx,
+        &state,
+        "progression",
+        execution,
+        &op_award,
+    )
+    .await;
+    assert!(
+        res2.is_ok(),
+        "Second AwardMessageXp should return Ok during cooldown"
+    );
+
+    // During cooldown, ZERO Discord HTTP calls must be made!
+    let calls2 = mock_state.recorded_calls.lock().await.clone();
+    assert_eq!(
+        calls2.len(),
+        0,
+        "During cooldown (awarded == 0), no Discord HTTP calls should be made (was {:?})",
+        calls2
+    );
+
+    shard_manager.shutdown_all().await;
+}

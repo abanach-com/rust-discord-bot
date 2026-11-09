@@ -2128,6 +2128,17 @@ impl Storage {
         }
     }
 
+    pub async fn get_granted_role_rewards(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<std::collections::HashSet<String>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_granted_role_rewards(guild_id, user_id)),
+            Self::Postgres(store) => store.get_granted_role_rewards(guild_id, user_id).await,
+        }
+    }
+
     pub async fn record_role_reward_granted(
         &self,
 
@@ -9072,5 +9083,60 @@ mod tests {
             2,
             "must have draft_created and draft_approved"
         );
+    }
+
+    #[tokio::test]
+    async fn test_get_granted_role_rewards_batch_query_issue_365() {
+        let store = Storage::memory();
+        let guild_a = "990001";
+        let guild_b = "990002";
+        let user_1 = "1001";
+        let user_2 = "1002";
+
+        // Record several role rewards
+        store
+            .record_role_reward_granted(guild_a, user_1, "role_a", 1)
+            .await
+            .unwrap();
+        store
+            .record_role_reward_granted(guild_a, user_1, "role_b", 2)
+            .await
+            .unwrap();
+        store
+            .record_role_reward_granted(guild_a, user_2, "role_c", 1)
+            .await
+            .unwrap();
+        store
+            .record_role_reward_granted(guild_b, user_1, "role_d", 1)
+            .await
+            .unwrap();
+
+        let user_1_guild_a = store
+            .get_granted_role_rewards(guild_a, user_1)
+            .await
+            .unwrap();
+        assert_eq!(user_1_guild_a.len(), 2);
+        assert!(user_1_guild_a.contains("role_a"));
+        assert!(user_1_guild_a.contains("role_b"));
+
+        let user_2_guild_a = store
+            .get_granted_role_rewards(guild_a, user_2)
+            .await
+            .unwrap();
+        assert_eq!(user_2_guild_a.len(), 1);
+        assert!(user_2_guild_a.contains("role_c"));
+
+        let user_1_guild_b = store
+            .get_granted_role_rewards(guild_b, user_1)
+            .await
+            .unwrap();
+        assert_eq!(user_1_guild_b.len(), 1);
+        assert!(user_1_guild_b.contains("role_d"));
+
+        let non_existent = store
+            .get_granted_role_rewards(guild_a, "9999")
+            .await
+            .unwrap();
+        assert!(non_existent.is_empty());
     }
 }
