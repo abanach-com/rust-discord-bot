@@ -10,6 +10,27 @@ use crate::{AppState, lua::MusicOperation};
 
 pub const MAX_QUEUE_SIZE: usize = 100;
 
+static GUILD_VOLUMES: std::sync::LazyLock<dashmap::DashMap<GuildId, f32>> =
+    std::sync::LazyLock::new(dashmap::DashMap::new);
+
+pub fn resolve_effective_volume(guild_id: GuildId, configured_volume: Option<f64>) -> f32 {
+    let configured_gain = configured_volume
+        .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
+        .unwrap_or(0.5) as f32;
+    GUILD_VOLUMES
+        .get(&guild_id)
+        .map(|v| *v)
+        .unwrap_or(configured_gain)
+}
+
+pub fn set_guild_volume(guild_id: GuildId, level: f32) {
+    GUILD_VOLUMES.insert(guild_id, level / 100.0);
+}
+
+pub fn clear_guild_volume(guild_id: GuildId) {
+    GUILD_VOLUMES.remove(&guild_id);
+}
+
 pub async fn execute(
     ctx: &Context,
     state: &AppState,
@@ -47,6 +68,7 @@ pub async fn execute(
         match operation {
             MusicOperation::Leave => {
                 let _ = manager.remove(guild_id).await;
+                clear_guild_volume(guild_id);
                 return Ok("The bot is not connected to a voice channel.".to_owned());
             }
             MusicOperation::Queue => {
@@ -54,11 +76,18 @@ pub async fn execute(
                     "The queue is empty. The bot is not connected to a voice channel.".to_owned(),
                 );
             }
+            MusicOperation::NowPlaying => {
+                return Ok(
+                    "Nothing is currently playing. The bot is not connected to a voice channel."
+                        .to_owned(),
+                );
+            }
             MusicOperation::Play => {
                 // Play will connect below
             }
             _ => {
                 let _ = manager.remove(guild_id).await;
+                clear_guild_volume(guild_id);
                 return Err(anyhow!("The bot is not connected to a voice channel."));
             }
         }
@@ -67,7 +96,10 @@ pub async fn execute(
     let handler_lock = if is_connected {
         let handler = existing_handler.expect("handler must exist when is_connected is true");
         // If bot is connected, control actions require user to be in the same voice channel
-        if !matches!(operation, MusicOperation::Queue) {
+        if !matches!(
+            operation,
+            MusicOperation::Queue | MusicOperation::NowPlaying
+        ) {
             let user_channel = user_voice_channel(ctx, guild_id, user_id)?;
             let bot_channel = {
                 let h = handler.lock().await;
@@ -89,6 +121,7 @@ pub async fn execute(
 
         if matches!(operation, MusicOperation::Leave) {
             manager.remove(guild_id).await?;
+            clear_guild_volume(guild_id);
             return Ok("Disconnected bot from the voice channel.".to_owned());
         }
 
@@ -104,6 +137,21 @@ pub async fn execute(
             }
         }
     };
+
+    let guild_key = guild_id.get().to_string();
+    let configured_default = if matches!(operation, MusicOperation::Play) {
+        let settings = state
+            .storage
+            .get_module_settings(&guild_key, "music")
+            .await?;
+        settings
+            .as_ref()
+            .and_then(|s| s.config.get("default_volume"))
+            .and_then(serde_json::Value::as_f64)
+    } else {
+        None
+    };
+
     let mut handler = handler_lock.lock().await;
 
     match operation {
@@ -121,7 +169,9 @@ pub async fn execute(
             } else {
                 YoutubeDl::new_search(state.media_http_client.clone(), query.to_owned())
             };
-            handler.enqueue_input(source.into()).await;
+            let track_volume = resolve_effective_volume(guild_id, configured_default);
+            let track = handler.enqueue_input(source.into()).await;
+            let _ = track.set_volume(track_volume);
             Ok(format!(
                 "Added to queue. Track count: {}.",
                 handler.queue().len()
@@ -133,6 +183,7 @@ pub async fn execute(
                 .filter(|&v| (0.0..=150.0).contains(&v))
                 .ok_or_else(|| anyhow!("volume level must be a number between 0 and 150"))?;
             let factor = level / 100.0;
+            set_guild_volume(guild_id, level);
             if let Some(track) = handler.queue().current() {
                 let _ = track.set_volume(factor);
             }
@@ -174,12 +225,34 @@ pub async fn execute(
         }
         MusicOperation::Stop => {
             handler.queue().stop();
+            clear_guild_volume(guild_id);
             Ok("Stopped playback and cleared the queue.".to_owned())
         }
         MusicOperation::Queue => Ok(format!(
             "The queue contains {} tracks.",
             handler.queue().len()
         )),
+        MusicOperation::NowPlaying => {
+            if let Some(track) = handler.queue().current() {
+                let info = track.get_info().await?;
+                let position_secs = info.position.as_secs();
+                let pos_min = position_secs / 60;
+                let pos_sec = position_secs % 60;
+                let state_str = match info.playing {
+                    songbird::tracks::PlayMode::Play => "Playing",
+                    songbird::tracks::PlayMode::Pause => "Paused",
+                    songbird::tracks::PlayMode::Stop => "Stopped",
+                    songbird::tracks::PlayMode::End => "Ended",
+                    _ => "Playing",
+                };
+                let track_vol = (info.volume * 100.0).round() as u32;
+                Ok(format!(
+                    "Now {state_str}: Track at {pos_min:02}:{pos_sec:02} (Volume: {track_vol}%)."
+                ))
+            } else {
+                Ok("Nothing is currently playing.".to_owned())
+            }
+        }
         MusicOperation::Leave => unreachable!("leave is handled before taking the call lock"),
     }
 }
@@ -394,5 +467,39 @@ mod tests {
         assert!(!is_blocked_ip(IpAddr::V6(
             "::ffff:8.8.8.8".parse().unwrap()
         )));
+    }
+
+    #[test]
+    fn test_music_volume_resolution_isolation_and_lifecycle() {
+        let guild_a = GuildId::new(990001);
+        let guild_b = GuildId::new(990002);
+
+        // Ensure clean state
+        clear_guild_volume(guild_a);
+        clear_guild_volume(guild_b);
+
+        // 1. Without configuration or runtime volume, default to 0.5 (50%)
+        assert_eq!(resolve_effective_volume(guild_a, None), 0.5);
+
+        // 2. Custom guild default volume from module config
+        assert_eq!(resolve_effective_volume(guild_a, Some(0.35)), 0.35);
+
+        // 3. Invalid or out-of-bounds configured volume falls back to 0.5
+        assert_eq!(resolve_effective_volume(guild_a, Some(-0.2)), 0.5);
+        assert_eq!(resolve_effective_volume(guild_a, Some(1.5)), 0.5);
+        assert_eq!(resolve_effective_volume(guild_a, Some(f64::NAN)), 0.5);
+
+        // 4. Runtime /music volume command sets active volume (e.g. 80%)
+        set_guild_volume(guild_a, 80.0);
+        assert_eq!(resolve_effective_volume(guild_a, Some(0.35)), 0.8);
+
+        // 5. Multi-guild isolation: Guild B is unaffected by Guild A's runtime volume
+        assert_eq!(resolve_effective_volume(guild_b, Some(0.35)), 0.35);
+        assert_eq!(resolve_effective_volume(guild_b, None), 0.5);
+
+        // 6. Stop/Leave clears runtime volume, reverting Guild A to its configured default
+        clear_guild_volume(guild_a);
+        assert_eq!(resolve_effective_volume(guild_a, Some(0.35)), 0.35);
+        assert_eq!(resolve_effective_volume(guild_a, None), 0.5);
     }
 }

@@ -541,7 +541,7 @@ impl LuaAction {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MusicOperation {
     Play,
@@ -553,6 +553,7 @@ pub enum MusicOperation {
     Queue,
     Volume,
     Loop,
+    NowPlaying,
 }
 
 fn has_duplicates<T: PartialEq>(values: &[T]) -> bool {

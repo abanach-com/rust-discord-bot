@@ -26,6 +26,7 @@ return {
                             { name = "Resume", value = "resume" },
                             { name = "Skip", value = "skip" },
                             { name = "Stop", value = "stop" },
+                            { name = "Leave", value = "leave" },
                             { name = "Volume", value = "volume" },
                             { name = "Loop", value = "loop" },
                             { name = "Now Playing", value = "now_playing" },

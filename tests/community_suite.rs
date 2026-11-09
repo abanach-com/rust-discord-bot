@@ -513,6 +513,86 @@ async fn music_command_supports_volume_and_loop() {
         Some(LuaAction::Music { operation, query: None })
             if matches!(operation, MusicOperation::Loop)
     ));
+
+    let now_playing_actions = engine
+        .execute_command(
+            "music",
+            "music",
+            context(json!({ "action": "now_playing" }), json!({})),
+        )
+        .await
+        .expect("music now_playing command should execute");
+
+    assert!(matches!(
+        now_playing_actions.get(1),
+        Some(LuaAction::Music { operation, query: None })
+            if matches!(operation, MusicOperation::NowPlaying)
+    ));
+
+    let leave_actions = engine
+        .execute_command(
+            "music",
+            "music",
+            context(json!({ "action": "leave" }), json!({})),
+        )
+        .await
+        .expect("music leave command should execute");
+
+    assert!(matches!(
+        leave_actions.get(1),
+        Some(LuaAction::Music { operation, query: None })
+            if matches!(operation, MusicOperation::Leave)
+    ));
+}
+
+#[tokio::test]
+async fn music_catalog_choices_match_rust_music_operations_issue_362() {
+    let engine = engine();
+    let commands = engine.command_definitions().await;
+    let music_cmd = commands
+        .iter()
+        .find(|c| c.name == "music")
+        .expect("music command should be registered");
+
+    let action_opt = music_cmd
+        .options
+        .iter()
+        .find(|opt| opt.name == "action")
+        .expect("action option must exist on /music");
+
+    let choices = &action_opt.choices;
+
+    let expected_operations = [
+        ("play", MusicOperation::Play),
+        ("pause", MusicOperation::Pause),
+        ("resume", MusicOperation::Resume),
+        ("skip", MusicOperation::Skip),
+        ("stop", MusicOperation::Stop),
+        ("leave", MusicOperation::Leave),
+        ("volume", MusicOperation::Volume),
+        ("loop", MusicOperation::Loop),
+        ("now_playing", MusicOperation::NowPlaying),
+        ("queue", MusicOperation::Queue),
+    ];
+
+    assert_eq!(
+        choices.len(),
+        expected_operations.len(),
+        "all expected music operations must have a corresponding choice"
+    );
+
+    for (value_str, expected_op) in expected_operations {
+        let choice = choices
+            .iter()
+            .find(|c| c.value == value_str)
+            .unwrap_or_else(|| panic!("choice with value '{value_str}' should be defined"));
+        assert!(!choice.name.is_empty());
+
+        let json_value = format!("\"{value_str}\"");
+        let deserialized: MusicOperation = serde_json::from_str(&json_value)
+            .unwrap_or_else(|_| panic!("serde should deserialize '{value_str}' to MusicOperation"));
+        assert_eq!(deserialized, expected_op);
+    }
 }
 
 #[tokio::test]
