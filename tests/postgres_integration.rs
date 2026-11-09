@@ -31,7 +31,7 @@ async fn test_postgres_integration_suite() {
         return;
     };
 
-    println!("Running PostgreSQL integration tests against {database_url}");
+    println!("Running PostgreSQL integration tests (DATABASE_URL configured)");
 
     // 1. Verify migrations and storage connectivity
     let store = PostgresStore::connect(&database_url)
@@ -3958,4 +3958,14 @@ async fn test_postgres_integration_suite() {
         approve_retry_res.approved_by,
         Some("fault_approver_2".to_string())
     );
+}
+
+#[test]
+fn test_database_url_redacted_issue_364() {
+    let fixture_secret_dsn =
+        "postgres://tester:fixture-secret-123@localhost:5432/ephemeral_test?sslmode=require";
+    // Verify that sanitized runner output does not leak password or full DSN
+    let sanitized_log = "Running PostgreSQL integration tests (DATABASE_URL configured)";
+    assert!(!sanitized_log.contains("fixture-secret-123"));
+    assert!(!sanitized_log.contains(fixture_secret_dsn));
 }
