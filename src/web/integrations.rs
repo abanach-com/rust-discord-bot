@@ -24,7 +24,10 @@ use crate::storage::{
 
 use super::{
     WebState,
-    auth::{authenticate, ensure_guild_access, ensure_guild_member_access, verify_csrf},
+    auth::{
+        authenticate, ensure_channel_view_access, ensure_guild_access, ensure_guild_member_access,
+        verify_csrf, verify_thread_scope,
+    },
     routes::ApiError,
 };
 
@@ -622,6 +625,33 @@ pub async fn map_github_thread(
     verify_csrf(&headers, &session)?;
     ensure_guild_access(&state, &session, &guild_id).await?;
 
+    if payload.issue_or_pr_number <= 0 {
+        return Err(ApiError::bad_request(
+            "GitHub issue/PR number must be positive",
+        ));
+    }
+
+    let parts: Vec<&str> = payload.repo_full_name.split('/').collect();
+    if parts.len() != 2 || parts[0].trim().is_empty() || parts[1].trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "repo_full_name must be in 'owner/repo' format",
+        ));
+    }
+
+    crate::storage::validate_snowflake("thread_channel_id", &payload.thread_channel_id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    crate::storage::validate_snowflake("discord_thread_id", &payload.discord_thread_id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    verify_thread_scope(
+        &state,
+        &session,
+        &guild_id,
+        &payload.thread_channel_id,
+        &payload.discord_thread_id,
+    )
+    .await?;
+
     let mapping = GitHubDevopsMapping {
         id: Uuid::new_v4(),
         guild_id,
@@ -688,6 +718,11 @@ pub async fn create_telegram_bridge(
     let (_, session) = authenticate(&state, &headers).await?;
     verify_csrf(&headers, &session)?;
     ensure_guild_access(&state, &session, &guild_id).await?;
+
+    crate::storage::validate_snowflake("discord_channel_id", &payload.discord_channel_id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    ensure_channel_view_access(&state, &session, &guild_id, &payload.discord_channel_id).await?;
 
     let bridge = TelegramBridge {
         id: Uuid::new_v4(),

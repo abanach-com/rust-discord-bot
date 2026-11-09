@@ -504,92 +504,66 @@ pub struct CachedChannelScope {
     pub guild_id: Option<String>,
     #[serde(rename = "type")]
     pub channel_type: u8,
+    pub parent_id: Option<String>,
 }
 
 static CHANNEL_SCOPE_CACHE: std::sync::LazyLock<
     DashMap<String, (CachedChannelScope, DateTime<Utc>)>,
 > = std::sync::LazyLock::new(DashMap::new);
 
-pub async fn ensure_channel_view_access(
+async fn fetch_cached_channel_scope(
     state: &WebState,
-    session: &Session,
-    guild_id: &str,
     channel_id: &str,
-) -> Result<(), ApiError> {
-    ensure_guild_member_access(state, session, guild_id).await?;
-
-    if state.app.config.is_offline_mode() {
-        return Ok(());
-    }
-
-    crate::storage::validate_snowflake("channel_id", channel_id)
-        .map_err(|e| ApiError::bad_request(e.to_string()))?;
-
+) -> Result<CachedChannelScope, ApiError> {
     let base_url = &state.app.config.discord_api_base_url;
-
     let now = Utc::now();
-    let channel_scope = if let Some(entry) = CHANNEL_SCOPE_CACHE.get(channel_id)
+    if let Some(entry) = CHANNEL_SCOPE_CACHE.get(channel_id)
         && now - entry.1 < Duration::seconds(15)
     {
-        entry.0.clone()
-    } else {
-        let chan_url = format!("{base_url}/channels/{channel_id}");
-        let chan_resp = state
-            .app
-            .http_client
-            .get(&chan_url)
-            .header(
-                reqwest::header::AUTHORIZATION,
-                format!("Bot {}", state.app.config.discord_token),
-            )
-            .send()
-            .await
-            .map_err(ApiError::upstream)?;
+        return Ok(entry.0.clone());
+    }
 
-        if chan_resp.status() == StatusCode::FORBIDDEN
-            || chan_resp.status() == StatusCode::NOT_FOUND
-        {
-            return Err(ApiError::forbidden(
-                "Brak dostępu do kanału konkursu: kanał nie istnieje lub bot nie ma do niego dostępu",
-            ));
-        }
+    let chan_url = format!("{base_url}/channels/{channel_id}");
+    let chan_resp = state
+        .app
+        .http_client
+        .get(&chan_url)
+        .header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bot {}", state.app.config.discord_token),
+        )
+        .send()
+        .await
+        .map_err(ApiError::upstream)?;
 
-        if !chan_resp.status().is_success() {
-            return Err(ApiError::forbidden(
-                "Nie udało się zweryfikować kanału konkursu w Discord API",
-            ));
-        }
-
-        let scope = chan_resp
-            .json::<CachedChannelScope>()
-            .await
-            .map_err(ApiError::upstream)?;
-
-        CHANNEL_SCOPE_CACHE.insert(channel_id.to_string(), (scope.clone(), now));
-        scope
-    };
-
-    if channel_scope.guild_id.as_deref() != Some(guild_id) {
+    if chan_resp.status() == StatusCode::FORBIDDEN || chan_resp.status() == StatusCode::NOT_FOUND {
         return Err(ApiError::forbidden(
-            "Kanał konkursu musi należeć do tej gildii",
+            "Brak dostępu do kanału: kanał nie istnieje lub bot nie ma do niego dostępu",
         ));
     }
 
-    if channel_scope.channel_type == 2
-        || channel_scope.channel_type == 4
-        || channel_scope.channel_type == 13
-    {
-        return Err(ApiError::bad_request(
-            "Kanał konkursu nie może być kategorią ani kanałem głosowym",
+    if !chan_resp.status().is_success() {
+        return Err(ApiError::forbidden(
+            "Nie udało się zweryfikować kanału w Discord API",
         ));
     }
 
-    if !matches!(channel_scope.channel_type, 0 | 5 | 10 | 11 | 12) {
-        return Err(ApiError::bad_request(
-            "Kanał konkursu nie obsługuje wiadomości tekstowych",
-        ));
-    }
+    let scope = chan_resp
+        .json::<CachedChannelScope>()
+        .await
+        .map_err(ApiError::upstream)?;
 
+    CHANNEL_SCOPE_CACHE.insert(channel_id.to_string(), (scope.clone(), now));
+    Ok(scope)
+}
+
+async fn check_member_channel_view_perms(
+    state: &WebState,
+    session: &Session,
+    channel_id: &str,
+    channel_scope: &CachedChannelScope,
+) -> Result<(), ApiError> {
+    let base_url = &state.app.config.discord_api_base_url;
     let perm_url = format!(
         "{base_url}/channels/{channel_id}/permissions/member/{}",
         session.user.id
@@ -608,13 +582,13 @@ pub async fn ensure_channel_view_access(
 
     if response.status() == StatusCode::FORBIDDEN || response.status() == StatusCode::NOT_FOUND {
         return Err(ApiError::forbidden(
-            "Brak dostępu do kanału konkursu: wymagane uprawnienie VIEW_CHANNEL",
+            "Brak dostępu do kanału: wymagane uprawnienie VIEW_CHANNEL",
         ));
     }
 
     if !response.status().is_success() {
         return Err(ApiError::forbidden(
-            "Nie udało się zweryfikować uprawnień kanału konkursu w Discord API",
+            "Nie udało się zweryfikować uprawnień kanału w Discord API",
         ));
     }
 
@@ -635,13 +609,9 @@ pub async fn ensure_channel_view_access(
 
     let perms = Permissions::from_bits_truncate(bits);
     if !perms.contains(Permissions::VIEW_CHANNEL) && !perms.contains(Permissions::ADMINISTRATOR) {
-        return Err(ApiError::forbidden(
-            "Kanał konkursu wymaga uprawnienia VIEW_CHANNEL",
-        ));
+        return Err(ApiError::forbidden("Kanał wymaga uprawnienia VIEW_CHANNEL"));
     }
 
-    // Discord private threads (type 12) inherit parent overwrites, so VIEW_CHANNEL alone is not enough.
-    // Non-moderators must be explicit members of the private thread.
     if channel_scope.channel_type == 12
         && !perms.contains(Permissions::ADMINISTRATOR)
         && !perms.contains(Permissions::MANAGE_THREADS)
@@ -664,7 +634,7 @@ pub async fn ensure_channel_view_access(
 
         if tm_resp.status() == StatusCode::NOT_FOUND || tm_resp.status() == StatusCode::FORBIDDEN {
             return Err(ApiError::forbidden(
-                "Brak dostępu do prywatnego wątku konkursu: wymagane członkostwo w wątku lub uprawnienie MANAGE_THREADS",
+                "Brak dostępu do prywatnego wątku: wymagane członkostwo w wątku lub uprawnienie MANAGE_THREADS",
             ));
         }
 
@@ -674,6 +644,106 @@ pub async fn ensure_channel_view_access(
             ));
         }
     }
+
+    Ok(())
+}
+
+pub async fn ensure_channel_view_access(
+    state: &WebState,
+    session: &Session,
+    guild_id: &str,
+    channel_id: &str,
+) -> Result<(), ApiError> {
+    ensure_guild_member_access(state, session, guild_id).await?;
+
+    if state.app.config.is_offline_mode() {
+        return Ok(());
+    }
+
+    crate::storage::validate_snowflake("channel_id", channel_id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let channel_scope = fetch_cached_channel_scope(state, channel_id).await?;
+
+    if channel_scope.guild_id.as_deref() != Some(guild_id) {
+        return Err(ApiError::forbidden("Kanał musi należeć do tej gildii"));
+    }
+
+    if channel_scope.channel_type == 2
+        || channel_scope.channel_type == 4
+        || channel_scope.channel_type == 13
+    {
+        return Err(ApiError::bad_request(
+            "Kanał nie może być kategorią ani kanałem głosowym",
+        ));
+    }
+
+    if !matches!(channel_scope.channel_type, 0 | 5 | 10 | 11 | 12) {
+        return Err(ApiError::bad_request(
+            "Kanał nie obsługuje wiadomości tekstowych",
+        ));
+    }
+
+    check_member_channel_view_perms(state, session, channel_id, &channel_scope).await
+}
+
+pub async fn verify_thread_scope(
+    state: &WebState,
+    session: &Session,
+    guild_id: &str,
+    parent_channel_id: &str,
+    thread_id: &str,
+) -> Result<(), ApiError> {
+    ensure_guild_member_access(state, session, guild_id).await?;
+
+    if state.app.config.is_offline_mode() {
+        return Ok(());
+    }
+
+    crate::storage::validate_snowflake("thread_channel_id", parent_channel_id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    crate::storage::validate_snowflake("discord_thread_id", thread_id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let parent_scope = fetch_cached_channel_scope(state, parent_channel_id).await?;
+    if parent_scope.guild_id.as_deref() != Some(guild_id) {
+        return Err(ApiError::forbidden(
+            "Kanał nadrzędny musi należeć do tej gildii",
+        ));
+    }
+
+    // Parent can be GuildText (0), GuildAnnouncement (5), or GuildForum (15)
+    if !matches!(parent_scope.channel_type, 0 | 5 | 15) {
+        return Err(ApiError::bad_request(
+            "Kanał nadrzędny musi być kanałem tekstowym, ogłoszeniowym lub forum",
+        ));
+    }
+
+    let thread_scope = fetch_cached_channel_scope(state, thread_id).await?;
+    if thread_scope.guild_id.as_deref() != Some(guild_id) {
+        return Err(ApiError::forbidden(
+            "Wątek musi należeć do tej samej gildii",
+        ));
+    }
+
+    // Thread must be AnnouncementThread (10), PublicThread (11), or PrivateThread (12)
+    if !matches!(thread_scope.channel_type, 10..=12) {
+        return Err(ApiError::bad_request(
+            "Wskazany identyfikator nie jest wątkiem Discord",
+        ));
+    }
+
+    if thread_scope.parent_id.as_deref() != Some(parent_channel_id) {
+        return Err(ApiError::forbidden(
+            "Wątek nie należy do wskazanego kanału nadrzędnego",
+        ));
+    }
+
+    // User must have VIEW_CHANNEL in parent channel
+    check_member_channel_view_perms(state, session, parent_channel_id, &parent_scope).await?;
+
+    // User must also have access to the thread
+    check_member_channel_view_perms(state, session, thread_id, &thread_scope).await?;
 
     Ok(())
 }
