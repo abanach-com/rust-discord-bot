@@ -1924,7 +1924,10 @@ impl MemoryStore {
         }
     }
 
-    pub fn finish_giveaway(&self, giveaway_id: Uuid) -> anyhow::Result<Vec<String>> {
+    pub fn finish_giveaway_detailed(
+        &self,
+        giveaway_id: Uuid,
+    ) -> anyhow::Result<crate::storage::FinishGiveawayOutcome> {
         let mut ga = match self.giveaways.get_mut(&giveaway_id) {
             Some(g) => g,
             None => anyhow::bail!("Giveaway was not found"),
@@ -1940,7 +1943,9 @@ impl MemoryStore {
                         .collect()
                 })
                 .unwrap_or_default();
-            return Ok(existing);
+            return Ok(crate::storage::FinishGiveawayOutcome::AlreadyEnded(
+                existing,
+            ));
         }
 
         ga.ended = true;
@@ -1957,7 +1962,7 @@ impl MemoryStore {
 
         if participants.is_empty() {
             ga.winners_json = serde_json::json!([]);
-            return Ok(Vec::new());
+            return Ok(crate::storage::FinishGiveawayOutcome::Finished(Vec::new()));
         }
 
         let count = (ga.winners_count as usize).min(participants.len());
@@ -1980,7 +1985,14 @@ impl MemoryStore {
         }
 
         ga.winners_json = serde_json::json!(winners);
-        Ok(winners)
+        Ok(crate::storage::FinishGiveawayOutcome::Finished(winners))
+    }
+
+    pub fn finish_giveaway(&self, giveaway_id: Uuid) -> anyhow::Result<Vec<String>> {
+        match self.finish_giveaway_detailed(giveaway_id)? {
+            crate::storage::FinishGiveawayOutcome::Finished(w)
+            | crate::storage::FinishGiveawayOutcome::AlreadyEnded(w) => Ok(w),
+        }
     }
 
     pub fn reroll_giveaway(&self, giveaway_id: Uuid) -> anyhow::Result<Vec<String>> {

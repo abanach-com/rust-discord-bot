@@ -8862,3 +8862,292 @@ async fn test_ticket_claim_unclaim_rename_and_participant_resilience_issues_361_
 
     shard_manager.shutdown_all().await;
 }
+
+#[tokio::test]
+async fn test_giveaway_web_end_and_reroll_discord_delivery_issue_359() {
+    use dashmap::DashMap;
+    use reqwest::header::COOKIE;
+    use rusty_discord_bot::web::{
+        WebState,
+        auth::{DashboardGuild, DashboardUser, LoginRateLimiter},
+        build_router,
+    };
+
+    let (_ctx, mock, shard_manager) = start_mock_discord_environment().await;
+
+    let bind: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let config = Config {
+        discord_token: "test_bot_token".to_string(),
+        discord_application_id: 123456789,
+        discord_client_id: "123456789".to_string(),
+        discord_client_secret: "secret".to_string(),
+        discord_oauth_redirect_url: "http://127.0.0.1:8080/auth/discord/callback".to_string(),
+        discord_dev_guild_id: None,
+        dashboard_bind: bind,
+        dashboard_public_url: format!("http://{}", bind),
+        database_url: None,
+        scripts_dir: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts"),
+        session_cookie_secure: false,
+        session_ttl_seconds: 86400,
+        lua_memory_limit_bytes: 4 * 1024 * 1024,
+        lua_instruction_limit: 200_000,
+        lua_hook_granularity: 100,
+        lua_max_parallel: 32,
+        lua_max_per_guild: 8,
+        lua_command_timeout_ms: 3000,
+        music_allowed_hosts: std::collections::HashSet::new(),
+        trusted_proxies: ["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()]
+            .into_iter()
+            .collect(),
+        offline_mode: false,
+        discord_api_base_url: format!("http://127.0.0.1:{}", mock.port),
+        transcript_encryption_key: None,
+        transcript_active_key_id: "v1".to_string(),
+        transcript_keyring: None,
+        ticket_transcripts_disabled: true,
+        metrics_token: None,
+        metrics_allowed_ips: std::collections::HashSet::new(),
+    };
+
+    let app = AppState::bootstrap(config)
+        .await
+        .expect("bootstrap app state");
+    let permissions_cache = Arc::new(DashMap::new());
+    let web_state = WebState {
+        app: app.clone(),
+        login_rate_limiter: Arc::new(LoginRateLimiter::new()),
+        permissions_cache: permissions_cache.clone(),
+    };
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let base_url = format!("http://{addr}");
+    let router = build_router(web_state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+    let admin_session = "admin_giveaway_session";
+    let csrf_token = "csrf_giveaway_test";
+    app.sessions
+        .save_session(
+            admin_session,
+            DashboardUser {
+                id: "111111111111111111".to_string(),
+                username: "ServerOwner".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: "100".to_string(),
+                name: "Test Guild".to_string(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_string(),
+            }],
+            csrf_token.to_string(),
+            chrono::Utc::now() + chrono::Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+    let cookie = format!("rusty_discord_bot_session={admin_session}");
+
+    // 1. Create a giveaway with 2 participants in valid channel 101
+    let ga = app
+        .storage
+        .create_giveaway(
+            "100",
+            "101",
+            "Discord Nitro 1 Month",
+            1,
+            chrono::Utc::now() + chrono::Duration::hours(2),
+        )
+        .await
+        .unwrap();
+    app.storage
+        .join_giveaway(ga.id, "222222222222222222")
+        .await
+        .unwrap();
+    app.storage
+        .join_giveaway(ga.id, "333333333333333333")
+        .await
+        .unwrap();
+
+    mock.recorded_calls.lock().await.clear();
+
+    // 2. POST /end via Web REST API
+    let end_res = client
+        .post(format!("{base_url}/api/guilds/100/giveaways/{}/end", ga.id))
+        .header(COOKIE, &cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(end_res.status(), reqwest::StatusCode::OK);
+    let end_json: serde_json::Value = end_res.json().await.unwrap();
+    assert_eq!(end_json["ended"], true);
+    assert_eq!(end_json["announcement_status"], "delivered");
+    assert!(end_json["message_id"].as_str().is_some());
+    let winners = end_json["winners"].as_array().expect("winners array");
+    assert_eq!(winners.len(), 1);
+
+    // Verify exactly 1 message POST was sent to channel 101 with announcement
+    let calls = mock.recorded_calls.lock().await.clone();
+    let msg_posts: Vec<_> = calls
+        .iter()
+        .filter(|(m, p)| {
+            *m == axum::http::Method::POST && p.starts_with("/api/v10/channels/101/messages")
+        })
+        .collect();
+    assert_eq!(
+        msg_posts.len(),
+        1,
+        "Exactly 1 Discord announcement must be sent on /end"
+    );
+    let post_body = &msg_posts[0].1;
+    assert!(
+        post_body.contains("KONKURS ZAKO\\u0143CZONY") || post_body.contains("KONKURS ZAKOŃCZONY")
+    );
+    assert!(post_body.contains("Discord Nitro 1 Month"));
+
+    // 3. Idempotent second POST /end: returns already_ended and sends 0 additional Discord messages
+    mock.recorded_calls.lock().await.clear();
+    let end_dup_res = client
+        .post(format!("{base_url}/api/guilds/100/giveaways/{}/end", ga.id))
+        .header(COOKIE, &cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(end_dup_res.status(), reqwest::StatusCode::OK);
+    let end_dup_json: serde_json::Value = end_dup_res.json().await.unwrap();
+    assert_eq!(end_dup_json["ended"], true);
+    assert_eq!(end_dup_json["announcement_status"], "already_ended");
+    let calls_after_dup = mock.recorded_calls.lock().await.clone();
+    assert_eq!(
+        calls_after_dup.len(),
+        0,
+        "Second /end must NOT send any Discord messages"
+    );
+
+    // 4. POST /reroll on active giveaway -> 409 Conflict & 0 messages
+    let ga_active = app
+        .storage
+        .create_giveaway(
+            "100",
+            "101",
+            "Active Prize",
+            1,
+            chrono::Utc::now() + chrono::Duration::hours(5),
+        )
+        .await
+        .unwrap();
+    app.storage
+        .join_giveaway(ga_active.id, "222222222222222222")
+        .await
+        .unwrap();
+
+    let reroll_conflict_res = client
+        .post(format!(
+            "{base_url}/api/guilds/100/giveaways/{}/reroll",
+            ga_active.id
+        ))
+        .header(COOKIE, &cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reroll_conflict_res.status(), reqwest::StatusCode::CONFLICT);
+
+    // 5. POST /reroll on concluded giveaway ga.id -> 200 OK & exactly 1 reroll message
+    mock.recorded_calls.lock().await.clear();
+    let reroll_res = client
+        .post(format!(
+            "{base_url}/api/guilds/100/giveaways/{}/reroll",
+            ga.id
+        ))
+        .header(COOKIE, &cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reroll_res.status(), reqwest::StatusCode::OK);
+    let reroll_json: serde_json::Value = reroll_res.json().await.unwrap();
+    assert_eq!(reroll_json["rerolled"], true);
+    assert_eq!(reroll_json["announcement_status"], "delivered");
+    assert!(reroll_json["message_id"].as_str().is_some());
+
+    let calls_reroll = mock.recorded_calls.lock().await.clone();
+    let reroll_posts: Vec<_> = calls_reroll
+        .iter()
+        .filter(|(m, p)| {
+            *m == axum::http::Method::POST && p.starts_with("/api/v10/channels/101/messages")
+        })
+        .collect();
+    assert_eq!(
+        reroll_posts.len(),
+        1,
+        "Exactly 1 Discord reroll announcement must be sent on /reroll"
+    );
+    let reroll_body = &reroll_posts[0].1;
+    assert!(reroll_body.contains("PONOWNE LOSOWANIE") || reroll_body.contains("REROLL"));
+
+    // 6. Cross-guild channel attempt: channel 201 belongs to foreign guild 200
+    let ga_cross = app
+        .storage
+        .create_giveaway(
+            "100",
+            "201", // Channel 201 is in guild 200
+            "Cross Guild Hack",
+            1,
+            chrono::Utc::now() + chrono::Duration::hours(2),
+        )
+        .await
+        .unwrap();
+    app.storage
+        .join_giveaway(ga_cross.id, "222222222222222222")
+        .await
+        .unwrap();
+
+    mock.recorded_calls.lock().await.clear();
+    let cross_end_res = client
+        .post(format!(
+            "{base_url}/api/guilds/100/giveaways/{}/end",
+            ga_cross.id
+        ))
+        .header(COOKIE, &cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cross_end_res.status(), reqwest::StatusCode::OK);
+    let cross_json: serde_json::Value = cross_end_res.json().await.unwrap();
+    assert_eq!(cross_json["ended"], true);
+    assert_eq!(cross_json["announcement_status"], "cross_guild_blocked");
+
+    // ZERO messages must be posted to channel 201 or any foreign channel!
+    let cross_calls = mock.recorded_calls.lock().await.clone();
+    let cross_posts = cross_calls
+        .iter()
+        .filter(|(m, p)| {
+            *m == axum::http::Method::POST && p.starts_with("/api/v10/channels/201/messages")
+        })
+        .count();
+    assert_eq!(
+        cross_posts, 0,
+        "No message should be posted to cross-guild channel 201"
+    );
+
+    shard_manager.shutdown_all().await;
+}

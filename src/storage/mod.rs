@@ -51,6 +51,12 @@ pub enum Storage {
     Postgres(PostgresStore),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FinishGiveawayOutcome {
+    Finished(Vec<String>),
+    AlreadyEnded(Vec<String>),
+}
+
 #[derive(Clone, Debug)]
 pub struct UpdateModuleSettingsParams<'a> {
     pub guild_id: &'a str,
@@ -2762,6 +2768,16 @@ impl Storage {
             Self::Memory(store) => Ok(store.join_giveaway(giveaway_id, user_id)),
 
             Self::Postgres(store) => store.join_giveaway(giveaway_id, user_id).await,
+        }
+    }
+
+    pub async fn finish_giveaway_detailed(
+        &self,
+        giveaway_id: Uuid,
+    ) -> anyhow::Result<FinishGiveawayOutcome> {
+        match self {
+            Self::Memory(store) => store.finish_giveaway_detailed(giveaway_id),
+            Self::Postgres(store) => store.finish_giveaway_detailed(giveaway_id).await,
         }
     }
 

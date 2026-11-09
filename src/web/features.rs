@@ -1294,31 +1294,60 @@ pub async fn end_giveaway(
         return Err(ApiError::not_found("Giveaway was not found in this guild."));
     }
 
-    let winners = state
+    let outcome = state
         .app
         .storage
-        .finish_giveaway(giveaway_id)
+        .finish_giveaway_detailed(giveaway_id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let (winners, already_ended) = match outcome {
+        crate::storage::FinishGiveawayOutcome::Finished(w) => (w, false),
+        crate::storage::FinishGiveawayOutcome::AlreadyEnded(w) => (w, true),
+    };
+
+    let (announcement_status, message_id) = if already_ended {
+        ("already_ended", None)
+    } else if state.app.config.is_offline_mode() {
+        ("offline", None)
+    } else {
+        let token = &state.app.config.discord_token;
+        let http = if state.app.config.discord_api_base_url.starts_with("http://") {
+            serenity::http::HttpBuilder::new(token)
+                .proxy(&state.app.config.discord_api_base_url)
+                .ratelimiter_disabled(true)
+                .build()
+        } else {
+            serenity::all::Http::new(token)
+        };
+        let del = crate::discord::giveaway::deliver_giveaway_announcement(
+            &http,
+            &state.app,
+            &ga,
+            &winners,
+            crate::discord::giveaway::GiveawayAnnouncementKind::End,
+            Some(&session.user.id),
+        )
+        .await;
+        (del.status, del.message_id)
+    };
 
     Ok(Json(json!({
         "giveaway_id": giveaway_id,
         "winners": winners,
-        "ended": true
+        "ended": true,
+        "announcement_status": announcement_status,
+        "message_id": message_id
     })))
 }
 
 pub async fn reroll_giveaway(
     State(state): State<WebState>,
-
     Path((guild_id, giveaway_id)): Path<(String, Uuid)>,
-
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
-
     verify_csrf(&headers, &session)?;
-
     ensure_guild_access(&state, &session, &guild_id).await?;
 
     let ga = state
@@ -1357,14 +1386,36 @@ pub async fn reroll_giveaway(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
+    let (announcement_status, message_id) = if state.app.config.is_offline_mode() {
+        ("offline", None)
+    } else {
+        let token = &state.app.config.discord_token;
+        let http = if state.app.config.discord_api_base_url.starts_with("http://") {
+            serenity::http::HttpBuilder::new(token)
+                .proxy(&state.app.config.discord_api_base_url)
+                .ratelimiter_disabled(true)
+                .build()
+        } else {
+            serenity::all::Http::new(token)
+        };
+        let del = crate::discord::giveaway::deliver_giveaway_announcement(
+            &http,
+            &state.app,
+            &ga,
+            &winners,
+            crate::discord::giveaway::GiveawayAnnouncementKind::Reroll,
+            Some(&session.user.id),
+        )
+        .await;
+        (del.status, del.message_id)
+    };
+
     Ok(Json(json!({
-
         "giveaway_id": giveaway_id,
-
         "winners": winners,
-
-        "rerolled": true
-
+        "rerolled": true,
+        "announcement_status": announcement_status,
+        "message_id": message_id
     })))
 }
 

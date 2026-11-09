@@ -2704,7 +2704,10 @@ impl PostgresStore {
         Ok(true)
     }
 
-    pub async fn finish_giveaway(&self, giveaway_id: Uuid) -> anyhow::Result<Vec<String>> {
+    pub async fn finish_giveaway_detailed(
+        &self,
+        giveaway_id: Uuid,
+    ) -> anyhow::Result<crate::storage::FinishGiveawayOutcome> {
         let mut tx = self.pool.begin().await?;
 
         let ga = sqlx::query_as::<_, Giveaway>(
@@ -2735,7 +2738,9 @@ impl PostgresStore {
                         .collect()
                 })
                 .unwrap_or_default();
-            return Ok(existing);
+            return Ok(crate::storage::FinishGiveawayOutcome::AlreadyEnded(
+                existing,
+            ));
         }
 
         let participants: Vec<String> = ga
@@ -2761,7 +2766,7 @@ impl PostgresStore {
             .await?;
 
             tx.commit().await?;
-            return Ok(Vec::new());
+            return Ok(crate::storage::FinishGiveawayOutcome::Finished(Vec::new()));
         }
 
         let count = (ga.winners_count as usize).min(participants.len());
@@ -2798,7 +2803,14 @@ impl PostgresStore {
         .await?;
 
         tx.commit().await?;
-        Ok(winners)
+        Ok(crate::storage::FinishGiveawayOutcome::Finished(winners))
+    }
+
+    pub async fn finish_giveaway(&self, giveaway_id: Uuid) -> anyhow::Result<Vec<String>> {
+        match self.finish_giveaway_detailed(giveaway_id).await? {
+            crate::storage::FinishGiveawayOutcome::Finished(w)
+            | crate::storage::FinishGiveawayOutcome::AlreadyEnded(w) => Ok(w),
+        }
     }
 
     pub async fn reroll_giveaway(&self, giveaway_id: Uuid) -> anyhow::Result<Vec<String>> {
