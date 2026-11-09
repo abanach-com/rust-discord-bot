@@ -368,6 +368,7 @@ return {
                     maxItems = 250,
                 },
                 block_all_links = { type = "boolean", default = false },
+                anti_spam = { type = "boolean", default = false },
                 block_invites = { type = "boolean", default = true },
                 block_suspicious_links = { type = "boolean", default = true },
                 block_everyone_here = { type = "boolean", default = true },

@@ -11,6 +11,7 @@ use rusty_discord_bot::{
         WebState,
         auth::{
             CachedGuildPermission, LoginRateLimiter, cleanup_stale_records, ensure_guild_access,
+            ensure_manage_roles_access,
         },
         build_router,
     },
@@ -6820,6 +6821,194 @@ async fn test_revalidate_guild_permission_owner_fallback_fails_closed_on_transfe
 }
 
 #[tokio::test]
+async fn test_ensure_manage_roles_access_revocation_and_live_permissions_issue_342() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let scenario_flag = std::sync::Arc::new(AtomicUsize::new(1));
+    let flag_clone = scenario_flag.clone();
+
+    let user_id = "123456789012345678";
+    let guild_id = "987654321098765432";
+
+    let discord_mock_app = axum::Router::new()
+        .route(
+            "/guilds/{guild_id}/permissions/member/{user_id}",
+            axum::routing::get(move || {
+                let flag = flag_clone.clone();
+                async move {
+                    match flag.load(Ordering::SeqCst) {
+                        1 => (
+                            // Scenario 1: MANAGE_ROLES revoked, only MANAGE_GUILD (32) remains
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({ "permissions": "32" })),
+                        ),
+                        2 => (
+                            // Scenario 2: Endpoint returns 404, fallback to member
+                            axum::http::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({ "message": "Not Found" })),
+                        ),
+                        3 => (
+                            // Scenario 3: Newly granted MANAGE_ROLES (268435488)
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({ "permissions": "268435488" })),
+                        ),
+                        _ => (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            axum::Json(serde_json::json!({ "message": "Upstream error" })),
+                        ),
+                    }
+                }
+            }),
+        )
+        .route(
+            "/guilds/{guild_id}/members/{user_id}",
+            axum::routing::get(|| async {
+                (
+                    axum::http::StatusCode::OK,
+                    axum::Json(serde_json::json!({
+                        "user": {
+                            "id": "123456789012345678",
+                            "username": "role_guard_user"
+                        },
+                        "roles": [] // Standard Discord member response without permissions field
+                    })),
+                )
+            }),
+        )
+        .route(
+            "/guilds/{guild_id}",
+            axum::routing::get(|| async {
+                (
+                    axum::http::StatusCode::OK,
+                    axum::Json(serde_json::json!({
+                        "id": "987654321098765432",
+                        "owner_id": "555555555555555555" // Not the user
+                    })),
+                )
+            }),
+        );
+
+    let discord_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind discord mock");
+    let discord_addr = discord_listener.local_addr().expect("discord mock addr");
+    tokio::spawn(async move {
+        axum::serve(discord_listener, discord_mock_app)
+            .await
+            .unwrap();
+    });
+
+    let mut config = test_config();
+    config.discord_token = "live_bot_token_production_secret".to_string();
+    config.offline_mode = false;
+    config.discord_api_base_url = format!("http://{discord_addr}");
+
+    let app = AppState::bootstrap(config).await.expect("bootstrap");
+    let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
+    let state = WebState {
+        app,
+        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        permissions_cache,
+    };
+
+    // Session 1: Stale snapshot has MANAGE_ROLES (268435488)
+    let session_stale_role = Session {
+        user: DashboardUser {
+            id: user_id.to_owned(),
+            username: "role_guard_user".to_owned(),
+            global_name: Some("Role Guard User".to_owned()),
+            avatar: None,
+        },
+        guilds: vec![DashboardGuild {
+            id: guild_id.to_owned(),
+            name: "Role Guard Guild".to_owned(),
+            icon: None,
+            owner: false,
+            permissions: "268435488".to_owned(), // MANAGE_GUILD | MANAGE_ROLES
+        }],
+        csrf_token: "csrf_role_guard".to_owned(),
+        expires_at: Utc::now() + Duration::days(1),
+        access_token: None,
+    };
+
+    // Scenario 1: MANAGE_ROLES revoked live in Discord (returns 32)
+    scenario_flag.store(1, Ordering::SeqCst);
+    let result = ensure_manage_roles_access(&state, &session_stale_role, guild_id).await;
+    assert!(
+        result.is_err(),
+        "Revoked MANAGE_ROLES must be rejected even if snapshot has MANAGE_ROLES"
+    );
+    assert_eq!(
+        result.unwrap_err().status,
+        axum::http::StatusCode::FORBIDDEN
+    );
+
+    // Scenario 2: Endpoint returns 404, fallback member lacks permissions, owner is different -> Fail-closed
+    scenario_flag.store(2, Ordering::SeqCst);
+    let result = ensure_manage_roles_access(&state, &session_stale_role, guild_id).await;
+    assert!(
+        result.is_err(),
+        "Fallback member without permissions must fail closed and deny access"
+    );
+    assert_eq!(
+        result.unwrap_err().status,
+        axum::http::StatusCode::FORBIDDEN
+    );
+
+    // Scenario 3: Newly granted MANAGE_ROLES in Discord (user snapshot only had MANAGE_GUILD = 32)
+    scenario_flag.store(3, Ordering::SeqCst);
+    let session_promoted = Session {
+        user: DashboardUser {
+            id: user_id.to_owned(),
+            username: "role_guard_user".to_owned(),
+            global_name: Some("Role Guard User".to_owned()),
+            avatar: None,
+        },
+        guilds: vec![DashboardGuild {
+            id: guild_id.to_owned(),
+            name: "Role Guard Guild".to_owned(),
+            icon: None,
+            owner: false,
+            permissions: "32".to_owned(), // Snapshot only had MANAGE_GUILD!
+        }],
+        csrf_token: "csrf_role_guard".to_owned(),
+        expires_at: Utc::now() + Duration::days(1),
+        access_token: None,
+    };
+    let result = ensure_manage_roles_access(&state, &session_promoted, guild_id).await;
+    assert!(
+        result.is_ok(),
+        "Newly granted MANAGE_ROLES live in Discord must be permitted: {:?}",
+        result.err()
+    );
+
+    // Scenario 4: Offline mode check
+    let mut offline_config = test_config();
+    offline_config.offline_mode = true;
+    let offline_app = AppState::bootstrap(offline_config)
+        .await
+        .expect("bootstrap offline");
+    let offline_state = WebState {
+        app: offline_app,
+        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        permissions_cache: std::sync::Arc::new(dashmap::DashMap::new()),
+    };
+
+    assert!(
+        ensure_manage_roles_access(&offline_state, &session_stale_role, guild_id)
+            .await
+            .is_ok(),
+        "Offline mode with MANAGE_ROLES in snapshot should pass"
+    );
+    assert!(
+        ensure_manage_roles_access(&offline_state, &session_promoted, guild_id)
+            .await
+            .is_err(),
+        "Offline mode without MANAGE_ROLES in snapshot should fail"
+    );
+}
+
+#[tokio::test]
 async fn test_logout_revocation_success_and_lifecycle() {
     let (state, perms_cache) = test_web_state().await;
     let user_id = "user_logout_test";
@@ -8735,7 +8924,7 @@ async fn test_giveaway_cross_guild_channel_isolation_live_mode() {
         error_body["error"]
             .as_str()
             .unwrap_or("")
-            .contains("Kanał konkursu musi należeć do tej gildii")
+            .contains("Kanał musi należeć do tej gildii")
     );
 
     // Case 2: Admin A attempts POST with channel_dm (DM channel, guild_id is null)

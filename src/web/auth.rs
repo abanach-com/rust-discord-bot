@@ -748,18 +748,11 @@ pub async fn verify_thread_scope(
     Ok(())
 }
 
-pub async fn revalidate_guild_permission(
+pub async fn fetch_computed_member_permissions(
     state: &WebState,
     session: &Session,
     guild_id: &str,
-) -> Result<bool, ApiError> {
-    if state.app.config.is_offline_mode() {
-        return Ok(session
-            .guilds
-            .iter()
-            .any(|g| g.id == guild_id && can_manage(g)));
-    }
-
+) -> Result<Option<u64>, ApiError> {
     if let Some(ref access_token) = session.access_token {
         let response = state
             .app
@@ -783,8 +776,15 @@ pub async fn revalidate_guild_permission(
             .await
             .map_err(ApiError::upstream)?;
 
-        let can_manage_guild = guilds.iter().any(|g| g.id == guild_id && can_manage(g));
-        return Ok(can_manage_guild);
+        if let Some(guild) = guilds.iter().find(|g| g.id == guild_id) {
+            if guild.owner {
+                return Ok(Some(ADMINISTRATOR));
+            }
+            if let Ok(bits) = guild.permissions.parse::<u64>() {
+                return Ok(Some(bits));
+            }
+        }
+        return Ok(None);
     }
 
     // Access token was discarded at rest for security; revalidate using Bot token via Discord API.
@@ -803,6 +803,7 @@ pub async fn revalidate_guild_permission(
             reqwest::header::AUTHORIZATION,
             format!("Bot {}", state.app.config.discord_token),
         )
+        .timeout(std::time::Duration::from_secs(5))
         .send()
         .await
         .map_err(ApiError::upstream)?;
@@ -819,6 +820,7 @@ pub async fn revalidate_guild_permission(
                 reqwest::header::AUTHORIZATION,
                 format!("Bot {}", state.app.config.discord_token),
             )
+            .timeout(std::time::Duration::from_secs(5))
             .send()
             .await
             .map_err(ApiError::upstream)?
@@ -827,7 +829,7 @@ pub async fn revalidate_guild_permission(
     };
 
     if response.status() == StatusCode::NOT_FOUND || response.status() == StatusCode::FORBIDDEN {
-        return Ok(false);
+        return Ok(None);
     }
 
     if !response.status().is_success() {
@@ -836,16 +838,38 @@ pub async fn revalidate_guild_permission(
             status = %response.status(),
             guild_id,
             user_id = %session.user.id,
-            "Discord API returned non-success when revalidating permissions; failing closed"
+            "Discord API returned non-success when fetching computed member permissions; failing closed"
         );
-        return Ok(false);
+        return Ok(None);
     }
 
     let member_json: serde_json::Value = response.json().await.map_err(ApiError::upstream)?;
     if let Some(perms_str) = member_json.get("permissions").and_then(|p| p.as_str())
         && let Ok(perms) = perms_str.parse::<u64>()
     {
-        return Ok((perms & (ADMINISTRATOR | MANAGE_GUILD)) != 0);
+        return Ok(Some(perms));
+    }
+
+    // Live guild owner check fallback if the member payload does not carry computed permissions:
+    // Query GET /guilds/{guild_id} to verify if the user is currently the guild owner.
+    let guild_url = format!("{base_url}/guilds/{guild_id}");
+    if let Ok(guild_resp) = state
+        .app
+        .http_client
+        .get(&guild_url)
+        .header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bot {}", state.app.config.discord_token),
+        )
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        && guild_resp.status().is_success()
+        && let Ok(guild_json) = guild_resp.json::<serde_json::Value>().await
+        && let Some(owner_id) = guild_json.get("owner_id").and_then(|v| v.as_str())
+        && owner_id == session.user.id
+    {
+        return Ok(Some(ADMINISTRATOR));
     }
 
     // FAIL-CLOSED: A member response proves membership only. The snapshot's owner flag
@@ -856,7 +880,23 @@ pub async fn revalidate_guild_permission(
         user_id = %session.user.id,
         "Discord API member response lacked computed permissions field; failing closed"
     );
-    Ok(false)
+    Ok(None)
+}
+
+pub async fn revalidate_guild_permission(
+    state: &WebState,
+    session: &Session,
+    guild_id: &str,
+) -> Result<bool, ApiError> {
+    if state.app.config.is_offline_mode() {
+        return Ok(session
+            .guilds
+            .iter()
+            .any(|g| g.id == guild_id && can_manage(g)));
+    }
+
+    let perms = fetch_computed_member_permissions(state, session, guild_id).await?;
+    Ok(perms.is_some_and(|p| (p & (ADMINISTRATOR | MANAGE_GUILD)) != 0))
 }
 
 pub async fn cleanup_stale_records(state: &WebState) -> (usize, usize, usize) {
@@ -1002,44 +1042,27 @@ pub async fn ensure_manage_roles_access(
 ) -> Result<(), ApiError> {
     ensure_guild_member_access(state, session, guild_id).await?;
 
-    let session_has_role_mgmt = session
-        .guilds
-        .iter()
-        .any(|g| g.id == guild_id && can_manage_roles(g));
-
-    if !session_has_role_mgmt {
-        return Err(ApiError::forbidden(
-            "Wymagane uprawnienie Zarządzanie rolami lub Administrator",
-        ));
-    }
-
     if state.app.config.is_offline_mode() {
-        return Ok(());
+        let session_has_role_mgmt = session
+            .guilds
+            .iter()
+            .any(|g| g.id == guild_id && can_manage_roles(g));
+        return if session_has_role_mgmt {
+            Ok(())
+        } else {
+            Err(ApiError::forbidden(
+                "Wymagane uprawnienie Zarządzanie rolami lub Administrator",
+            ))
+        };
     }
 
-    let base_url = &state.app.config.discord_api_base_url;
-    let token = &state.app.config.discord_token;
-    let member_url = format!("{base_url}/guilds/{guild_id}/members/{}", session.user.id);
-    let response = state
-        .app
-        .http_client
-        .get(&member_url)
-        .header(reqwest::header::AUTHORIZATION, format!("Bot {token}"))
-        .send()
-        .await
-        .map_err(ApiError::upstream)?;
+    let perms = fetch_computed_member_permissions(state, session, guild_id)
+        .await?
+        .ok_or_else(|| {
+            ApiError::forbidden("Nie udało się zweryfikować uprawnień użytkownika w Discord API")
+        })?;
 
-    if !response.status().is_success() {
-        return Err(ApiError::forbidden(
-            "Nie udało się zweryfikować uprawnień użytkownika w Discord API",
-        ));
-    }
-
-    let member_json: serde_json::Value = response.json().await.map_err(ApiError::upstream)?;
-    if let Some(perms_str) = member_json.get("permissions").and_then(|p| p.as_str())
-        && let Ok(perms) = perms_str.parse::<u64>()
-        && (perms & (ADMINISTRATOR | MANAGE_ROLES)) == 0
-    {
+    if perms & (ADMINISTRATOR | MANAGE_ROLES) == 0 {
         return Err(ApiError::forbidden(
             "Wymagane uprawnienie Zarządzanie rolami lub Administrator w Discord API",
         ));
