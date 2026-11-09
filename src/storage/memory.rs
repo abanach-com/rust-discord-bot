@@ -5086,6 +5086,16 @@ impl MemoryStore {
         }
     }
 
+    pub fn record_event_dedupe_with_timestamp(
+        &self,
+        provider: &str,
+        event_id: &str,
+        processed_at: DateTime<Utc>,
+    ) {
+        let key = (provider.to_ascii_lowercase(), event_id.to_string());
+        self.integration_event_dedupes.insert(key, processed_at);
+    }
+
     pub fn record_delivery_log(&self, log: IntegrationDeliveryLog) -> IntegrationDeliveryLog {
         self.integration_delivery_logs.insert(log.id, log.clone());
 
@@ -5094,26 +5104,89 @@ impl MemoryStore {
 
     pub fn list_delivery_logs(
         &self,
-
         guild_id: &str,
-
         provider: Option<&str>,
+        limit: Option<usize>,
+        before_created_at: Option<DateTime<Utc>>,
+        before_id: Option<Uuid>,
     ) -> Vec<IntegrationDeliveryLog> {
+        let max_results = limit.unwrap_or(50).clamp(1, 100);
         let mut list: Vec<_> = self
             .integration_delivery_logs
             .iter()
             .filter(|e| {
-                e.guild_id == guild_id
-                    && provider
-                        .map(|p| e.provider.eq_ignore_ascii_case(p))
-                        .unwrap_or(true)
+                if e.guild_id != guild_id {
+                    return false;
+                }
+                if let Some(p) = provider
+                    && !e.provider.eq_ignore_ascii_case(p)
+                {
+                    return false;
+                }
+                if let Some(cutoff) = before_created_at {
+                    if e.created_at > cutoff {
+                        return false;
+                    }
+                    if e.created_at == cutoff {
+                        if let Some(bid) = before_id {
+                            if e.id >= bid {
+                                return false;
+                            }
+                        } else {
+                            return false;
+                        }
+                    }
+                }
+                true
             })
             .map(|e| e.value().clone())
             .collect();
 
-        list.sort_by_key(|a| std::cmp::Reverse(a.created_at));
-
+        list.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+        list.truncate(max_results);
         list
+    }
+
+    pub fn prune_event_dedupes(&self, before: DateTime<Utc>, limit: usize) -> u64 {
+        let max_delete = limit.clamp(1, 5000);
+        let keys: Vec<_> = self
+            .integration_event_dedupes
+            .iter()
+            .filter(|e| *e.value() < before)
+            .take(max_delete)
+            .map(|e| e.key().clone())
+            .collect();
+
+        let mut count = 0;
+        for key in keys {
+            if self.integration_event_dedupes.remove(&key).is_some() {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    pub fn prune_delivery_logs(&self, before: DateTime<Utc>, limit: usize) -> u64 {
+        let max_delete = limit.clamp(1, 5000);
+        let ids: Vec<_> = self
+            .integration_delivery_logs
+            .iter()
+            .filter(|e| e.created_at < before)
+            .take(max_delete)
+            .map(|e| e.id)
+            .collect();
+
+        let mut count = 0;
+        for id in ids {
+            if self.integration_delivery_logs.remove(&id).is_some() {
+                count += 1;
+            }
+        }
+        count
     }
 
     // Agent 04 (#93): Unified Identity

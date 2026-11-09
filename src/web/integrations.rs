@@ -204,10 +204,25 @@ pub async fn list_delivery_logs(
     ensure_guild_access(&state, &session, &guild_id).await?;
 
     let provider = params.get("provider").map(|s| s.as_str());
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .map(|l| l.clamp(1, 100));
+    let before_created_at = params.get("before_created_at").and_then(|s| {
+        let normalized = s.replace(' ', "+");
+        chrono::DateTime::parse_from_rfc3339(&normalized)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .or_else(|_| s.parse::<chrono::DateTime<chrono::Utc>>())
+            .ok()
+    });
+    let before_id = params
+        .get("before_id")
+        .and_then(|s| s.parse::<uuid::Uuid>().ok());
+
     let logs = state
         .app
         .storage
-        .list_delivery_logs(&guild_id, provider)
+        .list_delivery_logs(&guild_id, provider, limit, before_created_at, before_id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 

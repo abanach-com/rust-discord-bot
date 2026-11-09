@@ -6753,6 +6753,24 @@ impl PostgresStore {
         Ok(res.rows_affected() > 0)
     }
 
+    pub async fn record_event_dedupe_with_timestamp(
+        &self,
+        provider: &str,
+        event_id: &str,
+        processed_at: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO integration_event_dedupes (provider, event_id, processed_at) VALUES ($1, $2, $3) ON CONFLICT (provider, event_id) DO UPDATE SET processed_at = EXCLUDED.processed_at"
+        )
+        .bind(provider.to_ascii_lowercase())
+        .bind(event_id)
+        .bind(processed_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
     pub async fn record_delivery_log(
         &self,
 
@@ -6797,40 +6815,135 @@ impl PostgresStore {
 
     pub async fn list_delivery_logs(
         &self,
-
         guild_id: &str,
-
         provider: Option<&str>,
+        limit: Option<usize>,
+        before_created_at: Option<DateTime<Utc>>,
+        before_id: Option<Uuid>,
     ) -> anyhow::Result<Vec<IntegrationDeliveryLog>> {
-        let rows = if let Some(p) = provider {
-            sqlx::query_as::<_, IntegrationDeliveryLog>(
-
-                "SELECT * FROM integration_delivery_logs WHERE guild_id = $1 AND provider = $2 ORDER BY created_at DESC"
-
-            )
-
-            .bind(guild_id)
-
-            .bind(p)
-
-            .fetch_all(&self.pool)
-
-            .await?
-        } else {
-            sqlx::query_as::<_, IntegrationDeliveryLog>(
-
-                "SELECT * FROM integration_delivery_logs WHERE guild_id = $1 ORDER BY created_at DESC"
-
-            )
-
-            .bind(guild_id)
-
-            .fetch_all(&self.pool)
-
-            .await?
+        let max_results = limit.unwrap_or(50).clamp(1, 100) as i64;
+        let rows = match (provider, before_created_at, before_id) {
+            (Some(p), Some(ts), Some(id)) => {
+                sqlx::query_as::<_, IntegrationDeliveryLog>(
+                    r#"
+                    SELECT * FROM integration_delivery_logs
+                    WHERE guild_id = $1 AND provider = $2
+                      AND (created_at < $3 OR (created_at = $3 AND id < $4))
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT $5
+                    "#,
+                )
+                .bind(guild_id)
+                .bind(p)
+                .bind(ts)
+                .bind(id)
+                .bind(max_results)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (Some(p), _, _) => {
+                sqlx::query_as::<_, IntegrationDeliveryLog>(
+                    r#"
+                    SELECT * FROM integration_delivery_logs
+                    WHERE guild_id = $1 AND provider = $2
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT $3
+                    "#,
+                )
+                .bind(guild_id)
+                .bind(p)
+                .bind(max_results)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (None, Some(ts), Some(id)) => {
+                sqlx::query_as::<_, IntegrationDeliveryLog>(
+                    r#"
+                    SELECT * FROM integration_delivery_logs
+                    WHERE guild_id = $1
+                      AND (created_at < $3 OR (created_at = $3 AND id < $4))
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT $4
+                    "#,
+                )
+                .bind(guild_id)
+                .bind(ts)
+                .bind(id)
+                .bind(max_results)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (None, _, _) => {
+                sqlx::query_as::<_, IntegrationDeliveryLog>(
+                    r#"
+                    SELECT * FROM integration_delivery_logs
+                    WHERE guild_id = $1
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT $2
+                    "#,
+                )
+                .bind(guild_id)
+                .bind(max_results)
+                .fetch_all(&self.pool)
+                .await?
+            }
         };
 
         Ok(rows)
+    }
+
+    pub async fn prune_event_dedupes(
+        &self,
+        before: DateTime<Utc>,
+        limit: usize,
+    ) -> anyhow::Result<u64> {
+        let max_delete = limit.clamp(1, 5000) as i64;
+        let res = sqlx::query(
+            r#"
+            WITH old AS (
+                SELECT provider, event_id FROM integration_event_dedupes
+                WHERE processed_at < $1
+                ORDER BY processed_at
+                LIMIT $2
+            )
+            DELETE FROM integration_event_dedupes d
+            USING old
+            WHERE d.provider = old.provider AND d.event_id = old.event_id
+            "#,
+        )
+        .bind(before)
+        .bind(max_delete)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(res.rows_affected())
+    }
+
+    pub async fn prune_delivery_logs(
+        &self,
+        before: DateTime<Utc>,
+        limit: usize,
+    ) -> anyhow::Result<u64> {
+        let max_delete = limit.clamp(1, 5000) as i64;
+        let res = sqlx::query(
+            r#"
+            WITH old AS (
+                SELECT id FROM integration_delivery_logs
+                WHERE created_at < $1
+                ORDER BY created_at, id
+                LIMIT $2
+            )
+            DELETE FROM integration_delivery_logs l
+            USING old
+            WHERE l.id = old.id
+            "#,
+        )
+        .bind(before)
+        .bind(max_delete)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(res.rows_affected())
     }
 
     // Agent 04 (#93): Unified Identity

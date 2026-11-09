@@ -20,7 +20,10 @@ use rusty_discord_bot::{
     },
     session::{DashboardGuild, DashboardUser},
     state::AppState,
-    storage::{AiKnowledgeDocument, IntegrationConnection, LinkedAccount},
+    storage::{
+        AiKnowledgeDocument, IntegrationConnection, IntegrationDeliveryLog, LinkedAccount,
+        run_integrations_retention_janitor,
+    },
     web::{
         WebState,
         auth::{CachedGuildPermission, LoginRateLimiter},
@@ -2202,4 +2205,303 @@ async fn test_github_thread_mapping_and_telegram_bridge_tenant_isolation_issues_
         .unwrap();
     assert!(stored_bridge.is_some());
     assert_eq!(stored_bridge.unwrap().secret_token, "tg_sec_super_secret");
+}
+
+#[tokio::test]
+async fn test_webhook_dedupe_and_delivery_logs_retention_and_pagination_issue_346() {
+    let (state, _) = test_web_state().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let base_url = format!("http://{addr}");
+    let client = reqwest::Client::new();
+
+    let guild_a = "111222333444555666";
+    let guild_b = "999888777666555444";
+    let user_id = "555666777888999000";
+
+    let session_id = "test_retention_session_token";
+    let csrf_token = "test_retention_csrf_token";
+    let session = rusty_discord_bot::session::Session {
+        user: DashboardUser {
+            id: user_id.to_string(),
+            username: "retention_admin".to_string(),
+            avatar: None,
+            global_name: None,
+        },
+        guilds: vec![DashboardGuild {
+            id: guild_a.to_string(),
+            name: "Guild A".to_string(),
+            icon: None,
+            owner: true,
+            permissions: "8".to_string(), // ADMINISTRATOR
+        }],
+        expires_at: Utc::now() + Duration::hours(2),
+        access_token: None,
+        csrf_token: csrf_token.to_string(),
+    };
+    state
+        .app
+        .sessions
+        .save_session(
+            session_id,
+            session.user,
+            session.guilds,
+            session.csrf_token,
+            session.expires_at,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let session_cookie = format!("rusty_discord_bot_session={session_id}");
+
+    // 1. Test event dedupe retention & pruning
+    let now = Utc::now();
+    let old_timestamp = now - Duration::days(45);
+
+    // Record old event with backdated timestamp and fresh event directly in storage
+    state
+        .app
+        .storage
+        .record_event_dedupe_with_timestamp("github", "evt_old_1", old_timestamp)
+        .await
+        .unwrap();
+    state
+        .app
+        .storage
+        .check_and_record_event_dedupe("github", "evt_fresh_1")
+        .await
+        .unwrap();
+
+    // Pruning with 30-day cutoff
+    let dedupe_cutoff = now - Duration::days(30);
+    let pruned_dedupes = state
+        .app
+        .storage
+        .prune_event_dedupes(dedupe_cutoff, 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        pruned_dedupes, 1,
+        "Exactly 1 old dedupe record must be pruned"
+    );
+
+    // Fresh event must still be recognized as duplicate
+    let fresh_replay = state
+        .app
+        .storage
+        .check_and_record_event_dedupe("github", "evt_fresh_1")
+        .await
+        .unwrap();
+    assert!(
+        !fresh_replay,
+        "Fresh event within retention must remain duplicate"
+    );
+
+    // Pruned old event can now be accepted anew
+    let old_reaccepted = state
+        .app
+        .storage
+        .check_and_record_event_dedupe("github", "evt_old_1")
+        .await
+        .unwrap();
+    assert!(
+        old_reaccepted,
+        "Pruned old event can be accepted again without collision"
+    );
+
+    // 2. Test delivery log retention & pruning
+    let old_log_id = Uuid::new_v4();
+    let fresh_log_id = Uuid::new_v4();
+
+    state
+        .app
+        .storage
+        .record_delivery_log(IntegrationDeliveryLog {
+            id: old_log_id,
+            guild_id: guild_a.to_string(),
+            provider: "github".to_string(),
+            event_type: "push".to_string(),
+            status: "delivered".to_string(),
+            error_message: None,
+            payload_summary: serde_json::json!({"action": "old_test"}),
+            created_at: now - Duration::days(120),
+        })
+        .await
+        .unwrap();
+
+    state
+        .app
+        .storage
+        .record_delivery_log(IntegrationDeliveryLog {
+            id: fresh_log_id,
+            guild_id: guild_a.to_string(),
+            provider: "github".to_string(),
+            event_type: "push".to_string(),
+            status: "delivered".to_string(),
+            error_message: None,
+            payload_summary: serde_json::json!({"action": "fresh_test"}),
+            created_at: now,
+        })
+        .await
+        .unwrap();
+
+    let logs_cutoff = now - Duration::days(90);
+    let pruned_logs = state
+        .app
+        .storage
+        .prune_delivery_logs(logs_cutoff, 100)
+        .await
+        .unwrap();
+    assert_eq!(pruned_logs, 1, "Exactly 1 old delivery log must be pruned");
+
+    // 3. Test list_delivery_logs pagination, ordering and tenant isolation
+    // Populate 70 logs for guild_a and 5 logs for guild_b
+    for i in 0..70 {
+        let ts = now - Duration::seconds(100 - i);
+        state
+            .app
+            .storage
+            .record_delivery_log(IntegrationDeliveryLog {
+                id: Uuid::new_v4(),
+                guild_id: guild_a.to_string(),
+                provider: if i % 2 == 0 { "github" } else { "twitch" }.to_string(),
+                event_type: "test_event".to_string(),
+                status: "delivered".to_string(),
+                error_message: None,
+                payload_summary: serde_json::json!({"item": i}),
+                created_at: ts,
+            })
+            .await
+            .unwrap();
+    }
+    for i in 0..5 {
+        state
+            .app
+            .storage
+            .record_delivery_log(IntegrationDeliveryLog {
+                id: Uuid::new_v4(),
+                guild_id: guild_b.to_string(),
+                provider: "github".to_string(),
+                event_type: "cross_tenant_event".to_string(),
+                status: "delivered".to_string(),
+                error_message: None,
+                payload_summary: serde_json::json!({"cross": i}),
+                created_at: now,
+            })
+            .await
+            .unwrap();
+    }
+
+    // Default fetch: must be bounded (default 50 <= 100), all for guild_a
+    let resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/integrations/deliveries"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let logs: Vec<IntegrationDeliveryLog> = resp.json().await.unwrap();
+    assert_eq!(logs.len(), 50, "Default query must be bounded to 50 logs");
+    assert!(
+        logs.iter().all(|l| l.guild_id == guild_a),
+        "All returned logs must belong strictly to requested guild_a"
+    );
+
+    // Verify deterministic descending ordering
+    for w in logs.windows(2) {
+        assert!(
+            w[0].created_at >= w[1].created_at,
+            "Logs must be sorted descending by created_at"
+        );
+    }
+
+    // Keyset pagination: request first 10, then next 10
+    let page1_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/integrations/deliveries?limit=10"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    let page1: Vec<IntegrationDeliveryLog> = page1_resp.json().await.unwrap();
+    assert_eq!(page1.len(), 10);
+
+    let last_p1 = &page1[9];
+    let encoded_ts = last_p1.created_at.to_rfc3339().replace('+', "%2B");
+    let page2_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/integrations/deliveries?limit=10&before_created_at={}&before_id={}",
+            encoded_ts,
+            last_p1.id
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    let page2: Vec<IntegrationDeliveryLog> = page2_resp.json().await.unwrap();
+    assert_eq!(page2.len(), 10);
+
+    // Verify zero overlap between page 1 and page 2
+    let page1_ids: HashSet<_> = page1.iter().map(|l| l.id).collect();
+    for item in &page2 {
+        assert!(
+            !page1_ids.contains(&item.id),
+            "Keyset cursor pagination must produce non-overlapping pages"
+        );
+    }
+
+    // Provider filter test
+    let twitch_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/integrations/deliveries?provider=twitch&limit=100"
+        ))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    let twitch_logs: Vec<IntegrationDeliveryLog> = twitch_resp.json().await.unwrap();
+    assert!(
+        twitch_logs
+            .iter()
+            .all(|l| l.provider.eq_ignore_ascii_case("twitch")),
+        "Filtered query must only return twitch logs"
+    );
+
+    // 4. Test run_integrations_retention_janitor background loop and graceful shutdown
+    let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
+    let janitor_task = tokio::spawn(run_integrations_retention_janitor(
+        state.app.storage.clone(),
+        shutdown_rx,
+        std::time::Duration::from_millis(50),
+        chrono::Duration::days(30),
+        chrono::Duration::days(90),
+    ));
+
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let _ = shutdown_tx.send(());
+
+    let shutdown_result =
+        tokio::time::timeout(std::time::Duration::from_secs(2), janitor_task).await;
+    assert!(
+        shutdown_result.is_ok(),
+        "Integrations retention janitor must terminate cleanly upon shutdown broadcast"
+    );
 }

@@ -671,6 +671,59 @@ pub async fn run_ai_metering_idempotency_janitor(
     }
 }
 
+/// Background janitor periodically pruning expired integration dedupe records and delivery logs (#346).
+pub async fn run_integrations_retention_janitor(
+    storage: Storage,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+    interval: std::time::Duration,
+    dedupe_retention: chrono::Duration,
+    logs_retention: chrono::Duration,
+) {
+    let mut timer = tokio::time::interval(interval);
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    tracing::info!(
+        interval_secs = interval.as_secs(),
+        dedupe_retention_days = dedupe_retention.num_days(),
+        logs_retention_days = logs_retention.num_days(),
+        "started integrations retention janitor"
+    );
+
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.recv() => {
+                tracing::info!("integrations retention janitor received shutdown signal");
+                break;
+            }
+            _ = timer.tick() => {
+                let now = chrono::Utc::now();
+                let dedupe_cutoff = now - dedupe_retention;
+                let logs_cutoff = now - logs_retention;
+
+                match storage.prune_event_dedupes(dedupe_cutoff, 1000).await {
+                    Ok(n) if n > 0 => {
+                        tracing::info!(pruned = n, "pruned expired integration event dedupe records");
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        tracing::warn!(?err, "failed to prune expired integration event dedupe records");
+                    }
+                }
+
+                match storage.prune_delivery_logs(logs_cutoff, 1000).await {
+                    Ok(n) if n > 0 => {
+                        tracing::info!(pruned = n, "pruned expired integration delivery logs");
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        tracing::warn!(?err, "failed to prune expired integration delivery logs");
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct MemberIdentityRecord {
     pub id: Uuid,
@@ -5055,6 +5108,25 @@ impl Storage {
         }
     }
 
+    pub async fn record_event_dedupe_with_timestamp(
+        &self,
+        provider: &str,
+        event_id: &str,
+        processed_at: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Memory(store) => {
+                store.record_event_dedupe_with_timestamp(provider, event_id, processed_at);
+                Ok(())
+            }
+            Self::Postgres(store) => {
+                store
+                    .record_event_dedupe_with_timestamp(provider, event_id, processed_at)
+                    .await
+            }
+        }
+    }
+
     pub async fn record_delivery_log(
         &self,
 
@@ -5069,15 +5141,47 @@ impl Storage {
 
     pub async fn list_delivery_logs(
         &self,
-
         guild_id: &str,
-
         provider: Option<&str>,
+        limit: Option<usize>,
+        before_created_at: Option<chrono::DateTime<chrono::Utc>>,
+        before_id: Option<uuid::Uuid>,
     ) -> anyhow::Result<Vec<IntegrationDeliveryLog>> {
         match self {
-            Self::Memory(store) => Ok(store.list_delivery_logs(guild_id, provider)),
+            Self::Memory(store) => Ok(store.list_delivery_logs(
+                guild_id,
+                provider,
+                limit,
+                before_created_at,
+                before_id,
+            )),
+            Self::Postgres(store) => {
+                store
+                    .list_delivery_logs(guild_id, provider, limit, before_created_at, before_id)
+                    .await
+            }
+        }
+    }
 
-            Self::Postgres(store) => store.list_delivery_logs(guild_id, provider).await,
+    pub async fn prune_event_dedupes(
+        &self,
+        before: chrono::DateTime<chrono::Utc>,
+        limit: usize,
+    ) -> anyhow::Result<u64> {
+        match self {
+            Self::Memory(store) => Ok(store.prune_event_dedupes(before, limit)),
+            Self::Postgres(store) => store.prune_event_dedupes(before, limit).await,
+        }
+    }
+
+    pub async fn prune_delivery_logs(
+        &self,
+        before: chrono::DateTime<chrono::Utc>,
+        limit: usize,
+    ) -> anyhow::Result<u64> {
+        match self {
+            Self::Memory(store) => Ok(store.prune_delivery_logs(before, limit)),
+            Self::Postgres(store) => store.prune_delivery_logs(before, limit).await,
         }
     }
 
