@@ -5553,10 +5553,27 @@ impl MemoryStore {
 
     // Agent 16 (#105): Social Publisher
 
-    pub fn create_social_draft(&self, draft: SocialPublicationDraft) -> SocialPublicationDraft {
+    pub fn create_social_draft(
+        &self,
+        draft: SocialPublicationDraft,
+    ) -> anyhow::Result<SocialPublicationDraft> {
         self.social_drafts.insert(draft.id, draft.clone());
 
-        draft
+        if let Err(err) = self.record_audit(
+            Some(&draft.guild_id),
+            Some(&draft.author_id),
+            "social_publisher",
+            "draft_created",
+            serde_json::json!({
+                "draft_id": draft.id,
+                "author_id": draft.author_id,
+            }),
+        ) {
+            self.social_drafts.remove(&draft.id);
+            return Err(err);
+        }
+
+        Ok(draft)
     }
 
     pub fn list_social_drafts(&self, guild_id: &str) -> Vec<SocialPublicationDraft> {
@@ -5569,34 +5586,55 @@ impl MemoryStore {
 
     pub fn approve_social_draft(
         &self,
-
         guild_id: &str,
-
         id: Uuid,
-
         approver_id: &str,
-    ) -> Result<SocialPublicationDraft, SocialDraftApprovalError> {
-        let mut draft = self
-            .social_drafts
-            .get_mut(&id)
-            .ok_or(SocialDraftApprovalError::NotFound)?;
+    ) -> anyhow::Result<Result<SocialPublicationDraft, SocialDraftApprovalError>> {
+        let mut draft = match self.social_drafts.get_mut(&id) {
+            Some(d) => d,
+            None => return Ok(Err(SocialDraftApprovalError::NotFound)),
+        };
 
         if draft.guild_id != guild_id {
-            return Err(SocialDraftApprovalError::NotFound);
+            return Ok(Err(SocialDraftApprovalError::NotFound));
         }
 
         if draft.author_id == approver_id {
-            return Err(SocialDraftApprovalError::SelfApproval);
+            return Ok(Err(SocialDraftApprovalError::SelfApproval));
         }
 
         if draft.status != "draft" || draft.approved_by.is_some() {
-            return Err(SocialDraftApprovalError::AlreadyDecided);
+            return Ok(Err(SocialDraftApprovalError::AlreadyDecided));
         }
+
+        let previous_status = draft.status.clone();
+        let previous_approved_by = draft.approved_by.clone();
 
         draft.approved_by = Some(approver_id.to_string());
         draft.status = "approved".to_string();
+        let approved_draft = draft.clone();
 
-        Ok(draft.clone())
+        drop(draft);
+
+        if let Err(err) = self.record_audit(
+            Some(guild_id),
+            Some(approver_id),
+            "social_publisher",
+            "draft_approved",
+            serde_json::json!({
+                "draft_id": id,
+                "author_id": approved_draft.author_id,
+                "approver_id": approver_id,
+            }),
+        ) {
+            if let Some(mut draft) = self.social_drafts.get_mut(&id) {
+                draft.status = previous_status;
+                draft.approved_by = previous_approved_by;
+            }
+            return Err(err);
+        }
+
+        Ok(Ok(approved_draft))
     }
 
     // Agent 17 & 18 (#106): AI + MCP

@@ -7940,53 +7940,54 @@ impl PostgresStore {
 
     pub async fn create_social_draft(
         &self,
-
         draft: SocialPublicationDraft,
     ) -> anyhow::Result<SocialPublicationDraft> {
+        let mut tx = self.pool.begin().await?;
+
         let row = sqlx::query_as::<_, SocialPublicationDraft>(
-
             r#"
-
             INSERT INTO social_publication_drafts (id, guild_id, author_id, content, media_urls, targets, scheduled_at, approved_by, status, created_at)
-
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-
             RETURNING *
-
-            "#
-
+            "#,
         )
-
         .bind(draft.id)
-
         .bind(&draft.guild_id)
-
         .bind(&draft.author_id)
-
         .bind(&draft.content)
-
         .bind(&draft.media_urls)
-
         .bind(&draft.targets)
-
         .bind(draft.scheduled_at)
-
         .bind(&draft.approved_by)
-
         .bind(&draft.status)
-
         .bind(draft.created_at)
-
-        .fetch_one(&self.pool)
-
+        .fetch_one(&mut *tx)
         .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO audit_events (guild_id, actor_id, module_id, event, data)
+            VALUES ($1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(&row.guild_id)
+        .bind(&row.author_id)
+        .bind("social_publisher")
+        .bind("draft_created")
+        .bind(serde_json::json!({
+            "draft_id": row.id,
+            "author_id": row.author_id,
+        }))
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
 
         Ok(row)
     }
 
     pub async fn list_social_drafts(
         &self,
-
         guild_id: &str,
     ) -> anyhow::Result<Vec<SocialPublicationDraft>> {
         let rows = sqlx::query_as::<_, SocialPublicationDraft>(
@@ -8001,13 +8002,12 @@ impl PostgresStore {
 
     pub async fn approve_social_draft(
         &self,
-
         guild_id: &str,
-
         id: Uuid,
-
         approver_id: &str,
     ) -> anyhow::Result<Result<SocialPublicationDraft, SocialDraftApprovalError>> {
+        let mut tx = self.pool.begin().await?;
+
         let updated = sqlx::query_as::<_, SocialPublicationDraft>(
             "UPDATE social_publication_drafts \
              SET approved_by = $1, status = 'approved' \
@@ -8018,10 +8018,27 @@ impl PostgresStore {
         .bind(approver_id)
         .bind(id)
         .bind(guild_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
 
         if let Some(draft) = updated {
+            sqlx::query(
+                "INSERT INTO audit_events (guild_id, actor_id, module_id, event, data) \
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(guild_id)
+            .bind(approver_id)
+            .bind("social_publisher")
+            .bind("draft_approved")
+            .bind(serde_json::json!({
+                "draft_id": id,
+                "author_id": draft.author_id,
+                "approver_id": approver_id,
+            }))
+            .execute(&mut *tx)
+            .await?;
+
+            tx.commit().await?;
             return Ok(Ok(draft));
         }
 
@@ -8039,7 +8056,7 @@ impl PostgresStore {
         )
         .bind(id)
         .bind(guild_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
 
         match existing {

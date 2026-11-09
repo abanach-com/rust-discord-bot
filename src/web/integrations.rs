@@ -907,21 +907,6 @@ pub async fn create_social_draft(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    let _ = state
-        .app
-        .storage
-        .record_audit(
-            Some(&saved.guild_id),
-            Some(&saved.author_id),
-            "social_publisher",
-            "draft_created",
-            json!({
-                "draft_id": saved.id,
-                "author_id": saved.author_id,
-            }),
-        )
-        .await;
-
     Ok(Json(saved))
 }
 
@@ -956,22 +941,6 @@ pub async fn approve_social_draft(
             ));
         }
     };
-
-    let _ = state
-        .app
-        .storage
-        .record_audit(
-            Some(&guild_id),
-            Some(&session.user.id),
-            "social_publisher",
-            "draft_approved",
-            json!({
-                "draft_id": draft_id,
-                "author_id": approved.author_id,
-                "approver_id": session.user.id,
-            }),
-        )
-        .await;
 
     Ok(Json(approved))
 }

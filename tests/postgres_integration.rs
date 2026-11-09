@@ -3808,4 +3808,154 @@ async fn test_postgres_integration_suite() {
         sp_reapprove_res,
         Err(SocialDraftApprovalError::AlreadyDecided)
     );
+
+    // Verify exactly two audit events exist for sp_guild_id: draft_created and draft_approved
+    let sp_audit_events = store
+        .list_audit_events(&sp_guild_id, 10)
+        .await
+        .expect("list audit events");
+    assert_eq!(
+        sp_audit_events.len(),
+        2,
+        "must have exactly draft_created and draft_approved"
+    );
+    assert!(sp_audit_events.iter().any(|e| {
+        e.module_id == "social_publisher"
+            && e.event == "draft_created"
+            && e.actor_id.as_deref() == Some(sp_author)
+            && e.data["draft_id"] == json!(sp_created.id)
+            && e.data["author_id"] == json!(sp_author)
+    }));
+    assert!(sp_audit_events.iter().any(|e| {
+        e.module_id == "social_publisher"
+            && e.event == "draft_approved"
+            && e.actor_id.as_deref() == Some(sp_approver)
+            && e.data["draft_id"] == json!(sp_created.id)
+            && e.data["author_id"] == json!(sp_author)
+            && e.data["approver_id"] == json!(sp_approver)
+    }));
+
+    // 6. Agent 16 (#341): Fault injection & transactional rollback verification
+    let fault_guild_create = format!("pg_fault_guild_create_{}", Uuid::new_v4().simple());
+    let fault_guild_approve = format!("pg_fault_guild_approve_{}", Uuid::new_v4().simple());
+
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION fail_audit_for_fault_test() RETURNS trigger AS $$
+        BEGIN
+            IF NEW.event = 'draft_created' AND NEW.guild_id LIKE 'pg_fault_guild_create_%' THEN
+                RAISE EXCEPTION 'Simulated audit insertion failure for draft creation';
+            END IF;
+            IF NEW.event = 'draft_approved' AND NEW.guild_id LIKE 'pg_fault_guild_approve_%' THEN
+                RAISE EXCEPTION 'Simulated audit insertion failure for draft approval';
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        DROP TRIGGER IF EXISTS trg_fail_audit_for_fault_test ON audit_events;
+        CREATE TRIGGER trg_fail_audit_for_fault_test
+        BEFORE INSERT ON audit_events
+        FOR EACH ROW
+        EXECUTE FUNCTION fail_audit_for_fault_test();
+        "#,
+    )
+    .execute(store.pool())
+    .await
+    .expect("setup audit failure trigger");
+
+    // 6a. Creation failure rollback test
+    let fault_draft_create = SocialPublicationDraft {
+        id: Uuid::new_v4(),
+        guild_id: fault_guild_create.clone(),
+        author_id: "fault_author".to_string(),
+        content: "Draft that should rollback on create".to_string(),
+        media_urls: json!([]),
+        targets: json!(["discord"]),
+        scheduled_at: None,
+        approved_by: None,
+        status: "draft".to_string(),
+        created_at: Utc::now(),
+    };
+    let create_fail_res = store.create_social_draft(fault_draft_create).await;
+    assert!(
+        create_fail_res.is_err(),
+        "create_social_draft must fail when audit logging fails"
+    );
+    let create_rolled_back_drafts = store.list_social_drafts(&fault_guild_create).await.unwrap();
+    assert!(
+        create_rolled_back_drafts.is_empty(),
+        "draft must not be committed to PostgreSQL when audit fails"
+    );
+
+    // 6b. Approval failure rollback test
+    let fault_draft_approve = SocialPublicationDraft {
+        id: Uuid::new_v4(),
+        guild_id: fault_guild_approve.clone(),
+        author_id: "fault_author_2".to_string(),
+        content: "Draft that should rollback on approve".to_string(),
+        media_urls: json!([]),
+        targets: json!(["discord"]),
+        scheduled_at: None,
+        approved_by: None,
+        status: "draft".to_string(),
+        created_at: Utc::now(),
+    };
+    let created_for_approval = store
+        .create_social_draft(fault_draft_approve)
+        .await
+        .expect("draft create should succeed when trigger does not match guild");
+
+    let approve_fail_res = store
+        .approve_social_draft(
+            &fault_guild_approve,
+            created_for_approval.id,
+            "fault_approver_2",
+        )
+        .await;
+    assert!(
+        approve_fail_res.is_err(),
+        "approve_social_draft must fail when audit logging fails"
+    );
+
+    let approve_rolled_back = store
+        .list_social_drafts(&fault_guild_approve)
+        .await
+        .unwrap();
+    assert_eq!(approve_rolled_back.len(), 1);
+    assert_eq!(
+        approve_rolled_back[0].status, "draft",
+        "draft status must remain 'draft' after approval audit failure"
+    );
+    assert_eq!(
+        approve_rolled_back[0].approved_by, None,
+        "draft approved_by must remain None after approval audit failure"
+    );
+
+    // Clean up fault injection trigger
+    sqlx::query(
+        r#"
+        DROP TRIGGER IF EXISTS trg_fail_audit_for_fault_test ON audit_events;
+        DROP FUNCTION IF EXISTS fail_audit_for_fault_test();
+        "#,
+    )
+    .execute(store.pool())
+    .await
+    .expect("cleanup audit failure trigger");
+
+    // After removing trigger, approval should succeed cleanly
+    let approve_retry_res = store
+        .approve_social_draft(
+            &fault_guild_approve,
+            created_for_approval.id,
+            "fault_approver_2",
+        )
+        .await
+        .expect("approval query should succeed")
+        .expect("approval should succeed");
+    assert_eq!(approve_retry_res.status, "approved");
+    assert_eq!(
+        approve_retry_res.approved_by,
+        Some("fault_approver_2".to_string())
+    );
 }

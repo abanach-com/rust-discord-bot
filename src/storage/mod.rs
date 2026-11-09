@@ -5544,40 +5544,32 @@ impl Storage {
 
     pub async fn create_social_draft(
         &self,
-
         draft: SocialPublicationDraft,
     ) -> anyhow::Result<SocialPublicationDraft> {
         match self {
-            Self::Memory(store) => Ok(store.create_social_draft(draft)),
-
+            Self::Memory(store) => store.create_social_draft(draft),
             Self::Postgres(store) => store.create_social_draft(draft).await,
         }
     }
 
     pub async fn list_social_drafts(
         &self,
-
         guild_id: &str,
     ) -> anyhow::Result<Vec<SocialPublicationDraft>> {
         match self {
             Self::Memory(store) => Ok(store.list_social_drafts(guild_id)),
-
             Self::Postgres(store) => store.list_social_drafts(guild_id).await,
         }
     }
 
     pub async fn approve_social_draft(
         &self,
-
         guild_id: &str,
-
         id: Uuid,
-
         approver_id: &str,
     ) -> anyhow::Result<Result<SocialPublicationDraft, SocialDraftApprovalError>> {
         match self {
-            Self::Memory(store) => Ok(store.approve_social_draft(guild_id, id, approver_id)),
-
+            Self::Memory(store) => store.approve_social_draft(guild_id, id, approver_id),
             Self::Postgres(store) => store.approve_social_draft(guild_id, id, approver_id).await,
         }
     }
@@ -8961,5 +8953,124 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(reapprove_res, Err(SocialDraftApprovalError::AlreadyDecided));
+
+        // 6. Verify audit log integrity
+        let events = store.list_audit_events(guild_id, 10).await.unwrap();
+        assert_eq!(
+            events.len(),
+            2,
+            "must have draft_created and draft_approved"
+        );
+        assert!(events.iter().any(|e| {
+            e.module_id == "social_publisher"
+                && e.event == "draft_created"
+                && e.actor_id.as_deref() == Some(author_id)
+                && e.data["draft_id"] == serde_json::json!(created.id)
+                && e.data["author_id"] == serde_json::json!(author_id)
+        }));
+        assert!(events.iter().any(|e| {
+            e.module_id == "social_publisher"
+                && e.event == "draft_approved"
+                && e.actor_id.as_deref() == Some(approver_id)
+                && e.data["draft_id"] == serde_json::json!(created.id)
+                && e.data["author_id"] == serde_json::json!(author_id)
+                && e.data["approver_id"] == serde_json::json!(approver_id)
+        }));
+    }
+
+    #[tokio::test]
+    async fn test_social_draft_audit_failure_atomic_rollback_issue_341() {
+        let store = Storage::memory();
+        let guild_id = "100000000000000002";
+        let author_id = "author_rollback_test";
+        let approver_id = "approver_rollback_test";
+
+        let draft_1 = SocialPublicationDraft {
+            id: Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            author_id: author_id.to_string(),
+            content: "Draft to rollback on create".to_string(),
+            media_urls: serde_json::json!([]),
+            targets: serde_json::json!(["discord"]),
+            scheduled_at: None,
+            approved_by: None,
+            status: "draft".to_string(),
+            created_at: Utc::now(),
+        };
+
+        // 1. Injected audit failure on create must rollback
+        store.inject_audit_failure(true);
+        let create_err = store.create_social_draft(draft_1).await;
+        assert!(create_err.is_err(), "create must fail when audit fails");
+        let drafts_after_fail = store.list_social_drafts(guild_id).await.unwrap();
+        assert!(
+            drafts_after_fail.is_empty(),
+            "draft must be rolled back on audit failure"
+        );
+        assert_eq!(
+            store.list_audit_events(guild_id, 10).await.unwrap().len(),
+            0
+        );
+
+        // 2. Normal create succeeds and writes audit
+        store.inject_audit_failure(false);
+        let draft_2 = SocialPublicationDraft {
+            id: Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            author_id: author_id.to_string(),
+            content: "Valid draft".to_string(),
+            media_urls: serde_json::json!([]),
+            targets: serde_json::json!(["discord"]),
+            scheduled_at: None,
+            approved_by: None,
+            status: "draft".to_string(),
+            created_at: Utc::now(),
+        };
+        let created = store.create_social_draft(draft_2).await.unwrap();
+        assert_eq!(created.status, "draft");
+        assert_eq!(
+            store.list_audit_events(guild_id, 10).await.unwrap().len(),
+            1
+        );
+
+        // 3. Injected audit failure on approve must rollback draft status
+        store.inject_audit_failure(true);
+        let approve_err = store
+            .approve_social_draft(guild_id, created.id, approver_id)
+            .await;
+        assert!(approve_err.is_err(), "approve must fail when audit fails");
+
+        let drafts_after_approve_fail = store.list_social_drafts(guild_id).await.unwrap();
+        assert_eq!(drafts_after_approve_fail.len(), 1);
+        assert_eq!(
+            drafts_after_approve_fail[0].status, "draft",
+            "draft status must rollback to 'draft'"
+        );
+        assert_eq!(
+            drafts_after_approve_fail[0].approved_by, None,
+            "draft approved_by must rollback to None"
+        );
+        // Still only 1 audit event (draft_created)
+        assert_eq!(
+            store.list_audit_events(guild_id, 10).await.unwrap().len(),
+            1
+        );
+
+        // 4. Normal approve succeeds and writes second audit
+        store.inject_audit_failure(false);
+        let approved = store
+            .approve_social_draft(guild_id, created.id, approver_id)
+            .await
+            .unwrap()
+            .expect("approval should succeed");
+        assert_eq!(approved.status, "approved");
+        assert_eq!(approved.approved_by, Some(approver_id.to_string()));
+
+        let final_events = store.list_audit_events(guild_id, 10).await.unwrap();
+        assert_eq!(
+            final_events.len(),
+            2,
+            "must have draft_created and draft_approved"
+        );
     }
 }
