@@ -47,6 +47,54 @@ impl MemorySchedulerStore {
         CreateJobOutcome::Created(Box::new(job))
     }
 
+    pub async fn create_job_with_audit(
+        &self,
+        storage: &crate::storage::Storage,
+        job: NewScheduledJob,
+        max_jobs: u16,
+    ) -> anyhow::Result<CreateJobOutcome> {
+        let job = {
+            let jobs = self.lock();
+            let pending_count = jobs
+                .values()
+                .filter(|existing| {
+                    existing.guild_id == job.guild_id
+                        && existing.creator_user_id == job.creator_user_id
+                        && existing.is_pending()
+                })
+                .count();
+
+            if pending_count >= usize::from(max_jobs) {
+                return Ok(CreateJobOutcome::LimitReached { limit: max_jobs });
+            }
+
+            job.materialize(Utc::now())
+        };
+
+        storage
+            .record_audit(
+                Some(&job.guild_id),
+                Some(&job.creator_user_id),
+                &job.module_id,
+                "scheduled_job_created",
+                serde_json::json!({
+                    "job_id": job.id,
+                    "channel_id": job.channel_id,
+                    "run_at": job.run_at,
+                    "repeat_every_seconds": job.repeat_every_seconds,
+                    "remaining_runs": job.remaining_runs,
+                    "mention_creator": job.mention_creator,
+                }),
+            )
+            .await?;
+
+        {
+            let mut jobs = self.lock();
+            jobs.insert(job.id.clone(), job.clone());
+        }
+        Ok(CreateJobOutcome::Created(Box::new(job)))
+    }
+
     pub fn list_jobs(
         &self,
         guild_id: &str,
@@ -139,6 +187,101 @@ impl MemorySchedulerStore {
             }
         }
         JobMutationOutcome::Updated(Box::new(job.clone()))
+    }
+
+    pub async fn mutate_job_with_audit(
+        &self,
+        storage: &crate::storage::Storage,
+        guild_id: &str,
+        job_id: &str,
+        actor_user_id: &str,
+        allow_any: bool,
+        mutation: JobMutation,
+    ) -> anyhow::Result<JobMutationOutcome> {
+        let (updated, event_name) = {
+            let jobs = self.lock();
+            let Some(job) = jobs.get(job_id) else {
+                return Ok(JobMutationOutcome::NotFound);
+            };
+            if job.guild_id != guild_id {
+                return Ok(JobMutationOutcome::NotFound);
+            }
+            if !allow_any && job.creator_user_id != actor_user_id {
+                return Ok(JobMutationOutcome::Forbidden);
+            }
+
+            let valid_state = match mutation {
+                JobMutation::Cancel => job.is_pending(),
+                JobMutation::Pause => job.status == STATUS_ACTIVE,
+                JobMutation::Resume => job.status == STATUS_PAUSED,
+            };
+            if !valid_state {
+                return Ok(JobMutationOutcome::InvalidState {
+                    current_status: job.status.clone(),
+                });
+            }
+
+            let now = Utc::now();
+            let mut updated = job.clone();
+            let event_name = match mutation {
+                JobMutation::Cancel => {
+                    if updated.status == STATUS_PROCESSING {
+                        updated.cancellation_requested_at = Some(now);
+                        updated.updated_at = now;
+                        "scheduled_job_cancel_requested"
+                    } else {
+                        updated.status = STATUS_CANCELLED.to_owned();
+                        updated.completed_at = Some(now);
+                        updated.locked_at = None;
+                        updated.locked_by = None;
+                        updated.updated_at = now;
+                        mutation.event_name()
+                    }
+                }
+                JobMutation::Pause => {
+                    updated.status = STATUS_PAUSED.to_owned();
+                    updated.locked_at = None;
+                    updated.locked_by = None;
+                    updated.updated_at = now;
+                    mutation.event_name()
+                }
+                JobMutation::Resume => {
+                    updated.status = STATUS_ACTIVE.to_owned();
+                    if updated.run_at <= now {
+                        updated.run_at = now + chrono::Duration::seconds(1);
+                    }
+                    updated.completed_at = None;
+                    updated.locked_at = None;
+                    updated.locked_by = None;
+                    updated.updated_at = now;
+                    mutation.event_name()
+                }
+            };
+            (updated, event_name)
+        };
+
+        storage
+            .record_audit(
+                Some(guild_id),
+                Some(actor_user_id),
+                &updated.module_id,
+                event_name,
+                serde_json::json!({
+                    "job_id": updated.id,
+                    "owner_user_id": updated.creator_user_id,
+                    "status": updated.status,
+                    "run_at": updated.run_at,
+                }),
+            )
+            .await?;
+
+        {
+            let mut jobs = self.lock();
+            if let Some(job) = jobs.get_mut(job_id) {
+                *job = updated.clone();
+            }
+        }
+        Ok(JobMutationOutcome::Updated(Box::new(updated)))
     }
 
     pub fn renew_lease(&self, job_id: &str, worker_id: &str, now: DateTime<Utc>) -> bool {

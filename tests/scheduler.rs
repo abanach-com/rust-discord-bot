@@ -598,3 +598,180 @@ async fn test_scheduler_expired_lease_with_remaining_attempts_is_not_terminalize
     assert_eq!(reclaimed[0].attempts, 2);
     assert_eq!(reclaimed[0].locked_by.as_deref(), Some("worker-2"));
 }
+
+#[tokio::test]
+async fn test_scheduler_job_creation_and_mutation_audit_atomicity_issue_353() {
+    use rusty_discord_bot::storage::Storage;
+
+    let storage = Storage::memory();
+    let scheduler = SchedulerStore::memory();
+
+    let guild_id = "100000000000000001";
+    let user_id = "100000000000000003";
+
+    let job_template = NewScheduledJob {
+        guild_id: guild_id.to_string(),
+        module_id: "scheduler".to_string(),
+        channel_id: "100000000000000002".to_string(),
+        creator_user_id: user_id.to_string(),
+        content: "Audit atomicity reminder".to_string(),
+        mention_creator: true,
+        run_at: Utc::now() + Duration::hours(1),
+        repeat_every_seconds: None,
+        remaining_runs: Some(1),
+        max_attempts: 5,
+    };
+
+    // 1. Injected audit failure on create must NOT persist job
+    storage.inject_audit_failure(true);
+    let create_err = scheduler
+        .create_job_with_audit(&storage, job_template.clone(), 1)
+        .await;
+    assert!(
+        create_err.is_err(),
+        "create_job_with_audit must return error when audit fails"
+    );
+
+    // Verify 0 jobs stored and quota not consumed
+    let jobs_after_fail = scheduler
+        .list_jobs(guild_id, user_id, true, 10)
+        .await
+        .unwrap();
+    assert!(
+        jobs_after_fail.is_empty(),
+        "job must not be persisted if audit failed"
+    );
+    let audit_events = storage.list_audit_events(guild_id, 10).await.unwrap();
+    assert_eq!(
+        audit_events.len(),
+        0,
+        "0 audit events should exist after audit failure"
+    );
+
+    // 2. Normal create succeeds with exactly 1 job and 1 audit event
+    storage.inject_audit_failure(false);
+    let create_ok = scheduler
+        .create_job_with_audit(&storage, job_template.clone(), 1)
+        .await
+        .expect("create_job_with_audit should succeed when audit succeeds");
+    let created_job = match create_ok {
+        CreateJobOutcome::Created(job) => job,
+        other => panic!("expected Created outcome, got {other:?}"),
+    };
+
+    let jobs_after_ok = scheduler
+        .list_jobs(guild_id, user_id, true, 10)
+        .await
+        .unwrap();
+    assert_eq!(jobs_after_ok.len(), 1);
+    assert_eq!(jobs_after_ok[0].id, created_job.id);
+    assert_eq!(jobs_after_ok[0].status, STATUS_ACTIVE);
+
+    let audit_events = storage.list_audit_events(guild_id, 10).await.unwrap();
+    assert_eq!(audit_events.len(), 1);
+    assert_eq!(audit_events[0].event, "scheduled_job_created");
+    assert_eq!(audit_events[0].data["job_id"], created_job.id);
+
+    // 3. Injected audit failure on mutation (Pause) must NOT apply status change
+    storage.inject_audit_failure(true);
+    let mutate_err = scheduler
+        .mutate_job_with_audit(
+            &storage,
+            guild_id,
+            &created_job.id,
+            user_id,
+            false,
+            JobMutation::Pause,
+        )
+        .await;
+    assert!(
+        mutate_err.is_err(),
+        "mutate_job_with_audit must return error when audit fails"
+    );
+
+    // Job in storage MUST still be ACTIVE!
+    let job_check = scheduler.get_job(&created_job.id).await.unwrap().unwrap();
+    assert_eq!(
+        job_check.status, STATUS_ACTIVE,
+        "job status must remain active if audit failed during pause"
+    );
+
+    // Still only 1 audit event
+    let audit_events = storage.list_audit_events(guild_id, 10).await.unwrap();
+    assert_eq!(audit_events.len(), 1);
+
+    // 4. Normal mutation (Pause) succeeds and writes audit
+    storage.inject_audit_failure(false);
+    let mutate_ok = scheduler
+        .mutate_job_with_audit(
+            &storage,
+            guild_id,
+            &created_job.id,
+            user_id,
+            false,
+            JobMutation::Pause,
+        )
+        .await
+        .expect("mutate_job_with_audit should succeed");
+    assert!(matches!(mutate_ok, JobMutationOutcome::Updated(_)));
+
+    let job_paused = scheduler.get_job(&created_job.id).await.unwrap().unwrap();
+    assert_eq!(
+        job_paused.status,
+        rusty_discord_bot::scheduler::STATUS_PAUSED
+    );
+
+    let audit_events = storage.list_audit_events(guild_id, 10).await.unwrap();
+    assert_eq!(audit_events.len(), 2);
+    assert_eq!(audit_events[0].event, "scheduled_job_paused");
+    assert_eq!(audit_events[1].event, "scheduled_job_created");
+
+    // 5. Resume and Cancel with audit
+    let resume_ok = scheduler
+        .mutate_job_with_audit(
+            &storage,
+            guild_id,
+            &created_job.id,
+            user_id,
+            false,
+            JobMutation::Resume,
+        )
+        .await
+        .expect("resume should succeed");
+    assert!(matches!(resume_ok, JobMutationOutcome::Updated(_)));
+
+    let job_resumed = scheduler.get_job(&created_job.id).await.unwrap().unwrap();
+    assert_eq!(job_resumed.status, STATUS_ACTIVE);
+
+    let cancel_ok = scheduler
+        .mutate_job_with_audit(
+            &storage,
+            guild_id,
+            &created_job.id,
+            user_id,
+            false,
+            JobMutation::Cancel,
+        )
+        .await
+        .expect("cancel should succeed");
+    assert!(matches!(cancel_ok, JobMutationOutcome::Updated(_)));
+
+    let job_cancelled = scheduler.get_job(&created_job.id).await.unwrap().unwrap();
+    assert_eq!(
+        job_cancelled.status,
+        rusty_discord_bot::scheduler::STATUS_CANCELLED
+    );
+
+    let audit_events = storage.list_audit_events(guild_id, 10).await.unwrap();
+    assert_eq!(audit_events.len(), 4);
+    let event_names: Vec<&str> = audit_events.iter().map(|e| e.event.as_str()).collect();
+    assert_eq!(
+        event_names,
+        vec![
+            "scheduled_job_cancelled",
+            "scheduled_job_resumed",
+            "scheduled_job_paused",
+            "scheduled_job_created",
+        ]
+    );
+}

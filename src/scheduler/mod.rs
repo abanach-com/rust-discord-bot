@@ -86,6 +86,18 @@ impl SchedulerStore {
         }
     }
 
+    pub async fn create_job_with_audit(
+        &self,
+        storage: &crate::storage::Storage,
+        job: NewScheduledJob,
+        max_jobs: u16,
+    ) -> Result<CreateJobOutcome> {
+        match self {
+            Self::Memory(store) => store.create_job_with_audit(storage, job, max_jobs).await,
+            Self::Postgres(store) => Ok(store.create_job_with_audit(job, max_jobs).await?),
+        }
+    }
+
     pub async fn list_jobs(
         &self,
         guild_id: &str,
@@ -124,6 +136,34 @@ impl SchedulerStore {
             }
             Self::Postgres(store) => Ok(store
                 .mutate_job(guild_id, job_id, actor_user_id, allow_any, mutation)
+                .await?),
+        }
+    }
+
+    pub async fn mutate_job_with_audit(
+        &self,
+        storage: &crate::storage::Storage,
+        guild_id: &str,
+        job_id: &str,
+        actor_user_id: &str,
+        allow_any: bool,
+        mutation: JobMutation,
+    ) -> Result<JobMutationOutcome> {
+        match self {
+            Self::Memory(store) => {
+                store
+                    .mutate_job_with_audit(
+                        storage,
+                        guild_id,
+                        job_id,
+                        actor_user_id,
+                        allow_any,
+                        mutation,
+                    )
+                    .await
+            }
+            Self::Postgres(store) => Ok(store
+                .mutate_job_with_audit(guild_id, job_id, actor_user_id, allow_any, mutation)
                 .await?),
         }
     }

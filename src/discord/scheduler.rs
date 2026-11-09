@@ -183,42 +183,19 @@ pub async fn execute(
                 max_attempts: 5,
             };
 
-            match state.scheduler.create_job(new_job, *max_jobs).await? {
-                CreateJobOutcome::Created(job) => {
-                    state
-                        .storage
-                        .record_audit(
-                            Some(&guild_key),
-                            Some(&actor_key),
-                            module_id,
-                            "scheduled_job_created",
-                            serde_json::json!({
-
-                                "job_id": job.id,
-
-                                "channel_id": job.channel_id,
-
-                                "run_at": job.run_at,
-
-                                "repeat_every_seconds": job.repeat_every_seconds,
-
-                                "remaining_runs": job.remaining_runs,
-
-                                "mention_creator": job.mention_creator,
-
-                            }),
-                        )
-                        .await?;
-
-                    Ok(Some(format!(
-                        "✅ Created task `{}`.\nChannel: <#{}>\nExecution: <t:{}:F> (<t:{}:R>)\nMode: {}",
-                        job.id,
-                        job.channel_id,
-                        job.run_at.timestamp(),
-                        job.run_at.timestamp(),
-                        recurrence_description(&job),
-                    )))
-                }
+            match state
+                .scheduler
+                .create_job_with_audit(&state.storage, new_job, *max_jobs)
+                .await?
+            {
+                CreateJobOutcome::Created(job) => Ok(Some(format!(
+                    "✅ Created task `{}`.\nChannel: <#{}>\nExecution: <t:{}:F> (<t:{}:R>)\nMode: {}",
+                    job.id,
+                    job.channel_id,
+                    job.run_at.timestamp(),
+                    job.run_at.timestamp(),
+                    recurrence_description(&job),
+                ))),
 
                 CreateJobOutcome::LimitReached { limit } => Ok(Some(format!(
                     "Reached limit of **{limit}** active tasks for this user."
@@ -281,7 +258,7 @@ pub async fn execute(
 async fn mutate_job(
     state: &AppState,
 
-    module_id: &str,
+    _module_id: &str,
 
     guild_id: &str,
 
@@ -295,48 +272,33 @@ async fn mutate_job(
 ) -> Result<Option<String>> {
     let outcome = state
         .scheduler
-        .mutate_job(guild_id, job_id, actor_user_id, allow_any, mutation)
+        .mutate_job_with_audit(
+            &state.storage,
+            guild_id,
+            job_id,
+            actor_user_id,
+            allow_any,
+            mutation,
+        )
         .await?;
 
     match outcome {
         JobMutationOutcome::Updated(job) => {
-            let (event, msg) = if mutation == JobMutation::Cancel
+            let msg = if mutation == JobMutation::Cancel
                 && job.cancellation_requested_at.is_some()
                 && job.status == crate::scheduler::STATUS_PROCESSING
             {
-                (
-                    "scheduled_job_cancel_requested",
-                    format!(
-                        "⏳ Zadanie `{}` jest w trakcie przetwarzania — zlecono żądanie anulowania.",
-                        job.id
-                    ),
+                format!(
+                    "⏳ Zadanie `{}` jest w trakcie przetwarzania — zlecono żądanie anulowania.",
+                    job.id
                 )
             } else {
-                (
-                    mutation.event_name(),
-                    format!(
-                        "✅ Zadanie `{}` ma teraz status **{}**.",
-                        job.id,
-                        status_label(&job.status),
-                    ),
+                format!(
+                    "✅ Zadanie `{}` ma teraz status **{}**.",
+                    job.id,
+                    status_label(&job.status),
                 )
             };
-
-            state
-                .storage
-                .record_audit(
-                    Some(guild_id),
-                    Some(actor_user_id),
-                    module_id,
-                    event,
-                    serde_json::json!({
-                        "job_id": job.id,
-                        "owner_user_id": job.creator_user_id,
-                        "status": job.status,
-                        "run_at": job.run_at,
-                    }),
-                )
-                .await?;
 
             Ok(Some(msg))
         }

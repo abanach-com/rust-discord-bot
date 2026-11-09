@@ -153,6 +153,130 @@ impl PostgresSchedulerStore {
         Ok(CreateJobOutcome::Created(Box::new(created)))
     }
 
+    pub async fn create_job_with_audit(
+        &self,
+        new_job: NewScheduledJob,
+        max_jobs: u16,
+    ) -> anyhow::Result<CreateJobOutcome> {
+        let mut transaction = self.pool.begin().await?;
+
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))")
+            .bind(&new_job.guild_id)
+            .bind(&new_job.creator_user_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+
+        let pending_count = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)
+            FROM scheduled_jobs
+            WHERE guild_id = $1
+              AND creator_user_id = $2
+              AND status IN ('active', 'processing', 'paused')
+            "#,
+        )
+        .bind(&new_job.guild_id)
+        .bind(&new_job.creator_user_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+
+        if pending_count >= i64::from(max_jobs) {
+            transaction.commit().await?;
+            return Ok(CreateJobOutcome::LimitReached { limit: max_jobs });
+        }
+
+        let job = new_job.materialize(Utc::now());
+        let created = sqlx::query_as::<_, ScheduledJob>(
+            r#"
+            INSERT INTO scheduled_jobs (
+                id,
+                guild_id,
+                module_id,
+                channel_id,
+                creator_user_id,
+                content,
+                mention_creator,
+                run_at,
+                repeat_every_seconds,
+                remaining_runs,
+                run_count,
+                status,
+                attempts,
+                max_attempts,
+                payload,
+                created_at,
+                updated_at
+            )
+            VALUES (
+                $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                0, 'active', 0, $11, $12, $13, $13
+            )
+            RETURNING
+                id::text AS id,
+                guild_id,
+                module_id,
+                channel_id,
+                creator_user_id,
+                content,
+                mention_creator,
+                run_at,
+                repeat_every_seconds,
+                remaining_runs,
+                run_count,
+                status,
+                attempts,
+                max_attempts,
+                locked_at,
+                locked_by,
+                last_error,
+                last_run_at,
+                completed_at,
+                cancellation_requested_at,
+                created_at,
+                updated_at
+            "#,
+        )
+        .bind(&job.id)
+        .bind(&job.guild_id)
+        .bind(&job.module_id)
+        .bind(&job.channel_id)
+        .bind(&job.creator_user_id)
+        .bind(&job.content)
+        .bind(job.mention_creator)
+        .bind(job.run_at)
+        .bind(job.repeat_every_seconds)
+        .bind(job.remaining_runs)
+        .bind(job.max_attempts)
+        .bind(json!({}))
+        .bind(job.created_at)
+        .fetch_one(&mut *transaction)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO audit_events (guild_id, actor_id, module_id, event, data)
+            VALUES ($1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(&created.guild_id)
+        .bind(&created.creator_user_id)
+        .bind(&created.module_id)
+        .bind("scheduled_job_created")
+        .bind(serde_json::json!({
+            "job_id": created.id,
+            "channel_id": created.channel_id,
+            "run_at": created.run_at,
+            "repeat_every_seconds": created.repeat_every_seconds,
+            "remaining_runs": created.remaining_runs,
+            "mention_creator": created.mention_creator,
+        }))
+        .execute(&mut *transaction)
+        .await?;
+
+        transaction.commit().await?;
+        Ok(CreateJobOutcome::Created(Box::new(created)))
+    }
+
     pub async fn list_jobs(
         &self,
         guild_id: &str,
@@ -348,6 +472,143 @@ impl PostgresSchedulerStore {
         let updated = fetch_job_for_update(&mut transaction, guild_id, job_id)
             .await?
             .expect("updated scheduler job should still exist");
+        transaction.commit().await?;
+        Ok(JobMutationOutcome::Updated(Box::new(updated)))
+    }
+
+    pub async fn mutate_job_with_audit(
+        &self,
+        guild_id: &str,
+        job_id: &str,
+        actor_user_id: &str,
+        allow_any: bool,
+        mutation: JobMutation,
+    ) -> anyhow::Result<JobMutationOutcome> {
+        if Uuid::parse_str(job_id).is_err() {
+            return Ok(JobMutationOutcome::NotFound);
+        }
+
+        let mut transaction = self.pool.begin().await?;
+        let Some(job) = fetch_job_for_update(&mut transaction, guild_id, job_id).await? else {
+            transaction.commit().await?;
+            return Ok(JobMutationOutcome::NotFound);
+        };
+
+        if !allow_any && job.creator_user_id != actor_user_id {
+            transaction.commit().await?;
+            return Ok(JobMutationOutcome::Forbidden);
+        }
+
+        let valid_state = match mutation {
+            JobMutation::Cancel => job.is_pending(),
+            JobMutation::Pause => job.status == STATUS_ACTIVE,
+            JobMutation::Resume => job.status == STATUS_PAUSED,
+        };
+        if !valid_state {
+            let current_status = job.status;
+            transaction.commit().await?;
+            return Ok(JobMutationOutcome::InvalidState { current_status });
+        }
+
+        let event_name = match mutation {
+            JobMutation::Cancel => {
+                if job.status == STATUS_PROCESSING {
+                    sqlx::query(
+                        r#"
+                        UPDATE scheduled_jobs
+                        SET cancellation_requested_at = NOW(),
+                            updated_at = NOW()
+                        WHERE guild_id = $1 AND id = $2::uuid AND status = 'processing'
+                        "#,
+                    )
+                    .bind(guild_id)
+                    .bind(job_id)
+                    .execute(&mut *transaction)
+                    .await?;
+                    "scheduled_job_cancel_requested"
+                } else {
+                    sqlx::query(
+                        r#"
+                        UPDATE scheduled_jobs
+                        SET status = $3,
+                            completed_at = NOW(),
+                            locked_at = NULL,
+                            locked_by = NULL,
+                            updated_at = NOW()
+                        WHERE guild_id = $1 AND id = $2::uuid
+                        "#,
+                    )
+                    .bind(guild_id)
+                    .bind(job_id)
+                    .bind(STATUS_CANCELLED)
+                    .execute(&mut *transaction)
+                    .await?;
+                    mutation.event_name()
+                }
+            }
+            JobMutation::Pause => {
+                sqlx::query(
+                    r#"
+                    UPDATE scheduled_jobs
+                    SET status = $3,
+                        locked_at = NULL,
+                        locked_by = NULL,
+                        updated_at = NOW()
+                    WHERE guild_id = $1 AND id = $2::uuid
+                    "#,
+                )
+                .bind(guild_id)
+                .bind(job_id)
+                .bind(STATUS_PAUSED)
+                .execute(&mut *transaction)
+                .await?;
+                mutation.event_name()
+            }
+            JobMutation::Resume => {
+                sqlx::query(
+                    r#"
+                    UPDATE scheduled_jobs
+                    SET status = $3,
+                        run_at = GREATEST(run_at, NOW() + INTERVAL '1 second'),
+                        completed_at = NULL,
+                        locked_at = NULL,
+                        locked_by = NULL,
+                        updated_at = NOW()
+                    WHERE guild_id = $1 AND id = $2::uuid
+                    "#,
+                )
+                .bind(guild_id)
+                .bind(job_id)
+                .bind(STATUS_ACTIVE)
+                .execute(&mut *transaction)
+                .await?;
+                mutation.event_name()
+            }
+        };
+
+        let updated = fetch_job_for_update(&mut transaction, guild_id, job_id)
+            .await?
+            .expect("updated scheduler job should still exist");
+
+        sqlx::query(
+            r#"
+            INSERT INTO audit_events (guild_id, actor_id, module_id, event, data)
+            VALUES ($1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(guild_id)
+        .bind(actor_user_id)
+        .bind(&updated.module_id)
+        .bind(event_name)
+        .bind(serde_json::json!({
+            "job_id": updated.id,
+            "owner_user_id": updated.creator_user_id,
+            "status": updated.status,
+            "run_at": updated.run_at,
+        }))
+        .execute(&mut *transaction)
+        .await?;
+
         transaction.commit().await?;
         Ok(JobMutationOutcome::Updated(Box::new(updated)))
     }
