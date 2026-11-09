@@ -4962,11 +4962,60 @@ async fn test_quotes_storage_and_execution_lifecycle_suite() {
     };
     assert!(op_too_long.validate().is_err());
 
-    // 6. Delete quote: requires MANAGE_MESSAGES when enforced
+    // 6. Delete quote: requires interactive actor with MANAGE_MESSAGES or ADMINISTRATOR (Issue #356)
     let quotes_in_a = state.storage.list_quotes(guild_a, 10).await.unwrap();
     assert_eq!(quotes_in_a.len(), 2);
     let to_delete_id = quotes_in_a[0].id;
 
+    // 6a. Non-interactive event path (enforce_actor_permissions = false, no actor) must be REJECTED (Issue #356)
+    let res_del_event_no_actor = execute_quote_action(
+        &ctx,
+        &state,
+        "quotes",
+        QuoteExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            None,
+            Permissions::empty(),
+            false, // Event path
+        ),
+        &QuoteOperation::Delete {
+            quote_id: to_delete_id,
+        },
+    )
+    .await;
+    assert!(
+        res_del_event_no_actor.is_err(),
+        "Event path without actor must be rejected for Quote Delete"
+    );
+
+    // 6b. Non-interactive event path with actor present but enforce_actor_permissions = false must also be REJECTED (Issue #356)
+    let res_del_event_with_actor = execute_quote_action(
+        &ctx,
+        &state,
+        "quotes",
+        QuoteExecutionContext::new(
+            Some(GuildId::new(100)),
+            Some(ChannelId::new(101)),
+            Some(actor_id),
+            Permissions::all(),
+            false, // Event path
+        ),
+        &QuoteOperation::Delete {
+            quote_id: to_delete_id,
+        },
+    )
+    .await;
+    assert!(
+        res_del_event_with_actor.is_err(),
+        "Non-interactive event path must be rejected for Quote Delete"
+    );
+
+    // Ensure quote still exists in storage after rejected attempts
+    let quotes_check = state.storage.list_quotes(guild_a, 10).await.unwrap();
+    assert!(quotes_check.iter().any(|q| q.id == to_delete_id));
+
+    // 6c. Interactive path without MANAGE_MESSAGES must be rejected
     let res_del_unauthorized = execute_quote_action(
         &ctx,
         &state,
@@ -4988,6 +5037,7 @@ async fn test_quotes_storage_and_execution_lifecycle_suite() {
         "Unauthorized deletion must be rejected"
     );
 
+    // 6d. Interactive path with MANAGE_MESSAGES succeeds
     let res_del_authorized = execute_quote_action(
         &ctx,
         &state,

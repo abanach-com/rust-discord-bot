@@ -150,16 +150,16 @@ pub async fn execute_quote_action(
         }
 
         QuoteOperation::Delete { quote_id } => {
-            if execution.enforce_actor_permissions {
-                let perms = execution.actor_permissions;
-                if !perms.contains(Permissions::MANAGE_MESSAGES)
-                    && !perms.contains(Permissions::ADMINISTRATOR)
-                {
-                    return Err(anyhow!(
-                        "Wymagane uprawnienie Zarządzanie wiadomościami (MANAGE_MESSAGES) lub Administrator"
-                    ));
-                }
-            }
+            ensure!(
+                execution.enforce_actor_permissions && execution.actor_id.is_some(),
+                "Quote deletion requires an authenticated interactive actor"
+            );
+            let perms = execution.actor_permissions;
+            ensure!(
+                perms.contains(Permissions::MANAGE_MESSAGES)
+                    || perms.contains(Permissions::ADMINISTRATOR),
+                "Wymagane uprawnienie Zarządzanie wiadomościami (MANAGE_MESSAGES) lub Administrator"
+            );
 
             let deleted = state
                 .storage
