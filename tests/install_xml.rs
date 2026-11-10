@@ -575,3 +575,72 @@ async fn test_lua_config_json_oversized_rejected_issue_343() {
         other => panic!("expected InvalidConfigSchema error, got: {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn test_install_xml_duplicate_attributes_rejected_issue_381() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path();
+
+    // 1. Initial valid setup
+    let valid_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<installer version="1.0.0">
+    <modules>
+        <module id="valid_mod" enabled="true">
+            <folder>mod</folder>
+            <entry>module.lua</entry>
+        </module>
+    </modules>
+</installer>"#;
+    std::fs::write(base.join("install.xml"), valid_xml).expect("write valid install.xml");
+
+    let mod_dir = base.join("mod");
+    std::fs::create_dir_all(&mod_dir).expect("create mod dir");
+    std::fs::write(
+        mod_dir.join("module.lua"),
+        r#"return { manifest = { id = "valid_mod", name = "Valid", version = "1.0.0", description = "Valid", category = "test", commands = {} } }"#,
+    )
+    .expect("write module.lua");
+
+    let engine = LuaEngine::load(base, limits()).expect("initial engine load should succeed");
+    assert!(engine.manifest("valid_mod").await.is_some());
+
+    // 2. Overwrite install.xml with duplicate enabled attribute
+    let malformed_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<installer version="1.0.0">
+    <modules>
+        <module id="valid_mod" enabled="false" enabled="true">
+            <folder>mod</folder>
+            <entry>module.lua</entry>
+        </module>
+    </modules>
+</installer>"#;
+    std::fs::write(base.join("install.xml"), malformed_xml).expect("write malformed install.xml");
+
+    let reload_res = engine.reload().await;
+    assert!(
+        reload_res.is_err(),
+        "reload must fail when install.xml contains duplicate attributes"
+    );
+    match reload_res.err().unwrap() {
+        LuaEngineError::InvalidInstallXml { message, .. } => {
+            assert!(
+                message.contains("duplicate XML attribute 'enabled'"),
+                "unexpected message: {message}"
+            );
+        }
+        other => panic!("expected InvalidInstallXml error, got: {other:?}"),
+    }
+
+    // Previous registry must remain intact after failed reload
+    assert!(
+        engine.manifest("valid_mod").await.is_some(),
+        "existing registry must be preserved after failed reload"
+    );
+
+    // 3. Cold start with duplicate attribute must fail fast
+    let cold_load_res = LuaEngine::load(base, limits());
+    assert!(
+        cold_load_res.is_err(),
+        "cold engine load must fail when install.xml contains duplicate attributes"
+    );
+}

@@ -524,7 +524,12 @@ pub fn parse_xml_to_dom(source: &str) -> Result<XmlElement, InstallXmlError> {
                     String::new()
                 };
 
-                attributes.insert(attr_name, attr_val);
+                if attributes.insert(attr_name.clone(), attr_val).is_some() {
+                    return Err(InstallXmlError::ParseError {
+                        offset: attr_start,
+                        message: format!("duplicate XML attribute '{attr_name}'"),
+                    });
+                }
 
                 if i <= prev_attr_i {
                     return Err(InstallXmlError::ParseError {
@@ -928,5 +933,61 @@ mod tests {
                 .to_string()
                 .contains("text content exceeds maximum limit")
         );
+    }
+
+    #[test]
+    fn test_reject_duplicate_xml_attributes_issue_381() {
+        // 1. Duplicate enabled attribute on module tag (false then true)
+        let xml1 = r#"<installer><modules>
+            <module id="demo" enabled="false" enabled="true">
+                <folder>demo</folder><entry>module.lua</entry>
+            </module>
+        </modules></installer>"#;
+        let err1 = InstallManifest::parse(xml1).unwrap_err();
+        assert!(matches!(err1, InstallXmlError::ParseError { .. }));
+        assert!(
+            err1.to_string()
+                .contains("duplicate XML attribute 'enabled'")
+        );
+
+        // 2. Duplicate enabled attribute in reverse order (true then false)
+        let xml2 = r#"<installer><modules>
+            <module id="demo" enabled="true" enabled="false">
+                <folder>demo</folder><entry>module.lua</entry>
+            </module>
+        </modules></installer>"#;
+        let err2 = InstallManifest::parse(xml2).unwrap_err();
+        assert!(matches!(err2, InstallXmlError::ParseError { .. }));
+        assert!(
+            err2.to_string()
+                .contains("duplicate XML attribute 'enabled'")
+        );
+
+        // 3. Duplicate id attribute
+        let xml3 = r#"<installer><modules>
+            <module id="first" id="second" enabled="true">
+                <folder>demo</folder><entry>module.lua</entry>
+            </module>
+        </modules></installer>"#;
+        let err3 = InstallManifest::parse(xml3).unwrap_err();
+        assert!(matches!(err3, InstallXmlError::ParseError { .. }));
+        assert!(err3.to_string().contains("duplicate XML attribute 'id'"));
+
+        // 4. Duplicate root attribute
+        let xml_root =
+            r#"<installer version="1.0.0" version="2.0.0"><modules></modules></installer>"#;
+        let err_root = InstallManifest::parse(xml_root).unwrap_err();
+        assert!(matches!(err_root, InstallXmlError::ParseError { .. }));
+        assert!(
+            err_root
+                .to_string()
+                .contains("duplicate XML attribute 'version'")
+        );
+
+        // 5. Self-closing tag with duplicate attribute
+        let xml_self_closing = r#"<installer><module id="demo" id="demo_dup"/></installer>"#;
+        let err_sc = parse_xml_to_dom(xml_self_closing).unwrap_err();
+        assert!(matches!(err_sc, InstallXmlError::ParseError { .. }));
+        assert!(err_sc.to_string().contains("duplicate XML attribute 'id'"));
     }
 }
