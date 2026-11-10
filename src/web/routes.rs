@@ -1744,6 +1744,13 @@ pub async fn get_guild_module_draft(
     let (_, session) = authenticate(&state, &headers).await?;
     ensure_guild_access(&state, &session, &guild_id).await?;
 
+    state
+        .app
+        .scripts
+        .manifest(&module_id)
+        .await
+        .ok_or_else(|| ApiError::not_found("Lua module not found."))?;
+
     let draft = state
         .app
         .storage
@@ -1775,6 +1782,39 @@ pub async fn save_guild_module_draft(
     ensure_guild_access(&state, &session, &guild_id).await?;
     verify_csrf(&headers, &session)?;
 
+    let decision = state.app.rate_limiter.check_action(
+        "admin:update_module",
+        &session.user.id,
+        Some(&guild_id),
+    );
+    if !decision.allowed {
+        return Err(ApiError::too_many_requests(format!(
+            "Module configuration changes are too frequent. Please wait {} s.",
+            decision.reset_after.as_secs().max(1)
+        )));
+    }
+
+    state
+        .app
+        .scripts
+        .manifest(&module_id)
+        .await
+        .ok_or_else(|| ApiError::not_found("Lua module not found."))?;
+
+    if !payload.config.is_object() {
+        return Err(ApiError::bad_request(
+            "Draft configuration must be a JSON object.",
+        ));
+    }
+    let serialized_size = serde_json::to_vec(&payload.config)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?
+        .len();
+    if serialized_size > 64 * 1024 {
+        return Err(ApiError::bad_request(
+            "Draft configuration must not exceed 64 KiB.",
+        ));
+    }
+
     let draft = state
         .app
         .storage
@@ -1797,6 +1837,13 @@ pub async fn publish_guild_module_draft(
     let (_, session) = authenticate(&state, &headers).await?;
     ensure_guild_access(&state, &session, &guild_id).await?;
     verify_csrf(&headers, &session)?;
+
+    state
+        .app
+        .scripts
+        .manifest(&module_id)
+        .await
+        .ok_or_else(|| ApiError::not_found("Lua module not found."))?;
 
     let draft = state
         .app
@@ -1866,6 +1913,13 @@ pub async fn discard_guild_module_draft(
     let (_, session) = authenticate(&state, &headers).await?;
     ensure_guild_access(&state, &session, &guild_id).await?;
     verify_csrf(&headers, &session)?;
+
+    state
+        .app
+        .scripts
+        .manifest(&module_id)
+        .await
+        .ok_or_else(|| ApiError::not_found("Lua module not found."))?;
 
     let removed = state
         .app

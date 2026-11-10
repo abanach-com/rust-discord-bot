@@ -17173,3 +17173,242 @@ async fn test_guild_cases_pagination_and_no_500_issue_367() {
         .unwrap();
     assert_eq!(res_unauth.status(), reqwest::StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn test_module_draft_resource_limits_and_validation_issue_375() {
+    let (web_state, _) = test_web_state().await;
+    let router = build_router(web_state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let guild_id = "111222333444555666";
+    let other_guild_id = "999888777666555444";
+
+    let session_id = "session_issue_375";
+    let csrf_token = "csrf_issue_375";
+    let session = rusty_discord_bot::session::Session {
+        user: DashboardUser {
+            id: "user_issue_375".to_string(),
+            username: "admin_tester".to_string(),
+            avatar: None,
+            global_name: None,
+        },
+        guilds: vec![DashboardGuild {
+            id: guild_id.to_string(),
+            name: "Draft Admin Guild".to_string(),
+            icon: None,
+            owner: true,
+            permissions: "8".to_string(), // ADMINISTRATOR
+        }],
+        expires_at: Utc::now() + Duration::hours(2),
+        access_token: None,
+        csrf_token: csrf_token.to_string(),
+    };
+    web_state
+        .app
+        .sessions
+        .save_session(
+            session_id,
+            session.user,
+            session.guilds,
+            session.csrf_token,
+            session.expires_at,
+            None,
+        )
+        .await
+        .unwrap();
+    let cookie = format!("rusty_discord_bot_session={session_id}");
+
+    // Session for other user in other guild
+    let other_session_id = "session_issue_375_other";
+    let other_session = rusty_discord_bot::session::Session {
+        user: DashboardUser {
+            id: "user_issue_375_other".to_string(),
+            username: "other_tester".to_string(),
+            avatar: None,
+            global_name: None,
+        },
+        guilds: vec![DashboardGuild {
+            id: other_guild_id.to_string(),
+            name: "Other Guild".to_string(),
+            icon: None,
+            owner: true,
+            permissions: "8".to_string(),
+        }],
+        expires_at: Utc::now() + Duration::hours(2),
+        access_token: None,
+        csrf_token: "csrf_other".to_string(),
+    };
+    web_state
+        .app
+        .sessions
+        .save_session(
+            other_session_id,
+            other_session.user,
+            other_session.guilds,
+            other_session.csrf_token,
+            other_session.expires_at,
+            None,
+        )
+        .await
+        .unwrap();
+    let other_cookie = format!("rusty_discord_bot_session={other_session_id}");
+
+    // AC1: POST for non-existent module_id returns 404 and does not create draft in storage
+    let non_existent_payload = serde_json::json!({
+        "config": { "foo": "bar" }
+    });
+    let post_non_existent = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/modules/nonexistent_mod_xyz/draft"
+        ))
+        .header(COOKIE, &cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&non_existent_payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(post_non_existent.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let draft_in_store = web_state
+        .app
+        .storage
+        .get_module_draft(guild_id, "nonexistent_mod_xyz")
+        .await
+        .unwrap();
+    assert!(
+        draft_in_store.is_none(),
+        "No draft must be created in storage for non-existent module"
+    );
+
+    // GET / DELETE / PUBLISH for non-existent module also return 404
+    let get_non_existent = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/modules/nonexistent_mod_xyz/draft"
+        ))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_non_existent.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let delete_non_existent = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/modules/nonexistent_mod_xyz/draft"
+        ))
+        .header(COOKIE, &cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(delete_non_existent.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let publish_non_existent = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/modules/nonexistent_mod_xyz/publish"
+        ))
+        .header(COOKIE, &cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        publish_non_existent.status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+
+    // AC2: Non-object config is rejected with 400 Bad Request
+    let non_obj_payload = serde_json::json!({
+        "config": ["array", "not", "object"]
+    });
+    let post_non_obj = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/modules/automod/draft"
+        ))
+        .header(COOKIE, &cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&non_obj_payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(post_non_obj.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // AC2: Config > 64 KiB is rejected with 400 Bad Request
+    let huge_str = "x".repeat(65 * 1024);
+    let oversized_payload = serde_json::json!({
+        "config": {
+            "large_field": huge_str
+        }
+    });
+    let post_oversized = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/modules/automod/draft"
+        ))
+        .header(COOKIE, &cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&oversized_payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(post_oversized.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // AC2: Valid draft <= 64 KiB is accepted (200 OK) and readable
+    let valid_payload = serde_json::json!({
+        "config": {
+            "max_mentions": 5,
+            "anti_spam": true
+        }
+    });
+    let post_valid = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/modules/automod/draft"
+        ))
+        .header(COOKIE, &cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&valid_payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(post_valid.status(), reqwest::StatusCode::OK);
+
+    let get_valid = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/modules/automod/draft"
+        ))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_valid.status(), reqwest::StatusCode::OK);
+    let draft_body: serde_json::Value = get_valid.json().await.unwrap();
+    assert_eq!(draft_body["has_draft"], true);
+    assert_eq!(draft_body["config"]["max_mentions"], 5);
+
+    // AC4: Tenant isolation - user from other_guild cannot access guild_id draft
+    let get_cross_tenant = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/modules/automod/draft"
+        ))
+        .header(COOKIE, &other_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_cross_tenant.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let post_cross_tenant = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/modules/automod/draft"
+        ))
+        .header(COOKIE, &other_cookie)
+        .header("x-csrf-token", "csrf_other")
+        .json(&valid_payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(post_cross_tenant.status(), reqwest::StatusCode::FORBIDDEN);
+}
