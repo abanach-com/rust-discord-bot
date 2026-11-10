@@ -161,18 +161,49 @@ pub fn is_blocked_ip(ip: IpAddr) -> bool {
                 || (octets[0] == 192 && octets[1] == 168)
                 // 169.254.0.0/16 (Link-Local / Cloud Metadata 169.254.169.254)
                 || (octets[0] == 169 && octets[1] == 254)
+                // 100.64.0.0/10 (carrier-grade NAT)
+                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+                // 192.0.0.0/24 (IETF protocol assignments)
+                || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+                // Multicast 224.0.0.0/4 and Reserved 240.0.0.0/4
+                || v4.is_multicast()
+                || octets[0] >= 240
                 // Broadcast 255.255.255.255
                 || v4 == Ipv4Addr::BROADCAST
         }
         IpAddr::V6(v6) => {
             // ::1 (Loopback)
-            v6.is_loopback()
-                // :: (Unspecified)
-                || v6.is_unspecified()
-                // fc00::/7 (Unique Local Address)
-                || ((v6.segments()[0] & 0xfe00) == 0xfc00)
-                // fe80::/10 (Link-Local Unicast)
-                || ((v6.segments()[0] & 0xffc0) == 0xfe80)
+            if v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() {
+                return true;
+            }
+            let segments = v6.segments();
+            // 2001:db8::/32 (Documentation)
+            if segments[0] == 0x2001 && segments[1] == 0x0db8 {
+                return true;
+            }
+            // fc00::/7 (Unique Local Address)
+            if (segments[0] & 0xfe00) == 0xfc00 {
+                return true;
+            }
+            // fe80::/10 (Link-Local Unicast)
+            if (segments[0] & 0xffc0) == 0xfe80 {
+                return true;
+            }
+            // IPv4-mapped (::ffff:a.b.c.d) or IPv4-compatible (::a.b.c.d)
+            let mapped_or_compat_v4 = if let Some(v4) = v6.to_ipv4_mapped() {
+                Some(v4)
+            } else if segments[..6] == [0, 0, 0, 0, 0, 0] {
+                let octets = v6.octets();
+                Some(Ipv4Addr::new(
+                    octets[12], octets[13], octets[14], octets[15],
+                ))
+            } else {
+                None
+            };
+            if let Some(v4) = mapped_or_compat_v4 {
+                return is_blocked_ip(IpAddr::V4(v4));
+            }
+            false
         }
     }
 }
@@ -195,8 +226,14 @@ pub fn validate_safe_url(
         .host_str()
         .ok_or_else(|| IntegrationError::SsrfBlocked("Missing host".to_string()))?;
 
-    // Check if host is an explicit IP address
-    if let Ok(ip) = host_str.parse::<IpAddr>()
+    // Check if host is an explicit IP address (IPv4, bracketed IPv6, IPv4-mapped, etc.)
+    let direct_ip = match parsed.host() {
+        Some(url::Host::Ipv4(v4)) => Some(IpAddr::V4(v4)),
+        Some(url::Host::Ipv6(v6)) => Some(IpAddr::V6(v6)),
+        _ => host_str.trim_matches(['[', ']']).parse::<IpAddr>().ok(),
+    };
+
+    if let Some(ip) = direct_ip
         && is_blocked_ip(ip)
     {
         return Err(IntegrationError::SsrfBlocked(format!(
@@ -217,4 +254,59 @@ pub fn validate_safe_url(
     }
 
     Ok(parsed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_blocked_ip_v4_and_v6() {
+        assert!(is_blocked_ip("127.0.0.1".parse().unwrap()));
+        assert!(is_blocked_ip("10.0.0.1".parse().unwrap()));
+        assert!(is_blocked_ip("192.168.1.1".parse().unwrap()));
+        assert!(is_blocked_ip("169.254.169.254".parse().unwrap()));
+        assert!(is_blocked_ip("::1".parse().unwrap()));
+        assert!(is_blocked_ip("::".parse().unwrap()));
+        assert!(is_blocked_ip("fe80::1".parse().unwrap()));
+        assert!(is_blocked_ip("fc00::1".parse().unwrap()));
+        assert!(is_blocked_ip("::ffff:127.0.0.1".parse().unwrap()));
+        assert!(is_blocked_ip("::ffff:169.254.169.254".parse().unwrap()));
+        assert!(is_blocked_ip("::ffff:10.0.0.1".parse().unwrap()));
+
+        assert!(!is_blocked_ip("8.8.8.8".parse().unwrap()));
+        assert!(!is_blocked_ip("1.1.1.1".parse().unwrap()));
+        assert!(!is_blocked_ip("2606:4700:4700::1111".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_validate_safe_url_bracketed_ipv6_and_mapped_ipv6_issue_368() {
+        for target in [
+            "http://[::1]/",
+            "http://[::]/",
+            "https://[fe80::1]/",
+            "https://[fc00::1]/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://[::ffff:169.254.169.254]/",
+            "http://[::ffff:10.0.0.1]/",
+            "http://127.0.0.1:8080/api",
+            "http://169.254.169.254/latest/meta-data/",
+        ] {
+            assert!(
+                validate_safe_url(target, None).is_err(),
+                "Target '{target}' must be rejected by validate_safe_url"
+            );
+        }
+
+        // Public URLs should succeed
+        assert!(validate_safe_url("https://[2606:4700:4700::1111]/", None).is_ok());
+        assert!(validate_safe_url("https://api.github.com/repos/rust-lang/rust", None).is_ok());
+
+        // Domain allowlist check
+        let mut allowed = HashSet::new();
+        allowed.insert("github.com".to_string());
+        assert!(validate_safe_url("https://api.github.com/something", Some(&allowed)).is_ok());
+        assert!(validate_safe_url("https://gitlab.com/something", Some(&allowed)).is_err());
+        assert!(validate_safe_url("http://[::1]/", Some(&allowed)).is_err());
+    }
 }

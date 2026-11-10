@@ -183,9 +183,30 @@ async fn test_phase4_integrations_and_extensibility_suite() {
     assert!(is_blocked_ip("192.168.1.1".parse().unwrap()));
     assert!(is_blocked_ip("169.254.169.254".parse().unwrap()));
     assert!(is_blocked_ip("::1".parse().unwrap()));
+    assert!(is_blocked_ip("::".parse().unwrap()));
+    assert!(is_blocked_ip("fe80::1".parse().unwrap()));
+    assert!(is_blocked_ip("fc00::1".parse().unwrap()));
+    assert!(is_blocked_ip("::ffff:127.0.0.1".parse().unwrap()));
+    assert!(is_blocked_ip("::ffff:169.254.169.254".parse().unwrap()));
 
     let ssrf_blocked = validate_safe_url("http://169.254.169.254/latest/meta-data/", None);
     assert!(ssrf_blocked.is_err(), "SSRF attempt must be rejected");
+
+    // Bracketed IPv6 SSRF attempts (Issue #368)
+    for target in [
+        "http://[::1]/",
+        "http://[::]/",
+        "https://[fe80::1]/",
+        "https://[fc00::1]/",
+        "http://[::ffff:127.0.0.1]/",
+        "http://[::ffff:169.254.169.254]/",
+    ] {
+        assert!(
+            validate_safe_url(target, None).is_err(),
+            "Target {target} must be rejected"
+        );
+    }
+    assert!(validate_safe_url("https://[2606:4700:4700::1111]/", None).is_ok());
 
     let valid_url = validate_safe_url("https://api.github.com/repos/rust-lang/rust", None);
     assert!(
