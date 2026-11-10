@@ -495,6 +495,73 @@ async fn test_phase2_community_operations_and_media_suite() {
         assert_eq!(valid_poll_resp.status(), reqwest::StatusCode::OK);
     }
 
+    // Issue #373: Poll question and options boundary validation via REST API
+    let invalid_poll_payloads = [
+        // Empty question
+        serde_json::json!({
+            "channel_id": "chan_general",
+            "question": "   ",
+            "options": ["A", "B"]
+        }),
+        // Question too long (> 300 chars)
+        serde_json::json!({
+            "channel_id": "chan_general",
+            "question": "x".repeat(301),
+            "options": ["A", "B"]
+        }),
+        // Empty options (< 2)
+        serde_json::json!({
+            "channel_id": "chan_general",
+            "question": "Valid Question?",
+            "options": []
+        }),
+        serde_json::json!({
+            "channel_id": "chan_general",
+            "question": "Valid Question?",
+            "options": ["Only One"]
+        }),
+        // Too many options (> 10)
+        serde_json::json!({
+            "channel_id": "chan_general",
+            "question": "Valid Question?",
+            "options": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"]
+        }),
+        // Blank option
+        serde_json::json!({
+            "channel_id": "chan_general",
+            "question": "Valid Question?",
+            "options": ["Valid", "   "]
+        }),
+        // Option too long (> 55 chars)
+        serde_json::json!({
+            "channel_id": "chan_general",
+            "question": "Valid Question?",
+            "options": ["Valid", "x".repeat(56)]
+        }),
+        // Duplicate options
+        serde_json::json!({
+            "channel_id": "chan_general",
+            "question": "Valid Question?",
+            "options": ["Same", "same"]
+        }),
+    ];
+
+    for (idx, invalid_payload) in invalid_poll_payloads.iter().enumerate() {
+        let resp = client
+            .post(format!("{base_url}/api/guilds/{guild_id}/polls"))
+            .header(COOKIE, &session_cookie)
+            .header("x-csrf-token", csrf_token)
+            .json(invalid_payload)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::BAD_REQUEST,
+            "invalid poll payload #{idx} must return 400 Bad Request"
+        );
+    }
+
     // Vote on option 1 ("Rust")
     let vote_resp = client
         .post(format!(

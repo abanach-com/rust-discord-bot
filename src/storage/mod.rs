@@ -503,6 +503,43 @@ pub fn validate_birthday_date(month: i16, day: i16) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub const MIN_POLL_QUESTION_CHARS: usize = 1;
+pub const MAX_POLL_QUESTION_CHARS: usize = 300;
+pub const MIN_POLL_OPTIONS: usize = 2;
+pub const MAX_POLL_OPTIONS: usize = 10;
+pub const MIN_POLL_OPTION_CHARS: usize = 1;
+pub const MAX_POLL_OPTION_CHARS: usize = 55;
+
+pub fn validate_poll_input(question: &str, options: &[String]) -> anyhow::Result<()> {
+    let q_trimmed = question.trim();
+    let q_len = q_trimmed.chars().count();
+    anyhow::ensure!(
+        (MIN_POLL_QUESTION_CHARS..=MAX_POLL_QUESTION_CHARS).contains(&q_len),
+        "question must contain {MIN_POLL_QUESTION_CHARS}..={MAX_POLL_QUESTION_CHARS} characters"
+    );
+
+    anyhow::ensure!(
+        (MIN_POLL_OPTIONS..=MAX_POLL_OPTIONS).contains(&options.len()),
+        "options must contain {MIN_POLL_OPTIONS}..={MAX_POLL_OPTIONS} answers"
+    );
+
+    let mut seen = std::collections::HashSet::with_capacity(options.len());
+    for option in options {
+        let opt_trimmed = option.trim();
+        let opt_len = opt_trimmed.chars().count();
+        anyhow::ensure!(
+            (MIN_POLL_OPTION_CHARS..=MAX_POLL_OPTION_CHARS).contains(&opt_len),
+            "option must contain {MIN_POLL_OPTION_CHARS}..={MAX_POLL_OPTION_CHARS} characters"
+        );
+        anyhow::ensure!(
+            seen.insert(opt_trimmed.to_lowercase()),
+            "duplicate poll option: '{opt_trimmed}'"
+        );
+    }
+
+    Ok(())
+}
+
 /// Computes the exact next occurrence date of a birthday on or after `today`.
 ///
 /// For Feb 29 birthdays, this calculates the next actual leap day (Feb 29) on or after `today`,
@@ -2745,15 +2782,17 @@ impl Storage {
 
         expires_at: DateTime<Utc>,
     ) -> anyhow::Result<CommunityPoll> {
+        validate_poll_input(question, options)?;
+
         match self {
-            Self::Memory(store) => Ok(store.create_community_poll(
+            Self::Memory(store) => store.create_community_poll(
                 guild_id,
                 channel_id,
                 question,
                 options,
                 is_anonymous,
                 expires_at,
-            )),
+            ),
 
             Self::Postgres(store) => {
                 store
@@ -9329,5 +9368,48 @@ mod tests {
             .await
             .unwrap();
         assert!(non_existent.is_empty());
+    }
+
+    #[test]
+    fn test_validate_poll_input_boundaries_and_rejections_issue_373() {
+        use super::*;
+
+        // Valid 2 options
+        let ok_2 = vec!["A".to_string(), "B".to_string()];
+        assert!(validate_poll_input("Valid Question?", &ok_2).is_ok());
+
+        // Valid 10 options
+        let ok_10: Vec<String> = (1..=10).map(|i| format!("Opt {i}")).collect();
+        assert!(validate_poll_input("Valid Question?", &ok_10).is_ok());
+
+        // Empty / whitespace question
+        assert!(validate_poll_input("", &ok_2).is_err());
+        assert!(validate_poll_input("   \t\n  ", &ok_2).is_err());
+
+        // Question too long (> 300 chars)
+        let long_q = "q".repeat(301);
+        assert!(validate_poll_input(&long_q, &ok_2).is_err());
+        let max_q = "q".repeat(300);
+        assert!(validate_poll_input(&max_q, &ok_2).is_ok());
+
+        // Options count boundaries (< 2 or > 10)
+        assert!(validate_poll_input("Q", &[]).is_err());
+        assert!(validate_poll_input("Q", &["Single".to_string()]).is_err());
+        let too_many: Vec<String> = (1..=11).map(|i| format!("Opt {i}")).collect();
+        assert!(validate_poll_input("Q", &too_many).is_err());
+
+        // Option length boundaries
+        let empty_opt = vec!["Valid".to_string(), "".to_string()];
+        assert!(validate_poll_input("Q", &empty_opt).is_err());
+        let ws_opt = vec!["Valid".to_string(), "   ".to_string()];
+        assert!(validate_poll_input("Q", &ws_opt).is_err());
+        let long_opt = vec!["Valid".to_string(), "o".repeat(56)];
+        assert!(validate_poll_input("Q", &long_opt).is_err());
+        let max_opt = vec!["Valid".to_string(), "o".repeat(55)];
+        assert!(validate_poll_input("Q", &max_opt).is_ok());
+
+        // Duplicate options (case-insensitive)
+        let dup = vec!["Option 1".to_string(), "option 1".to_string()];
+        assert!(validate_poll_input("Q", &dup).is_err());
     }
 }

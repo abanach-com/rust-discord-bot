@@ -2394,6 +2394,8 @@ impl PostgresStore {
 
         expires_at: DateTime<Utc>,
     ) -> anyhow::Result<CommunityPoll> {
+        super::validate_poll_input(question, options)?;
+
         let id = Uuid::new_v4();
 
         let tallies = vec![0i64; options.len()];

@@ -1031,6 +1031,9 @@ pub async fn create_poll(
 
     ensure_channel_view_access(&state, &session, &guild_id, &payload.channel_id).await?;
 
+    crate::storage::validate_poll_input(&payload.question, &payload.options)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
     let expires = checked_expires_at(payload.duration_minutes.unwrap_or(1440))?;
 
     let poll = state

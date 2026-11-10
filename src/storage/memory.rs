@@ -1871,7 +1871,9 @@ impl MemoryStore {
         is_anonymous: bool,
 
         expires_at: chrono::DateTime<Utc>,
-    ) -> CommunityPoll {
+    ) -> anyhow::Result<CommunityPoll> {
+        super::validate_poll_input(question, options)?;
+
         let id = Uuid::new_v4();
 
         let tallies = vec![0i64; options.len()];
@@ -1898,7 +1900,7 @@ impl MemoryStore {
 
         self.polls.insert(id, poll.clone());
 
-        poll
+        Ok(poll)
     }
 
     pub fn get_community_poll(&self, poll_id: Uuid) -> Option<CommunityPoll> {
