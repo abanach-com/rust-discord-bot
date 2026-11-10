@@ -18,7 +18,8 @@ use super::{
     EconomyPurchaseRequestRecord, EventRoster, FaqEntry, FeedSubscription, GameAccountLink,
     GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway, GuildModuleSettings,
     IntegrationConnection, IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking,
-    KickStreamSubscription, LinkedAccount, MAX_COMPANION_MAPPINGS_PER_GUILD, McpToolAuthorization,
+    KickStreamSubscription, LinkedAccount, MAX_AI_DOCUMENTS_BYTES_PER_GUILD,
+    MAX_AI_DOCUMENTS_PER_GUILD, MAX_COMPANION_MAPPINGS_PER_GUILD, McpToolAuthorization,
     MemberIdentityRecord, MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot,
     ModerationAppeal, ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings,
     ModeratorDutyState, ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage,
@@ -219,6 +220,8 @@ pub struct MemoryStore {
     ai_metering_write_lock: Arc<Mutex<()>>,
 
     ai_documents: Arc<DashMap<Uuid, AiKnowledgeDocument>>,
+
+    ai_documents_write_lock: Arc<Mutex<()>>,
 
     mcp_tool_auths: Arc<DashMap<(String, String), McpToolAuthorization>>,
 
@@ -6057,10 +6060,51 @@ impl MemoryStore {
         count
     }
 
-    pub fn create_ai_document(&self, doc: AiKnowledgeDocument) -> AiKnowledgeDocument {
+    pub fn create_ai_document(
+        &self,
+        doc: AiKnowledgeDocument,
+    ) -> anyhow::Result<AiKnowledgeDocument> {
+        let _guard = self
+            .ai_documents_write_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("AI documents write lock poisoned"))?;
+
+        let mut count = 0;
+        let mut total_bytes = 0;
+        for entry in self.ai_documents.iter() {
+            if entry.guild_id == doc.guild_id {
+                count += 1;
+                total_bytes += entry.title.len() + entry.content.len();
+            }
+        }
+
+        let incoming_bytes = doc.title.len() + doc.content.len();
+        if count >= MAX_AI_DOCUMENTS_PER_GUILD
+            || total_bytes.saturating_add(incoming_bytes) > MAX_AI_DOCUMENTS_BYTES_PER_GUILD
+        {
+            anyhow::bail!("AI knowledge documents quota exceeded for guild");
+        }
+
         self.ai_documents.insert(doc.id, doc.clone());
 
-        doc
+        Ok(doc)
+    }
+
+    pub fn delete_ai_document(&self, guild_id: &str, doc_id: Uuid) -> bool {
+        let _guard = match self.ai_documents_write_lock.lock() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+
+        if let Some(entry) = self.ai_documents.get(&doc_id) {
+            if entry.guild_id != guild_id {
+                return false;
+            }
+        } else {
+            return false;
+        }
+
+        self.ai_documents.remove(&doc_id).is_some()
     }
 
     pub fn search_ai_documents(

@@ -932,6 +932,8 @@ pub struct CompanionChannelMapping {
 }
 
 pub const MAX_COMPANION_MAPPINGS_PER_GUILD: usize = 50;
+pub const MAX_AI_DOCUMENTS_PER_GUILD: usize = 200;
+pub const MAX_AI_DOCUMENTS_BYTES_PER_GUILD: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CompanionMappingItem {
@@ -5878,9 +5880,16 @@ impl Storage {
         doc: AiKnowledgeDocument,
     ) -> anyhow::Result<AiKnowledgeDocument> {
         match self {
-            Self::Memory(store) => Ok(store.create_ai_document(doc)),
+            Self::Memory(store) => store.create_ai_document(doc),
 
             Self::Postgres(store) => store.create_ai_document(doc).await,
+        }
+    }
+
+    pub async fn delete_ai_document(&self, guild_id: &str, doc_id: Uuid) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => Ok(store.delete_ai_document(guild_id, doc_id)),
+            Self::Postgres(store) => store.delete_ai_document(guild_id, doc_id).await,
         }
     }
 

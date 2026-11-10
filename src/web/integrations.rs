@@ -1054,13 +1054,52 @@ pub async fn add_ai_knowledge_doc(
     verify_csrf(&headers, &session)?;
     ensure_guild_access(&state, &session, &guild_id).await?;
 
+    let title = payload.title.trim();
+    if title.is_empty() || title.len() > 200 {
+        return Err(ApiError::bad_request(
+            "Document title must be between 1 and 200 characters",
+        ));
+    }
+
+    let content = payload.content.trim();
+    if content.is_empty() || content.len() > 64 * 1024 {
+        return Err(ApiError::bad_request(
+            "Document content must be between 1 and 65536 bytes",
+        ));
+    }
+
+    let source_type = payload.source_type.trim();
+    if source_type.is_empty()
+        || source_type.len() > 64
+        || !source_type
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(ApiError::bad_request(
+            "Document source_type must be 1-64 alphanumeric characters, hyphens or underscores",
+        ));
+    }
+
+    if payload.channel_acl.len() > 50 {
+        return Err(ApiError::bad_request(
+            "channel_acl cannot contain more than 50 channel IDs",
+        ));
+    }
+    for ch in &payload.channel_acl {
+        if ch.is_empty() || ch.len() > 20 || ch.parse::<u64>().is_err() {
+            return Err(ApiError::bad_request(format!(
+                "Invalid channel ID in channel_acl: '{ch}'"
+            )));
+        }
+    }
+
     let doc = AiKnowledgeDocument {
         id: Uuid::new_v4(),
         guild_id,
         channel_acl: json!(payload.channel_acl),
-        title: payload.title,
-        content: payload.content,
-        source_type: payload.source_type,
+        title: title.to_string(),
+        content: content.to_string(),
+        source_type: source_type.to_string(),
         created_at: Utc::now(),
     };
 
@@ -1069,9 +1108,42 @@ pub async fn add_ai_knowledge_doc(
         .storage
         .create_ai_document(doc)
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("quota exceeded") {
+                ApiError::conflict("AI knowledge documents quota exceeded for guild")
+            } else {
+                ApiError::internal(msg)
+            }
+        })?;
 
     Ok(Json(saved))
+}
+
+pub async fn delete_ai_knowledge_doc(
+    State(state): State<WebState>,
+    Path((guild_id, doc_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+
+    let removed = state
+        .app
+        .storage
+        .delete_ai_document(&guild_id, doc_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    if !removed {
+        return Err(ApiError::not_found("AI knowledge document not found"));
+    }
+
+    Ok(Json(json!({
+        "status": "deleted",
+        "id": doc_id
+    })))
 }
 
 #[derive(Debug, Deserialize)]

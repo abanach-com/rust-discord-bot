@@ -836,6 +836,10 @@ pub fn build_router(state: WebState) -> Router {
             post(integrations::add_ai_knowledge_doc),
         )
         .route(
+            "/api/guilds/{guild_id}/ai/documents/{doc_id}",
+            delete(integrations::delete_ai_knowledge_doc),
+        )
+        .route(
             "/api/guilds/{guild_id}/ai/search",
             post(integrations::search_ai_knowledge),
         )

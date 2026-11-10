@@ -18,8 +18,9 @@ use super::{
     GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway, GuildModuleSettings,
     HelpForumConfig, HelpForumSession, HelpForumStats, IntegrationConnection,
     IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking, KickStreamSubscription,
-    LinkedAccount, MAX_COMPANION_MAPPINGS_PER_GUILD, McpToolAuthorization, MemberIdentityRecord,
-    MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
+    LinkedAccount, MAX_AI_DOCUMENTS_BYTES_PER_GUILD, MAX_AI_DOCUMENTS_PER_GUILD,
+    MAX_COMPANION_MAPPINGS_PER_GUILD, McpToolAuthorization, MemberIdentityRecord, MemberProgress,
+    MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
     ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
     ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
     ProgressionSeason, QuoteRecord, ReactionRoleBinding, ReactionRoleGrant,
@@ -8969,8 +8970,32 @@ impl PostgresStore {
 
         doc: AiKnowledgeDocument,
     ) -> anyhow::Result<AiKnowledgeDocument> {
-        let row = sqlx::query_as::<_, AiKnowledgeDocument>(
+        let mut tx = self.pool.begin().await?;
 
+        sqlx::query("SELECT pg_advisory_xact_lock(4242, hashtext($1))")
+            .bind(&doc.guild_id)
+            .execute(&mut *tx)
+            .await?;
+
+        let (count, total_bytes): (i64, i64) = sqlx::query_as(
+            r#"
+            SELECT COUNT(*), COALESCE(SUM(octet_length(content) + octet_length(title)), 0)::bigint
+            FROM ai_knowledge_documents
+            WHERE guild_id = $1
+            "#,
+        )
+        .bind(&doc.guild_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let incoming_bytes = (doc.title.len() + doc.content.len()) as i64;
+        if count >= MAX_AI_DOCUMENTS_PER_GUILD as i64
+            || total_bytes.saturating_add(incoming_bytes) > MAX_AI_DOCUMENTS_BYTES_PER_GUILD as i64
+        {
+            anyhow::bail!("AI knowledge documents quota exceeded for guild");
+        }
+
+        let row = sqlx::query_as::<_, AiKnowledgeDocument>(
             r#"
 
             INSERT INTO ai_knowledge_documents (id, guild_id, channel_acl, title, content, source_type, created_at)
@@ -8979,29 +9004,36 @@ impl PostgresStore {
 
             RETURNING *
 
-            "#
-
+            "#,
         )
-
         .bind(doc.id)
-
         .bind(&doc.guild_id)
-
         .bind(&doc.channel_acl)
-
         .bind(&doc.title)
-
         .bind(&doc.content)
-
         .bind(&doc.source_type)
-
         .bind(doc.created_at)
-
-        .fetch_one(&self.pool)
-
+        .fetch_one(&mut *tx)
         .await?;
 
+        tx.commit().await?;
+
         Ok(row)
+    }
+
+    pub async fn delete_ai_document(&self, guild_id: &str, doc_id: Uuid) -> anyhow::Result<bool> {
+        let res = sqlx::query(
+            r#"
+            DELETE FROM ai_knowledge_documents
+            WHERE id = $1 AND guild_id = $2
+            "#,
+        )
+        .bind(doc_id)
+        .bind(guild_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(res.rows_affected() > 0)
     }
 
     pub async fn search_ai_documents(

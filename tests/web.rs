@@ -17600,3 +17600,312 @@ async fn test_sse_eventsource_connection_limits_and_isolation_issue_376() {
         "Zero-count entries must be cleaned from memory"
     );
 }
+
+#[tokio::test]
+async fn test_ai_knowledge_doc_validation_quota_and_deletion_issue_377() {
+    let (web_state, _) = test_web_state().await;
+    let router = build_router(web_state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let guild_id = "555111222333444555";
+    let other_guild_id = "555999888777666555";
+
+    let session_id = "session_issue_377";
+    let csrf_token = "csrf_issue_377";
+    let session = rusty_discord_bot::session::Session {
+        user: DashboardUser {
+            id: "user_issue_377".to_string(),
+            username: "ai_admin".to_string(),
+            avatar: None,
+            global_name: None,
+        },
+        guilds: vec![DashboardGuild {
+            id: guild_id.to_string(),
+            name: "AI Guild".to_string(),
+            icon: None,
+            owner: true,
+            permissions: "8".to_string(),
+        }],
+        expires_at: Utc::now() + Duration::hours(2),
+        access_token: None,
+        csrf_token: csrf_token.to_string(),
+    };
+    web_state
+        .app
+        .sessions
+        .save_session(
+            session_id,
+            session.user,
+            session.guilds,
+            session.csrf_token,
+            session.expires_at,
+            None,
+        )
+        .await
+        .unwrap();
+    let cookie = format!("rusty_discord_bot_session={session_id}");
+
+    // Session for other user in other guild
+    let other_session_id = "session_issue_377_other";
+    let other_session = rusty_discord_bot::session::Session {
+        user: DashboardUser {
+            id: "user_issue_377_other".to_string(),
+            username: "other_admin".to_string(),
+            avatar: None,
+            global_name: None,
+        },
+        guilds: vec![DashboardGuild {
+            id: other_guild_id.to_string(),
+            name: "Other AI Guild".to_string(),
+            icon: None,
+            owner: true,
+            permissions: "8".to_string(),
+        }],
+        expires_at: Utc::now() + Duration::hours(2),
+        access_token: None,
+        csrf_token: "csrf_377_other".to_string(),
+    };
+    web_state
+        .app
+        .sessions
+        .save_session(
+            other_session_id,
+            other_session.user,
+            other_session.guilds,
+            other_session.csrf_token,
+            other_session.expires_at,
+            None,
+        )
+        .await
+        .unwrap();
+    let other_cookie = format!("rusty_discord_bot_session={other_session_id}");
+
+    // 1. Validation: empty title -> 400 Bad Request
+    let bad_title_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/ai/documents"))
+        .header(COOKIE, &cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "title": "   ",
+            "content": "Valid content",
+            "source_type": "manual"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_title_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 2. Validation: oversized title (>200 chars) -> 400 Bad Request
+    let long_title = "a".repeat(201);
+    let long_title_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/ai/documents"))
+        .header(COOKIE, &cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "title": long_title,
+            "content": "Valid content",
+            "source_type": "manual"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(long_title_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 3. Validation: empty content -> 400 Bad Request
+    let empty_content_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/ai/documents"))
+        .header(COOKIE, &cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "title": "Valid title",
+            "content": "\n\t   \n",
+            "source_type": "manual"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        empty_content_resp.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+
+    // 4. Validation: oversized content (>64 KiB) -> 400 Bad Request
+    let huge_content = "x".repeat(65 * 1024);
+    let huge_content_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/ai/documents"))
+        .header(COOKIE, &cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "title": "Valid title",
+            "content": huge_content,
+            "source_type": "manual"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(huge_content_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 5. Validation: invalid source_type -> 400 Bad Request
+    let bad_source_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/ai/documents"))
+        .header(COOKIE, &cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "title": "Valid title",
+            "content": "Valid content",
+            "source_type": "invalid source<script>"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_source_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 6. Validation: invalid channel_acl (non-numeric channel id) -> 400 Bad Request
+    let bad_acl_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/ai/documents"))
+        .header(COOKIE, &cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "title": "Valid title",
+            "content": "Valid content",
+            "source_type": "manual",
+            "channel_acl": ["not_a_snowflake_123!"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_acl_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 7. Success: create valid document -> 200 OK
+    let create_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/ai/documents"))
+        .header(COOKIE, &cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "title": "Server Policy Guide",
+            "content": "Be respectful and adhere to community guidelines at all times.",
+            "source_type": "handbook",
+            "channel_acl": ["100200300400500"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), reqwest::StatusCode::OK);
+    let created_doc: serde_json::Value = create_resp.json().await.unwrap();
+    let doc_id = created_doc["id"].as_str().unwrap();
+
+    // Verify document is searchable
+    let search_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/ai/search"))
+        .header(COOKIE, &cookie)
+        .json(&serde_json::json!({
+            "query": "respectful",
+            "user_channels": ["100200300400500"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(search_resp.status(), reqwest::StatusCode::OK);
+    let search_results: Vec<serde_json::Value> = search_resp.json().await.unwrap();
+    assert_eq!(search_results.len(), 1);
+    assert_eq!(search_results[0]["id"], doc_id);
+
+    // 8. Cross-tenant isolation on DELETE: other guild user cannot delete this doc -> 403 Forbidden
+    let cross_del_resp = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/ai/documents/{doc_id}"
+        ))
+        .header(COOKIE, &other_cookie)
+        .header("x-csrf-token", "csrf_377_other")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cross_del_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 9. Deleting non-existent doc on authorized guild -> 404 Not Found
+    let random_uuid = uuid::Uuid::new_v4();
+    let not_found_del = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/ai/documents/{random_uuid}"
+        ))
+        .header(COOKIE, &cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(not_found_del.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // 10. Legitimate DELETE: owner deletes document -> 200 OK
+    let del_resp = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/ai/documents/{doc_id}"
+        ))
+        .header(COOKIE, &cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del_resp.status(), reqwest::StatusCode::OK);
+    let del_body: serde_json::Value = del_resp.json().await.unwrap();
+    assert_eq!(del_body["status"], "deleted");
+    assert_eq!(del_body["id"], doc_id);
+
+    // Verify document is no longer searchable
+    let search_after = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/ai/search"))
+        .header(COOKIE, &cookie)
+        .json(&serde_json::json!({
+            "query": "respectful",
+            "user_channels": ["100200300400500"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(search_after.status(), reqwest::StatusCode::OK);
+    let after_results: Vec<serde_json::Value> = search_after.json().await.unwrap();
+    assert_eq!(after_results.len(), 0);
+
+    // 11. Storage Quota enforcement: filling up to limit returns 409 Conflict
+    let quota_guild = "666111222333444555";
+    for i in 1..=rusty_discord_bot::storage::MAX_AI_DOCUMENTS_PER_GUILD {
+        web_state
+            .app
+            .storage
+            .create_ai_document(rusty_discord_bot::storage::AiKnowledgeDocument {
+                id: uuid::Uuid::new_v4(),
+                guild_id: quota_guild.to_string(),
+                channel_acl: serde_json::json!([]),
+                title: format!("Doc #{i}"),
+                content: format!("Content #{i}"),
+                source_type: "bulk".to_string(),
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("fill doc under quota");
+    }
+
+    // Next insert must exceed quota and return Err
+    let excess_res = web_state
+        .app
+        .storage
+        .create_ai_document(rusty_discord_bot::storage::AiKnowledgeDocument {
+            id: uuid::Uuid::new_v4(),
+            guild_id: quota_guild.to_string(),
+            channel_acl: serde_json::json!([]),
+            title: "Excess Doc".to_string(),
+            content: "Excess content".to_string(),
+            source_type: "bulk".to_string(),
+            created_at: chrono::Utc::now(),
+        })
+        .await;
+    assert!(
+        excess_res.is_err(),
+        "Must reject insertion beyond MAX_AI_DOCUMENTS_PER_GUILD"
+    );
+}
