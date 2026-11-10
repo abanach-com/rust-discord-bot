@@ -644,3 +644,81 @@ async fn test_install_xml_duplicate_attributes_rejected_issue_381() {
         "cold engine load must fail when install.xml contains duplicate attributes"
     );
 }
+
+#[tokio::test]
+async fn test_install_xml_unquoted_and_valueless_attributes_rejected_issue_383() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path();
+
+    // 1. Initial valid setup
+    let valid_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<installer version="1.0.0">
+    <modules>
+        <module id="valid_mod" enabled="true">
+            <folder>mod</folder>
+            <entry>module.lua</entry>
+        </module>
+    </modules>
+</installer>"#;
+    std::fs::write(base.join("install.xml"), valid_xml).expect("write valid install.xml");
+
+    let mod_dir = base.join("mod");
+    std::fs::create_dir_all(&mod_dir).expect("create mod dir");
+    std::fs::write(
+        mod_dir.join("module.lua"),
+        r#"return { manifest = { id = "valid_mod", name = "Valid", version = "1.0.0", description = "Valid", category = "test", commands = {} } }"#,
+    )
+    .expect("write module.lua");
+
+    let engine = LuaEngine::load(base, limits()).expect("initial engine load should succeed");
+    assert!(engine.manifest("valid_mod").await.is_some());
+
+    // 2. Overwrite with valueless attribute (HTML-style: <module id="valid_mod" enabled>)
+    let valueless_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<installer version="1.0.0">
+    <modules>
+        <module id="valid_mod" enabled>
+            <folder>mod</folder>
+            <entry>module.lua</entry>
+        </module>
+    </modules>
+</installer>"#;
+    std::fs::write(base.join("install.xml"), valueless_xml).expect("write valueless install.xml");
+
+    let reload_res = engine.reload().await;
+    assert!(
+        reload_res.is_err(),
+        "reload must fail when install.xml contains valueless attributes"
+    );
+
+    // Existing registry must be preserved and not silently disabled
+    assert!(
+        engine.manifest("valid_mod").await.is_some(),
+        "existing registry must be preserved after failed reload"
+    );
+
+    // 3. Overwrite with unquoted attribute (<module id=valid_mod enabled="true">)
+    let unquoted_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<installer version="1.0.0">
+    <modules>
+        <module id=valid_mod enabled="true">
+            <folder>mod</folder>
+            <entry>module.lua</entry>
+        </module>
+    </modules>
+</installer>"#;
+    std::fs::write(base.join("install.xml"), unquoted_xml).expect("write unquoted install.xml");
+
+    let reload_res2 = engine.reload().await;
+    assert!(
+        reload_res2.is_err(),
+        "reload must fail when install.xml contains unquoted attributes"
+    );
+
+    // 4. Cold load must fail fast on unquoted attribute
+    let cold_res = LuaEngine::load(base, limits());
+    assert!(
+        cold_res.is_err(),
+        "cold start must fail fast on unquoted attribute"
+    );
+}

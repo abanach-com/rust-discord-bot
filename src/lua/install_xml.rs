@@ -496,33 +496,39 @@ pub fn parse_xml_to_dom(source: &str) -> Result<XmlElement, InstallXmlError> {
                     i += 1;
                 }
 
-                let attr_val = if i < len && bytes[i] == b'=' {
-                    i += 1; // skip '='
-                    while i < len && bytes[i].is_ascii_whitespace() {
-                        i += 1;
-                    }
-                    if i < len && (bytes[i] == b'"' || bytes[i] == b'\'') {
-                        let quote = bytes[i];
-                        i += 1;
-                        let val_start = i;
-                        while i < len && bytes[i] != quote {
-                            i += 1;
-                        }
-                        let val = &source[val_start..i];
-                        if i < len && bytes[i] == quote {
-                            i += 1;
-                        }
-                        unescape_xml(val)
-                    } else {
-                        let val_start = i;
-                        while i < len && !bytes[i].is_ascii_whitespace() && bytes[i] != b'>' {
-                            i += 1;
-                        }
-                        unescape_xml(&source[val_start..i])
-                    }
-                } else {
-                    String::new()
-                };
+                if i >= len || bytes[i] != b'=' {
+                    return Err(InstallXmlError::ParseError {
+                        offset: attr_start,
+                        message: format!("attribute '{attr_name}' requires '=' and quoted value"),
+                    });
+                }
+                i += 1; // skip '='
+
+                while i < len && bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+
+                if i >= len || (bytes[i] != b'"' && bytes[i] != b'\'') {
+                    return Err(InstallXmlError::ParseError {
+                        offset: i,
+                        message: format!("attribute '{attr_name}' requires quoted value"),
+                    });
+                }
+
+                let quote = bytes[i];
+                i += 1;
+                let val_start = i;
+                while i < len && bytes[i] != quote {
+                    i += 1;
+                }
+                if i >= len {
+                    return Err(InstallXmlError::ParseError {
+                        offset: val_start,
+                        message: format!("unterminated quoted value of attribute '{attr_name}'"),
+                    });
+                }
+                let attr_val = unescape_xml(&source[val_start..i]);
+                i += 1; // skip quote
 
                 if attributes.insert(attr_name.clone(), attr_val).is_some() {
                     return Err(InstallXmlError::ParseError {
@@ -989,5 +995,33 @@ mod tests {
         let err_sc = parse_xml_to_dom(xml_self_closing).unwrap_err();
         assert!(matches!(err_sc, InstallXmlError::ParseError { .. }));
         assert!(err_sc.to_string().contains("duplicate XML attribute 'id'"));
+    }
+
+    #[test]
+    fn test_reject_unquoted_or_valueless_attributes_issue_383() {
+        let invalid = [
+            r#"<installer><modules><module id="moderation" enabled></module></modules></installer>"#,
+            r#"<installer><modules><module id=moderation enabled=true></module></modules></installer>"#,
+            r#"<installer version=1.0.0 />"#,
+            r#"<installer><modules><module id='moderation' enabled=></module></modules></installer>"#,
+            r#"<installer><modules><module id="moderation" enabled="true></module></modules></installer>"#,
+        ];
+        for xml in invalid {
+            assert!(
+                matches!(
+                    InstallManifest::parse(xml),
+                    Err(InstallXmlError::ParseError { .. })
+                ),
+                "must reject invalid XML attribute syntax: {xml}"
+            );
+        }
+
+        // Single and double quotes are both valid XML
+        let valid_single = r#"<installer version='1.0.0'><modules><module id='single' enabled='true'><folder>f</folder><entry>e.lua</entry></module></modules></installer>"#;
+        assert!(InstallManifest::parse(valid_single).is_ok());
+
+        // Empty string value in quotes is valid XML
+        let valid_empty_val = r#"<installer version="1.0.0"><modules><module id="empty_author" author=""><folder>f</folder><entry>e.lua</entry></module></modules></installer>"#;
+        assert!(InstallManifest::parse(valid_empty_val).is_ok());
     }
 }
