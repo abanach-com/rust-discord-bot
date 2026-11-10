@@ -190,3 +190,127 @@ fn test_composite_reservations_cannot_deadlock() {
         handle.join().expect("thread join must not deadlock");
     }
 }
+
+#[test]
+fn test_multi_rate_limit_duplicate_identical_keys_consumes_single_slot_issue_370() {
+    let limiter = RateLimiter::new();
+    let quota = RateLimitQuota::new(2, 60);
+
+    // Call 1: two identical keys in a single multi-check
+    let first = limiter.check_multi_rate_limit(&[("same_key", quota), ("same_key", quota)]);
+    assert!(first.allowed);
+    assert_eq!(
+        first.remaining, 1,
+        "single call with duplicated identical key must consume exactly 1 token"
+    );
+
+    // Call 2: another call with two identical keys
+    let second = limiter.check_multi_rate_limit(&[("same_key", quota), ("same_key", quota)]);
+    assert!(second.allowed);
+    assert_eq!(
+        second.remaining, 0,
+        "second call should consume the remaining token"
+    );
+
+    // Call 3: should be denied as 2 requests in 60s were made
+    let third = limiter.check_multi_rate_limit(&[("same_key", quota), ("same_key", quota)]);
+    assert!(!third.allowed);
+    assert_eq!(third.remaining, 0);
+}
+
+#[test]
+fn test_multi_rate_limit_duplicate_keys_with_limit_one_never_overflows_issue_370() {
+    let limiter = RateLimiter::new();
+    let quota = RateLimitQuota::new(1, 60);
+
+    let first = limiter.check_multi_rate_limit(&[("single_slot", quota), ("single_slot", quota)]);
+    assert!(first.allowed);
+    assert_eq!(first.remaining, 0);
+
+    let second = limiter.check_multi_rate_limit(&[("single_slot", quota), ("single_slot", quota)]);
+    assert!(!second.allowed);
+}
+
+#[test]
+fn test_multi_rate_limit_distinct_keys_atomic_all_or_nothing() {
+    let limiter = RateLimiter::new();
+    let quota_low = RateLimitQuota::new(1, 60);
+    let quota_high = RateLimitQuota::new(5, 60);
+
+    // 1st request succeeds for both keys
+    let first = limiter.check_multi_rate_limit(&[("chan_1", quota_low), ("author_1", quota_high)]);
+    assert!(first.allowed);
+    assert_eq!(first.remaining, 0);
+
+    // 2nd request fails because chan_1 is exhausted
+    let second = limiter.check_multi_rate_limit(&[("chan_1", quota_low), ("author_1", quota_high)]);
+    assert!(!second.allowed);
+
+    // author_1 must have only consumed 1 token, remaining 4
+    let author_only = limiter.check_rate_limit("author_1", quota_high);
+    assert!(author_only.allowed);
+    assert_eq!(
+        author_only.remaining, 3,
+        "failed multi-check must not consume tokens for other keys"
+    );
+}
+
+#[test]
+fn test_multi_rate_limit_conflicting_quotas_rejected_deterministically_issue_370() {
+    let limiter = RateLimiter::new();
+    let quota_a = RateLimitQuota::new(2, 60);
+    let quota_b = RateLimitQuota::new(10, 5);
+
+    let res =
+        limiter.check_multi_rate_limit(&[("conflict_key", quota_a), ("conflict_key", quota_b)]);
+    assert!(
+        !res.allowed,
+        "conflicting quotas for the same key must be rejected"
+    );
+    assert_eq!(res.remaining, 0);
+
+    // Key history must not be polluted by the rejected call
+    let clean_res = limiter.check_rate_limit("conflict_key", quota_a);
+    assert!(clean_res.allowed);
+    assert_eq!(clean_res.remaining, 1);
+}
+
+#[test]
+fn test_multi_rate_limit_concurrent_duplicate_keys_limit_one_issue_370() {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    let limiter = Arc::new(RateLimiter::new());
+    let quota = RateLimitQuota::new(1, 60);
+
+    let threads = 20;
+    let barrier = Arc::new(Barrier::new(threads));
+    let mut handles = Vec::new();
+
+    for _ in 0..threads {
+        let lim = Arc::clone(&limiter);
+        let bar = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            bar.wait();
+            lim.check_multi_rate_limit(&[("concurrent_dup", quota), ("concurrent_dup", quota)])
+        }));
+    }
+
+    let mut allowed_count = 0;
+    let mut denied_count = 0;
+
+    for handle in handles {
+        let decision = handle.join().expect("thread join must succeed");
+        if decision.allowed {
+            allowed_count += 1;
+        } else {
+            denied_count += 1;
+        }
+    }
+
+    assert_eq!(
+        allowed_count, 1,
+        "under concurrency with limit 1, exactly 1 multi-check must succeed"
+    );
+    assert_eq!(denied_count, threads - 1);
+}

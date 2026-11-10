@@ -693,11 +693,12 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Refactored `GET /api/guilds/{guild_id}/audit` to execute pagination directly at the database level instead of loading 10,000 records into process memory.
   - Added `Storage::list_audit_events_page(guild_id, limit, offset)` and `Storage::count_audit_events(guild_id)` across `MemoryStore`, `PostgresStore`, and `Storage`.
   - Preserved existing JSON response contract (`items`, `total`, `next_offset`) while returning accurate unexpired audit event counts and bounded page results.
-- **Host Commands Policy Protection & Rate Limiting with Recovery Exception (#252)**:
+- **Host Commands Policy Protection & Rate Limiting with Recovery Exception (#252, #370)**:
   - Unified command dispatch guard via `evaluate_command_guard` in `src/discord/handler.rs` covering `/duty`, `/help`, `/emoji`, `/sticker` alongside Lua commands.
   - Enforced per-user and per-guild rate limiting (`RateLimiter::check_command`) and Command Policy evaluation (`CommandPolicyEngine::evaluate`) for built-in host commands.
   - Preserved administrative/owner recovery exception for `/policy` (`handle_policy_builtin_command`), preventing accidental policy lockouts.
   - Fixed `/policy explain` target command resolution in Discord slash command handler, mapping host commands (`duty`, `help`, `emoji`, `sticker`, `policy`) to their respective module IDs for consistent policy explain trace output.
+  - Normalized and deduplicated identical `(key, quota)` pairs in `RateLimiter::check_multi_rate_limit` (#370), preventing duplicate keys from consuming multiple tokens in a single multi-check invocation and deterministically rejecting conflicting quotas without modifying state.
 - **Ticket Close/Reopen Compensating Rollback & Reconciliation (#253)**:
   - Implemented transactional compensation in `src/discord/tickets.rs` across both `TicketOperation::Reopen` and `close_ticket`: tracks all applied permission overwrites and channel modifications, immediately rolling back changes (`set_member_read_only` / `restore_member_access` and channel name/category restore) if any intermediate Discord API call fails, or if the database mutation fails or returns `InvalidState`.
   - Added `reconcile_ticket_channel(ctx, state, guild_id, channel_id)` helper guaranteeing convergence between authoritative DB ticket status and Discord channel write permissions.

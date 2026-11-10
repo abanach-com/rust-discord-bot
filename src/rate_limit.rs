@@ -169,11 +169,27 @@ impl RateLimiter {
             };
         }
 
+        let mut unique: Vec<(&str, RateLimitQuota)> = Vec::with_capacity(checks.len());
+        for &(key, quota) in checks {
+            if let Some((_, existing)) = unique.iter().find(|(k, _)| *k == key) {
+                if *existing != quota {
+                    return RateLimitDecision {
+                        allowed: false,
+                        remaining: 0,
+                        reset_after: Duration::from_secs(1),
+                        limit: quota.max_requests,
+                    };
+                }
+            } else {
+                unique.push((key, quota));
+            }
+        }
+
         let now = Instant::now();
         let mut history = self.history.lock().unwrap_or_else(|e| e.into_inner());
 
         // First pass: evaluate capacity for all keys without recording timestamps
-        for &(key, quota) in checks {
+        for &(key, quota) in &unique {
             let timestamps = history.entry(key.to_string()).or_default();
             if let Err(decision) = Self::evaluate_capacity(timestamps, now, quota) {
                 return decision;
@@ -183,7 +199,7 @@ impl RateLimiter {
         // Second pass: all checks passed, record timestamp for all keys atomically
         let mut min_remaining = u32::MAX;
         let mut max_limit = 0;
-        for &(key, quota) in checks {
+        for &(key, quota) in &unique {
             let timestamps = history.entry(key.to_string()).or_default();
             timestamps.push(now);
             let rem = quota.max_requests.saturating_sub(timestamps.len() as u32);
