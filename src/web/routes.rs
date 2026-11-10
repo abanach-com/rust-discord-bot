@@ -700,34 +700,19 @@ pub async fn guild_cases(
         .parse::<u64>()
         .map_err(|_| ApiError::bad_request("Invalid server ID."))?;
 
-    let limit = pagination.limit.unwrap_or(50).clamp(1, 200);
+    let limit = pagination.limit.unwrap_or(50).clamp(1, 100);
     let offset = pagination.offset.unwrap_or(0);
 
-    let all_cases = state
+    let (items, total) = state
         .app
         .moderation_cases
-        .list_cases(
-            guild_u64,
-            crate::moderation_cases::CaseFilter {
-                subject_user_id: None,
-                actor_user_id: None,
-                kind: None,
-                status: None,
-                visible_to_subject_only: false,
-                limit: 10_000,
-            },
-            Utc::now(),
-        )
+        .list_cases_page(guild_u64, limit, offset, Utc::now())
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
 
-    let total = all_cases.len();
-    let items: Vec<_> = all_cases.into_iter().skip(offset).take(limit).collect();
-    let next_offset = if offset + items.len() < total {
-        Some(offset + items.len())
-    } else {
-        None
-    };
+    let next_offset = offset
+        .checked_add(items.len())
+        .filter(|next| (*next as u64) < total);
 
     Ok(Json(json!({
         "items": items,

@@ -178,6 +178,45 @@ impl PostgresModerationCaseStore {
         rows.iter().map(map_case).collect()
     }
 
+    pub async fn list_cases_page(
+        &self,
+        guild_id: u64,
+        limit: usize,
+        offset: usize,
+        now: DateTime<Utc>,
+    ) -> Result<(Vec<ModerationCase>, u64), CaseError> {
+        self.expire_due(guild_id, now).await?;
+        let guild_str = guild_id.to_string();
+
+        let mut tx = self.pool.begin().await?;
+
+        let total: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM moderation_cases WHERE guild_id = $1")
+                .bind(&guild_str)
+                .fetch_one(&mut *tx)
+                .await?;
+
+        let rows = sqlx::query(
+            r#"
+            SELECT *
+            FROM moderation_cases
+            WHERE guild_id = $1
+            ORDER BY case_number DESC
+            LIMIT $2 OFFSET $3
+            "#,
+        )
+        .bind(&guild_str)
+        .bind(limit as i64)
+        .bind(offset as i64)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+
+        let cases: Result<Vec<ModerationCase>, CaseError> = rows.iter().map(map_case).collect();
+        Ok((cases?, total as u64))
+    }
+
     pub async fn list_all_subject_cases(
         &self,
         guild_id: u64,

@@ -16972,3 +16972,204 @@ async fn test_lua_event_routing_parity_and_side_effects() {
         initial_events
     );
 }
+
+#[tokio::test]
+async fn test_guild_cases_pagination_and_no_500_issue_367() {
+    let (web_state, _) = test_web_state().await;
+    let router = build_router(web_state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let guild_id = "123456789012345678";
+    let other_guild_id = "987654321098765432";
+    let guild_u64 = guild_id.parse::<u64>().unwrap();
+    let other_guild_u64 = other_guild_id.parse::<u64>().unwrap();
+
+    let session_id = "session_issue_367";
+    let session = rusty_discord_bot::session::Session {
+        user: DashboardUser {
+            id: "100200300".to_string(),
+            username: "mod_tester".to_string(),
+            avatar: None,
+            global_name: None,
+        },
+        guilds: vec![DashboardGuild {
+            id: guild_id.to_string(),
+            name: "Mod Guild".to_string(),
+            icon: None,
+            owner: true,
+            permissions: "8".to_string(), // ADMINISTRATOR
+        }],
+        expires_at: Utc::now() + Duration::hours(2),
+        access_token: None,
+        csrf_token: "csrf_367".to_string(),
+    };
+    web_state
+        .app
+        .sessions
+        .save_session(
+            session_id,
+            session.user,
+            session.guilds,
+            session.csrf_token,
+            session.expires_at,
+            None,
+        )
+        .await
+        .unwrap();
+    let cookie = format!("rusty_discord_bot_session={session_id}");
+
+    // 1. Empty guild test: MUST return 200 OK (previously returned 500 Internal Server Error)
+    let res_empty = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/cases"))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res_empty.status(), reqwest::StatusCode::OK);
+    let body_empty: serde_json::Value = res_empty.json().await.unwrap();
+    assert_eq!(body_empty["total"], 0);
+    assert_eq!(body_empty["items"].as_array().unwrap().len(), 0);
+    assert!(body_empty["next_offset"].is_null());
+
+    // 2. Populate cases in guild_id (105 cases) and 5 cases in other_guild_id
+    let now = Utc::now();
+    for i in 1..=105 {
+        web_state
+            .app
+            .moderation_cases
+            .create_case(
+                rusty_discord_bot::moderation_cases::CreateCase {
+                    guild_id: guild_u64,
+                    subject_user_id: 2000 + (i as u64 % 10),
+                    actor_user_id: 100200300,
+                    kind: rusty_discord_bot::moderation_cases::CaseKind::Warning,
+                    reason: format!("Test infraction #{i}"),
+                    severity: rusty_discord_bot::moderation_cases::CaseSeverity::Low,
+                    points: 10,
+                    source_module: "automod".to_string(),
+                    visible_to_subject: true,
+                    expires_at: None,
+                },
+                now,
+            )
+            .await
+            .expect("create case");
+    }
+
+    for i in 1..=5 {
+        web_state
+            .app
+            .moderation_cases
+            .create_case(
+                rusty_discord_bot::moderation_cases::CreateCase {
+                    guild_id: other_guild_u64,
+                    subject_user_id: 3000 + (i as u64),
+                    actor_user_id: 100200300,
+                    kind: rusty_discord_bot::moderation_cases::CaseKind::Timeout,
+                    reason: format!("Other guild infraction #{i}"),
+                    severity: rusty_discord_bot::moderation_cases::CaseSeverity::Medium,
+                    points: 20,
+                    source_module: "manual".to_string(),
+                    visible_to_subject: true,
+                    expires_at: None,
+                },
+                now,
+            )
+            .await
+            .expect("create other guild case");
+    }
+
+    // 3. Test page 1: default limit (50), offset=0
+    let res_page1 = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/cases"))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res_page1.status(), reqwest::StatusCode::OK);
+    let body_page1: serde_json::Value = res_page1.json().await.unwrap();
+    assert_eq!(body_page1["total"], 105);
+    let items_p1 = body_page1["items"].as_array().unwrap();
+    assert_eq!(items_p1.len(), 50);
+    assert_eq!(body_page1["next_offset"], 50);
+    // Cases must be ordered DESC by case_number
+    assert_eq!(items_p1[0]["case_number"], 105);
+    assert_eq!(items_p1[49]["case_number"], 56);
+
+    // 4. Test page 2: limit=50, offset=50
+    let res_page2 = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/cases?limit=50&offset=50"
+        ))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res_page2.status(), reqwest::StatusCode::OK);
+    let body_page2: serde_json::Value = res_page2.json().await.unwrap();
+    assert_eq!(body_page2["total"], 105);
+    let items_p2 = body_page2["items"].as_array().unwrap();
+    assert_eq!(items_p2.len(), 50);
+    assert_eq!(body_page2["next_offset"], 100);
+    assert_eq!(items_p2[0]["case_number"], 55);
+    assert_eq!(items_p2[49]["case_number"], 6);
+
+    // 5. Test page 3 (last page): limit=50, offset=100
+    let res_page3 = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/cases?limit=50&offset=100"
+        ))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res_page3.status(), reqwest::StatusCode::OK);
+    let body_page3: serde_json::Value = res_page3.json().await.unwrap();
+    assert_eq!(body_page3["total"], 105);
+    let items_p3 = body_page3["items"].as_array().unwrap();
+    assert_eq!(items_p3.len(), 5);
+    assert!(
+        body_page3["next_offset"].is_null(),
+        "Last page must have next_offset = null"
+    );
+    assert_eq!(items_p3[0]["case_number"], 5);
+    assert_eq!(items_p3[4]["case_number"], 1);
+
+    // 6. Test offset out of bounds: offset=200
+    let res_oob = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/cases?limit=50&offset=200"
+        ))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res_oob.status(), reqwest::StatusCode::OK);
+    let body_oob: serde_json::Value = res_oob.json().await.unwrap();
+    assert_eq!(body_oob["total"], 105);
+    assert_eq!(body_oob["items"].as_array().unwrap().len(), 0);
+    assert!(body_oob["next_offset"].is_null());
+
+    // 7. Tenant isolation: unauthorized guild returns 403 Forbidden
+    let res_forbidden = client
+        .get(format!("{base_url}/api/guilds/{other_guild_id}/cases"))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res_forbidden.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 8. Missing auth returns 401 Unauthorized
+    let res_unauth = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/cases"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res_unauth.status(), reqwest::StatusCode::UNAUTHORIZED);
+}

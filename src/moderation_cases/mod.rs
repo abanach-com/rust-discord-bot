@@ -81,6 +81,19 @@ impl ModerationCaseStore {
         }
     }
 
+    pub async fn list_cases_page(
+        &self,
+        guild_id: u64,
+        limit: usize,
+        offset: usize,
+        now: DateTime<Utc>,
+    ) -> Result<(Vec<ModerationCase>, u64), CaseError> {
+        match self {
+            Self::Memory(store) => store.list_cases_page(guild_id, limit, offset, now).await,
+            Self::Postgres(store) => store.list_cases_page(guild_id, limit, offset, now).await,
+        }
+    }
+
     pub async fn list_all_subject_cases(
         &self,
         guild_id: u64,

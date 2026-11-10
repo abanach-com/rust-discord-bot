@@ -142,6 +142,33 @@ impl MemoryModerationCaseStore {
         Ok(rows)
     }
 
+    pub async fn list_cases_page(
+        &self,
+        guild_id: u64,
+        limit: usize,
+        offset: usize,
+        now: DateTime<Utc>,
+    ) -> Result<(Vec<ModerationCase>, u64), CaseError> {
+        let mut state = self.state.lock().await;
+        expire_due(&mut state, guild_id, now);
+        let all_guild_cases: Vec<&ModerationCase> = state
+            .cases
+            .range((guild_id, i64::MIN)..=(guild_id, i64::MAX))
+            .rev()
+            .map(|(_, value)| value)
+            .collect();
+
+        let total = all_guild_cases.len() as u64;
+        let items: Vec<ModerationCase> = all_guild_cases
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .cloned()
+            .collect();
+
+        Ok((items, total))
+    }
+
     pub async fn list_all_subject_cases(
         &self,
         guild_id: u64,
