@@ -70,6 +70,25 @@ impl AppState {
             None
         };
 
+        let credential_crypto =
+            if let Some(ref keyring_spec) = config.integration_credential_keyring {
+                Some(Arc::new(
+                    crate::integrations::CredentialCrypto::from_keyring_spec(
+                        &config.integration_credential_active_key_id,
+                        keyring_spec,
+                    )?,
+                ))
+            } else if let Some(ref key_hex) = config.integration_credential_key {
+                Some(Arc::new(
+                    crate::integrations::CredentialCrypto::from_hex_key(
+                        &config.integration_credential_active_key_id,
+                        key_hex,
+                    )?,
+                ))
+            } else {
+                None
+            };
+
         if config.database_url.is_some()
             && transcript_crypto.is_none()
             && !config.ticket_transcripts_disabled
@@ -79,6 +98,18 @@ impl AppState {
                  TRANSCRIPT_ENCRYPTION_KEY (32 bytes / 64 hex chars). \
                  Configure a persistent secret before starting; plaintext fallback is forbidden. \
                  Alternatively, set TICKET_TRANSCRIPTS_DISABLED=true to run without ticket transcripts."
+            );
+        }
+
+        if config.database_url.is_some()
+            && credential_crypto.is_none()
+            && !config.integration_credentials_disabled
+        {
+            anyhow::bail!(
+                "PostgreSQL storage requires INTEGRATION_CREDENTIAL_KEYRING or \
+                 INTEGRATION_CREDENTIAL_KEY (32 bytes / 64 hex chars). \
+                 Configure a persistent secret before starting; plaintext fallback is forbidden. \
+                 Alternatively, set INTEGRATION_CREDENTIALS_DISABLED=true to run without encrypted integration credentials."
             );
         }
 
@@ -94,7 +125,7 @@ impl AppState {
             crate::storage::run_safe_migrations(&pool).await?;
 
             (
-                Storage::postgres(pool.clone()),
+                Storage::postgres_with_crypto(pool.clone(), credential_crypto),
                 SchedulerStore::postgres(pool.clone()),
                 TicketStore::postgres_with_crypto(pool.clone(), transcript_crypto),
                 ModerationCaseStore::postgres(pool.clone()),

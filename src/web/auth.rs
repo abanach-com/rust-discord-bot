@@ -1144,6 +1144,10 @@ mod tests {
             transcript_active_key_id: "v1".to_string(),
             transcript_keyring: None,
             ticket_transcripts_disabled: false,
+            integration_credential_key: None,
+            integration_credential_active_key_id: "v1".to_string(),
+            integration_credential_keyring: None,
+            integration_credentials_disabled: false,
             metrics_token: None,
             metrics_allowed_ips: std::collections::HashSet::new(),
         }

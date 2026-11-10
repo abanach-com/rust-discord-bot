@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 
@@ -102,12 +103,39 @@ pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::Mig
 #[derive(Clone)]
 pub struct PostgresStore {
     pool: PgPool,
+    credential_crypto: Option<Arc<crate::integrations::CredentialCrypto>>,
 }
 
 impl PostgresStore {
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            credential_crypto: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_credential_crypto(
+        pool: PgPool,
+        credential_crypto: Option<Arc<crate::integrations::CredentialCrypto>>,
+    ) -> Self {
+        Self {
+            pool,
+            credential_crypto,
+        }
+    }
+
+    pub fn set_credential_crypto(
+        &mut self,
+        credential_crypto: Option<Arc<crate::integrations::CredentialCrypto>>,
+    ) {
+        self.credential_crypto = credential_crypto;
+    }
+
+    #[must_use]
+    pub fn credential_crypto(&self) -> Option<&Arc<crate::integrations::CredentialCrypto>> {
+        self.credential_crypto.as_ref()
     }
 
     pub async fn connect(database_url: &str) -> anyhow::Result<Self> {
@@ -118,7 +146,10 @@ impl PostgresStore {
 
         run_safe_migrations(&pool).await?;
 
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            credential_crypto: None,
+        })
     }
 
     #[must_use]
@@ -6516,80 +6547,111 @@ impl PostgresStore {
 
     pub async fn upsert_integration_connection(
         &self,
-
         conn: IntegrationConnection,
     ) -> anyhow::Result<IntegrationConnection> {
-        let row = sqlx::query_as::<_, IntegrationConnection>(
+        let crypto = self.credential_crypto.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "integration credential encryption key is required for PostgreSQL storage"
+            )
+        })?;
 
-            r#"
+        let mut tx = self.pool.begin().await?;
 
-            INSERT INTO integration_connections (id, guild_id, provider, provider_account_id, access_token, refresh_token, token_expires_at, scopes, metadata, enabled, created_at, updated_at)
-
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-
-            ON CONFLICT (id) DO UPDATE SET
-
-                provider_account_id = EXCLUDED.provider_account_id,
-
-                access_token = EXCLUDED.access_token,
-
-                refresh_token = EXCLUDED.refresh_token,
-
-                token_expires_at = EXCLUDED.token_expires_at,
-
-                scopes = EXCLUDED.scopes,
-
-                metadata = EXCLUDED.metadata,
-
-                enabled = EXCLUDED.enabled,
-
-                updated_at = EXCLUDED.updated_at
-
-            RETURNING *
-
-            "#
-
+        let existing_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM integration_connections WHERE guild_id = $1 AND provider = $2 FOR UPDATE",
         )
-
-        .bind(conn.id)
-
         .bind(&conn.guild_id)
-
         .bind(&conn.provider)
-
-        .bind(&conn.provider_account_id)
-
-        .bind(&conn.access_token)
-
-        .bind(&conn.refresh_token)
-
-        .bind(conn.token_expires_at)
-
-        .bind(&conn.scopes)
-
-        .bind(&conn.metadata)
-
-        .bind(conn.enabled)
-
-        .bind(conn.created_at)
-
-        .bind(conn.updated_at)
-
-        .fetch_one(&self.pool)
-
+        .fetch_optional(&mut *tx)
         .await?;
+
+        let target_id = existing_id.unwrap_or(conn.id);
+
+        let enc_access_token = if let Some(ref token) = conn.access_token {
+            Some(crypto.encrypt_field(
+                &conn.guild_id,
+                "integration_connection",
+                &target_id.to_string(),
+                "access_token",
+                token,
+            )?)
+        } else {
+            None
+        };
+
+        let enc_refresh_token = if let Some(ref token) = conn.refresh_token {
+            Some(crypto.encrypt_field(
+                &conn.guild_id,
+                "integration_connection",
+                &target_id.to_string(),
+                "refresh_token",
+                token,
+            )?)
+        } else {
+            None
+        };
+
+        let mut row = sqlx::query_as::<_, IntegrationConnection>(
+            r#"
+            INSERT INTO integration_connections (id, guild_id, provider, provider_account_id, access_token, refresh_token, token_expires_at, scopes, metadata, enabled, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (id) DO UPDATE SET
+                provider_account_id = EXCLUDED.provider_account_id,
+                access_token = EXCLUDED.access_token,
+                refresh_token = EXCLUDED.refresh_token,
+                token_expires_at = EXCLUDED.token_expires_at,
+                scopes = EXCLUDED.scopes,
+                metadata = EXCLUDED.metadata,
+                enabled = EXCLUDED.enabled,
+                updated_at = EXCLUDED.updated_at
+            RETURNING *
+            "#
+        )
+        .bind(target_id)
+        .bind(&conn.guild_id)
+        .bind(&conn.provider)
+        .bind(&conn.provider_account_id)
+        .bind(&enc_access_token)
+        .bind(&enc_refresh_token)
+        .bind(conn.token_expires_at)
+        .bind(&conn.scopes)
+        .bind(&conn.metadata)
+        .bind(conn.enabled)
+        .bind(conn.created_at)
+        .bind(conn.updated_at)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+
+        if let Some(ref enc) = row.access_token {
+            row.access_token = Some(crypto.decrypt_field(
+                &row.guild_id,
+                "integration_connection",
+                &row.id.to_string(),
+                "access_token",
+                enc,
+            )?);
+        }
+        if let Some(ref enc) = row.refresh_token {
+            row.refresh_token = Some(crypto.decrypt_field(
+                &row.guild_id,
+                "integration_connection",
+                &row.id.to_string(),
+                "refresh_token",
+                enc,
+            )?);
+        }
 
         Ok(row)
     }
 
     pub async fn get_integration_connection(
         &self,
-
         guild_id: &str,
-
         provider: &str,
     ) -> anyhow::Result<Option<IntegrationConnection>> {
-        let row = sqlx::query_as::<_, IntegrationConnection>(
+        let row_opt = sqlx::query_as::<_, IntegrationConnection>(
             "SELECT * FROM integration_connections WHERE guild_id = $1 AND provider = $2",
         )
         .bind(guild_id)
@@ -6597,20 +6659,97 @@ impl PostgresStore {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row)
+        let Some(mut row) = row_opt else {
+            return Ok(None);
+        };
+
+        if let Some(ref crypto) = self.credential_crypto {
+            if let Some(ref enc) = row.access_token {
+                row.access_token = Some(crypto.decrypt_field(
+                    &row.guild_id,
+                    "integration_connection",
+                    &row.id.to_string(),
+                    "access_token",
+                    enc,
+                )?);
+            }
+            if let Some(ref enc) = row.refresh_token {
+                row.refresh_token = Some(crypto.decrypt_field(
+                    &row.guild_id,
+                    "integration_connection",
+                    &row.id.to_string(),
+                    "refresh_token",
+                    enc,
+                )?);
+            }
+        } else {
+            if let Some(ref enc) = row.access_token
+                && crate::integrations::CredentialCrypto::is_encrypted(enc)
+            {
+                anyhow::bail!(
+                    "cannot decrypt connection access_token: credential crypto not configured"
+                );
+            }
+            if let Some(ref enc) = row.refresh_token
+                && crate::integrations::CredentialCrypto::is_encrypted(enc)
+            {
+                anyhow::bail!(
+                    "cannot decrypt connection refresh_token: credential crypto not configured"
+                );
+            }
+        }
+
+        Ok(Some(row))
     }
 
     pub async fn list_integration_connections(
         &self,
-
         guild_id: &str,
     ) -> anyhow::Result<Vec<IntegrationConnection>> {
-        let rows = sqlx::query_as::<_, IntegrationConnection>(
+        let mut rows = sqlx::query_as::<_, IntegrationConnection>(
             "SELECT * FROM integration_connections WHERE guild_id = $1",
         )
         .bind(guild_id)
         .fetch_all(&self.pool)
         .await?;
+
+        for row in &mut rows {
+            if let Some(ref crypto) = self.credential_crypto {
+                if let Some(ref enc) = row.access_token {
+                    row.access_token = Some(crypto.decrypt_field(
+                        &row.guild_id,
+                        "integration_connection",
+                        &row.id.to_string(),
+                        "access_token",
+                        enc,
+                    )?);
+                }
+                if let Some(ref enc) = row.refresh_token {
+                    row.refresh_token = Some(crypto.decrypt_field(
+                        &row.guild_id,
+                        "integration_connection",
+                        &row.id.to_string(),
+                        "refresh_token",
+                        enc,
+                    )?);
+                }
+            } else {
+                if let Some(ref enc) = row.access_token
+                    && crate::integrations::CredentialCrypto::is_encrypted(enc)
+                {
+                    anyhow::bail!(
+                        "cannot decrypt connection access_token: credential crypto not configured"
+                    );
+                }
+                if let Some(ref enc) = row.refresh_token
+                    && crate::integrations::CredentialCrypto::is_encrypted(enc)
+                {
+                    anyhow::bail!(
+                        "cannot decrypt connection refresh_token: credential crypto not configured"
+                    );
+                }
+            }
+        }
 
         Ok(rows)
     }
@@ -6635,78 +6774,89 @@ impl PostgresStore {
 
     pub async fn create_webhook_subscription(
         &self,
-
         sub: IntegrationWebhookSubscription,
     ) -> anyhow::Result<IntegrationWebhookSubscription> {
-        let row = sqlx::query_as::<_, IntegrationWebhookSubscription>(
+        let crypto = self.credential_crypto.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "integration credential encryption key is required for PostgreSQL storage"
+            )
+        })?;
 
-            r#"
+        let mut tx = self.pool.begin().await?;
 
-            INSERT INTO integration_webhook_subscriptions (id, guild_id, provider, external_id, secret_token, target_channel_id, config, active, created_at)
-
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-
-            ON CONFLICT (guild_id, provider, external_id) DO UPDATE SET
-
-                secret_token = EXCLUDED.secret_token,
-
-                target_channel_id = EXCLUDED.target_channel_id,
-
-                config = EXCLUDED.config,
-
-                active = EXCLUDED.active
-
-            RETURNING *
-
-            "#
-
+        let existing_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM integration_webhook_subscriptions WHERE guild_id = $1 AND provider = $2 AND external_id = $3 FOR UPDATE"
         )
-
-        .bind(sub.id)
-
         .bind(&sub.guild_id)
-
         .bind(&sub.provider)
-
         .bind(&sub.external_id)
-
-        .bind(&sub.secret_token)
-
-        .bind(&sub.target_channel_id)
-
-        .bind(&sub.config)
-
-        .bind(sub.active)
-
-        .bind(sub.created_at)
-
-        .fetch_one(&self.pool)
-
+        .fetch_optional(&mut *tx)
         .await?;
+
+        let target_id = existing_id.unwrap_or(sub.id);
+        let encrypted_secret = if let Some(ref cleartext) = sub.secret_token {
+            Some(crypto.encrypt_field(
+                &sub.guild_id,
+                "integration_webhook_subscription",
+                &target_id.to_string(),
+                "secret_token",
+                cleartext,
+            )?)
+        } else {
+            None
+        };
+
+        let mut row = sqlx::query_as::<_, IntegrationWebhookSubscription>(
+            r#"
+            INSERT INTO integration_webhook_subscriptions (id, guild_id, provider, external_id, secret_token, target_channel_id, config, active, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (guild_id, provider, external_id) DO UPDATE SET
+                secret_token = EXCLUDED.secret_token,
+                target_channel_id = EXCLUDED.target_channel_id,
+                config = EXCLUDED.config,
+                active = EXCLUDED.active
+            RETURNING *
+            "#
+        )
+        .bind(target_id)
+        .bind(&sub.guild_id)
+        .bind(&sub.provider)
+        .bind(&sub.external_id)
+        .bind(&encrypted_secret)
+        .bind(&sub.target_channel_id)
+        .bind(&sub.config)
+        .bind(sub.active)
+        .bind(sub.created_at)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+
+        if let Some(ref enc) = row.secret_token {
+            row.secret_token = Some(crypto.decrypt_field(
+                &row.guild_id,
+                "integration_webhook_subscription",
+                &row.id.to_string(),
+                "secret_token",
+                enc,
+            )?);
+        }
 
         Ok(row)
     }
 
     pub async fn list_webhook_subscriptions(
         &self,
-
         guild_id: &str,
-
         provider: Option<&str>,
     ) -> anyhow::Result<Vec<IntegrationWebhookSubscription>> {
-        let rows = if let Some(p) = provider {
+        let mut rows = if let Some(p) = provider {
             sqlx::query_as::<_, IntegrationWebhookSubscription>(
-
-                "SELECT * FROM integration_webhook_subscriptions WHERE guild_id = $1 AND provider = $2"
-
+                "SELECT * FROM integration_webhook_subscriptions WHERE guild_id = $1 AND provider = $2",
             )
-
             .bind(guild_id)
-
             .bind(p)
-
             .fetch_all(&self.pool)
-
             .await?
         } else {
             sqlx::query_as::<_, IntegrationWebhookSubscription>(
@@ -6716,6 +6866,24 @@ impl PostgresStore {
             .fetch_all(&self.pool)
             .await?
         };
+
+        for row in &mut rows {
+            if let Some(ref enc) = row.secret_token {
+                if let Some(ref crypto) = self.credential_crypto {
+                    row.secret_token = Some(crypto.decrypt_field(
+                        &row.guild_id,
+                        "integration_webhook_subscription",
+                        &row.id.to_string(),
+                        "secret_token",
+                        enc,
+                    )?);
+                } else if crate::integrations::CredentialCrypto::is_encrypted(enc) {
+                    anyhow::bail!(
+                        "cannot decrypt webhook subscription secret_token: credential crypto not configured"
+                    );
+                }
+            }
+        }
 
         Ok(rows)
     }
@@ -6944,6 +7112,241 @@ impl PostgresStore {
         .await?;
 
         Ok(res.rows_affected())
+    }
+
+    pub async fn backfill_encrypt_integration_credentials(
+        &self,
+        batch_size: usize,
+    ) -> anyhow::Result<usize> {
+        let Some(ref crypto) = self.credential_crypto else {
+            anyhow::bail!(
+                "cannot backfill integration credentials: no credential encryption keys configured"
+            );
+        };
+
+        let limit = i64::try_from(batch_size.clamp(1, 1000)).unwrap_or(1000);
+        let mut total_migrated = 0usize;
+        let mut tx = self.pool.begin().await?;
+
+        // 1. telegram_bridges
+        #[derive(sqlx::FromRow)]
+        struct BridgeLegacyRow {
+            id: Uuid,
+            guild_id: String,
+            secret_token: String,
+        }
+        let bridges = sqlx::query_as::<_, BridgeLegacyRow>(
+            r#"
+            SELECT id, guild_id, secret_token
+            FROM telegram_bridges
+            WHERE secret_token NOT LIKE 'enc:v1:%'
+            ORDER BY created_at ASC
+            LIMIT $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        for bridge in bridges {
+            let enc = crypto.encrypt_field(
+                &bridge.guild_id,
+                "telegram_bridge",
+                &bridge.id.to_string(),
+                "secret_token",
+                &bridge.secret_token,
+            )?;
+            sqlx::query("UPDATE telegram_bridges SET secret_token = $1 WHERE id = $2")
+                .bind(enc)
+                .bind(bridge.id)
+                .execute(&mut *tx)
+                .await?;
+            total_migrated += 1;
+        }
+
+        // 2. integration_webhook_subscriptions
+        #[derive(sqlx::FromRow)]
+        struct WebhookLegacyRow {
+            id: Uuid,
+            guild_id: String,
+            secret_token: String,
+        }
+        let webhooks = sqlx::query_as::<_, WebhookLegacyRow>(
+            r#"
+            SELECT id, guild_id, secret_token
+            FROM integration_webhook_subscriptions
+            WHERE secret_token IS NOT NULL AND secret_token NOT LIKE 'enc:v1:%'
+            ORDER BY created_at ASC
+            LIMIT $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        for wh in webhooks {
+            let enc = crypto.encrypt_field(
+                &wh.guild_id,
+                "integration_webhook_subscription",
+                &wh.id.to_string(),
+                "secret_token",
+                &wh.secret_token,
+            )?;
+            sqlx::query(
+                "UPDATE integration_webhook_subscriptions SET secret_token = $1 WHERE id = $2",
+            )
+            .bind(enc)
+            .bind(wh.id)
+            .execute(&mut *tx)
+            .await?;
+            total_migrated += 1;
+        }
+
+        // 3. integration_connections
+        #[derive(sqlx::FromRow)]
+        struct ConnLegacyRow {
+            id: Uuid,
+            guild_id: String,
+            access_token: Option<String>,
+            refresh_token: Option<String>,
+        }
+        let conns = sqlx::query_as::<_, ConnLegacyRow>(
+            r#"
+            SELECT id, guild_id, access_token, refresh_token
+            FROM integration_connections
+            WHERE (access_token IS NOT NULL AND access_token NOT LIKE 'enc:v1:%')
+               OR (refresh_token IS NOT NULL AND refresh_token NOT LIKE 'enc:v1:%')
+            ORDER BY created_at ASC
+            LIMIT $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        for conn in conns {
+            let enc_access = if let Some(ref t) = conn.access_token {
+                if !crate::integrations::CredentialCrypto::is_encrypted(t) {
+                    Some(crypto.encrypt_field(
+                        &conn.guild_id,
+                        "integration_connection",
+                        &conn.id.to_string(),
+                        "access_token",
+                        t,
+                    )?)
+                } else {
+                    Some(t.clone())
+                }
+            } else {
+                None
+            };
+
+            let enc_refresh = if let Some(ref t) = conn.refresh_token {
+                if !crate::integrations::CredentialCrypto::is_encrypted(t) {
+                    Some(crypto.encrypt_field(
+                        &conn.guild_id,
+                        "integration_connection",
+                        &conn.id.to_string(),
+                        "refresh_token",
+                        t,
+                    )?)
+                } else {
+                    Some(t.clone())
+                }
+            } else {
+                None
+            };
+
+            sqlx::query(
+                "UPDATE integration_connections SET access_token = $1, refresh_token = $2 WHERE id = $3",
+            )
+            .bind(enc_access)
+            .bind(enc_refresh)
+            .bind(conn.id)
+            .execute(&mut *tx)
+            .await?;
+            total_migrated += 1;
+        }
+
+        // 4. gitlab_subscriptions
+        #[derive(sqlx::FromRow)]
+        struct GitlabLegacyRow {
+            id: Uuid,
+            guild_id: String,
+            secret_token: String,
+        }
+        let gitlabs = sqlx::query_as::<_, GitlabLegacyRow>(
+            r#"
+            SELECT id, guild_id, secret_token
+            FROM gitlab_subscriptions
+            WHERE secret_token NOT LIKE 'enc:v1:%'
+            ORDER BY created_at ASC
+            LIMIT $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        for gl in gitlabs {
+            let enc = crypto.encrypt_field(
+                &gl.guild_id,
+                "gitlab_subscription",
+                &gl.id.to_string(),
+                "secret_token",
+                &gl.secret_token,
+            )?;
+            sqlx::query("UPDATE gitlab_subscriptions SET secret_token = $1 WHERE id = $2")
+                .bind(enc)
+                .bind(gl.id)
+                .execute(&mut *tx)
+                .await?;
+            total_migrated += 1;
+        }
+
+        // 5. vk_subscriptions
+        #[derive(sqlx::FromRow)]
+        struct VkLegacyRow {
+            id: Uuid,
+            guild_id: String,
+            secret_key: String,
+        }
+        let vks = sqlx::query_as::<_, VkLegacyRow>(
+            r#"
+            SELECT id, guild_id, secret_key
+            FROM vk_subscriptions
+            WHERE secret_key NOT LIKE 'enc:v1:%'
+            ORDER BY created_at ASC
+            LIMIT $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        for vk in vks {
+            let enc = crypto.encrypt_field(
+                &vk.guild_id,
+                "vk_subscription",
+                &vk.id.to_string(),
+                "secret_key",
+                &vk.secret_key,
+            )?;
+            sqlx::query("UPDATE vk_subscriptions SET secret_key = $1 WHERE id = $2")
+                .bind(enc)
+                .bind(vk.id)
+                .execute(&mut *tx)
+                .await?;
+            total_migrated += 1;
+        }
+
+        tx.commit().await?;
+        Ok(total_migrated)
     }
 
     // Agent 04 (#93): Unified Identity

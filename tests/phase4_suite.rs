@@ -61,6 +61,10 @@ fn test_config() -> Config {
         transcript_active_key_id: "v1".to_string(),
         transcript_keyring: None,
         ticket_transcripts_disabled: false,
+        integration_credential_key: None,
+        integration_credential_active_key_id: "v1".to_string(),
+        integration_credential_keyring: None,
+        integration_credentials_disabled: false,
         metrics_token: None,
         metrics_allowed_ips: HashSet::new(),
     }
@@ -2504,4 +2508,263 @@ async fn test_webhook_dedupe_and_delivery_logs_retention_and_pagination_issue_34
         shutdown_result.is_ok(),
         "Integrations retention janitor must terminate cleanly upon shutdown broadcast"
     );
+}
+
+#[tokio::test]
+async fn test_integration_credentials_encryption_at_rest_and_tamper_resistance_issue_349() {
+    use rusty_discord_bot::integrations::CredentialCrypto;
+
+    // 1. Verify HTTP endpoint security: secret_token is never leaked via HTTP responses (Issue #131 + #349)
+    let (state, _) = test_web_state().await;
+    let router = build_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{}", addr);
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let guild_id = "987654321098765432";
+    let channel_id = "111222333444555666";
+
+    let session_id = "test_cred_session_token";
+    let csrf_token = "test_cred_csrf_token";
+    let session = rusty_discord_bot::session::Session {
+        user: DashboardUser {
+            id: "123456789".to_string(),
+            username: "admin_user".to_string(),
+            avatar: None,
+            global_name: None,
+        },
+        guilds: vec![DashboardGuild {
+            id: guild_id.to_string(),
+            name: "Test Guild".to_string(),
+            icon: None,
+            owner: true,
+            permissions: "8".to_string(), // ADMINISTRATOR
+        }],
+        expires_at: Utc::now() + Duration::hours(2),
+        access_token: None,
+        csrf_token: csrf_token.to_string(),
+    };
+    state
+        .app
+        .sessions
+        .save_session(
+            session_id,
+            session.user,
+            session.guilds,
+            session.csrf_token,
+            session.expires_at,
+            None,
+        )
+        .await
+        .unwrap();
+    let session_cookie = format!("rusty_discord_bot_session={session_id}");
+
+    let payload = serde_json::json!({
+        "telegram_chat_id": "-1001234567890",
+        "discord_channel_id": channel_id,
+        "secret_token": "fixture-not-a-real-secret-token-xyz"
+    });
+
+    let post_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/telegram/bridge"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(post_resp.status(), reqwest::StatusCode::OK);
+    let post_body: serde_json::Value = post_resp.json().await.unwrap();
+    assert_eq!(post_body["discord_channel_id"], channel_id);
+    assert_eq!(post_body["telegram_chat_id"], "-1001234567890");
+    assert!(
+        post_body.get("secret_token").is_none(),
+        "TelegramBridgeSummary must NEVER leak secret_token over HTTP"
+    );
+
+    let get_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/telegram/bridges"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), reqwest::StatusCode::OK);
+    let get_body: Vec<serde_json::Value> = get_resp.json().await.unwrap();
+    assert_eq!(get_body.len(), 1);
+    assert!(
+        get_body[0].get("secret_token").is_none(),
+        "GET list must NEVER leak secret_token over HTTP"
+    );
+
+    // 2. Direct CredentialCrypto envelope format and nonces
+    let key_v1 = [0x42u8; 32];
+    let crypto = CredentialCrypto::new("v1", key_v1);
+    let record_id = "record-uuid-1234";
+    let cleartext = "super-secret-telegram-webhook-token";
+
+    let enc1 = crypto
+        .encrypt_field(
+            guild_id,
+            "telegram_bridge",
+            record_id,
+            "secret_token",
+            cleartext,
+        )
+        .expect("encrypt field");
+    let enc2 = crypto
+        .encrypt_field(
+            guild_id,
+            "telegram_bridge",
+            record_id,
+            "secret_token",
+            cleartext,
+        )
+        .expect("encrypt field");
+
+    assert!(enc1.starts_with("enc:v1:v1:"));
+    assert!(enc2.starts_with("enc:v1:v1:"));
+    assert_ne!(
+        enc1, enc2,
+        "Each encryption MUST use a unique random 96-bit nonce from OsRng"
+    );
+    assert!(
+        !enc1.contains(cleartext),
+        "Ciphertext envelope must NOT contain cleartext secret"
+    );
+
+    let dec1 = crypto
+        .decrypt_field(
+            guild_id,
+            "telegram_bridge",
+            record_id,
+            "secret_token",
+            &enc1,
+        )
+        .expect("decrypt field");
+    assert_eq!(dec1, cleartext);
+
+    // 3. Strict AAD binding: cross-tenant, cross-entity, cross-record, and cross-field tampering resistance
+    let other_guild = "111111111111111111";
+    let cross_tenant_err = crypto.decrypt_field(
+        other_guild,
+        "telegram_bridge",
+        record_id,
+        "secret_token",
+        &enc1,
+    );
+    assert!(
+        cross_tenant_err.is_err(),
+        "Decryption with different guild_id MUST fail closed (tenant isolation)"
+    );
+
+    let cross_entity_err = crypto.decrypt_field(
+        guild_id,
+        "integration_connection",
+        record_id,
+        "secret_token",
+        &enc1,
+    );
+    assert!(
+        cross_entity_err.is_err(),
+        "Decryption with different entity_type MUST fail closed"
+    );
+
+    let cross_record_err = crypto.decrypt_field(
+        guild_id,
+        "telegram_bridge",
+        "other-record-uuid",
+        "secret_token",
+        &enc1,
+    );
+    assert!(
+        cross_record_err.is_err(),
+        "Decryption with different record_id MUST fail closed"
+    );
+
+    let cross_field_err = crypto.decrypt_field(
+        guild_id,
+        "telegram_bridge",
+        record_id,
+        "access_token",
+        &enc1,
+    );
+    assert!(
+        cross_field_err.is_err(),
+        "Decryption with different field_name MUST fail closed"
+    );
+
+    // Corrupted ciphertext tampering
+    let corrupted = format!("{}deadbeef", &enc1[..enc1.len() - 8]);
+    assert!(
+        crypto
+            .decrypt_field(
+                guild_id,
+                "telegram_bridge",
+                record_id,
+                "secret_token",
+                &corrupted
+            )
+            .is_err(),
+        "Corrupted ciphertext MUST fail closed"
+    );
+
+    // 4. Key rotation and keyring support
+    let key_v2 = [0x99u8; 32];
+    let mut keyring = std::collections::HashMap::new();
+    keyring.insert("v1".to_string(), key_v1);
+    keyring.insert("v2".to_string(), key_v2);
+
+    let rotated_crypto = CredentialCrypto::with_keys("v2", keyring).expect("with_keys");
+    let decrypted_old = rotated_crypto
+        .decrypt_field(
+            guild_id,
+            "telegram_bridge",
+            record_id,
+            "secret_token",
+            &enc1,
+        )
+        .expect("decrypt legacy key from keyring");
+    assert_eq!(decrypted_old, cleartext);
+
+    let enc_new = rotated_crypto
+        .encrypt_field(
+            guild_id,
+            "telegram_bridge",
+            record_id,
+            "secret_token",
+            "brand-new-secret",
+        )
+        .expect("encrypt with active key v2");
+    assert!(
+        enc_new.starts_with("enc:v1:v2:"),
+        "New encryption must use active key id v2"
+    );
+    let dec_new = rotated_crypto
+        .decrypt_field(
+            guild_id,
+            "telegram_bridge",
+            record_id,
+            "secret_token",
+            &enc_new,
+        )
+        .expect("decrypt v2");
+    assert_eq!(dec_new, "brand-new-secret");
+
+    // 5. Backwards-compatible legacy plaintext fallback during transition
+    let legacy_plaintext = "old-unencrypted-token-from-backup";
+    let dec_legacy = rotated_crypto
+        .decrypt_field(
+            guild_id,
+            "telegram_bridge",
+            record_id,
+            "secret_token",
+            legacy_plaintext,
+        )
+        .expect("transparent read of legacy plaintext");
+    assert_eq!(dec_legacy, legacy_plaintext);
 }

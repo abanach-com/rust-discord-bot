@@ -909,6 +909,10 @@ async fn create_test_state() -> AppState {
         transcript_active_key_id: "v1".to_string(),
         transcript_keyring: None,
         ticket_transcripts_disabled: false,
+        integration_credential_key: None,
+        integration_credential_active_key_id: "v1".to_string(),
+        integration_credential_keyring: None,
+        integration_credentials_disabled: false,
         metrics_token: None,
         metrics_allowed_ips: std::collections::HashSet::new(),
     };
@@ -950,6 +954,10 @@ async fn create_test_state_with_port(port: u16) -> AppState {
         transcript_active_key_id: "v1".to_string(),
         transcript_keyring: None,
         ticket_transcripts_disabled: false,
+        integration_credential_key: None,
+        integration_credential_active_key_id: "v1".to_string(),
+        integration_credential_keyring: None,
+        integration_credentials_disabled: false,
         metrics_token: None,
         metrics_allowed_ips: std::collections::HashSet::new(),
     };
@@ -6598,6 +6606,10 @@ async fn test_web_broadcast_destination_channel_authorization_suite() {
         transcript_active_key_id: "v1".to_string(),
         transcript_keyring: None,
         ticket_transcripts_disabled: true,
+        integration_credential_key: None,
+        integration_credential_active_key_id: "v1".to_string(),
+        integration_credential_keyring: None,
+        integration_credentials_disabled: false,
         metrics_token: None,
         metrics_allowed_ips: std::collections::HashSet::new(),
     };
@@ -9001,6 +9013,10 @@ async fn test_giveaway_web_end_and_reroll_discord_delivery_issue_359() {
         transcript_active_key_id: "v1".to_string(),
         transcript_keyring: None,
         ticket_transcripts_disabled: true,
+        integration_credential_key: None,
+        integration_credential_active_key_id: "v1".to_string(),
+        integration_credential_keyring: None,
+        integration_credentials_disabled: false,
         metrics_token: None,
         metrics_allowed_ips: std::collections::HashSet::new(),
     };

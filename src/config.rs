@@ -30,6 +30,10 @@ pub struct Config {
     pub transcript_active_key_id: String,
     pub transcript_keyring: Option<String>,
     pub ticket_transcripts_disabled: bool,
+    pub integration_credential_key: Option<String>,
+    pub integration_credential_active_key_id: String,
+    pub integration_credential_keyring: Option<String>,
+    pub integration_credentials_disabled: bool,
     pub metrics_token: Option<String>,
     pub metrics_allowed_ips: HashSet<std::net::IpAddr>,
 }
@@ -64,6 +68,19 @@ impl fmt::Debug for Config {
             .field(
                 "ticket_transcripts_disabled",
                 &self.ticket_transcripts_disabled,
+            )
+            .field(
+                "integration_credential_crypto_configured",
+                &(self.integration_credential_keyring.is_some()
+                    || self.integration_credential_key.is_some()),
+            )
+            .field(
+                "integration_credential_active_key_id",
+                &self.integration_credential_active_key_id,
+            )
+            .field(
+                "integration_credentials_disabled",
+                &self.integration_credentials_disabled,
             )
             .field("metrics_token_configured", &self.metrics_token.is_some())
             .field("metrics_allowed_ips", &self.metrics_allowed_ips)
@@ -143,6 +160,11 @@ impl Config {
                 .unwrap_or_else(|_| "v1".to_owned()),
             transcript_keyring: optional_non_empty("TRANSCRIPT_KEYRING"),
             ticket_transcripts_disabled: env_bool("TICKET_TRANSCRIPTS_DISABLED", false)?,
+            integration_credential_key: optional_non_empty("INTEGRATION_CREDENTIAL_KEY"),
+            integration_credential_active_key_id: env::var("INTEGRATION_CREDENTIAL_ACTIVE_KEY_ID")
+                .unwrap_or_else(|_| "v1".to_owned()),
+            integration_credential_keyring: optional_non_empty("INTEGRATION_CREDENTIAL_KEYRING"),
+            integration_credentials_disabled: env_bool("INTEGRATION_CREDENTIALS_DISABLED", false)?,
             metrics_token: optional_non_empty("METRICS_TOKEN"),
             metrics_allowed_ips: env::var("METRICS_ALLOWED_IPS")
                 .unwrap_or_default()
@@ -293,6 +315,10 @@ mod tests {
             transcript_active_key_id: "v1".to_string(),
             transcript_keyring: None,
             ticket_transcripts_disabled: false,
+            integration_credential_key: None,
+            integration_credential_active_key_id: "v1".to_string(),
+            integration_credential_keyring: None,
+            integration_credentials_disabled: false,
             metrics_token: None,
             metrics_allowed_ips: HashSet::new(),
         };
@@ -365,6 +391,14 @@ mod tests {
             transcript_active_key_id: "v1".to_string(),
             transcript_keyring: Some("fixture-keyring-hex-9876543210fedcba".to_string()),
             ticket_transcripts_disabled: false,
+            integration_credential_key: Some(
+                "fixture-integration-key-hex-aabbccddeeff0011".to_string(),
+            ),
+            integration_credential_active_key_id: "v1".to_string(),
+            integration_credential_keyring: Some(
+                "fixture-integration-keyring-hex-11223344556677".to_string(),
+            ),
+            integration_credentials_disabled: false,
             metrics_token: Some("fixture-metrics-token-secret-777".to_string()),
             metrics_allowed_ips: ["10.0.0.1".parse().unwrap()].into_iter().collect(),
         };
@@ -376,6 +410,8 @@ mod tests {
             "fixture-db-password",
             "fixture-aead-key-hex-0123456789abcdef",
             "fixture-keyring-hex-9876543210fedcba",
+            "fixture-integration-key-hex-aabbccddeeff0011",
+            "fixture-integration-keyring-hex-11223344556677",
             "fixture-metrics-token-secret-777",
         ] {
             assert!(
@@ -386,6 +422,7 @@ mod tests {
 
         assert!(rendered.contains("postgres_configured: true"));
         assert!(rendered.contains("transcript_crypto_configured: true"));
+        assert!(rendered.contains("integration_credential_crypto_configured: true"));
         assert!(rendered.contains("metrics_token_configured: true"));
         assert!(rendered.contains("discord_application_id: 123456789"));
     }

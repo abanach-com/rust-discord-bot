@@ -1699,6 +1699,36 @@ impl Storage {
     }
 
     #[must_use]
+    pub fn postgres_with_crypto(
+        pool: sqlx::PgPool,
+        credential_crypto: Option<std::sync::Arc<crate::integrations::CredentialCrypto>>,
+    ) -> Self {
+        Self::Postgres(PostgresStore::with_credential_crypto(
+            pool,
+            credential_crypto,
+        ))
+    }
+
+    pub fn set_credential_crypto(
+        &mut self,
+        credential_crypto: Option<std::sync::Arc<crate::integrations::CredentialCrypto>>,
+    ) {
+        if let Self::Postgres(store) = self {
+            store.set_credential_crypto(credential_crypto);
+        }
+    }
+
+    #[must_use]
+    pub fn credential_crypto(
+        &self,
+    ) -> Option<&std::sync::Arc<crate::integrations::CredentialCrypto>> {
+        match self {
+            Self::Postgres(store) => store.credential_crypto(),
+            Self::Memory(_) => None,
+        }
+    }
+
+    #[must_use]
     pub fn memory() -> Self {
         Self::Memory(MemoryStore::default())
     }
@@ -5182,6 +5212,20 @@ impl Storage {
         match self {
             Self::Memory(store) => Ok(store.prune_delivery_logs(before, limit)),
             Self::Postgres(store) => store.prune_delivery_logs(before, limit).await,
+        }
+    }
+
+    pub async fn backfill_encrypt_integration_credentials(
+        &self,
+        batch_size: usize,
+    ) -> anyhow::Result<usize> {
+        match self {
+            Self::Memory(_) => Ok(0),
+            Self::Postgres(store) => {
+                store
+                    .backfill_encrypt_integration_credentials(batch_size)
+                    .await
+            }
         }
     }
 

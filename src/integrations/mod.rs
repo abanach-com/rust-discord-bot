@@ -6,9 +6,12 @@ use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
 
+pub mod credentials;
 pub mod oauth;
 pub mod providers;
 pub mod webhook;
+
+pub use credentials::CredentialCrypto;
 
 #[derive(Debug, Error)]
 pub enum IntegrationError {
