@@ -627,3 +627,63 @@ async fn test_postgres_startup_preflight_fails_fast_without_transcript_encryptio
     let res_mem = AppState::bootstrap(config_mem).await;
     assert!(res_mem.is_ok(), "MemoryStore must bootstrap without keys");
 }
+
+#[test]
+fn test_ticket_transcript_format_does_not_persist_expiring_cdn_signatures_issue_371() {
+    use rusty_discord_bot::discord::tickets::format_transcript_message;
+    use serenity::model::channel::Message;
+
+    let message_json = serde_json::json!({
+        "id": "100000000000000001",
+        "channel_id": "200000000000000002",
+        "author": {
+            "id": "300000000000000003",
+            "username": "alice",
+            "discriminator": "0001",
+            "avatar": null
+        },
+        "content": "Please check this proof screenshot.",
+        "timestamp": "2026-11-10T12:00:00Z",
+        "tts": false,
+        "mention_everyone": false,
+        "mentions": [],
+        "mention_roles": [],
+        "attachments": [
+            {
+                "id": "400000000000000004",
+                "filename": "proof.png",
+                "size": 2048,
+                "url": "https://cdn.discordapp.com/attachments/200000000000000002/400000000000000004/proof.png?ex=67310000&is=672feb00&hm=deadbeef1234567890abcdef",
+                "proxy_url": "https://media.discordapp.net/attachments/200000000000000002/400000000000000004/proof.png",
+                "content_type": "image/png"
+            }
+        ],
+        "embeds": [],
+        "pinned": false,
+        "type": 0
+    });
+
+    let message: Message =
+        serde_json::from_value(message_json).expect("deserialize serenity message");
+    let formatted = format_transcript_message(&message);
+
+    // 1. Expiring signature parameters MUST NOT be persisted in transcript
+    assert!(
+        !formatted.contains("hm="),
+        "must not persist expiring signature hash"
+    );
+    assert!(
+        !formatted.contains("ex="),
+        "must not persist expiring expiration timestamp"
+    );
+    assert!(!formatted.contains("deadbeef1234567890abcdef"));
+
+    // 2. Durable identifiers and metadata MUST be preserved
+    assert!(formatted.contains("proof.png"));
+    assert!(formatted.contains("channel_id=200000000000000002"));
+    assert!(formatted.contains("message_id=100000000000000001"));
+    assert!(formatted.contains("attachment_id=400000000000000004"));
+    assert!(formatted.contains("size=2048"));
+    assert!(formatted.contains("type=image/png"));
+    assert!(formatted.contains("archived=false"));
+}

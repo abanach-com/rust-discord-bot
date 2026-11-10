@@ -1464,7 +1464,7 @@ async fn build_transcript(
     Ok((output, included))
 }
 
-fn format_transcript_message(message: &Message) -> String {
+pub fn format_transcript_message(message: &Message) -> String {
     let content = if message.content.is_empty() {
         "[no text content]"
     } else {
@@ -1479,9 +1479,18 @@ fn format_transcript_message(message: &Message) -> String {
         content,
     );
     for attachment in &message.attachments {
+        let content_type = attachment
+            .content_type
+            .as_deref()
+            .unwrap_or("application/octet-stream");
         result.push_str(&format!(
-            "  attachment: {} | {}\n",
-            attachment.filename, attachment.url
+            "  attachment: {} | channel_id={} | message_id={} | attachment_id={} | size={} | type={} | archived=false\n",
+            attachment.filename,
+            message.channel_id.get(),
+            message.id.get(),
+            attachment.id.get(),
+            attachment.size,
+            content_type
         ));
     }
     result
