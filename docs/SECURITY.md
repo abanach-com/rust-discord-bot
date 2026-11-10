@@ -176,6 +176,21 @@ Future rich-message actions must define explicit mention, attachment and embed l
 
 Production should separate migration credentials from runtime credentials.
 
+## Application-Layer Encryption At Rest and Deployment Upgrades
+
+The bot enforces strict application-layer AES-256-GCM encryption at rest with separate cryptographic keyrings across independent domains:
+- **Ticket Transcripts**: Controlled by `TRANSCRIPT_ENCRYPTION_KEY` / `TRANSCRIPT_KEYRING` with AAD bound to `guild_id` and `ticket_id`.
+- **Integration Credentials**: Controlled by `INTEGRATION_CREDENTIAL_KEY` / `INTEGRATION_CREDENTIAL_KEYRING` with AAD bound to `guild_id`, `entity_type`, `record_id`, and `field_name`.
+
+### Startup Preflight & Upgrade Contract
+When `DATABASE_URL` is set, `AppState::bootstrap` executes a strict fail-fast preflight:
+1. Validates presence and 64-hex format of `TRANSCRIPT_ENCRYPTION_KEY` (or `TRANSCRIPT_KEYRING`), unless `TICKET_TRANSCRIPTS_DISABLED=true`.
+2. Validates presence and 64-hex format of `INTEGRATION_CREDENTIAL_KEY` (or `INTEGRATION_CREDENTIAL_KEYRING`), unless `INTEGRATION_CREDENTIALS_DISABLED=true`.
+3. If an encryption secret is missing or malformed, startup immediately aborts prior to opening database connections or executing migrations.
+
+**Upgrade Requirement**: Operators upgrading an existing deployment to version `0.1.0+` (or migrations `>= 0056`) MUST generate a dedicated 32-byte key via `openssl rand -hex 32` and set `INTEGRATION_CREDENTIAL_KEY` in their `.env` file before pulling the new container image or restarting the service. Transparent migration of existing unencrypted rows is performed automatically during backfill. Plaintext storage fallbacks are rejected fail-closed.
+
+
 ## Logging and privacy
 
 Do not log:

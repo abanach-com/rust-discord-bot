@@ -2768,3 +2768,66 @@ async fn test_integration_credentials_encryption_at_rest_and_tamper_resistance_i
         .expect("transparent read of legacy plaintext");
     assert_eq!(dec_legacy, legacy_plaintext);
 }
+
+#[tokio::test]
+async fn test_postgres_startup_preflight_fails_fast_without_integration_credential_key_issue_378() {
+    // 1. PostgreSQL configured, transcript key set, but integration key missing:
+    // Must fail fast during startup preflight before opening network connections to database.
+    let mut config = test_config();
+    config.database_url = Some("postgres://dummy:dummy@127.0.0.1:5432/dummy".to_string());
+    config.transcript_encryption_key =
+        Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string());
+    config.integration_credential_key = None;
+    config.integration_credential_keyring = None;
+    config.integration_credentials_disabled = false;
+
+    let res = AppState::bootstrap(config).await;
+    let err_msg = match res {
+        Err(e) => e.to_string(),
+        Ok(_) => {
+            panic!("Must fail fast when PostgreSQL has no integration credentials encryption key")
+        }
+    };
+    assert!(
+        err_msg.contains(
+            "PostgreSQL storage requires INTEGRATION_CREDENTIAL_KEYRING or INTEGRATION_CREDENTIAL_KEY"
+        ),
+        "Error message should explain requirement: {err_msg}"
+    );
+
+    // 2. Malformed key format (not 64 hex characters): must fail fast
+    let mut config_malformed = test_config();
+    config_malformed.database_url = Some("postgres://dummy:dummy@127.0.0.1:5432/dummy".to_string());
+    config_malformed.transcript_encryption_key =
+        Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string());
+    config_malformed.integration_credential_key = Some("invalid_key_short".to_string());
+    let res_malformed = AppState::bootstrap(config_malformed).await;
+    assert!(
+        res_malformed.is_err(),
+        "Malformed integration credential key must fail fast"
+    );
+
+    // 3. PostgreSQL configured, but integration_credentials_disabled is explicitly true:
+    // Startup preflight does NOT fail on missing integration key.
+    let mut config_disabled = test_config();
+    config_disabled.database_url = Some("postgres://dummy:dummy@127.0.0.1:5432/dummy".to_string());
+    config_disabled.transcript_encryption_key =
+        Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string());
+    config_disabled.integration_credentials_disabled = true;
+    let res_disabled = AppState::bootstrap(config_disabled).await;
+    let err_msg_disabled = match res_disabled {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("Expected connection failure to dummy PostgreSQL URL"),
+    };
+    assert!(
+        !err_msg_disabled.contains("INTEGRATION_CREDENTIAL_KEY"),
+        "Preflight should be skipped when integration credentials are explicitly disabled: {err_msg_disabled}"
+    );
+
+    // 4. MemoryStore without keys: succeeds without preflight error
+    let config_mem = test_config();
+    assert!(
+        AppState::bootstrap(config_mem).await.is_ok(),
+        "MemoryStore must bootstrap without requiring persistent encryption keys"
+    );
+}

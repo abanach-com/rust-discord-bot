@@ -30,6 +30,7 @@ services:
     cap_drop:
       - ALL
     env_file:
+      # Requires TRANSCRIPT_ENCRYPTION_KEY and INTEGRATION_CREDENTIAL_KEY (AES-256-GCM) when DATABASE_URL is active
       - .env
     environment:
       DATABASE_URL: postgres://rusty_discord_bot:${POSTGRES_PASSWORD:-rusty_discord_bot}@postgres:5432/rusty_discord_bot
