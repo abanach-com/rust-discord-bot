@@ -4451,7 +4451,9 @@ pub async fn import_policies(
         )));
     }
 
-    for rule in &payload.rules {
+    let mut rules = payload.rules;
+    for rule in &mut rules {
+        rule.normalize();
         if rule.guild_id != guild_id {
             return Err(ApiError::bad_request(format!(
                 "Rule {} has mismatched guild_id {}",
@@ -4465,7 +4467,7 @@ pub async fn import_policies(
     if payload.dry_run.unwrap_or(false) {
         return Ok(Json(json!({
             "dry_run": true,
-            "rules_count": payload.rules.len(),
+            "rules_count": rules.len(),
             "current_revision": current_revision,
             "valid": true,
         })));
@@ -4474,7 +4476,7 @@ pub async fn import_policies(
     let imported = state
         .app
         .storage
-        .replace_policy_rules(&guild_id, payload.expected_revision, payload.rules)
+        .replace_policy_rules(&guild_id, payload.expected_revision, rules)
         .await
         .map_err(|e| {
             let msg = e.to_string();

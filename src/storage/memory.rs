@@ -3659,6 +3659,7 @@ impl MemoryStore {
         &self,
         mut rule: CommandPolicyRule,
     ) -> anyhow::Result<CommandPolicyRule> {
+        rule.normalize();
         validate_snowflake("guild_id", &rule.guild_id)?;
         if let Some(ref uid) = rule.subject_id {
             if rule.subject_kind == "user" {
@@ -3708,10 +3709,11 @@ impl MemoryStore {
         &self,
         guild_id: &str,
         expected_revision: Option<i64>,
-        rules: Vec<CommandPolicyRule>,
+        mut rules: Vec<CommandPolicyRule>,
     ) -> anyhow::Result<Vec<CommandPolicyRule>> {
         validate_snowflake("guild_id", guild_id)?;
-        for rule in &rules {
+        for rule in &mut rules {
+            rule.normalize();
             if rule.guild_id != guild_id {
                 anyhow::bail!("rule {} guild_id mismatch", rule.id);
             }

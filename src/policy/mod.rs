@@ -60,8 +60,24 @@ pub struct CommandPolicyRule {
 
 pub fn validate_policy_rule_fields(rule: &CommandPolicyRule) -> anyhow::Result<()> {
     validate_snowflake("guild_id", &rule.guild_id)?;
-    let subject_kind = rule.subject_kind.to_lowercase();
-    if !["user", "role", "channel", "voice_channel", "guild"].contains(&subject_kind.as_str()) {
+    if rule.subject_kind != rule.subject_kind.to_ascii_lowercase() {
+        anyhow::bail!(
+            "subject_kind must be lowercase, got '{}'",
+            rule.subject_kind
+        );
+    }
+    if rule.resource_kind != rule.resource_kind.to_ascii_lowercase() {
+        anyhow::bail!(
+            "resource_kind must be lowercase, got '{}'",
+            rule.resource_kind
+        );
+    }
+    if rule.effect != rule.effect.to_ascii_lowercase() {
+        anyhow::bail!("effect must be lowercase, got '{}'", rule.effect);
+    }
+
+    let subject_kind = rule.subject_kind.as_str();
+    if !["user", "role", "channel", "voice_channel", "guild"].contains(&subject_kind) {
         anyhow::bail!("Invalid subject_kind: {}", rule.subject_kind);
     }
     if subject_kind == "guild" && rule.subject_id.is_some() {
@@ -74,8 +90,8 @@ pub fn validate_policy_rule_fields(rule: &CommandPolicyRule) -> anyhow::Result<(
         validate_snowflake("subject_id", sid)?;
     }
 
-    let resource_kind = rule.resource_kind.to_lowercase();
-    if !["command", "module", "action"].contains(&resource_kind.as_str()) {
+    let resource_kind = rule.resource_kind.as_str();
+    if !["command", "module", "action"].contains(&resource_kind) {
         anyhow::bail!("Invalid resource_kind: {}", rule.resource_kind);
     }
     if resource_kind == "command" && (rule.module_id.is_none() || rule.command_name.is_none()) {
@@ -88,7 +104,7 @@ pub fn validate_policy_rule_fields(rule: &CommandPolicyRule) -> anyhow::Result<(
         anyhow::bail!("Action resource requires action_key");
     }
 
-    let effect = rule.effect.to_lowercase();
+    let effect = rule.effect.as_str();
     if effect != "allow" && effect != "deny" {
         anyhow::bail!("Effect must be 'allow' or 'deny', got '{}'", rule.effect);
     }
@@ -96,6 +112,12 @@ pub fn validate_policy_rule_fields(rule: &CommandPolicyRule) -> anyhow::Result<(
 }
 
 impl CommandPolicyRule {
+    /// Normalize kind and effect strings to canonical trimmed lowercase.
+    pub fn normalize(&mut self) {
+        self.subject_kind = self.subject_kind.trim().to_ascii_lowercase();
+        self.resource_kind = self.resource_kind.trim().to_ascii_lowercase();
+        self.effect = self.effect.trim().to_ascii_lowercase();
+    }
     pub fn new_user_rule(
         guild_id: String,
         user_id: String,
@@ -222,11 +244,12 @@ impl CommandPolicyRule {
     }
 
     pub fn matches_resource(&self, target: &PolicyResource) -> bool {
+        let resource_kind = self.resource_kind.to_ascii_lowercase();
         match target {
             PolicyResource::Command {
                 module_id,
                 command_name,
-            } => match self.resource_kind.as_str() {
+            } => match resource_kind.as_str() {
                 "command" => {
                     self.module_id.as_deref() == Some(module_id)
                         && self.command_name.as_deref() == Some(command_name)
@@ -234,11 +257,11 @@ impl CommandPolicyRule {
                 "module" => self.module_id.as_deref() == Some(module_id),
                 _ => false,
             },
-            PolicyResource::Module { module_id } => match self.resource_kind.as_str() {
+            PolicyResource::Module { module_id } => match resource_kind.as_str() {
                 "module" => self.module_id.as_deref() == Some(module_id),
                 _ => false,
             },
-            PolicyResource::Action { action_key } => match self.resource_kind.as_str() {
+            PolicyResource::Action { action_key } => match resource_kind.as_str() {
                 "action" => self.action_key.as_deref() == Some(action_key),
                 _ => false,
             },
@@ -254,7 +277,8 @@ impl CommandPolicyRule {
     /// 1 = Role Match (position_weight = role position in hierarchy)
     /// 0 = Guild Default
     pub fn match_subject_tier(&self, ctx: &PolicyContext) -> Option<(u8, i64)> {
-        match self.subject_kind.as_str() {
+        let subject_kind = self.subject_kind.to_ascii_lowercase();
+        match subject_kind.as_str() {
             "user" => {
                 if self.subject_id.as_deref() == Some(&ctx.user_id) {
                     Some((5, 0))
@@ -428,7 +452,7 @@ impl CommandPolicyEngine {
             }
 
             if let Some((tier, role_pos)) = rule.match_subject_tier(ctx) {
-                let r_spec = match rule.resource_kind.as_str() {
+                let r_spec = match rule.resource_kind.to_ascii_lowercase().as_str() {
                     "command" => 3,
                     "action" => 2,
                     _ => 1,
@@ -1053,5 +1077,100 @@ mod tests {
             recovery_out.allowed,
             "Policy recovery command /policy reset must remain allowed for admin despite deny rule"
         );
+    }
+
+    #[test]
+    fn test_policy_rule_normalization_and_case_insensitive_eval_issue_382() {
+        let guild_id = "100000000000000001";
+        let user_id = "200000000000000001";
+        let channel_id = "300000000000000001";
+        let now = Utc::now();
+
+        // 1. Raw rule with uppercase fields fails canonical validation
+        let mut raw_rule = CommandPolicyRule {
+            id: Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            subject_kind: "USER".to_string(),
+            subject_id: Some(user_id.to_string()),
+            resource_kind: "COMMAND".to_string(),
+            module_id: Some("music".to_string()),
+            command_name: Some("play".to_string()),
+            action_key: None,
+            effect: "DENY".to_string(),
+            priority: 100,
+            enabled: true,
+            version: 1,
+            created_by: "tester".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+
+        assert!(
+            validate_policy_rule_fields(&raw_rule).is_err(),
+            "validate_policy_rule_fields must reject uppercase subject_kind/resource_kind/effect"
+        );
+
+        // 2. normalize() converts all kinds and effect to canonical lowercase
+        raw_rule.normalize();
+        assert_eq!(raw_rule.subject_kind, "user");
+        assert_eq!(raw_rule.resource_kind, "command");
+        assert_eq!(raw_rule.effect, "deny");
+        assert!(
+            validate_policy_rule_fields(&raw_rule).is_ok(),
+            "Normalized rule must pass validation"
+        );
+
+        // 3. Evaluator defense-in-depth: even if a rule un-normalized has "USER" and "COMMAND",
+        // the evaluator must still match and enforce the Deny rule, NOT bypass to default allow!
+        let unnormalized_deny = CommandPolicyRule {
+            id: Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            subject_kind: "USER".to_string(),
+            subject_id: Some(user_id.to_string()),
+            resource_kind: "COMMAND".to_string(),
+            module_id: Some("music".to_string()),
+            command_name: Some("play".to_string()),
+            action_key: None,
+            effect: "DENY".to_string(),
+            priority: 100,
+            enabled: true,
+            version: 1,
+            created_by: "tester".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+
+        let target_resource = PolicyResource::Command {
+            module_id: "music".to_string(),
+            command_name: "play".to_string(),
+        };
+        assert!(
+            unnormalized_deny.matches_resource(&target_resource),
+            "matches_resource must be case-insensitive"
+        );
+
+        let ctx = PolicyContext {
+            guild_id: guild_id.to_string(),
+            user_id: user_id.to_string(),
+            roles: Vec::new(),
+            channel_id: channel_id.to_string(),
+            thread_parent_id: None,
+            voice_channel_id: None,
+            is_guild_owner: false,
+            is_administrator: false,
+        };
+        assert!(
+            unnormalized_deny.match_subject_tier(&ctx).is_some(),
+            "match_subject_tier must be case-insensitive"
+        );
+
+        let deny_id = unnormalized_deny.id;
+        let engine = CommandPolicyEngine::default();
+        let eval_result = engine.evaluate(&ctx, &target_resource, &[unnormalized_deny], true);
+        assert!(
+            !eval_result.allowed,
+            "Evaluator must enforce Deny rule regardless of uppercase subject_kind or resource_kind"
+        );
+        assert_eq!(eval_result.matched_rule_id, Some(deny_id));
     }
 }
