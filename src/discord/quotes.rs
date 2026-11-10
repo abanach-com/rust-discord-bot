@@ -77,11 +77,20 @@ pub async fn execute_quote_action(
                 created_at: Utc::now(),
             };
 
-            let saved = state
-                .storage
-                .create_quote(quote)
-                .await
-                .context("Błąd zapisu cytatu w storage")?;
+            let saved = match state.storage.create_quote(quote).await {
+                Ok(saved) => saved,
+                Err(error) => {
+                    let err_msg = error.to_string();
+                    if err_msg.contains("limit")
+                        || err_msg.contains("quota")
+                        || err_msg.contains("Limit")
+                        || err_msg.contains("Osiągnięto")
+                    {
+                        return Ok(Some(format!("❌ Nie można dodać cytatu: {err_msg}")));
+                    }
+                    return Err(error).context("Błąd zapisu cytatu w storage");
+                }
+            };
 
             let audit_payload = serde_json::json!({
                 "quote_id": saved.id,

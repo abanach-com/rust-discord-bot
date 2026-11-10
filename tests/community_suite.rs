@@ -910,3 +910,136 @@ async fn welcome_module_sends_goodbye_message_on_member_remove() {
         LuaAction::Audit { event, .. } if event == "goodbye_sent"
     ));
 }
+
+#[tokio::test]
+async fn test_quote_storage_quota_enforcement_and_isolation_issue_385() {
+    use chrono::Utc;
+    use rusty_discord_bot::storage::{
+        MAX_QUOTES_PER_AUTHOR_PER_GUILD, MAX_QUOTES_PER_GUILD, QuoteRecord, Storage,
+    };
+    use uuid::Uuid;
+
+    assert_eq!(MAX_QUOTES_PER_GUILD, 5000);
+    assert_eq!(MAX_QUOTES_PER_AUTHOR_PER_GUILD, 250);
+
+    let storage = Storage::memory();
+    let guild_a = "100000000000000001";
+    let guild_b = "100000000000000002";
+    let author_u = "200000000000000001";
+    let author_v = "200000000000000002";
+
+    // 1. Set custom test quota: max 3 per author, max 5 per guild
+    if let Storage::Memory(mem) = &storage {
+        mem.set_quotes_quota_for_test(Some((5, 3)));
+    }
+
+    // 2. Author U adds 3 quotes in Guild A (hits author quota)
+    for i in 1..=3 {
+        let quote = QuoteRecord {
+            id: Uuid::new_v4(),
+            guild_id: guild_a.to_string(),
+            added_by: author_u.to_string(),
+            author_id: author_u.to_string(),
+            body: format!("Quote {i} by U"),
+            created_at: Utc::now(),
+        };
+        storage
+            .create_quote(quote)
+            .await
+            .expect("quote addition should succeed within quota");
+    }
+
+    // 3. Author U attempting 4th quote in Guild A must be rejected fail-closed
+    let quote_u4 = QuoteRecord {
+        id: Uuid::new_v4(),
+        guild_id: guild_a.to_string(),
+        added_by: author_u.to_string(),
+        author_id: author_u.to_string(),
+        body: "Quote 4 by U (exceeds author quota)".to_string(),
+        created_at: Utc::now(),
+    };
+    let err_u = storage.create_quote(quote_u4).await.unwrap_err();
+    assert!(
+        err_u
+            .to_string()
+            .contains("limit dodanych cytatów dla użytkownika"),
+        "must reject on user author quota: {err_u}"
+    );
+
+    // 4. Author V can still add quotes in Guild A (author quota isolation)
+    let quote_v1 = QuoteRecord {
+        id: Uuid::new_v4(),
+        guild_id: guild_a.to_string(),
+        added_by: author_v.to_string(),
+        author_id: author_u.to_string(),
+        body: "Quote 1 by V quoting U".to_string(),
+        created_at: Utc::now(),
+    };
+    let saved_v1 = storage
+        .create_quote(quote_v1)
+        .await
+        .expect("author V should still have quota in Guild A");
+
+    let quote_v2 = QuoteRecord {
+        id: Uuid::new_v4(),
+        guild_id: guild_a.to_string(),
+        added_by: author_v.to_string(),
+        author_id: author_v.to_string(),
+        body: "Quote 2 by V".to_string(),
+        created_at: Utc::now(),
+    };
+    storage
+        .create_quote(quote_v2)
+        .await
+        .expect("guild A total count is now 5 (at max_guild quota)");
+
+    // 5. Guild A total count is now 5 (= max_guild limit). Author V attempting a 3rd quote is rejected on guild limit
+    let quote_v3 = QuoteRecord {
+        id: Uuid::new_v4(),
+        guild_id: guild_a.to_string(),
+        added_by: author_v.to_string(),
+        author_id: author_v.to_string(),
+        body: "Quote 3 by V (exceeds guild quota)".to_string(),
+        created_at: Utc::now(),
+    };
+    let err_guild = storage.create_quote(quote_v3).await.unwrap_err();
+    assert!(
+        err_guild.to_string().contains("limit cytatów dla serwera"),
+        "must reject on guild total quota: {err_guild}"
+    );
+
+    // 6. Tenant isolation: Guild B is completely unaffected by Guild A's quota exhaustion
+    let quote_b1 = QuoteRecord {
+        id: Uuid::new_v4(),
+        guild_id: guild_b.to_string(),
+        added_by: author_u.to_string(),
+        author_id: author_u.to_string(),
+        body: "Quote 1 by U in Guild B".to_string(),
+        created_at: Utc::now(),
+    };
+    storage
+        .create_quote(quote_b1)
+        .await
+        .expect("Guild B must not be blocked by Guild A quota");
+
+    // 7. Deletion in Guild A frees up a slot
+    let deleted = storage
+        .delete_quote(guild_a, saved_v1.id)
+        .await
+        .expect("deletion succeeds");
+    assert!(deleted, "saved_v1 must be deleted");
+
+    // Now adding another quote in Guild A succeeds
+    let quote_v_retry = QuoteRecord {
+        id: Uuid::new_v4(),
+        guild_id: guild_a.to_string(),
+        added_by: author_v.to_string(),
+        author_id: author_v.to_string(),
+        body: "Quote retry by V after slot freed".to_string(),
+        created_at: Utc::now(),
+    };
+    storage
+        .create_quote(quote_v_retry)
+        .await
+        .expect("must succeed after deleting a quote");
+}

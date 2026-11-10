@@ -244,6 +244,8 @@ pub struct MemoryStore {
     reaction_roles: Arc<DashMap<(String, String, String), ReactionRoleBinding>>,
     reaction_role_grants: Arc<DashMap<(String, String, Uuid), ReactionRoleGrant>>,
     quotes: Arc<DashMap<Uuid, QuoteRecord>>,
+    quotes_write_lock: Arc<Mutex<()>>,
+    quotes_quota_override: Arc<std::sync::RwLock<Option<(usize, usize)>>>,
     birthdays: Arc<DashMap<(String, String), BirthdayRecord>>,
     afk: Arc<DashMap<(String, String), AfkRecord>>,
 }
@@ -735,10 +737,17 @@ impl MemoryStore {
             .retain(|(g, _), s| !(g == guild_id && s.owner_user_id == user_id));
         related_erased += before_forum_sessions.saturating_sub(self.help_forum_sessions.len());
 
-        let before_quotes = self.quotes.len();
-        self.quotes.retain(|_, q| {
-            !(q.guild_id == guild_id && (q.added_by == user_id || q.author_id == user_id))
-        });
+        let before_quotes = {
+            let _quotes_guard = match self.quotes_write_lock.lock() {
+                Ok(g) => g,
+                Err(e) => e.into_inner(),
+            };
+            let count = self.quotes.len();
+            self.quotes.retain(|_, q| {
+                !(q.guild_id == guild_id && (q.added_by == user_id || q.author_id == user_id))
+            });
+            count
+        };
         related_erased += before_quotes.saturating_sub(self.quotes.len());
 
         if self
@@ -2515,6 +2524,12 @@ impl MemoryStore {
         Ok(grants)
     }
 
+    pub fn set_quotes_quota_for_test(&self, quota: Option<(usize, usize)>) {
+        if let Ok(mut lock) = self.quotes_quota_override.write() {
+            *lock = quota;
+        }
+    }
+
     pub fn create_quote(&self, quote: QuoteRecord) -> anyhow::Result<QuoteRecord> {
         validate_snowflake("guild_id", &quote.guild_id)?;
         validate_snowflake("added_by", &quote.added_by)?;
@@ -2524,6 +2539,40 @@ impl MemoryStore {
         if len == 0 || len > 500 {
             anyhow::bail!("Treść cytatu musi zawierać od 1 do 500 znaków");
         }
+        let _guard = self
+            .quotes_write_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Quotes write lock poisoned"))?;
+
+        let (max_guild, max_author) = self
+            .quotes_quota_override
+            .read()
+            .map_err(|_| anyhow::anyhow!("Quotes quota lock poisoned"))?
+            .unwrap_or((
+                crate::storage::MAX_QUOTES_PER_GUILD,
+                crate::storage::MAX_QUOTES_PER_AUTHOR_PER_GUILD,
+            ));
+
+        let mut guild_count = 0;
+        let mut author_count = 0;
+        for entry in self.quotes.iter() {
+            if entry.guild_id == quote.guild_id {
+                guild_count += 1;
+                if entry.added_by == quote.added_by {
+                    author_count += 1;
+                }
+            }
+        }
+
+        if guild_count >= max_guild {
+            anyhow::bail!("Osiągnięto limit cytatów dla serwera (maksymalnie {max_guild})");
+        }
+        if author_count >= max_author {
+            anyhow::bail!(
+                "Osiągnięto limit dodanych cytatów dla użytkownika na tym serwerze (maksymalnie {max_author})"
+            );
+        }
+
         let clean = QuoteRecord {
             body: trimmed.to_string(),
             ..quote
@@ -2590,6 +2639,10 @@ impl MemoryStore {
 
     pub fn delete_quote(&self, guild_id: &str, quote_id: Uuid) -> anyhow::Result<bool> {
         validate_snowflake("guild_id", guild_id)?;
+        let _guard = match self.quotes_write_lock.lock() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
         if let Some(entry) = self.quotes.get(&quote_id)
             && entry.guild_id == guild_id
         {

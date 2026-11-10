@@ -934,6 +934,9 @@ pub struct CompanionChannelMapping {
 pub const MAX_COMPANION_MAPPINGS_PER_GUILD: usize = 50;
 pub const MAX_AI_DOCUMENTS_PER_GUILD: usize = 200;
 pub const MAX_AI_DOCUMENTS_BYTES_PER_GUILD: usize = 8 * 1024 * 1024;
+pub const MAX_QUOTES_PER_GUILD: usize = 5_000;
+pub const MAX_QUOTES_PER_AUTHOR_PER_GUILD: usize = 250;
+pub const MAX_QUOTES_PER_USER_PER_GUILD: usize = MAX_QUOTES_PER_AUTHOR_PER_GUILD;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CompanionMappingItem {

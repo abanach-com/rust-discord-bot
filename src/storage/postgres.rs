@@ -3367,6 +3367,35 @@ impl PostgresStore {
             anyhow::bail!("Treść cytatu musi zawierać od 1 do 500 znaków");
         }
 
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(4345, hashtext($1))")
+            .bind(&quote.guild_id)
+            .execute(&mut *tx)
+            .await?;
+
+        let (guild_count, author_count): (i64, i64) = sqlx::query_as(
+            r#"SELECT COUNT(*)::bigint,
+                      COUNT(*) FILTER (WHERE added_by = $2)::bigint
+               FROM guild_quotes WHERE guild_id = $1"#,
+        )
+        .bind(&quote.guild_id)
+        .bind(&quote.added_by)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        if (guild_count as usize) >= crate::storage::MAX_QUOTES_PER_GUILD {
+            anyhow::bail!(
+                "Osiągnięto limit cytatów dla serwera (maksymalnie {})",
+                crate::storage::MAX_QUOTES_PER_GUILD
+            );
+        }
+        if (author_count as usize) >= crate::storage::MAX_QUOTES_PER_AUTHOR_PER_GUILD {
+            anyhow::bail!(
+                "Osiągnięto limit dodanych cytatów dla użytkownika na tym serwerze (maksymalnie {})",
+                crate::storage::MAX_QUOTES_PER_AUTHOR_PER_GUILD
+            );
+        }
+
         sqlx::query(
             r#"
             INSERT INTO guild_quotes (id, guild_id, added_by, author_id, body, created_at)
@@ -3379,8 +3408,10 @@ impl PostgresStore {
         .bind(&quote.author_id)
         .bind(trimmed)
         .bind(quote.created_at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+
+        tx.commit().await?;
 
         Ok(QuoteRecord {
             body: trimmed.to_string(),
