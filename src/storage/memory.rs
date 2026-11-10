@@ -544,6 +544,86 @@ impl MemoryStore {
         Ok(new_settings)
     }
 
+    pub fn patch_starboard_config_with_audit(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        threshold: u32,
+        actor_id: Option<&str>,
+    ) -> anyhow::Result<GuildModuleSettings> {
+        let _guard = self
+            .settings_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+
+        let key = (guild_id.to_owned(), "starboard".to_owned());
+        let previous = self.settings.get(&key).map(|entry| entry.value().clone());
+
+        let new_settings = match &previous {
+            Some(prev) => {
+                let mut config_map = prev.config.as_object().cloned().unwrap_or_default();
+                config_map.insert(
+                    "channel_id".to_string(),
+                    serde_json::Value::String(channel_id.to_owned()),
+                );
+                config_map.insert(
+                    "threshold".to_string(),
+                    serde_json::Value::Number(threshold.into()),
+                );
+                GuildModuleSettings {
+                    guild_id: prev.guild_id.clone(),
+                    module_id: prev.module_id.clone(),
+                    enabled: prev.enabled,
+                    config: serde_json::Value::Object(config_map),
+                    updated_at: Utc::now(),
+                }
+            }
+            None => {
+                let mut config_map = serde_json::Map::new();
+                config_map.insert(
+                    "channel_id".to_string(),
+                    serde_json::Value::String(channel_id.to_owned()),
+                );
+                config_map.insert(
+                    "threshold".to_string(),
+                    serde_json::Value::Number(threshold.into()),
+                );
+                GuildModuleSettings {
+                    guild_id: guild_id.to_owned(),
+                    module_id: "starboard".to_owned(),
+                    enabled: true,
+                    config: serde_json::Value::Object(config_map),
+                    updated_at: Utc::now(),
+                }
+            }
+        };
+
+        self.settings.insert(key.clone(), new_settings.clone());
+
+        if let Err(audit_err) = self.record_audit(
+            Some(guild_id),
+            actor_id,
+            "dashboard",
+            "starboard_config_updated",
+            serde_json::json!({
+                "channel_id": channel_id,
+                "threshold": threshold,
+            }),
+        ) {
+            match previous {
+                Some(prev) => {
+                    self.settings.insert(key, prev);
+                }
+                None => {
+                    self.settings.remove(&key);
+                }
+            }
+            return Err(audit_err);
+        }
+
+        Ok(new_settings)
+    }
+
     pub fn get_member_progress(&self, guild_id: &str, user_id: &str) -> MemberProgress {
         let _guard = self.progression_guard();
 

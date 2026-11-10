@@ -1818,6 +1818,25 @@ impl Storage {
         }
     }
 
+    pub async fn patch_starboard_config_with_audit(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        threshold: u32,
+        actor_id: Option<&str>,
+    ) -> anyhow::Result<GuildModuleSettings> {
+        match self {
+            Self::Memory(store) => {
+                store.patch_starboard_config_with_audit(guild_id, channel_id, threshold, actor_id)
+            }
+            Self::Postgres(store) => {
+                store
+                    .patch_starboard_config_with_audit(guild_id, channel_id, threshold, actor_id)
+                    .await
+            }
+        }
+    }
+
     pub fn inject_audit_failure(&self, fail: bool) {
         if let Self::Memory(store) = self {
             store.inject_audit_failure(fail);

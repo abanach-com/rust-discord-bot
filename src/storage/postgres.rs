@@ -314,6 +314,54 @@ impl PostgresStore {
         Ok(settings)
     }
 
+    pub async fn patch_starboard_config_with_audit(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        threshold: u32,
+        actor_id: Option<&str>,
+    ) -> anyhow::Result<GuildModuleSettings> {
+        let mut tx = self.pool.begin().await?;
+
+        let settings = sqlx::query_as::<_, GuildModuleSettings>(
+            r#"
+            INSERT INTO guild_module_settings (guild_id, module_id, enabled, config)
+            VALUES ($1, 'starboard', TRUE, jsonb_build_object('channel_id', $2::text, 'threshold', $3::int))
+            ON CONFLICT (guild_id, module_id)
+            DO UPDATE SET
+                config = guild_module_settings.config || EXCLUDED.config,
+                updated_at = NOW()
+            RETURNING guild_id, module_id, enabled, config, updated_at
+            "#,
+        )
+        .bind(guild_id)
+        .bind(channel_id)
+        .bind(threshold as i32)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO audit_events (guild_id, actor_id, module_id, event, data)
+            VALUES ($1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(guild_id)
+        .bind(actor_id)
+        .bind("dashboard")
+        .bind("starboard_config_updated")
+        .bind(serde_json::json!({
+            "channel_id": channel_id,
+            "threshold": threshold,
+        }))
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+
+        Ok(settings)
+    }
+
     pub async fn record_audit(
         &self,
 

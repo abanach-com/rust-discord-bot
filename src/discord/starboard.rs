@@ -3,7 +3,7 @@ use serenity::all::{Channel, ChannelId, ChannelType, Context, GuildId, Permissio
 
 use crate::lua::StarboardOperation;
 use crate::state::AppState;
-use crate::storage::{UpdateModuleSettingsParams, validate_snowflake};
+use crate::storage::validate_snowflake;
 
 pub struct StarboardExecutionContext {
     pub guild_id: Option<GuildId>,
@@ -150,41 +150,15 @@ pub async fn execute_starboard_action(
                 ));
             }
 
-            // Read current settings and merge new config
-            let current_settings = state
-                .storage
-                .get_module_settings(&guild_id_str, "starboard")
-                .await?;
-
-            let enabled = current_settings.as_ref().map(|s| s.enabled).unwrap_or(true);
-            let mut config_map = current_settings
-                .and_then(|s| s.config.as_object().cloned())
-                .unwrap_or_default();
-
-            config_map.insert(
-                "channel_id".to_string(),
-                serde_json::Value::String(channel_id.clone()),
-            );
-            config_map.insert(
-                "threshold".to_string(),
-                serde_json::Value::Number((*threshold).into()),
-            );
-            let new_config = serde_json::Value::Object(config_map);
-
+            // Atomically patch starboard config in storage without clobbering enabled state or concurrent web edits
             state
                 .storage
-                .update_module_settings_with_audit(UpdateModuleSettingsParams {
-                    guild_id: &guild_id_str,
-                    module_id: "starboard",
-                    enabled,
-                    config: new_config,
-                    actor_id: Some(&actor_id_str),
-                    audit_event: "starboard_config_updated",
-                    audit_data: serde_json::json!({
-                        "channel_id": channel_id,
-                        "threshold": threshold,
-                    }),
-                })
+                .patch_starboard_config_with_audit(
+                    &guild_id_str,
+                    channel_id,
+                    *threshold,
+                    Some(&actor_id_str),
+                )
                 .await
                 .context("Błąd zapisu konfiguracji starboard w storage")?;
 

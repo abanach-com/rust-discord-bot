@@ -4789,6 +4789,94 @@ async fn test_starboard_config_execution_and_persistence_suite() {
 }
 
 #[tokio::test]
+async fn test_starboard_config_atomic_patch_preserves_enabled_and_keys_issue_372() {
+    use rusty_discord_bot::discord::starboard::{
+        StarboardExecutionContext, execute_starboard_action,
+    };
+    use rusty_discord_bot::lua::StarboardOperation;
+    use rusty_discord_bot::storage::UpdateModuleSettingsParams;
+    use serenity::all::{ChannelId, GuildId, Permissions, UserId};
+
+    let (ctx, _mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state().await;
+
+    let guild_id = GuildId::new(100);
+    let owner_id = UserId::new(111111111111111111);
+
+    // 1. Pre-configure starboard as DISABLED with custom config fields
+    state
+        .storage
+        .update_module_settings_with_audit(UpdateModuleSettingsParams {
+            guild_id: "100",
+            module_id: "starboard",
+            enabled: false,
+            config: serde_json::json!({
+                "channel_id": "101",
+                "threshold": 3,
+                "self_star": true,
+                "emoji": "⭐"
+            }),
+            actor_id: Some("111111111111111111"),
+            audit_event: "module_settings_updated",
+            audit_data: serde_json::json!({ "enabled": false }),
+        })
+        .await
+        .expect("setup disabled starboard settings");
+
+    // 2. Execute /starboard config channel:#102 threshold:7
+    let res = execute_starboard_action(
+        &ctx,
+        &state,
+        "starboard",
+        StarboardExecutionContext::new(
+            Some(guild_id),
+            Some(ChannelId::new(102)),
+            Some(owner_id),
+            Permissions::ADMINISTRATOR,
+            true,
+        ),
+        &StarboardOperation::Configure {
+            channel_id: "102".to_string(),
+            threshold: 7,
+        },
+    )
+    .await;
+
+    assert!(
+        res.is_ok(),
+        "Starboard configure must succeed: {:?}",
+        res.err()
+    );
+
+    // 3. Verify settings in storage:
+    // MUST NOT clobber enabled (must remain false!)
+    // MUST NOT clobber other config keys (self_star and emoji must be preserved!)
+    let settings = state
+        .storage
+        .get_module_settings("100", "starboard")
+        .await
+        .unwrap()
+        .expect("Settings should exist");
+
+    assert!(
+        !settings.enabled,
+        "Issue #372: /starboard config must preserve disabled state instead of clobbering to enabled"
+    );
+    assert_eq!(settings.config["channel_id"], "102");
+    assert_eq!(settings.config["threshold"], 7);
+    assert_eq!(
+        settings.config["self_star"], true,
+        "Issue #372: /starboard config must preserve concurrent extra config keys"
+    );
+    assert_eq!(
+        settings.config["emoji"], "⭐",
+        "Issue #372: /starboard config must preserve concurrent extra config keys"
+    );
+
+    shard_manager.shutdown_all().await;
+}
+
+#[tokio::test]
 async fn test_quotes_storage_and_execution_lifecycle_suite() {
     use rusty_discord_bot::discord::quotes::{QuoteExecutionContext, execute_quote_action};
     use rusty_discord_bot::lua::QuoteOperation;
