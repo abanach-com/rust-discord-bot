@@ -394,6 +394,33 @@ async fn mock_discord_handler(
             }))
             .into_response(),
 
+            "501" => Json(json!({
+                "id": "501",
+                "guild_id": "100",
+                "type": 15, // Forum
+                "name": "announcements-forum",
+                "position": 8
+            }))
+            .into_response(),
+
+            "502" => Json(json!({
+                "id": "502",
+                "guild_id": "100",
+                "type": 16, // Media
+                "name": "clips-media",
+                "position": 9
+            }))
+            .into_response(),
+
+            "503" => Json(json!({
+                "id": "503",
+                "guild_id": "100",
+                "type": 14, // Directory
+                "name": "server-directory",
+                "position": 10
+            }))
+            .into_response(),
+
             _ => (
                 StatusCode::NOT_FOUND,
                 Json(json!({"message": "Unknown Channel", "code": 10003})),
@@ -1063,6 +1090,38 @@ async fn test_channel_resolution_server_isolation_and_error_handling() {
         "Zero modifying requests should be made for Category channel"
     );
 
+    // 4b. Forum channel -> Rejected for SendMessage (Issue #374)
+    let forum =
+        resolve_and_validate_channel(&ctx, &origin, Some("501"), ChannelPurpose::SendMessage).await;
+    assert!(
+        forum.is_err(),
+        "Forum channel 501 must be rejected for SendMessage"
+    );
+    let forum_err = forum.unwrap_err().to_string();
+    assert!(forum_err.contains("forum channels do not accept direct messages"));
+
+    // 4c. Media channel -> Rejected for SendMessage (Issue #374)
+    let media =
+        resolve_and_validate_channel(&ctx, &origin, Some("502"), ChannelPurpose::SendMessage).await;
+    assert!(
+        media.is_err(),
+        "Media channel 502 must be rejected for SendMessage"
+    );
+
+    // 4d. Directory channel -> Rejected for SendMessage (Issue #374)
+    let directory =
+        resolve_and_validate_channel(&ctx, &origin, Some("503"), ChannelPurpose::SendMessage).await;
+    assert!(
+        directory.is_err(),
+        "Directory channel 503 must be rejected for SendMessage"
+    );
+
+    assert_eq!(
+        mock.modifying_requests_count.load(Ordering::SeqCst),
+        baseline_modifications,
+        "Zero modifying requests should be made for invalid channel types"
+    );
+
     // 5. Non-existent channel -> Rejected on read error
 
     let not_found =
@@ -1247,6 +1306,39 @@ async fn test_join_guard_raid_kick_timeout_and_self_punishment_contract() {
     assert!(
         self_err.contains("cannot perform this action on yourself")
             || self_err.contains("nie możesz wykonać tej akcji na sobie")
+    );
+
+    // Case D (Issue #374): Sequence of SendMessage [Forum 501, Text 101]
+    // Forum channel must be rejected, but delivery to Text channel must NOT be aborted!
+    let broadcast_actions = vec![
+        LuaAction::SendMessage {
+            channel_id: Some("501".to_string()), // Forum channel
+            content: "Broadcast to forum channel".to_string(),
+        },
+        LuaAction::SendMessage {
+            channel_id: Some("101".to_string()), // Text channel
+            content: "Broadcast to text channel".to_string(),
+        },
+    ];
+
+    let baseline_broadcast = mock.modifying_requests_count.load(Ordering::SeqCst);
+    let broadcast_result = execute_event_actions(
+        &ctx,
+        &state,
+        "staff_tools",
+        Some(guild_id),
+        Some(ChannelId::new(101)),
+        Some(owner_user),
+        &broadcast_actions,
+    )
+    .await;
+
+    assert!(broadcast_result.is_ok());
+    let after_broadcast = mock.modifying_requests_count.load(Ordering::SeqCst);
+    assert_eq!(
+        after_broadcast - baseline_broadcast,
+        1,
+        "Forum channel fails safely, but text channel message must still be dispatched"
     );
 
     shard_manager.shutdown_all().await;

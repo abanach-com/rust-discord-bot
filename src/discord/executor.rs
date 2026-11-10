@@ -303,6 +303,10 @@ pub async fn execute_command_actions(
                         .await?;
                 }
 
+                if matches!(action, LuaAction::SendMessage { .. }) {
+                    continue;
+                }
+
                 break;
             }
         }
@@ -1724,12 +1728,28 @@ pub async fn resolve_and_validate_channel(
                             "channel categories cannot be the target of messages"
                         ));
                     }
+                    if guild_channel.kind == ChannelType::Forum {
+                        return Err(anyhow!(
+                            "forum channels do not accept direct messages; create a thread or post instead"
+                        ));
+                    }
+                    if matches!(
+                        guild_channel.kind,
+                        ChannelType::Directory | ChannelType::Unknown(16)
+                    ) {
+                        return Err(anyhow!(
+                            "media and directory channels cannot be the target of messages"
+                        ));
+                    }
                 }
 
                 ChannelPurpose::ManageMessages => {
-                    if guild_channel.kind == ChannelType::Category {
+                    if matches!(
+                        guild_channel.kind,
+                        ChannelType::Category | ChannelType::Directory
+                    ) {
                         return Err(anyhow!(
-                            "channel categories cannot be the target of message deletions"
+                            "channel categories and directories cannot be the target of message deletions"
                         ));
                     }
                 }
