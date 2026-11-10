@@ -704,17 +704,15 @@ async fn open_ticket(
         }
     };
 
-    let activated = match state
+    let channel_id_str = created_channel.id.get().to_string();
+    let activation = state
         .tickets
-        .activate_ticket(
-            &reserved.id,
-            &created_channel.id.get().to_string(),
-            &channel_name,
-        )
-        .await?
-    {
-        TicketMutationOutcome::Updated(ticket) => ticket,
-        outcome => {
+        .activate_ticket(&reserved.id, &channel_id_str, &channel_name)
+        .await;
+
+    let activated = match activation {
+        Ok(TicketMutationOutcome::Updated(ticket)) => ticket,
+        Ok(outcome) => {
             let _ = created_channel.id.delete(&ctx.http).await;
             let _ = state
                 .tickets
@@ -727,6 +725,39 @@ async fn open_ticket(
                 )
                 .await;
             return Err(anyhow!("failed to activate ticket record"));
+        }
+        Err(error) => {
+            if let Ok(Some(ticket)) = state
+                .tickets
+                .get_by_channel(&guild_key, &channel_id_str)
+                .await
+            {
+                if ticket.id == reserved.id && ticket.status == STATUS_OPEN {
+                    tracing::info!(
+                        ticket_id = %reserved.id,
+                        channel_id = %channel_id_str,
+                        "ticket activation confirmed on recovery check despite initial error"
+                    );
+                    Box::new(ticket)
+                } else {
+                    let _ = created_channel.id.delete(&ctx.http).await;
+                    let _ = state
+                        .tickets
+                        .fail_provisioning(
+                            &reserved.id,
+                            &format!("ticket activation failed: {error}"),
+                        )
+                        .await;
+                    return Err(error);
+                }
+            } else {
+                let _ = created_channel.id.delete(&ctx.http).await;
+                let _ = state
+                    .tickets
+                    .fail_provisioning(&reserved.id, &format!("ticket activation failed: {error}"))
+                    .await;
+                return Err(error);
+            }
         }
     };
 

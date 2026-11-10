@@ -687,3 +687,68 @@ fn test_ticket_transcript_format_does_not_persist_expiring_cdn_signatures_issue_
     assert!(formatted.contains("type=image/png"));
     assert!(formatted.contains("archived=false"));
 }
+
+#[tokio::test]
+async fn test_ticket_activation_error_handling_and_recovery_contract_issue_384() {
+    let store = TicketStore::memory();
+    let creator_user_id = "100000000000000099";
+    let reserved = reserved_ticket(&store, creator_user_id, 1).await;
+    assert_eq!(
+        reserved.status,
+        rusty_discord_bot::tickets::STATUS_PROVISIONING
+    );
+
+    // 1. Injected activation failure (simulating DB Err)
+    store.set_activation_failure_injected(true);
+    let channel_id = "100000000000000088";
+    let channel_name = "ticket-000001-problem";
+    let activation_res = store
+        .activate_ticket(&reserved.id, channel_id, channel_name)
+        .await;
+    assert!(
+        activation_res.is_err(),
+        "activation must return Err when injected"
+    );
+
+    // 2. Recovery check via get_by_channel shows channel is not linked yet
+    let recovery_check = store
+        .get_by_channel(&reserved.guild_id, channel_id)
+        .await
+        .expect("get_by_channel query succeeds");
+    assert!(
+        recovery_check.is_none(),
+        "uncommitted ticket must not be linked to the channel"
+    );
+
+    // 3. Compensation: failing provisioning marks ticket as failed and releases user quota
+    let fail_res = store
+        .fail_provisioning(
+            &reserved.id,
+            "ticket activation failed: Simulated database activation error",
+        )
+        .await
+        .expect("fail_provisioning succeeds");
+    let TicketMutationOutcome::Updated(failed) = fail_res else {
+        panic!("expected updated fail outcome");
+    };
+    assert_eq!(failed.status, rusty_discord_bot::tickets::STATUS_FAILED);
+    assert!(
+        failed
+            .provisioning_error
+            .as_deref()
+            .unwrap_or("")
+            .contains("Simulated database activation error")
+    );
+    assert!(
+        !failed.is_active(),
+        "failed ticket must not count as active"
+    );
+
+    // 4. User can now reserve a new ticket within their quota (limit 1)
+    store.set_activation_failure_injected(false);
+    let new_reserved = store
+        .reserve_ticket(reservation(creator_user_id), 1)
+        .await
+        .expect("reservation should succeed after previous provisioning failure");
+    assert!(matches!(new_reserved, ReserveTicketOutcome::Reserved(_)));
+}

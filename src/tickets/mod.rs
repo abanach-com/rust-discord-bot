@@ -71,6 +71,14 @@ impl TicketStore {
         }
     }
 
+    pub fn set_activation_failure_injected(&self, injected: bool) {
+        if let Self::Memory(store) = self {
+            store
+                .activation_failure_injected
+                .store(injected, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
     pub async fn activate_ticket(
         &self,
         ticket_id: &str,
@@ -78,7 +86,15 @@ impl TicketStore {
         channel_name: &str,
     ) -> Result<TicketMutationOutcome> {
         match self {
-            Self::Memory(store) => Ok(store.activate_ticket(ticket_id, channel_id, channel_name)),
+            Self::Memory(store) => {
+                if store
+                    .activation_failure_injected
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    anyhow::bail!("Simulated database activation error");
+                }
+                Ok(store.activate_ticket(ticket_id, channel_id, channel_name))
+            }
             Self::Postgres(store) => Ok(store
                 .activate_ticket(ticket_id, channel_id, channel_name)
                 .await?),

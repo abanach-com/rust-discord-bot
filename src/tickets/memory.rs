@@ -27,6 +27,7 @@ struct MemoryTicketState {
 #[derive(Clone, Default)]
 pub struct MemoryTicketStore {
     state: Arc<Mutex<MemoryTicketState>>,
+    pub(crate) activation_failure_injected: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MemoryTicketStore {
