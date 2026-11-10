@@ -6798,11 +6798,11 @@ async fn test_web_broadcast_destination_channel_authorization_suite() {
         .await
         .expect("bootstrap app state");
     let permissions_cache = Arc::new(DashMap::new());
-    let web_state = WebState {
-        app: app.clone(),
-        login_rate_limiter: Arc::new(LoginRateLimiter::new()),
-        permissions_cache: permissions_cache.clone(),
-    };
+    let web_state = WebState::new(
+        app.clone(),
+        Arc::new(LoginRateLimiter::new()),
+        permissions_cache.clone(),
+    );
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -9205,11 +9205,11 @@ async fn test_giveaway_web_end_and_reroll_discord_delivery_issue_359() {
         .await
         .expect("bootstrap app state");
     let permissions_cache = Arc::new(DashMap::new());
-    let web_state = WebState {
-        app: app.clone(),
-        login_rate_limiter: Arc::new(LoginRateLimiter::new()),
-        permissions_cache: permissions_cache.clone(),
-    };
+    let web_state = WebState::new(
+        app.clone(),
+        Arc::new(LoginRateLimiter::new()),
+        permissions_cache.clone(),
+    );
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

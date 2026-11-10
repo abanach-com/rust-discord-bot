@@ -1083,6 +1083,16 @@ pub async fn guild_events_stream(
     let (_, session) = authenticate(&state, &headers).await?;
     ensure_guild_access(&state, &session, &guild_id).await?;
 
+    let global_permit = state
+        .sse_global_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::too_many_requests("Too many SSE connections"))?;
+    let user_permit = state
+        .sse_quota
+        .try_acquire(&session.user.id, &guild_id)
+        .map_err(|_| ApiError::too_many_requests("SSE connection quota exceeded"))?;
+
     let mut rx = state.app.guild_events.subscribe();
     let target_guild = guild_id.clone();
 
@@ -1098,6 +1108,7 @@ pub async fn guild_events_stream(
     let worker_guild = target_guild.clone();
 
     tokio::spawn(async move {
+        let _permits = (global_permit, user_permit);
         let mut reauth_interval = tokio::time::interval(std::time::Duration::from_secs(15));
         reauth_interval.tick().await;
 

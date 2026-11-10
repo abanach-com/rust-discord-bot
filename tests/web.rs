@@ -64,11 +64,11 @@ async fn test_web_state() -> (
         .await
         .expect("bootstrap app state");
     let permissions_cache = Arc::new(DashMap::new());
-    let state = WebState {
+    let state = WebState::new(
         app,
-        login_rate_limiter: Arc::new(LoginRateLimiter::new()),
-        permissions_cache: permissions_cache.clone(),
-    };
+        Arc::new(LoginRateLimiter::new()),
+        permissions_cache.clone(),
+    );
     (state, permissions_cache)
 }
 
@@ -4476,11 +4476,11 @@ async fn test_scheduled_events_live_mode_discord_verification() {
 
     let app = AppState::bootstrap(config).await.expect("bootstrap");
     let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
-    let web_state = WebState {
+    let web_state = WebState::new(
         app,
-        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        std::sync::Arc::new(LoginRateLimiter::new()),
         permissions_cache,
-    };
+    );
     web_state
         .app
         .is_gateway_ready
@@ -5955,11 +5955,11 @@ async fn test_diagnostics_discord_permissions_and_failure_states() {
 
     let app = AppState::bootstrap(config).await.expect("bootstrap");
     let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
-    let web_state = WebState {
+    let web_state = WebState::new(
         app,
-        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        std::sync::Arc::new(LoginRateLimiter::new()),
         permissions_cache,
-    };
+    );
     web_state
         .app
         .is_gateway_ready
@@ -6886,11 +6886,11 @@ async fn test_revalidate_guild_permission_owner_fallback_fails_closed_on_transfe
 
     let app = AppState::bootstrap(config).await.expect("bootstrap");
     let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
-    let state = WebState {
+    let state = WebState::new(
         app,
-        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        std::sync::Arc::new(LoginRateLimiter::new()),
         permissions_cache,
-    };
+    );
 
     let session = Session {
         user: DashboardUser {
@@ -7007,11 +7007,11 @@ async fn test_ensure_manage_roles_access_revocation_and_live_permissions_issue_3
 
     let app = AppState::bootstrap(config).await.expect("bootstrap");
     let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
-    let state = WebState {
+    let state = WebState::new(
         app,
-        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        std::sync::Arc::new(LoginRateLimiter::new()),
         permissions_cache,
-    };
+    );
 
     // Session 1: Stale snapshot has MANAGE_ROLES (268435488)
     let session_stale_role = Session {
@@ -7090,11 +7090,11 @@ async fn test_ensure_manage_roles_access_revocation_and_live_permissions_issue_3
     let offline_app = AppState::bootstrap(offline_config)
         .await
         .expect("bootstrap offline");
-    let offline_state = WebState {
-        app: offline_app,
-        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
-        permissions_cache: std::sync::Arc::new(dashmap::DashMap::new()),
-    };
+    let offline_state = WebState::new(
+        offline_app,
+        std::sync::Arc::new(LoginRateLimiter::new()),
+        std::sync::Arc::new(dashmap::DashMap::new()),
+    );
 
     assert!(
         ensure_manage_roles_access(&offline_state, &session_stale_role, guild_id)
@@ -7894,11 +7894,7 @@ async fn test_metrics_endpoint_bearer_token_session_cookie_and_ip_authorization(
         .await
         .expect("bootstrap app state");
     let permissions_cache = Arc::new(DashMap::new());
-    let state = WebState {
-        app,
-        login_rate_limiter: Arc::new(LoginRateLimiter::new()),
-        permissions_cache,
-    };
+    let state = WebState::new(app, Arc::new(LoginRateLimiter::new()), permissions_cache);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -8577,11 +8573,11 @@ async fn test_giveaway_max_winners_and_channel_view_live_mode() {
 
     let app = AppState::bootstrap(config).await.expect("bootstrap");
     let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
-    let web_state = WebState {
+    let web_state = WebState::new(
         app,
-        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        std::sync::Arc::new(LoginRateLimiter::new()),
         permissions_cache,
-    };
+    );
     web_state
         .app
         .is_gateway_ready
@@ -8891,11 +8887,11 @@ async fn test_giveaway_cross_guild_channel_isolation_live_mode() {
 
     let app = AppState::bootstrap(config).await.expect("bootstrap");
     let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
-    let web_state = WebState {
+    let web_state = WebState::new(
         app,
-        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        std::sync::Arc::new(LoginRateLimiter::new()),
         permissions_cache,
-    };
+    );
     web_state
         .app
         .is_gateway_ready
@@ -9396,11 +9392,11 @@ async fn test_reaction_roles_web_api_and_isolation() {
 
     let app = AppState::bootstrap(config).await.expect("bootstrap");
     let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
-    let web_state = WebState {
+    let web_state = WebState::new(
         app,
-        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        std::sync::Arc::new(LoginRateLimiter::new()),
         permissions_cache,
-    };
+    );
     web_state
         .app
         .is_gateway_ready
@@ -9956,11 +9952,11 @@ async fn test_store_items_privilege_escalation_guard_suite() {
 
     let app = AppState::bootstrap(config).await.expect("bootstrap");
     let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
-    let web_state = WebState {
+    let web_state = WebState::new(
         app,
-        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        std::sync::Arc::new(LoginRateLimiter::new()),
         permissions_cache,
-    };
+    );
     web_state
         .app
         .is_gateway_ready
@@ -10415,11 +10411,11 @@ async fn test_polls_channel_view_live_mode_and_cross_guild_suite() {
 
     let app = AppState::bootstrap(config).await.expect("bootstrap");
     let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
-    let web_state = WebState {
+    let web_state = WebState::new(
         app,
-        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        std::sync::Arc::new(LoginRateLimiter::new()),
         permissions_cache,
-    };
+    );
     web_state
         .app
         .is_gateway_ready
@@ -10903,11 +10899,11 @@ async fn test_giveaway_private_thread_membership_authorization_suite() {
 
     let app = AppState::bootstrap(config).await.expect("bootstrap");
     let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
-    let web_state = WebState {
+    let web_state = WebState::new(
         app,
-        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        std::sync::Arc::new(LoginRateLimiter::new()),
         permissions_cache,
-    };
+    );
 
     // 3. Register user sessions
     let make_session = |user_id: &str, username: &str, sess_id: &str, csrf: &str| {
@@ -11399,11 +11395,11 @@ async fn test_module_autorole_privilege_escalation_guard_suite() {
 
     let app = AppState::bootstrap(config).await.expect("bootstrap");
     let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
-    let web_state = WebState {
+    let web_state = WebState::new(
         app,
-        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        std::sync::Arc::new(LoginRateLimiter::new()),
         permissions_cache,
-    };
+    );
 
     let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -11881,11 +11877,11 @@ async fn test_progression_role_rewards_privilege_escalation_guard_suite() {
 
     let app = AppState::bootstrap(config).await.expect("bootstrap");
     let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
-    let web_state = WebState {
+    let web_state = WebState::new(
         app,
-        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        std::sync::Arc::new(LoginRateLimiter::new()),
         permissions_cache,
-    };
+    );
 
     let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -12550,11 +12546,11 @@ async fn test_recruitment_privilege_escalation_and_self_accept_guard_suite() {
 
     let app = AppState::bootstrap(config).await.expect("bootstrap");
     let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
-    let web_state = WebState {
+    let web_state = WebState::new(
         app,
-        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        std::sync::Arc::new(LoginRateLimiter::new()),
         permissions_cache,
-    };
+    );
 
     let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -13244,11 +13240,11 @@ async fn test_recruitment_review_role_authorization_and_approval_policy_suite() 
 
     let app = AppState::bootstrap(config).await.expect("bootstrap");
     let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
-    let web_state = WebState {
+    let web_state = WebState::new(
         app,
-        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        std::sync::Arc::new(LoginRateLimiter::new()),
         permissions_cache,
-    };
+    );
 
     let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -13831,11 +13827,11 @@ async fn test_store_purchase_concurrent_fulfillment_race_suite() {
 
     let app = AppState::bootstrap(config).await.expect("bootstrap");
     let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
-    let web_state = WebState {
+    let web_state = WebState::new(
         app,
-        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        std::sync::Arc::new(LoginRateLimiter::new()),
         permissions_cache,
-    };
+    );
 
     let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -14067,11 +14063,11 @@ async fn test_economy_store_purchase_idempotency_validation_and_rate_limit_suite
 
     let app = AppState::bootstrap(config).await.expect("bootstrap");
     let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
-    let web_state = WebState {
+    let web_state = WebState::new(
         app,
-        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        std::sync::Arc::new(LoginRateLimiter::new()),
         permissions_cache,
-    };
+    );
 
     let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -14411,11 +14407,11 @@ async fn test_recruitment_n_plus_one_avoidance_and_approval_threshold_suite() {
 
     let app = AppState::bootstrap(config).await.expect("bootstrap");
     let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
-    let web_state = WebState {
+    let web_state = WebState::new(
         app,
-        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        std::sync::Arc::new(LoginRateLimiter::new()),
         permissions_cache,
-    };
+    );
     let router = build_router(web_state.clone());
 
     let server_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -15312,11 +15308,11 @@ async fn test_sticky_messages_view_authorization_and_isolation_issue_320() {
 
     let app = AppState::bootstrap(config).await.expect("bootstrap");
     let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
-    let web_state = WebState {
+    let web_state = WebState::new(
         app,
-        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
-        permissions_cache: permissions_cache.clone(),
-    };
+        std::sync::Arc::new(LoginRateLimiter::new()),
+        permissions_cache.clone(),
+    );
     web_state
         .app
         .is_gateway_ready
@@ -15691,11 +15687,11 @@ async fn test_snapshot_api_scrubbing_and_historic_record_isolation_issue_328() {
     config.offline_mode = true;
     let app = AppState::bootstrap(config).await.expect("bootstrap");
     let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
-    let web_state = WebState {
+    let web_state = WebState::new(
         app,
-        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
-        permissions_cache: permissions_cache.clone(),
-    };
+        std::sync::Arc::new(LoginRateLimiter::new()),
+        permissions_cache.clone(),
+    );
     web_state
         .app
         .is_gateway_ready
@@ -15968,11 +15964,11 @@ async fn test_scheduled_event_chronological_window_and_rsvp_cutoff_issue_331() {
     config.offline_mode = true;
     let app = AppState::bootstrap(config).await.expect("bootstrap");
     let permissions_cache = Arc::new(DashMap::new());
-    let web_state = WebState {
+    let web_state = WebState::new(
         app,
-        login_rate_limiter: Arc::new(LoginRateLimiter::new()),
-        permissions_cache: permissions_cache.clone(),
-    };
+        Arc::new(LoginRateLimiter::new()),
+        permissions_cache.clone(),
+    );
     web_state
         .app
         .is_gateway_ready
@@ -17411,4 +17407,196 @@ async fn test_module_draft_resource_limits_and_validation_issue_375() {
         .await
         .unwrap();
     assert_eq!(post_cross_tenant.status(), reqwest::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_sse_eventsource_connection_limits_and_isolation_issue_376() {
+    let (mut web_state, _) = test_web_state().await;
+    // Set max 2 per user/guild for testing
+    let sse_quota = Arc::new(rusty_discord_bot::web::SseQuota::new(2));
+    web_state.sse_quota = sse_quota.clone();
+    let global_slots = Arc::new(tokio::sync::Semaphore::new(3));
+    web_state.sse_global_slots = global_slots.clone();
+
+    let router = build_router(web_state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let guild_a = "123000000000000001";
+    let guild_b = "123000000000000002";
+    let user_1 = "user_sse_1";
+    let user_2 = "user_sse_2";
+
+    // Setup session for user_1 with access to guild_a and guild_b
+    let session_1_id = "session_sse_user_1";
+    let session_1 = rusty_discord_bot::session::Session {
+        user: DashboardUser {
+            id: user_1.to_string(),
+            username: "sse_user_1".to_string(),
+            avatar: None,
+            global_name: None,
+        },
+        guilds: vec![
+            DashboardGuild {
+                id: guild_a.to_string(),
+                name: "Guild A".to_string(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_string(),
+            },
+            DashboardGuild {
+                id: guild_b.to_string(),
+                name: "Guild B".to_string(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_string(),
+            },
+        ],
+        expires_at: Utc::now() + Duration::hours(2),
+        access_token: None,
+        csrf_token: "csrf_sse_1".to_string(),
+    };
+    web_state
+        .app
+        .sessions
+        .save_session(
+            session_1_id,
+            session_1.user,
+            session_1.guilds,
+            session_1.csrf_token,
+            session_1.expires_at,
+            None,
+        )
+        .await
+        .unwrap();
+    let cookie_1 = format!("rusty_discord_bot_session={session_1_id}");
+
+    // Setup session for user_2 with access to guild_a
+    let session_2_id = "session_sse_user_2";
+    let session_2 = rusty_discord_bot::session::Session {
+        user: DashboardUser {
+            id: user_2.to_string(),
+            username: "sse_user_2".to_string(),
+            avatar: None,
+            global_name: None,
+        },
+        guilds: vec![DashboardGuild {
+            id: guild_a.to_string(),
+            name: "Guild A".to_string(),
+            icon: None,
+            owner: true,
+            permissions: "8".to_string(),
+        }],
+        expires_at: Utc::now() + Duration::hours(2),
+        access_token: None,
+        csrf_token: "csrf_sse_2".to_string(),
+    };
+    web_state
+        .app
+        .sessions
+        .save_session(
+            session_2_id,
+            session_2.user,
+            session_2.guilds,
+            session_2.csrf_token,
+            session_2.expires_at,
+            None,
+        )
+        .await
+        .unwrap();
+    let cookie_2 = format!("rusty_discord_bot_session={session_2_id}");
+
+    // 1. User 1 connects stream 1 on guild_a -> 200 OK
+    let resp_1 = client
+        .get(format!("{base_url}/api/guilds/{guild_a}/events"))
+        .header(COOKIE, &cookie_1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_1.status(), reqwest::StatusCode::OK);
+    assert_eq!(sse_quota.active_connections(user_1, guild_a), 1);
+
+    // 2. User 1 connects stream 2 on guild_a -> 200 OK (reaches max limit 2)
+    let resp_2 = client
+        .get(format!("{base_url}/api/guilds/{guild_a}/events"))
+        .header(COOKIE, &cookie_1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_2.status(), reqwest::StatusCode::OK);
+    assert_eq!(sse_quota.active_connections(user_1, guild_a), 2);
+
+    let initial_receivers = web_state.app.guild_events.receiver_count();
+
+    // 3. User 1 attempts 3rd stream on guild_a -> 429 Too Many Requests
+    let resp_excess = client
+        .get(format!("{base_url}/api/guilds/{guild_a}/events"))
+        .header(COOKIE, &cookie_1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_excess.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    // Crucial: receiver count must NOT have increased!
+    assert_eq!(
+        web_state.app.guild_events.receiver_count(),
+        initial_receivers
+    );
+    assert_eq!(sse_quota.active_connections(user_1, guild_a), 2);
+
+    // 4. User 2 connects to guild_a -> independent quota, succeeds with 200 OK!
+    let resp_user_2 = client
+        .get(format!("{base_url}/api/guilds/{guild_a}/events"))
+        .header(COOKIE, &cookie_2)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_user_2.status(), reqwest::StatusCode::OK);
+    assert_eq!(sse_quota.active_connections(user_2, guild_a), 1);
+
+    // 5. Global slot limit reached: 3 streams active (resp_1, resp_2, resp_user_2) out of 3 total.
+    // Any new stream (even for User 1 on guild_b) is rejected by global slots -> 429 Too Many Requests
+    let resp_global_full = client
+        .get(format!("{base_url}/api/guilds/{guild_b}/events"))
+        .header(COOKIE, &cookie_1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp_global_full.status(),
+        reqwest::StatusCode::TOO_MANY_REQUESTS
+    );
+
+    // 6. Dropping a stream frees the slot promptly
+    drop(resp_1);
+    // Give async task a brief moment to detect disconnect and drop RAII permit
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(sse_quota.active_connections(user_1, guild_a), 1);
+
+    // Now User 1 can connect another stream on guild_a
+    let resp_new = client
+        .get(format!("{base_url}/api/guilds/{guild_a}/events"))
+        .header(COOKIE, &cookie_1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_new.status(), reqwest::StatusCode::OK);
+    assert_eq!(sse_quota.active_connections(user_1, guild_a), 2);
+
+    // Drop all remaining streams and verify zero active entries left in map
+    drop(resp_2);
+    drop(resp_user_2);
+    drop(resp_new);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(sse_quota.active_connections(user_1, guild_a), 0);
+    assert_eq!(sse_quota.active_connections(user_2, guild_a), 0);
+    assert_eq!(
+        sse_quota.total_tracked_entries(),
+        0,
+        "Zero-count entries must be cleaned from memory"
+    );
 }

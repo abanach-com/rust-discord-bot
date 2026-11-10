@@ -78,11 +78,11 @@ async fn test_web_state() -> (
         .await
         .expect("bootstrap app state");
     let permissions_cache = Arc::new(DashMap::new());
-    let state = WebState {
+    let state = WebState::new(
         app,
-        login_rate_limiter: Arc::new(LoginRateLimiter::new()),
-        permissions_cache: permissions_cache.clone(),
-    };
+        Arc::new(LoginRateLimiter::new()),
+        permissions_cache.clone(),
+    );
     (state, permissions_cache)
 }
 
@@ -1259,11 +1259,11 @@ async fn test_telegram_bridge_upsert_deduplication_and_identity_stability_issue_
     config.offline_mode = true;
     let app = AppState::bootstrap(config).await.expect("bootstrap");
     let permissions_cache = Arc::new(DashMap::new());
-    let web_state = WebState {
+    let web_state = WebState::new(
         app,
-        login_rate_limiter: Arc::new(LoginRateLimiter::new()),
-        permissions_cache: permissions_cache.clone(),
-    };
+        Arc::new(LoginRateLimiter::new()),
+        permissions_cache.clone(),
+    );
     web_state
         .app
         .is_gateway_ready
@@ -1926,11 +1926,7 @@ async fn test_github_thread_mapping_and_telegram_bridge_tenant_isolation_issues_
             checked_at: Utc::now(),
         },
     );
-    let state = WebState {
-        app,
-        login_rate_limiter: Arc::new(LoginRateLimiter::new()),
-        permissions_cache,
-    };
+    let state = WebState::new(app, Arc::new(LoginRateLimiter::new()), permissions_cache);
 
     let session_id = "test_phase4_live_session_token";
     let csrf_token = "test_phase4_live_csrf_token";

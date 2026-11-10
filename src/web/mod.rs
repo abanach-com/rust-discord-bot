@@ -20,11 +20,122 @@ use tokio::net::TcpListener;
 
 use crate::AppState;
 
+#[derive(Debug)]
+pub struct SseQuota {
+    counts: DashMap<(String, String), usize>,
+    max_per_user_guild: usize,
+}
+
+impl Default for SseQuota {
+    fn default() -> Self {
+        Self::new(3)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SseQuotaExceededError;
+
+impl std::fmt::Display for SseQuotaExceededError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SSE connection quota exceeded")
+    }
+}
+
+impl std::error::Error for SseQuotaExceededError {}
+
+impl SseQuota {
+    #[must_use]
+    pub fn new(max_per_user_guild: usize) -> Self {
+        Self {
+            counts: DashMap::new(),
+            max_per_user_guild,
+        }
+    }
+
+    pub fn try_acquire(
+        self: &Arc<Self>,
+        user_id: &str,
+        guild_id: &str,
+    ) -> Result<SseUserPermit, SseQuotaExceededError> {
+        let key = (user_id.to_string(), guild_id.to_string());
+        let entry = self.counts.entry(key.clone());
+        match entry {
+            dashmap::mapref::entry::Entry::Occupied(mut occ) => {
+                if *occ.get() >= self.max_per_user_guild {
+                    return Err(SseQuotaExceededError);
+                }
+                *occ.get_mut() += 1;
+            }
+            dashmap::mapref::entry::Entry::Vacant(vac) => {
+                if self.max_per_user_guild == 0 {
+                    return Err(SseQuotaExceededError);
+                }
+                vac.insert(1);
+            }
+        }
+        Ok(SseUserPermit {
+            key,
+            quota: Arc::clone(self),
+        })
+    }
+
+    #[must_use]
+    pub fn active_connections(&self, user_id: &str, guild_id: &str) -> usize {
+        self.counts
+            .get(&(user_id.to_string(), guild_id.to_string()))
+            .map(|entry| *entry.value())
+            .unwrap_or(0)
+    }
+
+    #[must_use]
+    pub fn total_tracked_entries(&self) -> usize {
+        self.counts.len()
+    }
+}
+
+pub struct SseUserPermit {
+    key: (String, String),
+    quota: Arc<SseQuota>,
+}
+
+impl Drop for SseUserPermit {
+    fn drop(&mut self) {
+        if let dashmap::mapref::entry::Entry::Occupied(mut entry) =
+            self.quota.counts.entry(self.key.clone())
+        {
+            if *entry.get() <= 1 {
+                entry.remove();
+            } else {
+                *entry.get_mut() -= 1;
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct WebState {
     pub app: AppState,
     pub login_rate_limiter: Arc<auth::LoginRateLimiter>,
     pub permissions_cache: Arc<DashMap<(String, String), auth::CachedGuildPermission>>,
+    pub sse_global_slots: Arc<tokio::sync::Semaphore>,
+    pub sse_quota: Arc<SseQuota>,
+}
+
+impl WebState {
+    #[must_use]
+    pub fn new(
+        app: AppState,
+        login_rate_limiter: Arc<auth::LoginRateLimiter>,
+        permissions_cache: Arc<DashMap<(String, String), auth::CachedGuildPermission>>,
+    ) -> Self {
+        Self {
+            app,
+            login_rate_limiter,
+            permissions_cache,
+            sse_global_slots: Arc::new(tokio::sync::Semaphore::new(256)),
+            sse_quota: Arc::new(SseQuota::default()),
+        }
+    }
 }
 
 pub async fn serve(app: AppState) -> Result<()> {
@@ -37,11 +148,11 @@ pub async fn serve_with_shutdown(
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) -> Result<()> {
     let bind = app.config.dashboard_bind;
-    let state = WebState {
+    let state = WebState::new(
         app,
-        login_rate_limiter: Arc::new(auth::LoginRateLimiter::new()),
-        permissions_cache: Arc::new(DashMap::new()),
-    };
+        Arc::new(auth::LoginRateLimiter::new()),
+        Arc::new(DashMap::new()),
+    );
 
     let cleanup_state = state.clone();
     tokio::spawn(async move {

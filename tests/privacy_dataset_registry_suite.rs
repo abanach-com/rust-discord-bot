@@ -70,11 +70,7 @@ async fn test_web_state() -> (
     let permissions_cache = Arc::new(DashMap::new());
     let login_rate_limiter = Arc::new(LoginRateLimiter::new());
     (
-        WebState {
-            app,
-            permissions_cache: Arc::clone(&permissions_cache),
-            login_rate_limiter,
-        },
+        WebState::new(app, login_rate_limiter, Arc::clone(&permissions_cache)),
         permissions_cache,
     )
 }

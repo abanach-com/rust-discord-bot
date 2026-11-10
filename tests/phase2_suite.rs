@@ -66,11 +66,11 @@ async fn test_web_state() -> (
         .await
         .expect("bootstrap app state");
     let permissions_cache = Arc::new(DashMap::new());
-    let state = WebState {
+    let state = WebState::new(
         app,
-        login_rate_limiter: Arc::new(LoginRateLimiter::new()),
-        permissions_cache: permissions_cache.clone(),
-    };
+        Arc::new(LoginRateLimiter::new()),
+        permissions_cache.clone(),
+    );
     (state, permissions_cache)
 }
 
@@ -1478,11 +1478,11 @@ async fn test_offline_mode_false_live_membership_verification() {
 
     let app = AppState::bootstrap(config).await.expect("bootstrap");
     let permissions_cache = std::sync::Arc::new(dashmap::DashMap::new());
-    let web_state = WebState {
+    let web_state = WebState::new(
         app,
-        login_rate_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+        std::sync::Arc::new(LoginRateLimiter::new()),
         permissions_cache,
-    };
+    );
 
     let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

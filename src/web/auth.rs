@@ -1230,11 +1230,11 @@ mod tests {
             .await
             .expect("bootstrap");
         let permissions_cache = Arc::new(DashMap::new());
-        let state = WebState {
+        let state = WebState::new(
             app,
-            login_rate_limiter: Arc::new(LoginRateLimiter::new()),
-            permissions_cache: permissions_cache.clone(),
-        };
+            Arc::new(LoginRateLimiter::new()),
+            permissions_cache.clone(),
+        );
 
         let mut session = Session {
             user: DashboardUser {
@@ -1453,11 +1453,11 @@ mod tests {
         let app = crate::state::AppState::bootstrap(test_config())
             .await
             .expect("bootstrap");
-        let state = WebState {
+        let state = WebState::new(
             app,
-            login_rate_limiter: Arc::new(LoginRateLimiter::new()),
-            permissions_cache: Arc::new(DashMap::new()),
-        };
+            Arc::new(LoginRateLimiter::new()),
+            Arc::new(DashMap::new()),
+        );
 
         let headers = HeaderMap::new();
         let peer_addr = "127.0.0.1:12345".parse().unwrap();
@@ -1514,11 +1514,11 @@ mod tests {
         let app = crate::state::AppState::bootstrap(test_config())
             .await
             .expect("bootstrap");
-        let state = WebState {
+        let state = WebState::new(
             app,
-            login_rate_limiter: Arc::new(LoginRateLimiter::new()),
-            permissions_cache: Arc::new(DashMap::new()),
-        };
+            Arc::new(LoginRateLimiter::new()),
+            Arc::new(DashMap::new()),
+        );
 
         let test_state = "valid-oauth-state-12345";
         state
@@ -1600,11 +1600,11 @@ mod tests {
         let app = crate::state::AppState::bootstrap(test_config())
             .await
             .expect("bootstrap");
-        let state = WebState {
+        let state = WebState::new(
             app,
-            login_rate_limiter: Arc::new(LoginRateLimiter::new()),
-            permissions_cache: Arc::new(DashMap::new()),
-        };
+            Arc::new(LoginRateLimiter::new()),
+            Arc::new(DashMap::new()),
+        );
 
         let test_state = "error-oauth-state-12345";
         state

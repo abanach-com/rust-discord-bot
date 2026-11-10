@@ -62,11 +62,11 @@ async fn test_web_state() -> (
         .await
         .expect("bootstrap app state");
     let permissions_cache = Arc::new(DashMap::new());
-    let state = WebState {
+    let state = WebState::new(
         app,
-        login_rate_limiter: Arc::new(LoginRateLimiter::new()),
-        permissions_cache: permissions_cache.clone(),
-    };
+        Arc::new(LoginRateLimiter::new()),
+        permissions_cache.clone(),
+    );
     (state, permissions_cache)
 }
 
