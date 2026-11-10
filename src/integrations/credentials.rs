@@ -178,10 +178,16 @@ impl CredentialCrypto {
         &self.active_key_id
     }
 
-    /// Check if a stored string is wrapped in an encrypted envelope.
+    /// Check if a stored string has the current supported encrypted envelope prefix (`enc:v1:`).
     #[must_use]
     pub fn is_encrypted(val: &str) -> bool {
         val.starts_with(CREDENTIAL_ENVELOPE_PREFIX)
+    }
+
+    /// Check if a stored string appears to be an encrypted envelope of any version (`enc:...`).
+    #[must_use]
+    pub fn is_any_envelope(val: &str) -> bool {
+        val.starts_with("enc:")
     }
 
     /// Construct canonical Additional Authenticated Data (AAD) for credential isolation.
@@ -241,6 +247,10 @@ impl CredentialCrypto {
         field_name: &str,
         stored_value: &str,
     ) -> Result<String> {
+        if stored_value.starts_with("enc:") && !Self::is_encrypted(stored_value) {
+            bail!("unsupported integration credential envelope version");
+        }
+
         if !Self::is_encrypted(stored_value) {
             tracing::warn!(
                 guild_id = %guild_id,
@@ -535,5 +545,36 @@ mod tests {
         // Duplicate key IDs in CSV must fail
         let dup_csv = format!("v1:{hex_key_1},v1:{hex_key_2}");
         assert!(CredentialCrypto::from_keyring_spec("v1", &dup_csv).is_err());
+    }
+
+    #[test]
+    fn test_unknown_credential_envelope_version_fails_closed_issue_380() {
+        let crypto = CredentialCrypto::generate_ephemeral();
+        let args = ("123", "integration_connection", "rec-1", "access_token");
+
+        // enc:v2:... or any other non-v1 envelope version must fail-closed, NOT pass through as plaintext!
+        assert!(
+            crypto
+                .decrypt_field(args.0, args.1, args.2, args.3, "enc:v2:key:001122:deadbeef")
+                .is_err()
+        );
+        assert!(
+            crypto
+                .decrypt_field(args.0, args.1, args.2, args.3, "enc:v3:future:payload")
+                .is_err()
+        );
+        assert!(
+            crypto
+                .decrypt_field(args.0, args.1, args.2, args.3, "enc:v1")
+                .is_err()
+        );
+
+        // Legitimate legacy plaintext (does not start with enc:) is passed through
+        assert_eq!(
+            crypto
+                .decrypt_field(args.0, args.1, args.2, args.3, "legacy-plaintext-token")
+                .unwrap(),
+            "legacy-plaintext-token"
+        );
     }
 }

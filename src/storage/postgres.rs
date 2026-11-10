@@ -6684,14 +6684,14 @@ impl PostgresStore {
             }
         } else {
             if let Some(ref enc) = row.access_token
-                && crate::integrations::CredentialCrypto::is_encrypted(enc)
+                && crate::integrations::CredentialCrypto::is_any_envelope(enc)
             {
                 anyhow::bail!(
                     "cannot decrypt connection access_token: credential crypto not configured"
                 );
             }
             if let Some(ref enc) = row.refresh_token
-                && crate::integrations::CredentialCrypto::is_encrypted(enc)
+                && crate::integrations::CredentialCrypto::is_any_envelope(enc)
             {
                 anyhow::bail!(
                     "cannot decrypt connection refresh_token: credential crypto not configured"
@@ -6735,14 +6735,14 @@ impl PostgresStore {
                 }
             } else {
                 if let Some(ref enc) = row.access_token
-                    && crate::integrations::CredentialCrypto::is_encrypted(enc)
+                    && crate::integrations::CredentialCrypto::is_any_envelope(enc)
                 {
                     anyhow::bail!(
                         "cannot decrypt connection access_token: credential crypto not configured"
                     );
                 }
                 if let Some(ref enc) = row.refresh_token
-                    && crate::integrations::CredentialCrypto::is_encrypted(enc)
+                    && crate::integrations::CredentialCrypto::is_any_envelope(enc)
                 {
                     anyhow::bail!(
                         "cannot decrypt connection refresh_token: credential crypto not configured"
@@ -6877,7 +6877,7 @@ impl PostgresStore {
                         "secret_token",
                         enc,
                     )?);
-                } else if crate::integrations::CredentialCrypto::is_encrypted(enc) {
+                } else if crate::integrations::CredentialCrypto::is_any_envelope(enc) {
                     anyhow::bail!(
                         "cannot decrypt webhook subscription secret_token: credential crypto not configured"
                     );
@@ -7128,6 +7128,28 @@ impl PostgresStore {
         let mut total_migrated = 0usize;
         let mut tx = self.pool.begin().await?;
 
+        // Preflight validation across all 5 tables: fail-closed if any record contains an
+        // unsupported/future envelope version (e.g. 'enc:v2:...') to prevent double-encryption.
+        let has_unsupported: bool = sqlx::query_scalar(
+            r#"
+            SELECT (
+                EXISTS(SELECT 1 FROM telegram_bridges WHERE secret_token LIKE 'enc:%' AND secret_token NOT LIKE 'enc:v1:%')
+                OR EXISTS(SELECT 1 FROM integration_webhook_subscriptions WHERE secret_token LIKE 'enc:%' AND secret_token NOT LIKE 'enc:v1:%')
+                OR EXISTS(SELECT 1 FROM integration_connections WHERE (access_token LIKE 'enc:%' AND access_token NOT LIKE 'enc:v1:%') OR (refresh_token LIKE 'enc:%' AND refresh_token NOT LIKE 'enc:v1:%'))
+                OR EXISTS(SELECT 1 FROM gitlab_subscriptions WHERE secret_token LIKE 'enc:%' AND secret_token NOT LIKE 'enc:v1:%')
+                OR EXISTS(SELECT 1 FROM vk_subscriptions WHERE secret_key LIKE 'enc:%' AND secret_key NOT LIKE 'enc:v1:%')
+            )
+            "#,
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+
+        if has_unsupported {
+            anyhow::bail!(
+                "unsupported integration credential envelope version detected in storage; cannot backfill"
+            );
+        }
+
         // 1. telegram_bridges
         #[derive(sqlx::FromRow)]
         struct BridgeLegacyRow {
@@ -7139,7 +7161,7 @@ impl PostgresStore {
             r#"
             SELECT id, guild_id, secret_token
             FROM telegram_bridges
-            WHERE secret_token NOT LIKE 'enc:v1:%'
+            WHERE secret_token NOT LIKE 'enc:%'
             ORDER BY created_at ASC
             LIMIT $1
             FOR UPDATE
@@ -7176,7 +7198,7 @@ impl PostgresStore {
             r#"
             SELECT id, guild_id, secret_token
             FROM integration_webhook_subscriptions
-            WHERE secret_token IS NOT NULL AND secret_token NOT LIKE 'enc:v1:%'
+            WHERE secret_token IS NOT NULL AND secret_token NOT LIKE 'enc:%'
             ORDER BY created_at ASC
             LIMIT $1
             FOR UPDATE
@@ -7216,8 +7238,8 @@ impl PostgresStore {
             r#"
             SELECT id, guild_id, access_token, refresh_token
             FROM integration_connections
-            WHERE (access_token IS NOT NULL AND access_token NOT LIKE 'enc:v1:%')
-               OR (refresh_token IS NOT NULL AND refresh_token NOT LIKE 'enc:v1:%')
+            WHERE (access_token IS NOT NULL AND access_token NOT LIKE 'enc:%')
+               OR (refresh_token IS NOT NULL AND refresh_token NOT LIKE 'enc:%')
             ORDER BY created_at ASC
             LIMIT $1
             FOR UPDATE
@@ -7229,7 +7251,7 @@ impl PostgresStore {
 
         for conn in conns {
             let enc_access = if let Some(ref t) = conn.access_token {
-                if !crate::integrations::CredentialCrypto::is_encrypted(t) {
+                if !crate::integrations::CredentialCrypto::is_any_envelope(t) {
                     Some(crypto.encrypt_field(
                         &conn.guild_id,
                         "integration_connection",
@@ -7245,7 +7267,7 @@ impl PostgresStore {
             };
 
             let enc_refresh = if let Some(ref t) = conn.refresh_token {
-                if !crate::integrations::CredentialCrypto::is_encrypted(t) {
+                if !crate::integrations::CredentialCrypto::is_any_envelope(t) {
                     Some(crypto.encrypt_field(
                         &conn.guild_id,
                         "integration_connection",
@@ -7282,7 +7304,7 @@ impl PostgresStore {
             r#"
             SELECT id, guild_id, secret_token
             FROM gitlab_subscriptions
-            WHERE secret_token NOT LIKE 'enc:v1:%'
+            WHERE secret_token NOT LIKE 'enc:%'
             ORDER BY created_at ASC
             LIMIT $1
             FOR UPDATE
@@ -7319,7 +7341,7 @@ impl PostgresStore {
             r#"
             SELECT id, guild_id, secret_key
             FROM vk_subscriptions
-            WHERE secret_key NOT LIKE 'enc:v1:%'
+            WHERE secret_key NOT LIKE 'enc:%'
             ORDER BY created_at ASC
             LIMIT $1
             FOR UPDATE
