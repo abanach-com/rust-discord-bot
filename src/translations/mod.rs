@@ -107,21 +107,57 @@ impl TranslationsStore {
     }
 
     pub fn t_args(&self, locale: &str, key: &str, args: &[(&str, &str)]) -> String {
-        let mut template = self.t(locale, key);
-        for (placeholder, value) in args {
-            let target = format!("{{{placeholder}}}");
-            template = template.replace(&target, value);
+        let template = self.t(locale, key);
+        let mut result = String::with_capacity(template.len());
+        let mut rest = template.as_str();
+
+        while let Some(start) = rest.find('{') {
+            result.push_str(&rest[..start]);
+            let after_open = &rest[start + 1..];
+            if let Some(end) = after_open.find('}') {
+                let placeholder = &after_open[..end];
+                if let Some((_, val)) = args.iter().find(|(k, _)| *k == placeholder) {
+                    result.push_str(val);
+                } else {
+                    result.push('{');
+                    result.push_str(placeholder);
+                    result.push('}');
+                }
+                rest = &after_open[end + 1..];
+            } else {
+                result.push('{');
+                rest = after_open;
+            }
         }
-        template
+        result.push_str(rest);
+        result
     }
 
     pub fn t_map(&self, locale: &str, key: &str, args: &HashMap<String, String>) -> String {
-        let mut template = self.t(locale, key);
-        for (placeholder, value) in args {
-            let target = format!("{{{placeholder}}}");
-            template = template.replace(&target, value);
+        let template = self.t(locale, key);
+        let mut result = String::with_capacity(template.len());
+        let mut rest = template.as_str();
+
+        while let Some(start) = rest.find('{') {
+            result.push_str(&rest[..start]);
+            let after_open = &rest[start + 1..];
+            if let Some(end) = after_open.find('}') {
+                let placeholder = &after_open[..end];
+                if let Some(val) = args.get(placeholder) {
+                    result.push_str(val);
+                } else {
+                    result.push('{');
+                    result.push_str(placeholder);
+                    result.push('}');
+                }
+                rest = &after_open[end + 1..];
+            } else {
+                result.push('{');
+                rest = after_open;
+            }
         }
-        template
+        result.push_str(rest);
+        result
     }
 
     pub fn get_localizations(&self, key: &str) -> Vec<(String, String)> {
@@ -310,6 +346,21 @@ mod tests {
             localizations
                 .iter()
                 .any(|(lang, text)| lang == "de" && text == "Befehl erfolgreich ausgeführt.")
+        );
+    }
+
+    #[test]
+    fn test_t_map_single_pass_and_non_recursive_expansion() {
+        let store = TranslationsStore::init();
+        let mut args = HashMap::new();
+        // command value contains `{seconds}` placeholder; must not be expanded recursively!
+        args.insert("command".to_string(), "ping_{seconds}".to_string());
+        args.insert("seconds".to_string(), "42".to_string());
+
+        let res = store.t_map("en", "system.rate_limited", &args);
+        assert_eq!(
+            res, "Rate limit exceeded for command `/ping_{seconds}`. Try again in 42 s.",
+            "Substituted values containing placeholder syntax must not be expanded recursively"
         );
     }
 }

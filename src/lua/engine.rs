@@ -1314,6 +1314,13 @@ fn inspect_value_complexity(
     Ok(())
 }
 
+pub const MAX_I18N_ARGS: usize = 32;
+pub const MAX_I18N_KEY_BYTES: usize = 256;
+pub const MAX_I18N_LOCALE_BYTES: usize = 32;
+pub const MAX_I18N_VALUE_BYTES: usize = 2048;
+pub const MAX_I18N_TOTAL_ARG_BYTES: usize = 8192;
+pub const MAX_I18N_OUTPUT_BYTES: usize = 4096;
+
 fn sandboxed_lua(limits: LuaLimits) -> mlua::Result<Lua> {
     let lua = Lua::new_with(StdLib::ALL_SAFE, LuaOptions::default())?;
     lua.set_memory_limit(limits.memory_bytes)?;
@@ -1363,53 +1370,133 @@ fn sandboxed_lua(limits: LuaLimits) -> mlua::Result<Lua> {
         "t",
         lua.create_function(
             |_, (key, arg2, arg3): (String, Option<Value>, Option<Value>)| {
+                if key.len() > MAX_I18N_KEY_BYTES {
+                    return Err(MluaError::runtime(format!(
+                        "translation key too long: {} bytes (max {})",
+                        key.len(),
+                        MAX_I18N_KEY_BYTES
+                    )));
+                }
+
                 let mut locale = "en".to_owned();
                 let mut args_map: HashMap<String, String> = HashMap::new();
+                let mut total_arg_bytes = 0usize;
 
-                let parse_arg =
-                    |val: Value, loc: &mut String, map: &mut HashMap<String, String>| match val {
+                let parse_arg = |val: Value,
+                                     loc: &mut String,
+                                     map: &mut HashMap<String, String>,
+                                     total_bytes: &mut usize|
+                 -> mlua::Result<()> {
+                    match val {
                         Value::String(s) => {
-                            if let Ok(str_val) = s.to_str() {
-                                *loc = str_val.to_owned();
+                            let str_val = s.to_str()?;
+                            if str_val.len() > MAX_I18N_LOCALE_BYTES {
+                                return Err(MluaError::runtime(format!(
+                                    "translation locale too long: {} bytes (max {})",
+                                    str_val.len(),
+                                    MAX_I18N_LOCALE_BYTES
+                                )));
                             }
+                            *loc = str_val.to_owned();
                         }
                         Value::Table(tbl) => {
                             if let Ok(l) = tbl.get::<String>("locale") {
+                                if l.len() > MAX_I18N_LOCALE_BYTES {
+                                    return Err(MluaError::runtime(format!(
+                                        "translation locale too long: {} bytes (max {})",
+                                        l.len(),
+                                        MAX_I18N_LOCALE_BYTES
+                                    )));
+                                }
                                 *loc = l;
                             }
-                            for pair in tbl.pairs::<Value, Value>().flatten() {
-                                if let (Value::String(k), v) = pair
-                                    && let Ok(k_str) = k.to_str()
-                                    && k_str != "locale"
-                                {
+                            for pair in tbl.pairs::<Value, Value>() {
+                                let (k, v) = pair?;
+                                if let Value::String(k_str_val) = k {
+                                    let k_str = k_str_val.to_str()?;
+                                    if k_str == "locale" {
+                                        continue;
+                                    }
+                                    if k_str.len() > MAX_I18N_KEY_BYTES {
+                                        return Err(MluaError::runtime(format!(
+                                            "translation argument key too long: {} bytes (max {})",
+                                            k_str.len(),
+                                            MAX_I18N_KEY_BYTES
+                                        )));
+                                    }
                                     let val_str = match v {
                                         Value::String(s) => {
-                                            s.to_str().map(|s| s.to_owned()).unwrap_or_default()
+                                            let s_str = s.to_str()?;
+                                            if s_str.len() > MAX_I18N_VALUE_BYTES {
+                                                return Err(MluaError::runtime(format!(
+                                                    "translation argument value too long: {} bytes (max {})",
+                                                    s_str.len(),
+                                                    MAX_I18N_VALUE_BYTES
+                                                )));
+                                            }
+                                            s_str.to_owned()
                                         }
                                         Value::Integer(i) => i.to_string(),
                                         Value::Number(n) => n.to_string(),
                                         Value::Boolean(b) => b.to_string(),
                                         _ => String::new(),
                                     };
+
+                                    let key_slice = &k_str[..];
+                                    if !map.contains_key(key_slice) {
+                                        if map.len() >= MAX_I18N_ARGS {
+                                            return Err(MluaError::runtime(format!(
+                                                "too many translation arguments: max {MAX_I18N_ARGS}"
+                                            )));
+                                        }
+                                        *total_bytes = total_bytes
+                                            .saturating_add(k_str.len())
+                                            .saturating_add(val_str.len());
+                                    } else {
+                                        let old_len =
+                                            map.get(key_slice).map(|s| s.len()).unwrap_or(0);
+                                        *total_bytes = total_bytes
+                                            .saturating_sub(old_len)
+                                            .saturating_add(val_str.len());
+                                    }
+
+                                    if *total_bytes > MAX_I18N_TOTAL_ARG_BYTES {
+                                        return Err(MluaError::runtime(format!(
+                                            "total translation arguments budget exceeded: max {MAX_I18N_TOTAL_ARG_BYTES} bytes"
+                                        )));
+                                    }
+
                                     map.insert(k_str.to_owned(), val_str);
                                 }
                             }
                         }
                         _ => {}
-                    };
+                    }
+                    Ok(())
+                };
 
                 if let Some(a2) = arg2 {
-                    parse_arg(a2, &mut locale, &mut args_map);
+                    parse_arg(a2, &mut locale, &mut args_map, &mut total_arg_bytes)?;
                 }
                 if let Some(a3) = arg3 {
-                    parse_arg(a3, &mut locale, &mut args_map);
+                    parse_arg(a3, &mut locale, &mut args_map, &mut total_arg_bytes)?;
                 }
 
-                if args_map.is_empty() {
-                    Ok(crate::translations::t(&locale, &key))
+                let rendered = if args_map.is_empty() {
+                    crate::translations::t(&locale, &key)
                 } else {
-                    Ok(crate::translations::t_map(&locale, &key, &args_map))
+                    crate::translations::t_map(&locale, &key, &args_map)
+                };
+
+                if rendered.len() > MAX_I18N_OUTPUT_BYTES {
+                    return Err(MluaError::runtime(format!(
+                        "translated text too long: {} bytes (max {})",
+                        rendered.len(),
+                        MAX_I18N_OUTPUT_BYTES
+                    )));
                 }
+
+                Ok(rendered)
             },
         )?,
     )?;
@@ -1592,6 +1679,159 @@ mod tests {
             res_de,
             "Ratenbegrenzung für Befehl `/help` überschritten. Bitte in 10 s erneut versuchen."
         );
+    }
+
+    #[test]
+    fn test_rustybot_t_bounded_arguments_and_limits_issue_369() {
+        let limits = LuaLimits {
+            memory_bytes: 2 * 1024 * 1024,
+            instruction_limit: 100_000,
+            hook_granularity: 100,
+        };
+        let lua = sandboxed_lua(limits).expect("sandbox init");
+
+        // 1. Key exceeds MAX_I18N_KEY_BYTES (256)
+        let long_key = "k".repeat(257);
+        let err_key = lua
+            .load(format!(r#"return rustybot.t("{long_key}")"#))
+            .eval::<String>();
+        assert!(err_key.is_err(), "Key > 256 bytes must fail");
+        assert!(
+            err_key
+                .unwrap_err()
+                .to_string()
+                .contains("translation key too long")
+        );
+
+        // 2. Locale exceeds MAX_I18N_LOCALE_BYTES (32)
+        let long_locale = "l".repeat(33);
+        let err_loc = lua
+            .load(format!(
+                r#"return rustybot.t("system.command_executed", "{long_locale}")"#
+            ))
+            .eval::<String>();
+        assert!(err_loc.is_err(), "Locale > 32 bytes must fail");
+        assert!(
+            err_loc
+                .unwrap_err()
+                .to_string()
+                .contains("translation locale too long")
+        );
+
+        // 3. More than MAX_I18N_ARGS (32) arguments
+        let err_args_count = lua
+            .load(
+                r#"
+                local args = {}
+                for i = 1, 33 do
+                    args["arg" .. i] = "val" .. i
+                end
+                return rustybot.t("system.command_executed", args)
+            "#,
+            )
+            .eval::<String>();
+        assert!(err_args_count.is_err(), "Arguments count > 32 must fail");
+        assert!(
+            err_args_count
+                .unwrap_err()
+                .to_string()
+                .contains("too many translation arguments")
+        );
+
+        // 4. Argument key exceeds MAX_I18N_KEY_BYTES (256)
+        let long_arg_key = "a".repeat(257);
+        let err_arg_key = lua
+            .load(format!(
+                r#"
+                local args = {{ ["{long_arg_key}"] = "v" }}
+                return rustybot.t("system.command_executed", args)
+            "#
+            ))
+            .eval::<String>();
+        assert!(err_arg_key.is_err(), "Arg key > 256 bytes must fail");
+        assert!(
+            err_arg_key
+                .unwrap_err()
+                .to_string()
+                .contains("translation argument key too long")
+        );
+
+        // 5. Argument value exceeds MAX_I18N_VALUE_BYTES (2048)
+        let long_arg_val = "v".repeat(2049);
+        let err_arg_val = lua
+            .load(format!(
+                r#"
+                local args = {{ short_key = "{long_arg_val}" }}
+                return rustybot.t("system.command_executed", args)
+            "#
+            ))
+            .eval::<String>();
+        assert!(err_arg_val.is_err(), "Arg value > 2048 bytes must fail");
+        assert!(
+            err_arg_val
+                .unwrap_err()
+                .to_string()
+                .contains("translation argument value too long")
+        );
+
+        // 6. Total arguments budget exceeds MAX_I18N_TOTAL_ARG_BYTES (8192)
+        let err_total = lua
+            .load(
+                r#"
+                local args = {}
+                -- 5 args * 1800 bytes = 9000 bytes > 8192 bytes
+                for i = 1, 5 do
+                    args["key" .. i] = string.rep("x", 1800)
+                end
+                return rustybot.t("system.command_executed", args)
+            "#,
+            )
+            .eval::<String>();
+        assert!(err_total.is_err(), "Total budget > 8192 must fail");
+        assert!(
+            err_total
+                .unwrap_err()
+                .to_string()
+                .contains("total translation arguments budget exceeded")
+        );
+
+        // 7. Output exceeds MAX_I18N_OUTPUT_BYTES (4096)
+        let err_output = lua
+            .load(
+                r#"
+                -- Template: "Rate limit exceeded for command `{command}`. Try again in {seconds} s."
+                -- 2040 + 2040 + template overhead > 4096 bytes
+                local args = { command = string.rep("x", 2040), seconds = string.rep("y", 2040) }
+                return t("system.rate_limited", args)
+            "#,
+            )
+            .eval::<String>();
+        assert!(err_output.is_err(), "Output > 4096 bytes must fail");
+        assert!(
+            err_output
+                .unwrap_err()
+                .to_string()
+                .contains("translated text too long")
+        );
+
+        let ok_out = lua
+            .load(
+                r#"
+                return t("system.rate_limited", { command = string.rep("a", 1000), seconds = string.rep("b", 1000) })
+            "#,
+            )
+            .eval::<String>();
+        assert!(
+            ok_out.is_ok(),
+            "Output ~2000 bytes within limit should succeed"
+        );
+
+        // 8. zuckerbot alias works identically
+        let res_zucker: String = lua
+            .load(r#"return zuckerbot.t("system.command_executed")"#)
+            .eval()
+            .expect("zuckerbot alias eval");
+        assert_eq!(res_zucker, "Command executed successfully.");
     }
 
     #[tokio::test]
