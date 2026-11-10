@@ -37,15 +37,36 @@ impl fmt::Debug for CredentialCrypto {
 
 impl CredentialCrypto {
     /// Create a single-key crypto context.
-    #[must_use]
-    pub fn new(active_key_id: impl Into<String>, key: [u8; 32]) -> Self {
+    /// Validate that a key ID contains only safe alphanumeric and hyphen/underscore characters,
+    /// preventing envelope format corruption when serialized into `enc:v1:<key_id>:<nonce>:<ciphertext>`.
+    pub fn validate_key_id(id: &str) -> Result<()> {
+        if id.is_empty() {
+            bail!("integration key id cannot be empty");
+        }
+        if !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            bail!("invalid integration key id '{id}': must only contain [A-Za-z0-9_-]");
+        }
+        Ok(())
+    }
+
+    /// Try to create a single-key crypto context, validating the active key ID.
+    pub fn try_new(active_key_id: impl Into<String>, key: [u8; 32]) -> Result<Self> {
         let active_key_id = active_key_id.into();
+        Self::validate_key_id(&active_key_id)?;
         let mut keys = HashMap::new();
         keys.insert(active_key_id.clone(), key);
-        Self {
+        Ok(Self {
             active_key_id,
             keys,
-        }
+        })
+    }
+
+    #[must_use]
+    pub fn new(active_key_id: impl Into<String>, key: [u8; 32]) -> Self {
+        Self::try_new(active_key_id, key).expect("valid key id in CredentialCrypto::new")
     }
 
     /// Create a keyring-based crypto context with an active key ID.
@@ -54,6 +75,10 @@ impl CredentialCrypto {
         keys: HashMap<String, [u8; 32]>,
     ) -> Result<Self> {
         let active_key_id = active_key_id.into();
+        Self::validate_key_id(&active_key_id)?;
+        for key_id in keys.keys() {
+            Self::validate_key_id(key_id)?;
+        }
         if !keys.contains_key(&active_key_id) {
             bail!("active key id '{active_key_id}' not found in provided keyring");
         }
@@ -89,37 +114,59 @@ impl CredentialCrypto {
 
     /// Create from a single hex-encoded 32-byte key.
     pub fn from_hex_key(active_key_id: impl Into<String>, hex_key: &str) -> Result<Self> {
+        let active_key_id = active_key_id.into();
+        Self::validate_key_id(&active_key_id)?;
         let key = Self::parse_hex_key(hex_key)?;
-        Ok(Self::new(active_key_id, key))
+        Self::try_new(active_key_id, key)
     }
 
     /// Create from a keyring specification (JSON map or comma-separated `id:hex` / `id=hex`).
     pub fn from_keyring_spec(active_key_id: impl Into<String>, spec: &str) -> Result<Self> {
+        let active_key_id = active_key_id.into();
+        Self::validate_key_id(&active_key_id)?;
         let trimmed = spec.trim();
         if trimmed.starts_with('{') {
             let parsed: HashMap<String, String> = serde_json::from_str(trimmed)
                 .map_err(|e| anyhow!("failed to parse JSON keyring spec: {e}"))?;
             let mut keys = HashMap::new();
             for (id, hex_val) in parsed {
+                Self::validate_key_id(&id)?;
                 let key = Self::parse_hex_key(&hex_val)?;
-                keys.insert(id, key);
+                if keys.insert(id.clone(), key).is_some() {
+                    bail!("duplicate integration key id '{id}' in JSON keyring spec");
+                }
             }
             return Self::with_keys(active_key_id, keys);
         }
 
+        let entries: Vec<&str> = trimmed
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if entries.is_empty() {
+            bail!("integration keyring spec cannot be empty");
+        }
+
+        // Single standalone hex without id is accepted for backwards compatibility
+        if entries.len() == 1 && !entries[0].contains(':') && !entries[0].contains('=') {
+            return Self::from_hex_key(active_key_id, entries[0]);
+        }
+
         let mut keys = HashMap::new();
-        for entry in trimmed.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-            if let Some((id, hex_val)) = entry.split_once(':') {
-                let key = Self::parse_hex_key(hex_val)?;
-                keys.insert(id.trim().to_string(), key);
-            } else if let Some((id, hex_val)) = entry.split_once('=') {
-                let key = Self::parse_hex_key(hex_val)?;
-                keys.insert(id.trim().to_string(), key);
-            } else {
-                let active = active_key_id.into();
-                let key = Self::parse_hex_key(entry)?;
-                keys.insert(active.clone(), key);
-                return Self::with_keys(active, keys);
+        for entry in entries {
+            let (id, hex_val) = entry
+                .split_once(':')
+                .or_else(|| entry.split_once('='))
+                .ok_or_else(|| {
+                    anyhow!("invalid integration keyring entry '{entry}': expected format 'id:hex_key' or 'id=hex_key'")
+                })?;
+            let id = id.trim();
+            Self::validate_key_id(id)?;
+            let key = Self::parse_hex_key(hex_val)?;
+            if keys.insert(id.to_string(), key).is_some() {
+                bail!("duplicate integration key id '{id}' in keyring spec");
             }
         }
 
@@ -436,5 +483,57 @@ mod tests {
             )
             .unwrap();
         assert_eq!(dec, legacy_val);
+    }
+
+    #[test]
+    fn test_key_id_validation_and_keyring_spec_parsing_issue_379() {
+        let hex_key_1 = "11".repeat(32);
+        let hex_key_2 = "22".repeat(32);
+        let hex_key_3 = "33".repeat(32);
+
+        // Problem A: key_id containing ':' or invalid characters must fail validation upfront
+        assert!(CredentialCrypto::from_hex_key("prod:2026", &hex_key_1).is_err());
+        assert!(CredentialCrypto::from_hex_key("invalid key", &hex_key_1).is_err());
+        assert!(CredentialCrypto::from_hex_key("key.with.dots", &hex_key_1).is_err());
+        assert!(CredentialCrypto::from_hex_key("", &hex_key_1).is_err());
+
+        // Valid key IDs work
+        assert!(CredentialCrypto::from_hex_key("v1", &hex_key_1).is_ok());
+        assert!(CredentialCrypto::from_hex_key("prod_2026-active", &hex_key_1).is_ok());
+
+        // JSON keyring with invalid key_id fails fast
+        let bad_json = format!(r#"{{"prod:2026":"{hex_key_1}","v2":"{hex_key_2}"}}"#);
+        assert!(CredentialCrypto::from_keyring_spec("v2", &bad_json).is_err());
+
+        // Problem B: CSV keyring parser must not truncate or silently drop entries
+        // Valid multi-key CSV with ':' and '=' separators
+        let valid_csv = format!("v1:{hex_key_1},v2={hex_key_2}");
+        let crypto_csv = CredentialCrypto::from_keyring_spec("v2", &valid_csv).unwrap();
+        assert_eq!(crypto_csv.keys.len(), 2);
+        assert!(crypto_csv.keys.contains_key("v1"));
+        assert!(crypto_csv.keys.contains_key("v2"));
+
+        // Single standalone hex without id
+        let single_hex_csv = hex_key_1.clone();
+        let crypto_single = CredentialCrypto::from_keyring_spec("v1", &single_hex_csv).unwrap();
+        assert_eq!(crypto_single.keys.len(), 1);
+        assert!(crypto_single.keys.contains_key("v1"));
+
+        // Mixed/unnamed entries in multi-entry CSV must FAIL, not silently drop trailing keys
+        let mixed_csv_1 = format!("{hex_key_1},v2:{hex_key_2}");
+        assert!(
+            CredentialCrypto::from_keyring_spec("v2", &mixed_csv_1).is_err(),
+            "Unnamed entry in multi-key CSV must return Err, not partial success"
+        );
+
+        let mixed_csv_2 = format!("v1:{hex_key_1},{hex_key_2},v3:{hex_key_3}");
+        assert!(
+            CredentialCrypto::from_keyring_spec("v1", &mixed_csv_2).is_err(),
+            "Middle unnamed entry in multi-key CSV must return Err"
+        );
+
+        // Duplicate key IDs in CSV must fail
+        let dup_csv = format!("v1:{hex_key_1},v1:{hex_key_2}");
+        assert!(CredentialCrypto::from_keyring_spec("v1", &dup_csv).is_err());
     }
 }
