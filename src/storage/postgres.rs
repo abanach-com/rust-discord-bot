@@ -28,7 +28,7 @@ use super::{
     RecruitmentRoleFulfillment, RecruitmentTrack, RedditSubscription,
     ReleaseReactionRoleGrantOutcome, ReputationGrantOutcome, ScheduledEvent, ServerSnapshot,
     SocialDraftApprovalError, SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage,
-    StoreItem, StorePurchase, StorePurchasesPage, TagRecord, TelegramBridge,
+    StoreItem, StoreItemsPage, StorePurchase, StorePurchasesPage, TagRecord, TelegramBridge,
     TelegramMessageMapping, TimedRoleGrant, Tournament, TransitionApplicationParams, TupperError,
     TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
     VkSubscription, WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
@@ -3802,6 +3802,149 @@ impl PostgresStore {
         Ok(rows)
     }
 
+    pub async fn list_store_items_page(
+        &self,
+        guild_id: &str,
+        limit: usize,
+        cursor: Option<(&DateTime<Utc>, &Uuid)>,
+    ) -> anyhow::Result<StoreItemsPage> {
+        let fetch_limit = (limit as i64).saturating_add(1);
+
+        let mut rows = match cursor {
+            None => {
+                sqlx::query_as::<_, StoreItem>(
+                    r#"
+                    SELECT id, guild_id, name, description, price, role_id, stock, created_at
+                    FROM store_items
+                    WHERE guild_id = $1
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT $2
+                    "#,
+                )
+                .bind(guild_id)
+                .bind(fetch_limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            Some((cur_time, cur_id)) => {
+                sqlx::query_as::<_, StoreItem>(
+                    r#"
+                    SELECT id, guild_id, name, description, price, role_id, stock, created_at
+                    FROM store_items
+                    WHERE guild_id = $1
+                      AND (created_at, id) < ($2, $3)
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT $4
+                    "#,
+                )
+                .bind(guild_id)
+                .bind(cur_time)
+                .bind(cur_id)
+                .bind(fetch_limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
+
+        let has_more = rows.len() > limit;
+        if has_more {
+            rows.truncate(limit);
+        }
+
+        let next_cursor = if has_more {
+            rows.last()
+                .map(|last| super::encode_store_item_cursor(guild_id, &last.created_at, &last.id))
+        } else {
+            None
+        };
+
+        Ok(StoreItemsPage {
+            items: rows,
+            next_cursor,
+            has_more,
+        })
+    }
+
+    pub async fn list_store_item_names_by_ids(
+        &self,
+        guild_id: &str,
+        item_ids: &[Uuid],
+    ) -> anyhow::Result<std::collections::HashMap<Uuid, String>> {
+        if item_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let rows = sqlx::query_as::<_, (Uuid, String)>(
+            r#"
+            SELECT id, name
+            FROM store_items
+            WHERE guild_id = $1 AND id = ANY($2::uuid[])
+            "#,
+        )
+        .bind(guild_id)
+        .bind(item_ids)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().collect())
+    }
+
+    pub async fn find_store_item(
+        &self,
+        guild_id: &str,
+        item_ref: &str,
+    ) -> anyhow::Result<Option<StoreItem>> {
+        let item_ref = item_ref.trim();
+        if item_ref.is_empty() {
+            return Ok(None);
+        }
+        if let Ok(uuid) = Uuid::parse_str(item_ref) {
+            let row = sqlx::query_as::<_, StoreItem>(
+                r#"
+                SELECT id, guild_id, name, description, price, role_id, stock, created_at
+                FROM store_items
+                WHERE guild_id = $1 AND id = $2
+                "#,
+            )
+            .bind(guild_id)
+            .bind(uuid)
+            .fetch_optional(&self.pool)
+            .await?;
+            return Ok(row);
+        }
+
+        let target_norm = item_ref.to_lowercase().replace([' ', '-'], "_");
+        let rows = sqlx::query_as::<_, StoreItem>(
+            r#"
+            SELECT id, guild_id, name, description, price, role_id, stock, created_at
+            FROM store_items
+            WHERE guild_id = $1
+              AND (
+                LOWER(name) = LOWER($2)
+                OR REPLACE(REPLACE(LOWER(name), ' ', '_'), '-', '_') = $3
+              )
+            LIMIT 2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(item_ref)
+        .bind(&target_norm)
+        .fetch_all(&self.pool)
+        .await?;
+
+        if rows.is_empty() {
+            Ok(None)
+        } else if rows.len() == 1 {
+            Ok(Some(rows.into_iter().next().unwrap()))
+        } else {
+            if let Some(exact) = rows.iter().find(|i| i.name == item_ref) {
+                return Ok(Some(exact.clone()));
+            }
+            anyhow::bail!(
+                "Znaleziono kilka przedmiotów pasujących do nazwy '{item_ref}'. Użyj UUID przedmiotu, aby dokonać zakupu."
+            );
+        }
+    }
+
     pub async fn create_store_item(
         &self,
 
@@ -3820,12 +3963,30 @@ impl PostgresStore {
         anyhow::ensure!(price >= 0, "price must be non-negative");
         anyhow::ensure!(stock.is_none_or(|n| n >= 0), "stock must be non-negative");
 
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query("SELECT pg_advisory_xact_lock(4346, hashtext($1))")
+            .bind(guild_id)
+            .execute(&mut *tx)
+            .await?;
+
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM store_items WHERE guild_id = $1")
+            .bind(guild_id)
+            .fetch_one(&mut *tx)
+            .await?;
+
+        if count.0 >= super::MAX_STORE_ITEMS_PER_GUILD as i64 {
+            anyhow::bail!(
+                "store items quota exceeded (maximum {} items per server)",
+                super::MAX_STORE_ITEMS_PER_GUILD
+            );
+        }
+
         let id = Uuid::new_v4();
 
         let now = Utc::now();
 
         let rec = sqlx::query_as::<_, StoreItem>(
-
             r#"
 
             INSERT INTO store_items (id, guild_id, name, description, price, role_id, stock, created_at)
@@ -3835,28 +3996,19 @@ impl PostgresStore {
             RETURNING id, guild_id, name, description, price, role_id, stock, created_at
 
             "#,
-
         )
-
         .bind(id)
-
         .bind(guild_id)
-
         .bind(name)
-
         .bind(description)
-
         .bind(price)
-
         .bind(role_id)
-
         .bind(stock)
-
         .bind(now)
-
-        .fetch_one(&self.pool)
-
+        .fetch_one(&mut *tx)
         .await?;
+
+        tx.commit().await?;
 
         Ok(rec)
     }

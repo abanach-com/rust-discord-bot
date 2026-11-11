@@ -26,13 +26,13 @@ use super::{
     ProgressMetric, ProgressionSeason, QuoteRecord, ReactionRoleBinding, ReactionRoleGrant,
     RecordCompanionLeaseParams, RedditSubscription, ReleaseReactionRoleGrantOutcome,
     ReputationGrantOutcome, ScheduledEvent, ServerSnapshot, SocialDraftApprovalError,
-    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
-    StorePurchasesPage, TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant,
-    Tournament, TupperError, TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams,
-    UserErasureReport, VkSubscription, WORK_JOBS, WorkClaimOutcome, WorkflowDefinition,
-    WorkflowRunExecution, XpAward, YouTubeChannelSubscription, encode_store_purchase_cursor,
-    is_member_after_cursor, level_for_xp, next_birthday_date, parse_member_search_cursor,
-    snowflake_created_at, validate_birthday_date, validate_snowflake,
+    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StoreItemsPage,
+    StorePurchase, StorePurchasesPage, TagRecord, TelegramBridge, TelegramMessageMapping,
+    TimedRoleGrant, Tournament, TupperError, TupperProfile, TwitchStreamSubscription,
+    UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WORK_JOBS, WorkClaimOutcome,
+    WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription,
+    encode_store_purchase_cursor, is_member_after_cursor, level_for_xp, next_birthday_date,
+    parse_member_search_cursor, snowflake_created_at, validate_birthday_date, validate_snowflake,
 };
 
 type ModuleKey = (String, String);
@@ -247,8 +247,36 @@ pub struct MemoryStore {
     quotes: Arc<DashMap<Uuid, QuoteRecord>>,
     quotes_write_lock: Arc<Mutex<()>>,
     quotes_quota_override: Arc<std::sync::RwLock<Option<(usize, usize)>>>,
+    store_items_write_lock: Arc<Mutex<()>>,
+    store_items_quota_override: Arc<std::sync::RwLock<Option<usize>>>,
     birthdays: Arc<DashMap<(String, String), BirthdayRecord>>,
     afk: Arc<DashMap<(String, String), AfkRecord>>,
+}
+
+struct StoreItemHeapItem {
+    key: (DateTime<Utc>, Uuid),
+    item: StoreItem,
+}
+
+impl PartialEq for StoreItemHeapItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+impl Eq for StoreItemHeapItem {}
+
+impl PartialOrd for StoreItemHeapItem {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for StoreItemHeapItem {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Reverse ordering so BinaryHeap acts as a min-heap on key
+        other.key.cmp(&self.key)
+    }
 }
 
 struct StorePurchaseHeapItem {
@@ -2557,6 +2585,12 @@ impl MemoryStore {
         }
     }
 
+    pub fn set_store_items_quota_for_test(&self, quota: Option<usize>) {
+        if let Ok(mut lock) = self.store_items_quota_override.write() {
+            *lock = quota;
+        }
+    }
+
     pub fn create_quote(&self, quote: QuoteRecord) -> anyhow::Result<QuoteRecord> {
         validate_snowflake("guild_id", &quote.guild_id)?;
         validate_snowflake("added_by", &quote.added_by)?;
@@ -2817,6 +2851,141 @@ impl MemoryStore {
             .collect()
     }
 
+    pub fn list_store_items_page(
+        &self,
+        guild_id: &str,
+        limit: usize,
+        cursor: Option<(&DateTime<Utc>, &Uuid)>,
+    ) -> StoreItemsPage {
+        let capacity = limit.saturating_add(1);
+        let mut heap: std::collections::BinaryHeap<StoreItemHeapItem> =
+            std::collections::BinaryHeap::with_capacity(capacity);
+
+        for entry in self.store_items.iter() {
+            let it = entry.value();
+            if it.guild_id != guild_id {
+                continue;
+            }
+
+            if let Some((cur_time, cur_id)) = cursor {
+                let is_after_cursor =
+                    it.created_at < *cur_time || (it.created_at == *cur_time && it.id < *cur_id);
+                if !is_after_cursor {
+                    continue;
+                }
+            }
+
+            let key = (it.created_at, it.id);
+            if heap.len() < capacity {
+                heap.push(StoreItemHeapItem {
+                    key,
+                    item: it.clone(),
+                });
+            } else if let Some(min_top) = heap.peek()
+                && key > min_top.key
+            {
+                heap.pop();
+                heap.push(StoreItemHeapItem {
+                    key,
+                    item: it.clone(),
+                });
+            }
+        }
+
+        let mut items: Vec<StoreItem> = heap.into_iter().map(|item| item.item).collect();
+        items.sort_by_key(|a| std::cmp::Reverse((a.created_at, a.id)));
+
+        let has_more = items.len() > limit;
+        if has_more {
+            items.truncate(limit);
+        }
+
+        let next_cursor = if has_more {
+            items
+                .last()
+                .map(|last| super::encode_store_item_cursor(guild_id, &last.created_at, &last.id))
+        } else {
+            None
+        };
+
+        StoreItemsPage {
+            items,
+            next_cursor,
+            has_more,
+        }
+    }
+
+    pub fn list_store_item_names_by_ids(
+        &self,
+        guild_id: &str,
+        item_ids: &[Uuid],
+    ) -> std::collections::HashMap<Uuid, String> {
+        if item_ids.is_empty() {
+            return std::collections::HashMap::new();
+        }
+        let mut map = std::collections::HashMap::with_capacity(item_ids.len());
+        for id in item_ids {
+            if let Some(item) = self
+                .store_items
+                .get(id)
+                .filter(|item| item.guild_id == guild_id)
+            {
+                map.insert(*id, item.name.clone());
+            }
+        }
+        map
+    }
+
+    pub fn find_store_item(
+        &self,
+        guild_id: &str,
+        item_ref: &str,
+    ) -> anyhow::Result<Option<StoreItem>> {
+        let item_ref = item_ref.trim();
+        if item_ref.is_empty() {
+            return Ok(None);
+        }
+        if let Ok(uuid) = Uuid::parse_str(item_ref) {
+            let found = self
+                .store_items
+                .get(&uuid)
+                .filter(|item| item.guild_id == guild_id)
+                .map(|item| item.clone());
+            return Ok(found);
+        }
+
+        let target_norm = item_ref.to_lowercase().replace([' ', '-'], "_");
+        let mut matches = Vec::new();
+        for entry in self.store_items.iter() {
+            let item = entry.value();
+            if item.guild_id != guild_id {
+                continue;
+            }
+            if item.name.eq_ignore_ascii_case(item_ref)
+                || item.name.to_lowercase().replace([' ', '-'], "_") == target_norm
+                || item.id.to_string() == item_ref
+            {
+                matches.push(item.clone());
+                if matches.len() >= 2 {
+                    break;
+                }
+            }
+        }
+
+        if matches.is_empty() {
+            Ok(None)
+        } else if matches.len() == 1 {
+            Ok(Some(matches.remove(0)))
+        } else {
+            if let Some(exact) = matches.iter().find(|i| i.name == item_ref) {
+                return Ok(Some(exact.clone()));
+            }
+            anyhow::bail!(
+                "Znaleziono kilka przedmiotów pasujących do nazwy '{item_ref}'. Użyj UUID przedmiotu, aby dokonać zakupu."
+            );
+        }
+    }
+
     pub fn create_store_item(
         &self,
 
@@ -2831,7 +3000,29 @@ impl MemoryStore {
         role_id: Option<&str>,
 
         stock: Option<i32>,
-    ) -> StoreItem {
+    ) -> anyhow::Result<StoreItem> {
+        let _guard = match self.store_items_write_lock.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        let quota = self
+            .store_items_quota_override
+            .read()
+            .ok()
+            .and_then(|g| *g)
+            .unwrap_or(super::MAX_STORE_ITEMS_PER_GUILD);
+
+        let current_count = self
+            .store_items
+            .iter()
+            .filter(|i| i.guild_id == guild_id)
+            .count();
+
+        if current_count >= quota {
+            anyhow::bail!("store items quota exceeded (maximum {quota} items per server)");
+        }
+
         let id = Uuid::new_v4();
 
         let item = StoreItem {
@@ -2854,7 +3045,7 @@ impl MemoryStore {
 
         self.store_items.insert(id, item.clone());
 
-        item
+        Ok(item)
     }
 
     pub fn purchase_store_item(
@@ -3084,6 +3275,10 @@ impl MemoryStore {
 
     pub fn insert_store_purchase_for_test(&self, purchase: StorePurchase) {
         self.store_purchases.insert(purchase.id, purchase);
+    }
+
+    pub fn insert_store_item_for_test(&self, item: StoreItem) {
+        self.store_items.insert(item.id, item);
     }
 
     pub fn claim_store_role_delivery(&self, purchase_id: Uuid) -> anyhow::Result<bool> {

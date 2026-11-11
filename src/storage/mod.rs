@@ -457,6 +457,24 @@ pub struct StorePurchase {
     pub created_at: DateTime<Utc>,
 }
 
+pub const MAX_STORE_ITEMS_PER_GUILD: usize = 500;
+pub const MAX_STORE_ITEM_NAME_LEN: usize = 100;
+pub const MAX_STORE_ITEM_DESCRIPTION_LEN: usize = 1000;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoreItemsPage {
+    pub items: Vec<StoreItem>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreItemCursor {
+    pub guild_id: String,
+    pub created_at: DateTime<Utc>,
+    pub id: Uuid,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StorePurchasesPage {
     pub purchases: Vec<StorePurchase>,
@@ -707,6 +725,44 @@ pub fn decode_store_purchase_cursor(cursor: &str) -> anyhow::Result<StorePurchas
     }
 
     Err(anyhow::anyhow!("Unrecognized cursor format"))
+}
+
+/// Encodes a store items keyset pagination cursor binding `guild_id`, `created_at`, and `id`.
+pub fn encode_store_item_cursor(guild_id: &str, created_at: &DateTime<Utc>, id: &Uuid) -> String {
+    let payload = format!("v1|{}|{}|{}", guild_id.trim(), created_at.to_rfc3339(), id);
+    base64url_encode_store_cursor(payload.as_bytes())
+}
+
+/// Decodes and validates a store items pagination cursor.
+pub fn decode_store_item_cursor(cursor: &str) -> anyhow::Result<StoreItemCursor> {
+    let trimmed = cursor.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("empty cursor");
+    }
+
+    let decoded = base64url_decode_store_cursor(trimmed)
+        .map_err(|e| anyhow::anyhow!("invalid base64url encoding for store item cursor: {e}"))?;
+    let payload = String::from_utf8(decoded)
+        .map_err(|e| anyhow::anyhow!("cursor is not valid UTF-8: {e}"))?;
+    let parts: Vec<&str> = payload.split('|').collect();
+    if parts.len() != 4 || parts[0] != "v1" {
+        anyhow::bail!("invalid store item cursor format: expected v1 format");
+    }
+    let guild_id = parts[1].trim().to_string();
+    if guild_id.is_empty() {
+        anyhow::bail!("store item cursor missing guild_id");
+    }
+    let created_at = DateTime::parse_from_rfc3339(parts[2].trim())
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| anyhow::anyhow!("Failed to parse cursor timestamp: {e}"))?;
+    let id = Uuid::parse_str(parts[3].trim())
+        .map_err(|e| anyhow::anyhow!("Failed to parse cursor UUID: {e}"))?;
+
+    Ok(StoreItemCursor {
+        guild_id,
+        created_at,
+        id,
+    })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -3576,6 +3632,60 @@ impl Storage {
         }
     }
 
+    pub async fn list_store_items_page(
+        &self,
+        guild_id: &str,
+        limit: usize,
+        cursor: Option<&str>,
+    ) -> anyhow::Result<StoreItemsPage> {
+        let limit = limit.clamp(1, 50);
+        let decoded_cursor = match cursor {
+            Some(raw) => {
+                let cur = decode_store_item_cursor(raw)?;
+                if cur.guild_id != guild_id {
+                    anyhow::bail!("cursor guild_id mismatch");
+                }
+                Some(cur)
+            }
+            None => None,
+        };
+
+        match self {
+            Self::Memory(store) => {
+                let cursor_ref = decoded_cursor.as_ref().map(|c| (&c.created_at, &c.id));
+                Ok(store.list_store_items_page(guild_id, limit, cursor_ref))
+            }
+            Self::Postgres(store) => {
+                let cursor_ref = decoded_cursor.as_ref().map(|c| (&c.created_at, &c.id));
+                store
+                    .list_store_items_page(guild_id, limit, cursor_ref)
+                    .await
+            }
+        }
+    }
+
+    pub async fn list_store_item_names_by_ids(
+        &self,
+        guild_id: &str,
+        item_ids: &[Uuid],
+    ) -> anyhow::Result<std::collections::HashMap<Uuid, String>> {
+        match self {
+            Self::Memory(store) => Ok(store.list_store_item_names_by_ids(guild_id, item_ids)),
+            Self::Postgres(store) => store.list_store_item_names_by_ids(guild_id, item_ids).await,
+        }
+    }
+
+    pub async fn find_store_item(
+        &self,
+        guild_id: &str,
+        item_ref: &str,
+    ) -> anyhow::Result<Option<StoreItem>> {
+        match self {
+            Self::Memory(store) => store.find_store_item(guild_id, item_ref),
+            Self::Postgres(store) => store.find_store_item(guild_id, item_ref).await,
+        }
+    }
+
     pub async fn create_store_item(
         &self,
 
@@ -3593,13 +3703,22 @@ impl Storage {
     ) -> anyhow::Result<StoreItem> {
         anyhow::ensure!(price >= 0, "price must be non-negative");
         anyhow::ensure!(stock.is_none_or(|n| n >= 0), "stock must be non-negative");
+        let name_trimmed = name.trim();
+        anyhow::ensure!(
+            !name_trimmed.is_empty() && name_trimmed.chars().count() <= MAX_STORE_ITEM_NAME_LEN,
+            "store item name must be between 1 and {MAX_STORE_ITEM_NAME_LEN} characters"
+        );
+        anyhow::ensure!(
+            description.chars().count() <= MAX_STORE_ITEM_DESCRIPTION_LEN,
+            "store item description cannot exceed {MAX_STORE_ITEM_DESCRIPTION_LEN} characters"
+        );
         if let Some(r_id) = role_id {
             validate_snowflake("role_id", r_id)?;
         }
 
         match self {
             Self::Memory(store) => {
-                Ok(store.create_store_item(guild_id, name, description, price, role_id, stock))
+                store.create_store_item(guild_id, name, description, price, role_id, stock)
             }
 
             Self::Postgres(store) => {
@@ -3674,6 +3793,12 @@ impl Storage {
     pub fn insert_store_purchase_for_test(&self, purchase: StorePurchase) {
         if let Self::Memory(store) = self {
             store.insert_store_purchase_for_test(purchase);
+        }
+    }
+
+    pub fn insert_store_item_for_test(&self, item: StoreItem) {
+        if let Self::Memory(store) = self {
+            store.insert_store_item_for_test(item);
         }
     }
 
@@ -9886,5 +10011,277 @@ mod tests {
             .unwrap();
         let expected_ordered_ids: Vec<Uuid> = full_list.into_iter().map(|p| p.id).collect();
         assert_eq!(all_paged_ids, expected_ordered_ids);
+    }
+
+    #[test]
+    fn test_store_item_cursor_encoding_and_validation_issue_389() {
+        let guild_id = "guild_test_123";
+        let now = Utc::now();
+        let item_id = Uuid::new_v4();
+
+        // 1. Round-trip valid cursor
+        let encoded = encode_store_item_cursor(guild_id, &now, &item_id);
+        let decoded = decode_store_item_cursor(&encoded).expect("decode valid item cursor");
+        assert_eq!(decoded.guild_id, guild_id);
+        assert_eq!(decoded.id, item_id);
+        assert_eq!(
+            decoded.created_at.timestamp_millis(),
+            now.timestamp_millis()
+        );
+
+        // 2. Error handling: empty and malformed cursors
+        assert!(decode_store_item_cursor("").is_err());
+        assert!(decode_store_item_cursor("   ").is_err());
+        assert!(decode_store_item_cursor("invalid_base64!@#$").is_err());
+        let bad_version = base64url_encode_store_cursor(
+            b"v2|guild|2026-01-01T00:00:00Z|00000000-0000-0000-0000-000000000000",
+        );
+        assert!(decode_store_item_cursor(&bad_version).is_err());
+        let empty_guild = base64url_encode_store_cursor(
+            b"v1||2026-01-01T00:00:00Z|00000000-0000-0000-0000-000000000000",
+        );
+        assert!(decode_store_item_cursor(&empty_guild).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_memory_store_items_keyset_pagination_and_tie_breaking_issue_389() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_id = "guild_items_pagi";
+        let other_guild = "guild_other";
+
+        // Create 10 items with pairwise equal timestamps to test (created_at DESC, id DESC)
+        let base_time = Utc::now() - chrono::Duration::hours(5);
+        let mut expected_ids = Vec::new();
+        for i in 0..10 {
+            let dt = base_time + chrono::Duration::minutes((i / 2) * 10);
+            let item = StoreItem {
+                id: Uuid::new_v4(),
+                guild_id: guild_id.to_string(),
+                name: format!("Item {i}"),
+                description: format!("Desc {i}"),
+                price: 100 + i,
+                role_id: None,
+                stock: Some(10),
+                created_at: dt,
+            };
+            expected_ids.push(item.id);
+            store.insert_store_item_for_test(item);
+        }
+
+        // Add 1 item for a different guild to test isolation
+        store.insert_store_item_for_test(StoreItem {
+            id: Uuid::new_v4(),
+            guild_id: other_guild.to_string(),
+            name: "Other Guild Item".to_string(),
+            description: "Desc".to_string(),
+            price: 50,
+            role_id: None,
+            stock: None,
+            created_at: base_time,
+        });
+
+        // Page 1: limit 4
+        let p1 = store
+            .list_store_items_page(guild_id, 4, None)
+            .await
+            .unwrap();
+        assert_eq!(p1.items.len(), 4);
+        assert!(p1.has_more);
+        assert!(p1.next_cursor.is_some());
+
+        // Page 2: limit 4 with cursor
+        let p2 = store
+            .list_store_items_page(guild_id, 4, p1.next_cursor.as_deref())
+            .await
+            .unwrap();
+        assert_eq!(p2.items.len(), 4);
+        assert!(p2.has_more);
+        assert!(p2.next_cursor.is_some());
+
+        // Page 3: limit 4 (remaining 2)
+        let p3 = store
+            .list_store_items_page(guild_id, 4, p2.next_cursor.as_deref())
+            .await
+            .unwrap();
+        assert_eq!(p3.items.len(), 2);
+        assert!(!p3.has_more);
+        assert!(p3.next_cursor.is_none());
+
+        // Verify all 10 unique items were returned
+        let all_ids: Vec<Uuid> = p1
+            .items
+            .into_iter()
+            .chain(p2.items.into_iter())
+            .chain(p3.items.into_iter())
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(all_ids.len(), 10);
+        let unique_set: std::collections::HashSet<Uuid> = all_ids.iter().copied().collect();
+        assert_eq!(unique_set.len(), 10);
+
+        // Verify cross-guild cursor rejected
+        let foreign_cursor = encode_store_item_cursor(other_guild, &base_time, &expected_ids[0]);
+        let foreign_res = store
+            .list_store_items_page(guild_id, 4, Some(&foreign_cursor))
+            .await;
+        assert!(foreign_res.is_err(), "cross-guild cursor must be rejected");
+    }
+
+    #[tokio::test]
+    async fn test_store_items_quota_enforcement_and_validation_issue_389() {
+        let mem = MemoryStore::default();
+        let store = Storage::Memory(mem.clone());
+        let guild_id = "quota_guild_1";
+
+        // Input validation checks
+        assert!(
+            store
+                .create_store_item(guild_id, "", "Desc", 100, None, None)
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .create_store_item(guild_id, "   ", "Desc", 100, None, None)
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .create_store_item(guild_id, &"a".repeat(101), "Desc", 100, None, None)
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .create_store_item(guild_id, "Valid", &"d".repeat(1001), 100, None, None)
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .create_store_item(guild_id, "Valid", "Desc", -1, None, None)
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .create_store_item(guild_id, "Valid", "Desc", 10, None, Some(-1))
+                .await
+                .is_err()
+        );
+
+        // Quota check with test override
+        mem.set_store_items_quota_for_test(Some(2));
+
+        // Item 1 succeeds
+        assert!(
+            store
+                .create_store_item(guild_id, "Item 1", "Desc", 10, None, None)
+                .await
+                .is_ok()
+        );
+        // Item 2 succeeds
+        assert!(
+            store
+                .create_store_item(guild_id, "Item 2", "Desc", 20, None, None)
+                .await
+                .is_ok()
+        );
+        // Item 3 exceeds quota of 2
+        let err3 = store
+            .create_store_item(guild_id, "Item 3", "Desc", 30, None, None)
+            .await
+            .unwrap_err();
+        assert!(err3.to_string().contains("quota exceeded"));
+
+        // Different guild has separate quota
+        assert!(
+            store
+                .create_store_item("other_guild", "Item A", "Desc", 10, None, None)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_store_item_batch_name_and_point_lookup_issue_389() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_id = "lookup_guild";
+
+        let item1 = store
+            .create_store_item(guild_id, "Diamond Sword", "Sharp weapon", 500, None, None)
+            .await
+            .unwrap();
+        let item2 = store
+            .create_store_item(guild_id, "Iron Shield", "Protective gear", 300, None, None)
+            .await
+            .unwrap();
+
+        // 1. Batch name lookup by IDs
+        let names = store
+            .list_store_item_names_by_ids(guild_id, &[item1.id, item2.id])
+            .await
+            .unwrap();
+        assert_eq!(names.len(), 2);
+        assert_eq!(
+            names.get(&item1.id).map(String::as_str),
+            Some("Diamond Sword")
+        );
+        assert_eq!(
+            names.get(&item2.id).map(String::as_str),
+            Some("Iron Shield")
+        );
+
+        // Non-existent ID is omitted
+        let random_id = Uuid::new_v4();
+        let names_with_missing = store
+            .list_store_item_names_by_ids(guild_id, &[item1.id, random_id])
+            .await
+            .unwrap();
+        assert_eq!(names_with_missing.len(), 1);
+
+        // Foreign guild query returns empty
+        let foreign_names = store
+            .list_store_item_names_by_ids("foreign_guild", &[item1.id])
+            .await
+            .unwrap();
+        assert!(foreign_names.is_empty());
+
+        // 2. Point lookup find_store_item
+        // By UUID
+        let found_uuid = store
+            .find_store_item(guild_id, &item1.id.to_string())
+            .await
+            .unwrap();
+        assert_eq!(found_uuid.map(|i| i.id), Some(item1.id));
+
+        // By Exact name
+        let found_name = store
+            .find_store_item(guild_id, "Diamond Sword")
+            .await
+            .unwrap();
+        assert_eq!(found_name.map(|i| i.id), Some(item1.id));
+
+        // By Case-insensitive name
+        let found_ci = store
+            .find_store_item(guild_id, "diamond sword")
+            .await
+            .unwrap();
+        assert_eq!(found_ci.map(|i| i.id), Some(item1.id));
+
+        // By Normalized slug
+        let found_slug = store
+            .find_store_item(guild_id, "iron-shield")
+            .await
+            .unwrap();
+        assert_eq!(found_slug.map(|i| i.id), Some(item2.id));
+
+        // Non-existent returns None
+        let not_found = store
+            .find_store_item(guild_id, "Golden Apple")
+            .await
+            .unwrap();
+        assert!(not_found.is_none());
     }
 }

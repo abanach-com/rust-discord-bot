@@ -2052,3 +2052,354 @@ async fn test_store_purchases_pagination_and_bounded_inventory_issue_387() {
         "55 from member A + 1 from member B"
     );
 }
+
+#[tokio::test]
+async fn test_store_items_pagination_quota_and_lookups_issue_389() {
+    let (state, _) = test_web_state().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let guild_a = "777000000000000001";
+    let guild_b = "777000000000000002";
+    let admin_user_id = "111000000000000002";
+    let member_a_user_id = "222000000000000003";
+    let member_b_user_id = "222000000000000004";
+
+    // 1. Setup Admin session for Guild A
+    let admin_session_id = "sess_admin_items_389";
+    let admin_csrf = "csrf_admin_items_389";
+    state
+        .app
+        .sessions
+        .save_session(
+            admin_session_id,
+            DashboardUser {
+                id: admin_user_id.to_owned(),
+                username: "admin_user_items".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_a.to_owned(),
+                name: "Store Items Guild A".to_owned(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_owned(),
+            }],
+            admin_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+    let admin_cookie = format!("rusty_discord_bot_session={admin_session_id}");
+
+    // 2. Setup Member A session for Guild A
+    let member_a_session_id = "sess_member_a_items_389";
+    let member_a_csrf = "csrf_member_a_items_389";
+    state
+        .app
+        .sessions
+        .save_session(
+            member_a_session_id,
+            DashboardUser {
+                id: member_a_user_id.to_owned(),
+                username: "member_a".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_a.to_owned(),
+                name: "Store Items Guild A".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "1024".to_owned(),
+            }],
+            member_a_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+    let member_a_cookie = format!("rusty_discord_bot_session={member_a_session_id}");
+
+    // 3. Setup Member B session for Guild B (Foreign)
+    let member_b_session_id = "sess_member_b_items_389";
+    state
+        .app
+        .sessions
+        .save_session(
+            member_b_session_id,
+            DashboardUser {
+                id: member_b_user_id.to_owned(),
+                username: "member_b".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_b.to_owned(),
+                name: "Store Items Guild B".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "1024".to_owned(),
+            }],
+            "csrf_member_b_items_389".to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+    let member_b_cookie = format!("rusty_discord_bot_session={member_b_session_id}");
+
+    // 4. Input validation on POST /api/guilds/{guild_a}/store/items
+    // Empty name -> 400
+    let empty_name_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/store/items"))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "name": "   ",
+            "description": "Valid desc",
+            "price": 100
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(empty_name_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Name > 100 chars -> 400
+    let long_name_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/store/items"))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "name": "a".repeat(101),
+            "description": "Valid desc",
+            "price": 100
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(long_name_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Description > 1000 chars -> 400
+    let long_desc_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/store/items"))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "name": "Valid Name",
+            "description": "d".repeat(1001),
+            "price": 100
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(long_desc_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Price < 0 -> 400
+    let neg_price_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/store/items"))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "name": "Valid Name",
+            "description": "Valid desc",
+            "price": -10
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(neg_price_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 5. Create 12 valid store items in Guild A
+    let mut created_ids = Vec::new();
+    for i in 0..12 {
+        let resp = client
+            .post(format!("{base_url}/api/guilds/{guild_a}/store/items"))
+            .header(COOKIE, &admin_cookie)
+            .header("x-csrf-token", admin_csrf)
+            .json(&serde_json::json!({
+                "name": format!("Item {:02}", i + 1),
+                "description": format!("Description for item {}", i + 1),
+                "price": 50 + (i as i64) * 10,
+                "stock": Some(10)
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let item_json: serde_json::Value = resp.json().await.unwrap();
+        created_ids.push(item_json["id"].as_str().unwrap().to_string());
+    }
+    assert_eq!(created_ids.len(), 12);
+
+    // 6. Test GET /api/guilds/{guild_a}/store/items/page
+    // Unauthenticated -> 401
+    let unauth_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_a}/store/items/page"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth_resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // Foreign member -> 403 Forbidden
+    let foreign_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_a}/store/items/page"))
+        .header(COOKIE, &member_b_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(foreign_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Member A: Page 1 with limit 5
+    let p1_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/store/items/page?limit=5"
+        ))
+        .header(COOKIE, &member_a_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(p1_resp.status(), reqwest::StatusCode::OK);
+    let p1: serde_json::Value = p1_resp.json().await.unwrap();
+    let p1_items = p1["items"].as_array().unwrap();
+    assert_eq!(p1_items.len(), 5);
+    assert_eq!(p1["has_more"], true);
+    let cur1 = p1["next_cursor"].as_str().unwrap();
+
+    // Member A: Page 2 with cursor from Page 1
+    let p2_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/store/items/page?limit=5&cursor={cur1}"
+        ))
+        .header(COOKIE, &member_a_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(p2_resp.status(), reqwest::StatusCode::OK);
+    let p2: serde_json::Value = p2_resp.json().await.unwrap();
+    let p2_items = p2["items"].as_array().unwrap();
+    assert_eq!(p2_items.len(), 5);
+    assert_eq!(p2["has_more"], true);
+    let cur2 = p2["next_cursor"].as_str().unwrap();
+
+    // Member A: Page 3 with cursor from Page 2 (remaining 2 items)
+    let p3_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/store/items/page?limit=5&cursor={cur2}"
+        ))
+        .header(COOKIE, &member_a_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(p3_resp.status(), reqwest::StatusCode::OK);
+    let p3: serde_json::Value = p3_resp.json().await.unwrap();
+    let p3_items = p3["items"].as_array().unwrap();
+    assert_eq!(p3_items.len(), 2);
+    assert_eq!(p3["has_more"], false);
+    assert!(p3["next_cursor"].is_null());
+
+    // Verify all 12 items returned uniquely
+    let mut collected_ids = Vec::new();
+    for it in p1_items
+        .iter()
+        .chain(p2_items.iter())
+        .chain(p3_items.iter())
+    {
+        collected_ids.push(it["id"].as_str().unwrap().to_string());
+    }
+    assert_eq!(collected_ids.len(), 12);
+    let collected_set: std::collections::HashSet<String> = collected_ids.iter().cloned().collect();
+    assert_eq!(collected_set.len(), 12);
+
+    // Cross-guild cursor validation -> 400 Bad Request
+    let foreign_cursor = rusty_discord_bot::storage::encode_store_item_cursor(
+        guild_b,
+        &chrono::Utc::now(),
+        &uuid::Uuid::new_v4(),
+    );
+    let cross_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/store/items/page?cursor={foreign_cursor}"
+        ))
+        .header(COOKIE, &member_a_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cross_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Limit out of bounds (0 or 51) -> 400 Bad Request
+    let limit_zero_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/store/items/page?limit=0"
+        ))
+        .header(COOKIE, &member_a_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(limit_zero_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let limit_too_big_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/store/items/page?limit=51"
+        ))
+        .header(COOKIE, &member_a_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        limit_too_big_resp.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+
+    // 7. Legacy endpoint backward compatibility: GET /api/guilds/{guild_a}/store/items returns JSON array
+    let legacy_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_a}/store/items"))
+        .header(COOKIE, &member_a_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(legacy_resp.status(), reqwest::StatusCode::OK);
+    let legacy_array: Vec<serde_json::Value> = legacy_resp.json().await.unwrap();
+    assert_eq!(legacy_array.len(), 12);
+
+    // 8. Quota enforcement: set quota to 12 and attempt 13th item -> 400 Bad Request
+    if let rusty_discord_bot::storage::Storage::Memory(ref mem) = state.app.storage {
+        mem.set_store_items_quota_for_test(Some(12));
+    }
+    let over_quota_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/store/items"))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({
+            "name": "Over Quota Item",
+            "description": "Should fail",
+            "price": 100
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(over_quota_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let err_json: serde_json::Value = over_quota_resp.json().await.unwrap();
+    assert!(
+        err_json["error"]
+            .as_str()
+            .unwrap()
+            .contains("quota exceeded")
+    );
+}

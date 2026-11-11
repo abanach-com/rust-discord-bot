@@ -453,6 +453,10 @@ pub fn build_router(state: WebState) -> Router {
             get(features::list_store_items).post(features::create_store_item),
         )
         .route(
+            "/api/guilds/{guild_id}/store/items/page",
+            get(features::list_store_items_page),
+        )
+        .route(
             "/api/guilds/{guild_id}/store/purchase",
             post(features::purchase_store_item),
         )

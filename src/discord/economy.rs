@@ -111,6 +111,42 @@ pub fn format_inventory(
     lines.join("\n")
 }
 
+pub fn format_shop_output(page: &crate::storage::StoreItemsPage) -> String {
+    if page.items.is_empty() {
+        return "🛍️ **Sklep Serwerowy**\n\nSklep na tym serwerze jest obecnie pusty.".to_string();
+    }
+
+    let mut lines = Vec::new();
+    lines.push("🛍️ **Sklep Serwerowy**\n".to_string());
+    for (i, item) in page.items.iter().enumerate() {
+        let stock_str = match item.stock {
+            Some(s) => format!(" (pozostało: {s})"),
+            None => String::new(),
+        };
+        let role_str = match &item.role_id {
+            Some(r) => format!(" • Rola: <@&{r}>"),
+            None => String::new(),
+        };
+        lines.push(format!(
+            "{}. **{}** — **{}** monet{}{}\n   _{}_",
+            i + 1,
+            item.name,
+            item.price,
+            stock_str,
+            role_str,
+            item.description
+        ));
+    }
+    if page.has_more {
+        lines.push(
+            "\n*(Wyświetlono 15 najnowszych produktów. Pełny katalog sprawdzisz w panelu WWW)*"
+                .to_string(),
+        );
+    }
+    lines.push("\nAby kupić przedmiot, wpisz: `/economy buy item:<nazwa_lub_id>`".to_string());
+    lines.join("\n")
+}
+
 pub async fn execute(
     ctx: &Context,
     state: &AppState,
@@ -157,39 +193,11 @@ pub async fn execute(
 
     match operation {
         EconomyOperation::Shop => {
-            let items = state.storage.list_store_items(&guild_key).await?;
-            if items.is_empty() {
-                return Ok(Some(
-                    "🛍️ **Sklep Serwerowy**\n\nSklep na tym serwerze jest obecnie pusty."
-                        .to_string(),
-                ));
-            }
-
-            let mut lines = Vec::new();
-            lines.push("🛍️ **Sklep Serwerowy**\n".to_string());
-            for (i, item) in items.iter().enumerate() {
-                let stock_str = match item.stock {
-                    Some(s) => format!(" (pozostało: {s})"),
-                    None => String::new(),
-                };
-                let role_str = match &item.role_id {
-                    Some(r) => format!(" • Rola: <@&{r}>"),
-                    None => String::new(),
-                };
-                lines.push(format!(
-                    "{}. **{}** — **{}** monet{}{}\n   _{}_",
-                    i + 1,
-                    item.name,
-                    item.price,
-                    stock_str,
-                    role_str,
-                    item.description
-                ));
-            }
-            lines.push(
-                "\nAby kupić przedmiot, wpisz: `/economy buy item:<nazwa_lub_id>`".to_string(),
-            );
-            Ok(Some(lines.join("\n")))
+            let page = state
+                .storage
+                .list_store_items_page(&guild_key, 15, None)
+                .await?;
+            Ok(Some(format_shop_output(&page)))
         }
 
         EconomyOperation::Inventory => {
@@ -197,30 +205,19 @@ pub async fn execute(
                 .storage
                 .list_store_purchases_page(&guild_key, Some(&actor_key), 15, None)
                 .await?;
-            let items = state
+            let item_ids: Vec<Uuid> = page.purchases.iter().map(|p| p.item_id).collect();
+            let item_names = state
                 .storage
-                .list_store_items(&guild_key)
+                .list_store_item_names_by_ids(&guild_key, &item_ids)
                 .await
                 .unwrap_or_default();
-            let item_names: std::collections::HashMap<Uuid, String> =
-                items.into_iter().map(|it| (it.id, it.name)).collect();
 
             Ok(Some(format_inventory(&actor_key, &page, &item_names)))
         }
 
         EconomyOperation::Buy { item } => {
-            let all_items = state.storage.list_store_items(&guild_key).await?;
             let item_ref = item.trim();
-            let target_item = if let Ok(uuid) = Uuid::parse_str(item_ref) {
-                all_items.into_iter().find(|i| i.id == uuid)
-            } else {
-                all_items.into_iter().find(|i| {
-                    i.name.eq_ignore_ascii_case(item_ref)
-                        || i.name.to_lowercase().replace([' ', '-'], "_")
-                            == item_ref.to_lowercase().replace([' ', '-'], "_")
-                        || i.id.to_string() == item_ref
-                })
-            };
+            let target_item = state.storage.find_store_item(&guild_key, item_ref).await?;
 
             let Some(item) = target_item else {
                 return Err(anyhow!(
@@ -697,6 +694,73 @@ mod tests {
         assert_eq!(text_15.matches("• ").count(), 15);
         assert!(text_15.contains(
             "*(Wyświetlono 15 najnowszych zakupów. Pełną historię sprawdzisz w panelu WWW)*"
+        ));
+    }
+
+    #[test]
+    fn test_format_shop_output_bounded_display_issue_389() {
+        use crate::storage::{StoreItem, StoreItemsPage};
+        let now = chrono::Utc::now();
+
+        // 1. Empty shop
+        let empty_page = StoreItemsPage {
+            items: Vec::new(),
+            next_cursor: None,
+            has_more: false,
+        };
+        let empty_text = format_shop_output(&empty_page);
+        assert!(empty_text.contains("jest obecnie pusty"));
+
+        // 2. 5 items without has_more
+        let items_5: Vec<StoreItem> = (0..5)
+            .map(|i| StoreItem {
+                id: Uuid::new_v4(),
+                guild_id: "g1".to_string(),
+                name: format!("Item {i}"),
+                description: format!("Description {i}"),
+                price: 100 + i * 20,
+                role_id: if i == 0 {
+                    Some("999000000000000001".to_string())
+                } else {
+                    None
+                },
+                stock: if i == 1 { Some(3) } else { None },
+                created_at: now,
+            })
+            .collect();
+        let page_5 = StoreItemsPage {
+            items: items_5,
+            next_cursor: None,
+            has_more: false,
+        };
+        let text_5 = format_shop_output(&page_5);
+        assert_eq!(text_5.matches("** — **").count(), 5);
+        assert!(text_5.contains("• Rola: <@&999000000000000001>"));
+        assert!(text_5.contains("(pozostało: 3)"));
+        assert!(!text_5.contains("Wyświetlono 15 najnowszych produktów"));
+
+        // 3. 15 items with has_more: true
+        let items_15: Vec<StoreItem> = (0..15)
+            .map(|i| StoreItem {
+                id: Uuid::new_v4(),
+                guild_id: "g1".to_string(),
+                name: format!("Item {i}"),
+                description: format!("Description {i}"),
+                price: 50,
+                role_id: None,
+                stock: None,
+                created_at: now,
+            })
+            .collect();
+        let page_15 = StoreItemsPage {
+            items: items_15,
+            next_cursor: Some("dummy_cursor".to_string()),
+            has_more: true,
+        };
+        let text_15 = format_shop_output(&page_15);
+        assert_eq!(text_15.matches("** — **").count(), 15);
+        assert!(text_15.contains(
+            "*(Wyświetlono 15 najnowszych produktów. Pełny katalog sprawdzisz w panelu WWW)*"
         ));
     }
 }

@@ -1527,6 +1527,44 @@ pub async fn list_store_items(
     Ok(Json(items))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct StoreItemsPaginationQuery {
+    pub limit: Option<usize>,
+    pub cursor: Option<String>,
+}
+
+pub async fn list_store_items_page(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+    Query(query): Query<StoreItemsPaginationQuery>,
+) -> Result<Json<crate::storage::StoreItemsPage>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
+
+    let limit = query.limit.unwrap_or(25);
+    if limit == 0 || limit > 50 {
+        return Err(ApiError::bad_request("limit must be between 1 and 50"));
+    }
+
+    if let Some(ref c) = query.cursor {
+        let decoded = crate::storage::decode_store_item_cursor(c)
+            .map_err(|e| ApiError::bad_request(format!("invalid cursor: {e}")))?;
+        if decoded.guild_id != guild_id {
+            return Err(ApiError::bad_request("cursor belongs to a different guild"));
+        }
+    }
+
+    let page = state
+        .app
+        .storage
+        .list_store_items_page(&guild_id, limit, query.cursor.as_deref())
+        .await
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    Ok(Json(page))
+}
+
 pub async fn create_store_item(
     State(state): State<WebState>,
 
@@ -1541,6 +1579,19 @@ pub async fn create_store_item(
     verify_csrf(&headers, &session)?;
 
     ensure_guild_access(&state, &session, &guild_id).await?;
+
+    let name_trimmed = payload.name.trim();
+    if name_trimmed.is_empty() || name_trimmed.chars().count() > 100 {
+        return Err(ApiError::bad_request(
+            "name must be between 1 and 100 characters",
+        ));
+    }
+
+    if payload.description.chars().count() > 1000 {
+        return Err(ApiError::bad_request(
+            "description cannot exceed 1000 characters",
+        ));
+    }
 
     if payload.price < 0 {
         return Err(ApiError::bad_request("price must be non-negative"));
