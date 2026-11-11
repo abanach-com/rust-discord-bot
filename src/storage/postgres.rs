@@ -28,10 +28,11 @@ use super::{
     RecruitmentRoleFulfillment, RecruitmentTrack, RedditSubscription,
     ReleaseReactionRoleGrantOutcome, ReputationGrantOutcome, ScheduledEvent, ServerSnapshot,
     SocialDraftApprovalError, SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage,
-    StoreItem, StorePurchase, TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant,
-    Tournament, TransitionApplicationParams, TupperError, TupperProfile, TwitchStreamSubscription,
-    UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WORK_JOBS, WorkClaimOutcome,
-    WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription, level_for_xp,
+    StoreItem, StorePurchase, StorePurchasesPage, TagRecord, TelegramBridge,
+    TelegramMessageMapping, TimedRoleGrant, Tournament, TransitionApplicationParams, TupperError,
+    TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
+    VkSubscription, WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
+    YouTubeChannelSubscription, encode_store_purchase_cursor, level_for_xp,
     parse_member_search_cursor, snowflake_created_at, validate_birthday_date, validate_snowflake,
 };
 
@@ -4058,6 +4059,77 @@ impl PostgresStore {
         Ok(rec)
     }
 
+    pub async fn list_store_purchases_page(
+        &self,
+        guild_id: &str,
+        user_id: Option<&str>,
+        limit: usize,
+        cursor: Option<(&DateTime<Utc>, &Uuid)>,
+    ) -> anyhow::Result<StorePurchasesPage> {
+        let fetch_limit = (limit.saturating_add(1)) as i64;
+        let cursor_time = cursor.map(|(t, _)| *t);
+        let cursor_id = cursor.map(|(_, id)| *id);
+
+        let mut rows: Vec<StorePurchase> = if let Some(uid) = user_id {
+            sqlx::query_as::<_, StorePurchase>(
+                r#"
+                SELECT id, guild_id, user_id, item_id, price_paid, role_id,
+                       fulfillment_status, failure_reason, fulfilled_at, lease_expires_at, created_at
+                FROM store_purchases
+                WHERE guild_id = $1
+                  AND user_id = $2
+                  AND ($3::timestamptz IS NULL OR (created_at, id) < ($3, $4::uuid))
+                ORDER BY created_at DESC, id DESC
+                LIMIT $5
+                "#,
+            )
+            .bind(guild_id)
+            .bind(uid)
+            .bind(cursor_time)
+            .bind(cursor_id)
+            .bind(fetch_limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, StorePurchase>(
+                r#"
+                SELECT id, guild_id, user_id, item_id, price_paid, role_id,
+                       fulfillment_status, failure_reason, fulfilled_at, lease_expires_at, created_at
+                FROM store_purchases
+                WHERE guild_id = $1
+                  AND ($2::timestamptz IS NULL OR (created_at, id) < ($2, $3::uuid))
+                ORDER BY created_at DESC, id DESC
+                LIMIT $4
+                "#,
+            )
+            .bind(guild_id)
+            .bind(cursor_time)
+            .bind(cursor_id)
+            .bind(fetch_limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        let has_more = rows.len() > limit;
+        if has_more {
+            rows.truncate(limit);
+        }
+
+        let next_cursor = if has_more {
+            rows.last().map(|last| {
+                encode_store_purchase_cursor(guild_id, user_id, &last.created_at, &last.id)
+            })
+        } else {
+            None
+        };
+
+        Ok(StorePurchasesPage {
+            purchases: rows,
+            next_cursor,
+            has_more,
+        })
+    }
+
     pub async fn list_store_purchases(
         &self,
         guild_id: &str,
@@ -4065,10 +4137,10 @@ impl PostgresStore {
     ) -> anyhow::Result<Vec<StorePurchase>> {
         let recs = sqlx::query_as::<_, StorePurchase>(
             r#"
-            SELECT id, guild_id, user_id, item_id, price_paid, role_id, fulfillment_status, failure_reason, fulfilled_at, created_at
+            SELECT id, guild_id, user_id, item_id, price_paid, role_id, fulfillment_status, failure_reason, fulfilled_at, lease_expires_at, created_at
             FROM store_purchases
             WHERE guild_id = $1 AND ($2 IS NULL OR user_id = $2)
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, id DESC
             "#,
         )
         .bind(guild_id)

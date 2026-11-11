@@ -457,6 +457,258 @@ pub struct StorePurchase {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StorePurchasesPage {
+    pub purchases: Vec<StorePurchase>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StorePurchaseCursor {
+    pub guild_id: Option<String>,
+    pub user_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub id: Uuid,
+}
+
+fn base64url_encode_store_cursor(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity((input.len() * 4).div_ceil(3));
+    let mut i = 0;
+    while i < input.len() {
+        let b0 = input[i] as u32;
+        let b1 = if i + 1 < input.len() {
+            input[i + 1] as u32
+        } else {
+            0
+        };
+        let b2 = if i + 2 < input.len() {
+            input[i + 2] as u32
+        } else {
+            0
+        };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+
+        out.push(TABLE[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 0x3F) as usize] as char);
+        if i + 1 < input.len() {
+            out.push(TABLE[((triple >> 6) & 0x3F) as usize] as char);
+        }
+        if i + 2 < input.len() {
+            out.push(TABLE[(triple & 0x3F) as usize] as char);
+        }
+        i += 3;
+    }
+    out
+}
+
+fn base64url_decode_store_cursor(input: &str) -> anyhow::Result<Vec<u8>> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut table = [0xFFu8; 256];
+    for (i, c) in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+        .iter()
+        .enumerate()
+    {
+        table[*c as usize] = i as u8;
+    }
+    table[b'+' as usize] = 62;
+    table[b'/' as usize] = 63;
+
+    let bytes: Vec<u8> = trimmed.bytes().filter(|&b| b != b'=').collect();
+    let mut out = Vec::with_capacity((bytes.len() * 3) / 4 + 1);
+    let mut i = 0;
+    while i < bytes.len() {
+        let rem = bytes.len() - i;
+        if rem == 1 {
+            return Err(anyhow::anyhow!("Invalid base64 length"));
+        }
+        let b0 = table[bytes[i] as usize];
+        let b1 = table[bytes[i + 1] as usize];
+        if b0 == 0xFF || b1 == 0xFF {
+            return Err(anyhow::anyhow!("Invalid base64 character"));
+        }
+        out.push((b0 << 2) | (b1 >> 4));
+
+        if rem >= 3 {
+            let b2 = table[bytes[i + 2] as usize];
+            if b2 == 0xFF {
+                return Err(anyhow::anyhow!("Invalid base64 character"));
+            }
+            out.push((b1 << 4) | (b2 >> 2));
+
+            if rem >= 4 {
+                let b3 = table[bytes[i + 3] as usize];
+                if b3 == 0xFF {
+                    return Err(anyhow::anyhow!("Invalid base64 character"));
+                }
+                out.push((b2 << 6) | b3);
+                i += 4;
+            } else {
+                i += 3;
+            }
+        } else {
+            i += 2;
+        }
+    }
+    Ok(out)
+}
+
+/// Encodes a store purchases keyset pagination cursor binding `guild_id`, optional `user_id`, `created_at`, and `id`.
+pub fn encode_store_purchase_cursor(
+    guild_id: &str,
+    user_id: Option<&str>,
+    created_at: &DateTime<Utc>,
+    id: &Uuid,
+) -> String {
+    let payload = format!(
+        "v1|{}|{}|{}|{}",
+        guild_id.trim(),
+        user_id.map(str::trim).unwrap_or("*"),
+        created_at.to_rfc3339(),
+        id
+    );
+    base64url_encode_store_cursor(payload.as_bytes())
+}
+
+/// Decodes and validates a store purchases pagination cursor.
+pub fn decode_store_purchase_cursor(cursor: &str) -> anyhow::Result<StorePurchaseCursor> {
+    let trimmed = cursor.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow::anyhow!("Cursor cannot be empty"));
+    }
+    if trimmed.len() > 512 {
+        return Err(anyhow::anyhow!("Cursor exceeds maximum allowed length"));
+    }
+
+    let decoded_str = match base64url_decode_store_cursor(trimmed) {
+        Ok(bytes) => String::from_utf8(bytes).unwrap_or_else(|_| trimmed.to_string()),
+        Err(_) => trimmed.to_string(),
+    };
+
+    let s = decoded_str.trim();
+
+    // 1. "v1|guild_id|user_id|timestamp|uuid"
+    if let Some(rest) = s.strip_prefix("v1|") {
+        let parts: Vec<&str> = rest.split('|').collect();
+        if parts.len() == 4 {
+            let guild_id = parts[0].trim().to_string();
+            let user_id = if parts[1] == "*" || parts[1].trim().is_empty() {
+                None
+            } else {
+                Some(parts[1].trim().to_string())
+            };
+            let created_at = DateTime::parse_from_rfc3339(parts[2].trim())
+                .map(|dt| dt.with_timezone(&Utc))
+                .or_else(|_| {
+                    parts[2]
+                        .trim()
+                        .parse::<i64>()
+                        .ok()
+                        .and_then(DateTime::from_timestamp_millis)
+                        .ok_or_else(|| anyhow::anyhow!("invalid timestamp"))
+                })
+                .map_err(|e| anyhow::anyhow!("Failed to parse cursor timestamp: {e}"))?;
+            let id = Uuid::parse_str(parts[3].trim())
+                .map_err(|e| anyhow::anyhow!("Failed to parse cursor UUID: {e}"))?;
+            return Ok(StorePurchaseCursor {
+                guild_id: if guild_id.is_empty() {
+                    None
+                } else {
+                    Some(guild_id)
+                },
+                user_id,
+                created_at,
+                id,
+            });
+        }
+    }
+
+    // 2. "guild_id|user_id|timestamp|uuid"
+    let parts: Vec<&str> = s.split('|').collect();
+    if parts.len() == 4 {
+        let guild_id = parts[0].trim().to_string();
+        let user_id = if parts[1] == "*" || parts[1].trim().is_empty() {
+            None
+        } else {
+            Some(parts[1].trim().to_string())
+        };
+        let created_at = DateTime::parse_from_rfc3339(parts[2].trim())
+            .map(|dt| dt.with_timezone(&Utc))
+            .or_else(|_| {
+                parts[2]
+                    .trim()
+                    .parse::<i64>()
+                    .ok()
+                    .and_then(DateTime::from_timestamp_millis)
+                    .ok_or_else(|| anyhow::anyhow!("invalid timestamp"))
+            })
+            .map_err(|e| anyhow::anyhow!("Failed to parse cursor timestamp: {e}"))?;
+        let id = Uuid::parse_str(parts[3].trim())
+            .map_err(|e| anyhow::anyhow!("Failed to parse cursor UUID: {e}"))?;
+        return Ok(StorePurchaseCursor {
+            guild_id: if guild_id.is_empty() {
+                None
+            } else {
+                Some(guild_id)
+            },
+            user_id,
+            created_at,
+            id,
+        });
+    }
+
+    // 3. "timestamp|uuid"
+    if parts.len() == 2 {
+        let created_at = DateTime::parse_from_rfc3339(parts[0].trim())
+            .map(|dt| dt.with_timezone(&Utc))
+            .or_else(|_| {
+                parts[0]
+                    .trim()
+                    .parse::<i64>()
+                    .ok()
+                    .and_then(DateTime::from_timestamp_millis)
+                    .ok_or_else(|| anyhow::anyhow!("invalid timestamp"))
+            })
+            .map_err(|e| anyhow::anyhow!("Failed to parse cursor timestamp: {e}"))?;
+        let id = Uuid::parse_str(parts[1].trim())
+            .map_err(|e| anyhow::anyhow!("Failed to parse cursor UUID: {e}"))?;
+        return Ok(StorePurchaseCursor {
+            guild_id: None,
+            user_id: None,
+            created_at,
+            id,
+        });
+    }
+
+    // 4. "timestamp:uuid"
+    if let Some((left, right)) = s.rsplit_once(':')
+        && let Ok(id) = Uuid::parse_str(right.trim())
+    {
+        let created_at = DateTime::parse_from_rfc3339(left.trim())
+            .map(|dt| dt.with_timezone(&Utc))
+            .or_else(|_| {
+                left.trim()
+                    .parse::<i64>()
+                    .ok()
+                    .and_then(DateTime::from_timestamp_millis)
+                    .ok_or_else(|| anyhow::anyhow!("invalid timestamp"))
+            })
+            .map_err(|e| anyhow::anyhow!("Failed to parse cursor timestamp: {e}"))?;
+        return Ok(StorePurchaseCursor {
+            guild_id: None,
+            user_id: None,
+            created_at,
+            id,
+        });
+    }
+
+    Err(anyhow::anyhow!("Unrecognized cursor format"))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct EconomyPurchaseRequestRecord {
     pub guild_id: String,
@@ -3388,6 +3640,25 @@ impl Storage {
         }
     }
 
+    pub async fn list_store_purchases_page(
+        &self,
+        guild_id: &str,
+        user_id: Option<&str>,
+        limit: usize,
+        cursor: Option<(&DateTime<Utc>, &Uuid)>,
+    ) -> anyhow::Result<StorePurchasesPage> {
+        match self {
+            Self::Memory(store) => {
+                Ok(store.list_store_purchases_page(guild_id, user_id, limit, cursor))
+            }
+            Self::Postgres(store) => {
+                store
+                    .list_store_purchases_page(guild_id, user_id, limit, cursor)
+                    .await
+            }
+        }
+    }
+
     pub async fn list_store_purchases(
         &self,
         guild_id: &str,
@@ -3397,6 +3668,12 @@ impl Storage {
             Self::Memory(store) => Ok(store.list_store_purchases(guild_id, user_id)),
 
             Self::Postgres(store) => store.list_store_purchases(guild_id, user_id).await,
+        }
+    }
+
+    pub fn insert_store_purchase_for_test(&self, purchase: StorePurchase) {
+        if let Self::Memory(store) = self {
+            store.insert_store_purchase_for_test(purchase);
         }
     }
 
@@ -9423,5 +9700,191 @@ mod tests {
         // Duplicate options (case-insensitive)
         let dup = vec!["Option 1".to_string(), "option 1".to_string()];
         assert!(validate_poll_input("Q", &dup).is_err());
+    }
+
+    #[test]
+    fn test_store_purchase_cursor_encoding_and_validation_issue_387() {
+        let guild_id = "guild_123";
+        let user_id = "user_456";
+        let now = Utc::now();
+        let pid = Uuid::new_v4();
+
+        // 1. Round-trip with user_id
+        let encoded = encode_store_purchase_cursor(guild_id, Some(user_id), &now, &pid);
+        let decoded = decode_store_purchase_cursor(&encoded).expect("decode valid cursor");
+        assert_eq!(decoded.guild_id.as_deref(), Some(guild_id));
+        assert_eq!(decoded.user_id.as_deref(), Some(user_id));
+        assert_eq!(decoded.id, pid);
+        assert_eq!(
+            decoded.created_at.timestamp_millis(),
+            now.timestamp_millis()
+        );
+
+        // 2. Round-trip without user_id (admin cursor)
+        let encoded_admin = encode_store_purchase_cursor(guild_id, None, &now, &pid);
+        let decoded_admin =
+            decode_store_purchase_cursor(&encoded_admin).expect("decode valid admin cursor");
+        assert_eq!(decoded_admin.guild_id.as_deref(), Some(guild_id));
+        assert!(decoded_admin.user_id.is_none());
+        assert_eq!(decoded_admin.id, pid);
+
+        // 3. Fallback: plain "timestamp|uuid"
+        let plain_cursor = format!("{}|{}", now.to_rfc3339(), pid);
+        let decoded_plain =
+            decode_store_purchase_cursor(&plain_cursor).expect("decode plain cursor");
+        assert!(decoded_plain.guild_id.is_none());
+        assert!(decoded_plain.user_id.is_none());
+        assert_eq!(decoded_plain.id, pid);
+
+        // 4. Fallback: base64 encoded "timestamp:uuid"
+        let colon_cursor = format!("{}:{}", now.to_rfc3339(), pid);
+        let encoded_colon = base64url_encode_store_cursor(colon_cursor.as_bytes());
+        let decoded_colon =
+            decode_store_purchase_cursor(&encoded_colon).expect("decode colon cursor");
+        assert_eq!(decoded_colon.id, pid);
+
+        // 5. Error handling
+        assert!(
+            decode_store_purchase_cursor("").is_err(),
+            "empty cursor must fail"
+        );
+        assert!(
+            decode_store_purchase_cursor("   ").is_err(),
+            "whitespace cursor must fail"
+        );
+        assert!(
+            decode_store_purchase_cursor(&"a".repeat(513)).is_err(),
+            "oversized cursor must fail"
+        );
+        assert!(decode_store_purchase_cursor("not_a_valid_cursor_string").is_err());
+        assert!(decode_store_purchase_cursor("2026-99-99T99:99:99Z|invalid_uuid").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_memory_store_purchases_keyset_pagination_and_tie_breaking_issue_387() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_id = "test_guild_pagi";
+        let user_id = "test_user_pagi";
+        let other_user = "test_user_other";
+        let other_guild = "other_guild";
+
+        // Create store items
+        let item = store
+            .create_store_item(guild_id, "Test Item", "Desc", 10, None, None)
+            .await
+            .unwrap();
+
+        // Populate 10 purchases: 5 pairs with equal timestamps to verify id DESC tie-breaker
+        let base_time = Utc::now() - chrono::Duration::hours(10);
+        let mut ids = Vec::new();
+        for i in 0..10 {
+            let dt = base_time + chrono::Duration::minutes((i / 2) * 5);
+            let purchase = StorePurchase {
+                id: Uuid::new_v4(),
+                guild_id: guild_id.to_string(),
+                user_id: user_id.to_string(),
+                item_id: item.id,
+                price_paid: 10,
+                role_id: None,
+                fulfillment_status: "completed".to_string(),
+                failure_reason: None,
+                fulfilled_at: Some(dt),
+                lease_expires_at: None,
+                created_at: dt,
+            };
+            ids.push(purchase.id);
+            store.insert_store_purchase_for_test(purchase);
+        }
+
+        // Add 1 purchase for other user and 1 for other guild
+        store.insert_store_purchase_for_test(StorePurchase {
+            id: Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            user_id: other_user.to_string(),
+            item_id: item.id,
+            price_paid: 10,
+            role_id: None,
+            fulfillment_status: "completed".to_string(),
+            failure_reason: None,
+            fulfilled_at: Some(base_time),
+            lease_expires_at: None,
+            created_at: base_time,
+        });
+        store.insert_store_purchase_for_test(StorePurchase {
+            id: Uuid::new_v4(),
+            guild_id: other_guild.to_string(),
+            user_id: user_id.to_string(),
+            item_id: item.id,
+            price_paid: 10,
+            role_id: None,
+            fulfillment_status: "completed".to_string(),
+            failure_reason: None,
+            fulfilled_at: Some(base_time),
+            lease_expires_at: None,
+            created_at: base_time,
+        });
+
+        // Page 1: limit 4
+        let p1 = store
+            .list_store_purchases_page(guild_id, Some(user_id), 4, None)
+            .await
+            .unwrap();
+        assert_eq!(p1.purchases.len(), 4);
+        assert!(p1.has_more);
+        assert!(p1.next_cursor.is_some());
+
+        // Page 2: limit 4 with cursor from page 1
+        let cur1 = decode_store_purchase_cursor(p1.next_cursor.as_deref().unwrap()).unwrap();
+        let p2 = store
+            .list_store_purchases_page(
+                guild_id,
+                Some(user_id),
+                4,
+                Some((&cur1.created_at, &cur1.id)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(p2.purchases.len(), 4);
+        assert!(p2.has_more);
+        assert!(p2.next_cursor.is_some());
+
+        // Page 3: limit 4 with cursor from page 2 (remaining 2 items)
+        let cur2 = decode_store_purchase_cursor(p2.next_cursor.as_deref().unwrap()).unwrap();
+        let p3 = store
+            .list_store_purchases_page(
+                guild_id,
+                Some(user_id),
+                4,
+                Some((&cur2.created_at, &cur2.id)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(p3.purchases.len(), 2);
+        assert!(!p3.has_more);
+        assert!(p3.next_cursor.is_none());
+
+        // Verify all 10 unique IDs were retrieved across the 3 pages
+        let all_paged_ids: Vec<Uuid> = p1
+            .purchases
+            .into_iter()
+            .chain(p2.purchases.into_iter())
+            .chain(p3.purchases.into_iter())
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(all_paged_ids.len(), 10);
+        let unique_count: std::collections::HashSet<Uuid> = all_paged_ids.iter().copied().collect();
+        assert_eq!(
+            unique_count.len(),
+            10,
+            "Every item must be returned exactly once"
+        );
+
+        // Verify strictly descending order (created_at DESC, id DESC)
+        let full_list = store
+            .list_store_purchases(guild_id, Some(user_id))
+            .await
+            .unwrap();
+        let expected_ordered_ids: Vec<Uuid> = full_list.into_iter().map(|p| p.id).collect();
+        assert_eq!(all_paged_ids, expected_ordered_ids);
     }
 }

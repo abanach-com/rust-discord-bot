@@ -1770,6 +1770,8 @@ pub async fn purchase_store_item(
 #[derive(Debug, Deserialize)]
 pub struct ListStorePurchasesQuery {
     pub user_id: Option<String>,
+    pub limit: Option<usize>,
+    pub cursor: Option<String>,
 }
 
 pub async fn list_store_purchases(
@@ -1783,25 +1785,72 @@ pub async fn list_store_purchases(
 ) -> Result<Json<Value>, ApiError> {
     let (_, session) = authenticate(&state, &headers).await?;
 
-    let target_user_id = if ensure_guild_access(&state, &session, &guild_id)
+    let limit = match query.limit {
+        None => 25,
+        Some(l) if (1..=100).contains(&l) => l,
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "Query parameter 'limit' must be between 1 and 100",
+            ));
+        }
+    };
+
+    let is_admin = ensure_guild_access(&state, &session, &guild_id)
         .await
-        .is_ok()
-    {
+        .is_ok();
+
+    let target_user_id = if is_admin {
         query.user_id
     } else {
         ensure_guild_member_access(&state, &session, &guild_id).await?;
         Some(session.user.id.clone())
     };
 
-    let purchases = state
+    let cursor_tuple = if let Some(ref cur_str) = query.cursor {
+        let cursor = crate::storage::decode_store_purchase_cursor(cur_str)
+            .map_err(|_| ApiError::bad_request("Invalid cursor format"))?;
+
+        if let Some(ref c_guild) = cursor.guild_id
+            && c_guild != &guild_id
+        {
+            return Err(ApiError::bad_request(
+                "Cursor guild does not match target guild",
+            ));
+        }
+
+        if let Some(ref req_user) = target_user_id {
+            if let Some(ref c_user) = cursor.user_id {
+                if c_user != req_user {
+                    return Err(ApiError::bad_request(
+                        "Cursor user does not match target user",
+                    ));
+                }
+            } else if !is_admin {
+                return Err(ApiError::bad_request("Cursor is not scoped to target user"));
+            }
+        }
+
+        Some((cursor.created_at, cursor.id))
+    } else {
+        None
+    };
+
+    let page = state
         .app
         .storage
-        .list_store_purchases(&guild_id, target_user_id.as_deref())
+        .list_store_purchases_page(
+            &guild_id,
+            target_user_id.as_deref(),
+            limit,
+            cursor_tuple.as_ref().map(|(t, i)| (t, i)),
+        )
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(Json(json!({
-        "purchases": purchases
+        "purchases": page.purchases,
+        "next_cursor": page.next_cursor,
+        "has_more": page.has_more,
     })))
 }
 

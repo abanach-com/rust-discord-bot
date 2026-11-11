@@ -27,11 +27,12 @@ use super::{
     RecordCompanionLeaseParams, RedditSubscription, ReleaseReactionRoleGrantOutcome,
     ReputationGrantOutcome, ScheduledEvent, ServerSnapshot, SocialDraftApprovalError,
     SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StorePurchase,
-    TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError,
-    TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
-    VkSubscription, WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
-    YouTubeChannelSubscription, is_member_after_cursor, level_for_xp, next_birthday_date,
-    parse_member_search_cursor, snowflake_created_at, validate_birthday_date, validate_snowflake,
+    StorePurchasesPage, TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant,
+    Tournament, TupperError, TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams,
+    UserErasureReport, VkSubscription, WORK_JOBS, WorkClaimOutcome, WorkflowDefinition,
+    WorkflowRunExecution, XpAward, YouTubeChannelSubscription, encode_store_purchase_cursor,
+    is_member_after_cursor, level_for_xp, next_birthday_date, parse_member_search_cursor,
+    snowflake_created_at, validate_birthday_date, validate_snowflake,
 };
 
 type ModuleKey = (String, String);
@@ -248,6 +249,32 @@ pub struct MemoryStore {
     quotes_quota_override: Arc<std::sync::RwLock<Option<(usize, usize)>>>,
     birthdays: Arc<DashMap<(String, String), BirthdayRecord>>,
     afk: Arc<DashMap<(String, String), AfkRecord>>,
+}
+
+struct StorePurchaseHeapItem {
+    key: (DateTime<Utc>, Uuid),
+    purchase: StorePurchase,
+}
+
+impl PartialEq for StorePurchaseHeapItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+impl Eq for StorePurchaseHeapItem {}
+
+impl PartialOrd for StorePurchaseHeapItem {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for StorePurchaseHeapItem {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Reverse ordering so BinaryHeap acts as a min-heap on key
+        other.key.cmp(&self.key)
+    }
 }
 
 impl MemoryStore {
@@ -2969,6 +2996,77 @@ impl MemoryStore {
         self.store_purchases.get(&purchase_id).map(|p| p.clone())
     }
 
+    pub fn list_store_purchases_page(
+        &self,
+        guild_id: &str,
+        user_id: Option<&str>,
+        limit: usize,
+        cursor: Option<(&DateTime<Utc>, &Uuid)>,
+    ) -> StorePurchasesPage {
+        let capacity = limit.saturating_add(1);
+        let mut heap: std::collections::BinaryHeap<StorePurchaseHeapItem> =
+            std::collections::BinaryHeap::with_capacity(capacity);
+
+        for entry in self.store_purchases.iter() {
+            let p = entry.value();
+            if p.guild_id != guild_id {
+                continue;
+            }
+            if let Some(uid) = user_id
+                && p.user_id != uid
+            {
+                continue;
+            }
+
+            // Keyset pagination condition: strictly after cursor in (created_at DESC, id DESC) order
+            if let Some((cur_time, cur_id)) = cursor {
+                let is_after_cursor =
+                    p.created_at < *cur_time || (p.created_at == *cur_time && p.id < *cur_id);
+                if !is_after_cursor {
+                    continue;
+                }
+            }
+
+            let key = (p.created_at, p.id);
+            if heap.len() < capacity {
+                heap.push(StorePurchaseHeapItem {
+                    key,
+                    purchase: p.clone(),
+                });
+            } else if let Some(min_top) = heap.peek()
+                && key > min_top.key
+            {
+                heap.pop();
+                heap.push(StorePurchaseHeapItem {
+                    key,
+                    purchase: p.clone(),
+                });
+            }
+        }
+
+        let mut items: Vec<StorePurchase> = heap.into_iter().map(|item| item.purchase).collect();
+        items.sort_by_key(|a| std::cmp::Reverse((a.created_at, a.id)));
+
+        let has_more = items.len() > limit;
+        if has_more {
+            items.truncate(limit);
+        }
+
+        let next_cursor = if has_more {
+            items.last().map(|last| {
+                encode_store_purchase_cursor(guild_id, user_id, &last.created_at, &last.id)
+            })
+        } else {
+            None
+        };
+
+        StorePurchasesPage {
+            purchases: items,
+            next_cursor,
+            has_more,
+        }
+    }
+
     pub fn list_store_purchases(
         &self,
         guild_id: &str,
@@ -2980,8 +3078,12 @@ impl MemoryStore {
             .filter(|p| p.guild_id == guild_id && user_id.is_none_or(|uid| p.user_id == uid))
             .map(|p| p.clone())
             .collect();
-        list.sort_by_key(|a| std::cmp::Reverse(a.created_at));
+        list.sort_by_key(|a| std::cmp::Reverse((a.created_at, a.id)));
         list
+    }
+
+    pub fn insert_store_purchase_for_test(&self, purchase: StorePurchase) {
+        self.store_purchases.insert(purchase.id, purchase);
     }
 
     pub fn claim_store_role_delivery(&self, purchase_id: Uuid) -> anyhow::Result<bool> {

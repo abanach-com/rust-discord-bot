@@ -73,6 +73,44 @@ async fn get_economy_config(state: &AppState, guild_id: &str) -> GuildEconomyCon
     config
 }
 
+pub fn format_inventory(
+    actor_key: &str,
+    page: &crate::storage::StorePurchasesPage,
+    item_names: &std::collections::HashMap<Uuid, String>,
+) -> String {
+    if page.purchases.is_empty() {
+        return format!(
+            "🎒 **Ekwipunek <@{actor_key}>:**\nTwój ekwipunek na tym serwerze jest pusty. Odwiedź `/economy shop`!"
+        );
+    }
+
+    let mut lines = Vec::new();
+    lines.push(format!("🎒 **Ekwipunek <@{actor_key}>:**"));
+    for p in &page.purchases {
+        let name = item_names
+            .get(&p.item_id)
+            .cloned()
+            .unwrap_or_else(|| p.item_id.to_string());
+        let status_icon = match p.fulfillment_status.as_str() {
+            "completed" => "✅",
+            "pending" => "⏳",
+            "failed" => "❌",
+            _ => "ℹ️",
+        };
+        lines.push(format!(
+            "• {status_icon} **{name}** — Status: `{}` (Zapłacono: {} monet)",
+            p.fulfillment_status, p.price_paid
+        ));
+    }
+    if page.has_more {
+        lines.push(
+            "\n*(Wyświetlono 15 najnowszych zakupów. Pełną historię sprawdzisz w panelu WWW)*"
+                .to_string(),
+        );
+    }
+    lines.join("\n")
+}
+
 pub async fn execute(
     ctx: &Context,
     state: &AppState,
@@ -155,16 +193,10 @@ pub async fn execute(
         }
 
         EconomyOperation::Inventory => {
-            let purchases = state
+            let page = state
                 .storage
-                .list_store_purchases(&guild_key, Some(&actor_key))
+                .list_store_purchases_page(&guild_key, Some(&actor_key), 15, None)
                 .await?;
-            if purchases.is_empty() {
-                return Ok(Some(format!(
-                    "🎒 **Ekwipunek <@{actor_key}>:**\nTwój ekwipunek na tym serwerze jest pusty. Odwiedź `/economy shop`!"
-                )));
-            }
-
             let items = state
                 .storage
                 .list_store_items(&guild_key)
@@ -173,25 +205,7 @@ pub async fn execute(
             let item_names: std::collections::HashMap<Uuid, String> =
                 items.into_iter().map(|it| (it.id, it.name)).collect();
 
-            let mut lines = Vec::new();
-            lines.push(format!("🎒 **Ekwipunek <@{actor_key}>:**"));
-            for p in &purchases {
-                let name = item_names
-                    .get(&p.item_id)
-                    .cloned()
-                    .unwrap_or_else(|| p.item_id.to_string());
-                let status_icon = match p.fulfillment_status.as_str() {
-                    "completed" => "✅",
-                    "pending" => "⏳",
-                    "failed" => "❌",
-                    _ => "ℹ️",
-                };
-                lines.push(format!(
-                    "• {status_icon} **{name}** — Status: `{}` (Zapłacono: {} monet)",
-                    p.fulfillment_status, p.price_paid
-                ));
-            }
-            Ok(Some(lines.join("\n")))
+            Ok(Some(format_inventory(&actor_key, &page, &item_names)))
         }
 
         EconomyOperation::Buy { item } => {
@@ -608,5 +622,81 @@ pub async fn execute(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::{StorePurchase, StorePurchasesPage};
+
+    #[test]
+    fn test_format_inventory_bounded_display_and_footer_issue_387() {
+        let actor_key = "123456789";
+        let mut item_names = std::collections::HashMap::new();
+        let item_id = Uuid::new_v4();
+        item_names.insert(item_id, "Diamond Pickaxe".to_string());
+
+        // 1. Empty inventory
+        let empty_page = StorePurchasesPage {
+            purchases: vec![],
+            next_cursor: None,
+            has_more: false,
+        };
+        let empty_text = format_inventory(actor_key, &empty_page, &item_names);
+        assert!(empty_text.contains("Twój ekwipunek na tym serwerze jest pusty"));
+
+        // 2. 5 purchases (no has_more)
+        let now = Utc::now();
+        let purchases_5: Vec<StorePurchase> = (0..5)
+            .map(|i| StorePurchase {
+                id: Uuid::new_v4(),
+                guild_id: "g1".to_string(),
+                user_id: actor_key.to_string(),
+                item_id,
+                price_paid: 100 + i * 10,
+                role_id: None,
+                fulfillment_status: "completed".to_string(),
+                failure_reason: None,
+                fulfilled_at: Some(now),
+                lease_expires_at: None,
+                created_at: now,
+            })
+            .collect();
+        let page_5 = StorePurchasesPage {
+            purchases: purchases_5,
+            next_cursor: None,
+            has_more: false,
+        };
+        let text_5 = format_inventory(actor_key, &page_5, &item_names);
+        assert_eq!(text_5.matches("• ✅ **Diamond Pickaxe**").count(), 5);
+        assert!(!text_5.contains("Wyświetlono 15 najnowszych zakupów"));
+
+        // 3. 15 purchases with has_more: true
+        let purchases_15: Vec<StorePurchase> = (0..15)
+            .map(|i| StorePurchase {
+                id: Uuid::new_v4(),
+                guild_id: "g1".to_string(),
+                user_id: actor_key.to_string(),
+                item_id,
+                price_paid: 50,
+                role_id: None,
+                fulfillment_status: if i % 2 == 0 { "completed" } else { "pending" }.to_string(),
+                failure_reason: None,
+                fulfilled_at: Some(now),
+                lease_expires_at: None,
+                created_at: now,
+            })
+            .collect();
+        let page_15 = StorePurchasesPage {
+            purchases: purchases_15,
+            next_cursor: Some("dummy_cursor".to_string()),
+            has_more: true,
+        };
+        let text_15 = format_inventory(actor_key, &page_15, &item_names);
+        assert_eq!(text_15.matches("• ").count(), 15);
+        assert!(text_15.contains(
+            "*(Wyświetlono 15 najnowszych zakupów. Pełną historię sprawdzisz w panelu WWW)*"
+        ));
     }
 }

@@ -1691,3 +1691,364 @@ async fn test_store_role_fulfillment_rate_limiting_retry_after_and_transient_pen
         "Permanent Discord API error (status 404): ..."
     ));
 }
+
+#[tokio::test]
+async fn test_store_purchases_pagination_and_bounded_inventory_issue_387() {
+    let (state, _) = test_web_state().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test web");
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let guild_a = "888000000000000001";
+    let guild_b = "888000000000000002";
+    let admin_user_id = "111000000000000001";
+    let member_a_user_id = "222000000000000001";
+    let member_b_user_id = "222000000000000002";
+
+    // 1. Setup Admin session for Guild A
+    let admin_session_id = "sess_admin_pagi_387";
+    let admin_csrf = "csrf_admin_pagi_387";
+    state
+        .app
+        .sessions
+        .save_session(
+            admin_session_id,
+            DashboardUser {
+                id: admin_user_id.to_owned(),
+                username: "admin_user".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_a.to_owned(),
+                name: "Store Pagination Guild A".to_owned(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_owned(),
+            }],
+            admin_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+    let admin_cookie = format!("rusty_discord_bot_session={admin_session_id}");
+
+    // 2. Setup Member A session for Guild A
+    let member_a_session_id = "sess_member_a_pagi_387";
+    let member_a_csrf = "csrf_member_a_pagi_387";
+    state
+        .app
+        .sessions
+        .save_session(
+            member_a_session_id,
+            DashboardUser {
+                id: member_a_user_id.to_owned(),
+                username: "member_a".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_a.to_owned(),
+                name: "Store Pagination Guild A".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_owned(),
+            }],
+            member_a_csrf.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+    let member_a_cookie = format!("rusty_discord_bot_session={member_a_session_id}");
+
+    // 3. Create a store item in Guild A
+    let item = state
+        .app
+        .storage
+        .create_store_item(
+            guild_a,
+            "VIP Pass",
+            "Special member access",
+            100,
+            Some("999000000000000001"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // 4. Seed 55 purchases for member A with pairs of duplicate timestamps to test tie-breaker (id DESC)
+    let base_time = Utc::now() - Duration::days(10);
+    let mut expected_member_a_ids = std::collections::HashSet::new();
+
+    for i in 0..55 {
+        let dt = base_time + Duration::seconds(((i / 2) * 2) as i64);
+        let purchase_id = uuid::Uuid::new_v4();
+        let purchase = rusty_discord_bot::storage::StorePurchase {
+            id: purchase_id,
+            guild_id: guild_a.to_string(),
+            user_id: member_a_user_id.to_string(),
+            item_id: item.id,
+            price_paid: 100,
+            role_id: Some("999000000000000001".to_string()),
+            fulfillment_status: "completed".to_string(),
+            failure_reason: None,
+            fulfilled_at: Some(dt),
+            lease_expires_at: None,
+            created_at: dt,
+        };
+        expected_member_a_ids.insert(purchase_id.to_string());
+        state.app.storage.insert_store_purchase_for_test(purchase);
+    }
+
+    // Also seed a purchase for member B in Guild A and a purchase in Guild B to verify isolation
+    let purchase_b = rusty_discord_bot::storage::StorePurchase {
+        id: uuid::Uuid::new_v4(),
+        guild_id: guild_a.to_string(),
+        user_id: member_b_user_id.to_string(),
+        item_id: item.id,
+        price_paid: 100,
+        role_id: None,
+        fulfillment_status: "completed".to_string(),
+        failure_reason: None,
+        fulfilled_at: Some(base_time),
+        lease_expires_at: None,
+        created_at: base_time,
+    };
+    state.app.storage.insert_store_purchase_for_test(purchase_b);
+
+    let foreign_guild_purchase = rusty_discord_bot::storage::StorePurchase {
+        id: uuid::Uuid::new_v4(),
+        guild_id: guild_b.to_string(),
+        user_id: member_a_user_id.to_string(),
+        item_id: item.id,
+        price_paid: 100,
+        role_id: None,
+        fulfillment_status: "completed".to_string(),
+        failure_reason: None,
+        fulfilled_at: Some(base_time),
+        lease_expires_at: None,
+        created_at: base_time,
+    };
+    state
+        .app
+        .storage
+        .insert_store_purchase_for_test(foreign_guild_purchase);
+
+    // ========================================================
+    // 5. Test Keyset Pagination Traversal (Page 1: 25, Page 2: 25, Page 3: 5)
+    // ========================================================
+    let mut collected_ids = std::collections::HashSet::new();
+
+    // Page 1
+    let resp1 = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/store/purchases?limit=25"
+        ))
+        .header(COOKIE, &member_a_cookie)
+        .header("x-csrf-token", member_a_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp1.status(), reqwest::StatusCode::OK);
+    let body1: serde_json::Value = resp1.json().await.unwrap();
+    let page1_purchases = body1["purchases"].as_array().unwrap();
+    assert_eq!(page1_purchases.len(), 25);
+    assert_eq!(body1["has_more"], true);
+    let cursor1 = body1["next_cursor"].as_str().expect("cursor1 must exist");
+
+    for p in page1_purchases {
+        let pid = p["id"].as_str().unwrap().to_string();
+        assert!(collected_ids.insert(pid), "duplicate purchase on page 1");
+    }
+
+    // Page 2
+    let resp2 = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/store/purchases?limit=25&cursor={cursor1}"
+        ))
+        .header(COOKIE, &member_a_cookie)
+        .header("x-csrf-token", member_a_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), reqwest::StatusCode::OK);
+    let body2: serde_json::Value = resp2.json().await.unwrap();
+    let page2_purchases = body2["purchases"].as_array().unwrap();
+    assert_eq!(page2_purchases.len(), 25);
+    assert_eq!(body2["has_more"], true);
+    let cursor2 = body2["next_cursor"].as_str().expect("cursor2 must exist");
+
+    for p in page2_purchases {
+        let pid = p["id"].as_str().unwrap().to_string();
+        assert!(collected_ids.insert(pid), "duplicate purchase on page 2");
+    }
+
+    // Page 3
+    let resp3 = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/store/purchases?limit=25&cursor={cursor2}"
+        ))
+        .header(COOKIE, &member_a_cookie)
+        .header("x-csrf-token", member_a_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp3.status(), reqwest::StatusCode::OK);
+    let body3: serde_json::Value = resp3.json().await.unwrap();
+    let page3_purchases = body3["purchases"].as_array().unwrap();
+    assert_eq!(page3_purchases.len(), 5);
+    assert_eq!(body3["has_more"], false);
+    assert!(body3["next_cursor"].is_null());
+
+    for p in page3_purchases {
+        let pid = p["id"].as_str().unwrap().to_string();
+        assert!(collected_ids.insert(pid), "duplicate purchase on page 3");
+    }
+
+    assert_eq!(
+        collected_ids, expected_member_a_ids,
+        "All 55 purchases must be returned exactly once"
+    );
+
+    // ========================================================
+    // 6. Test Security & Scoping
+    // ========================================================
+    // A. Member A attempting to query Member B via ?user_id is ignored/overridden to Member A
+    let member_spoof_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/store/purchases?user_id={member_b_user_id}"
+        ))
+        .header(COOKIE, &member_a_cookie)
+        .header("x-csrf-token", member_a_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(member_spoof_resp.status(), reqwest::StatusCode::OK);
+    let spoof_body: serde_json::Value = member_spoof_resp.json().await.unwrap();
+    for p in spoof_body["purchases"].as_array().unwrap() {
+        assert_eq!(
+            p["user_id"], member_a_user_id,
+            "Member query cannot see other users"
+        );
+    }
+
+    // B. Member A attempting to use a cursor forged for Member B -> 400 Bad Request
+    let forged_user_cursor = rusty_discord_bot::storage::encode_store_purchase_cursor(
+        guild_a,
+        Some(member_b_user_id),
+        &Utc::now(),
+        &uuid::Uuid::new_v4(),
+    );
+    let forged_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/store/purchases?cursor={forged_user_cursor}"
+        ))
+        .header(COOKIE, &member_a_cookie)
+        .header("x-csrf-token", member_a_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forged_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // C. Cursor forged for another guild -> 400 Bad Request
+    let foreign_guild_cursor = rusty_discord_bot::storage::encode_store_purchase_cursor(
+        guild_b,
+        Some(member_a_user_id),
+        &Utc::now(),
+        &uuid::Uuid::new_v4(),
+    );
+    let foreign_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/store/purchases?cursor={foreign_guild_cursor}"
+        ))
+        .header(COOKIE, &member_a_cookie)
+        .header("x-csrf-token", member_a_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(foreign_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // D. Member attempting to use unbounded admin cursor -> 400 Bad Request
+    let unbounded_cursor = rusty_discord_bot::storage::encode_store_purchase_cursor(
+        guild_a,
+        None,
+        &Utc::now(),
+        &uuid::Uuid::new_v4(),
+    );
+    let unbounded_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/store/purchases?cursor={unbounded_cursor}"
+        ))
+        .header(COOKIE, &member_a_cookie)
+        .header("x-csrf-token", member_a_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unbounded_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // E. Invalid limit (< 1 or > 100) -> 400 Bad Request
+    let zero_limit_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/store/purchases?limit=0"
+        ))
+        .header(COOKIE, &member_a_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(zero_limit_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let huge_limit_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/store/purchases?limit=500"
+        ))
+        .header(COOKIE, &member_a_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(huge_limit_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // F. Malformed cursor -> 400 Bad Request
+    let malformed_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/store/purchases?cursor=not-a-valid-cursor-gibberish"
+        ))
+        .header(COOKIE, &member_a_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(malformed_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // G. Admin accessing Guild A with limit returns both member A and member B purchases
+    let admin_list_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/store/purchases?limit=100"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("x-csrf-token", admin_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin_list_resp.status(), reqwest::StatusCode::OK);
+    let admin_body: serde_json::Value = admin_list_resp.json().await.unwrap();
+    let admin_purchases = admin_body["purchases"].as_array().unwrap();
+    assert_eq!(
+        admin_purchases.len(),
+        56,
+        "55 from member A + 1 from member B"
+    );
+}
