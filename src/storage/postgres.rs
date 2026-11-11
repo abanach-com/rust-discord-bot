@@ -10582,6 +10582,7 @@ impl PostgresStore {
     pub async fn upsert_policy_rule(
         &self,
         mut rule: CommandPolicyRule,
+        actor_id: Option<&str>,
     ) -> anyhow::Result<CommandPolicyRule> {
         rule.normalize();
         validate_snowflake("guild_id", &rule.guild_id)?;
@@ -10655,11 +10656,38 @@ impl PostgresStore {
         .execute(&mut *tx)
         .await?;
 
+        let actor = actor_id.unwrap_or("system");
+        sqlx::query(
+            r#"
+            INSERT INTO audit_events (guild_id, actor_id, module_id, event, data)
+            VALUES ($1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(&rule.guild_id)
+        .bind(actor)
+        .bind("command_policies")
+        .bind("rule_upserted")
+        .bind(serde_json::json!({
+            "rule_id": saved.id,
+            "subject_kind": saved.subject_kind,
+            "subject_id": saved.subject_id,
+            "resource_kind": saved.resource_kind,
+            "effect": saved.effect,
+            "priority": saved.priority,
+        }))
+        .execute(&mut *tx)
+        .await?;
+
         tx.commit().await?;
         Ok(saved)
     }
 
-    pub async fn delete_policy_rule(&self, guild_id: &str, rule_id: Uuid) -> anyhow::Result<bool> {
+    pub async fn delete_policy_rule(
+        &self,
+        guild_id: &str,
+        rule_id: Uuid,
+        actor_id: Option<&str>,
+    ) -> anyhow::Result<bool> {
         validate_snowflake("guild_id", guild_id)?;
         let mut tx = self.pool.begin().await?;
         let res = sqlx::query("DELETE FROM command_policy_rules WHERE guild_id = $1 AND id = $2")
@@ -10681,12 +10709,31 @@ impl PostgresStore {
             .bind(guild_id)
             .execute(&mut *tx)
             .await?;
+
+            let actor = actor_id.unwrap_or("system");
+            sqlx::query(
+                r#"
+                INSERT INTO audit_events (guild_id, actor_id, module_id, event, data)
+                VALUES ($1, $2, $3, $4, $5)
+                "#,
+            )
+            .bind(guild_id)
+            .bind(actor)
+            .bind("command_policies")
+            .bind("rule_deleted")
+            .bind(serde_json::json!({ "rule_id": rule_id }))
+            .execute(&mut *tx)
+            .await?;
         }
         tx.commit().await?;
         Ok(deleted)
     }
 
-    pub async fn reset_policy_rules(&self, guild_id: &str) -> anyhow::Result<usize> {
+    pub async fn reset_policy_rules(
+        &self,
+        guild_id: &str,
+        actor_id: Option<&str>,
+    ) -> anyhow::Result<usize> {
         validate_snowflake("guild_id", guild_id)?;
         let mut tx = self.pool.begin().await?;
         let res = sqlx::query("DELETE FROM command_policy_rules WHERE guild_id = $1")
@@ -10707,6 +10754,21 @@ impl PostgresStore {
         .execute(&mut *tx)
         .await?;
 
+        let actor = actor_id.unwrap_or("system");
+        sqlx::query(
+            r#"
+            INSERT INTO audit_events (guild_id, actor_id, module_id, event, data)
+            VALUES ($1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(guild_id)
+        .bind(actor)
+        .bind("command_policies")
+        .bind("rules_reset")
+        .bind(serde_json::json!({ "removed_count": count }))
+        .execute(&mut *tx)
+        .await?;
+
         tx.commit().await?;
         Ok(count)
     }
@@ -10716,6 +10778,7 @@ impl PostgresStore {
         guild_id: &str,
         expected_revision: Option<i64>,
         mut rules: Vec<CommandPolicyRule>,
+        actor_id: Option<&str>,
     ) -> anyhow::Result<Vec<CommandPolicyRule>> {
         validate_snowflake("guild_id", guild_id)?;
         for rule in &mut rules {
@@ -10812,6 +10875,22 @@ impl PostgresStore {
             "#,
         )
         .bind(guild_id)
+        .execute(&mut *tx)
+        .await?;
+
+        // 7. Insert audit event
+        let actor = actor_id.unwrap_or("system");
+        sqlx::query(
+            r#"
+            INSERT INTO audit_events (guild_id, actor_id, module_id, event, data)
+            VALUES ($1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(guild_id)
+        .bind(actor)
+        .bind("command_policies")
+        .bind("rules_imported")
+        .bind(serde_json::json!({ "imported_count": inserted.len() }))
         .execute(&mut *tx)
         .await?;
 

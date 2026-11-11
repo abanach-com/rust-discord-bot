@@ -19484,3 +19484,300 @@ async fn test_workflow_builder_crud_quota_and_pagination_issue_395() {
     // Reset quota override
     web_state.app.storage.set_workflows_quota_for_test(None);
 }
+
+#[tokio::test]
+async fn test_command_policy_audit_atomic_and_rollback_issue_399() {
+    let (web_state, _perms) = test_web_state().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let app = build_router(web_state.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve axum");
+    });
+
+    let admin_id = "555000000000000001";
+    let guild_id = "777000000000000001";
+    let user_id = "666000000000000001";
+    let csrf_token = "valid_csrf_token_policies_399";
+    let admin_session_id = "test_policies_admin_session_399";
+
+    web_state
+        .app
+        .sessions
+        .save_session(
+            admin_session_id,
+            DashboardUser {
+                id: admin_id.to_owned(),
+                username: "AdminUser".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_owned(),
+                name: "Test Guild".to_owned(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_owned(),
+            }],
+            csrf_token.to_owned(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let session_cookie = format!("rusty_discord_bot_session={admin_session_id}");
+
+    // 1. Audit failure injection on upsert -> HTTP 500, no rules created, revision unchanged
+    web_state.app.storage.inject_audit_failure(true);
+    let fail_upsert = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/policies"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "subject_kind": "user",
+            "subject_id": user_id,
+            "resource_kind": "command",
+            "module_id": "fun",
+            "command_name": "meme",
+            "effect": "deny",
+            "priority": 5
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        fail_upsert.status(),
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR
+    );
+
+    // List rules: must be empty
+    let list_after_fail = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/policies"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_after_fail.status(), reqwest::StatusCode::OK);
+    let list_json: serde_json::Value = list_after_fail.json().await.unwrap();
+    assert_eq!(list_json["rules"].as_array().unwrap().len(), 0);
+    assert_eq!(list_json["revision"].as_i64().unwrap(), 1);
+
+    // 2. Successful upsert when audit failure is false -> HTTP 200, rule saved, audit logged with actor
+    web_state.app.storage.inject_audit_failure(false);
+    let ok_upsert = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/policies"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "subject_kind": "user",
+            "subject_id": user_id,
+            "resource_kind": "command",
+            "module_id": "fun",
+            "command_name": "meme",
+            "effect": "deny",
+            "priority": 5
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok_upsert.status(), reqwest::StatusCode::OK);
+    let ok_upsert_json: serde_json::Value = ok_upsert.json().await.unwrap();
+    let rule_id = ok_upsert_json["rule"]["id"].as_str().unwrap().to_string();
+
+    let audits = web_state
+        .app
+        .storage
+        .list_audit_events(guild_id, 10)
+        .await
+        .unwrap();
+    assert_eq!(audits.len(), 1);
+    assert_eq!(audits[0].module_id, "command_policies");
+    assert_eq!(audits[0].event, "rule_upserted");
+    assert_eq!(audits[0].actor_id.as_deref(), Some(admin_id));
+    assert_eq!(audits[0].data["rule_id"], rule_id);
+
+    // 3. Audit failure injection on delete -> HTTP 500, rule not deleted
+    web_state.app.storage.inject_audit_failure(true);
+    let fail_delete = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/policies/{rule_id}"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        fail_delete.status(),
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR
+    );
+
+    let list_after_fail_del = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/policies"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    let list_del_json: serde_json::Value = list_after_fail_del.json().await.unwrap();
+    assert_eq!(list_del_json["rules"].as_array().unwrap().len(), 1);
+
+    // 4. Successful delete -> HTTP 200, rule deleted, audit logged
+    web_state.app.storage.inject_audit_failure(false);
+    let ok_delete = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/policies/{rule_id}"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok_delete.status(), reqwest::StatusCode::OK);
+
+    let audits_after_del = web_state
+        .app
+        .storage
+        .list_audit_events(guild_id, 10)
+        .await
+        .unwrap();
+    assert_eq!(audits_after_del.len(), 2);
+    assert_eq!(audits_after_del[0].event, "rule_deleted");
+    assert_eq!(audits_after_del[0].actor_id.as_deref(), Some(admin_id));
+    assert_eq!(audits_after_del[0].data["rule_id"], rule_id);
+
+    // 5. Re-create rule for reset test
+    let _ = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/policies"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "subject_kind": "user",
+            "subject_id": user_id,
+            "resource_kind": "module",
+            "module_id": "fun",
+            "effect": "allow"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // 6. Audit failure injection on reset -> HTTP 500, rules preserved
+    web_state.app.storage.inject_audit_failure(true);
+    let fail_reset = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/policies/reset"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({ "confirm": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        fail_reset.status(),
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR
+    );
+
+    let list_after_fail_reset = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/policies"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    let list_reset_json: serde_json::Value = list_after_fail_reset.json().await.unwrap();
+    assert_eq!(list_reset_json["rules"].as_array().unwrap().len(), 1);
+
+    // 7. Successful reset -> HTTP 200, rules deleted, audit logged
+    web_state.app.storage.inject_audit_failure(false);
+    let ok_reset = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/policies/reset"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({ "confirm": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok_reset.status(), reqwest::StatusCode::OK);
+    let ok_reset_json: serde_json::Value = ok_reset.json().await.unwrap();
+    let current_rev = ok_reset_json["revision"].as_i64().unwrap();
+
+    // 8. Audit failure injection on import/replace -> HTTP 500, no import
+    let import_rule_id = uuid::Uuid::new_v4();
+    let now_str = Utc::now().to_rfc3339();
+    let import_rules = vec![serde_json::json!({
+        "id": import_rule_id.to_string(),
+        "guild_id": guild_id,
+        "subject_kind": "user",
+        "subject_id": user_id,
+        "resource_kind": "command",
+        "module_id": "music",
+        "command_name": "play",
+        "action_key": null,
+        "effect": "deny",
+        "priority": 10,
+        "enabled": true,
+        "version": 1,
+        "created_by": admin_id,
+        "created_at": now_str,
+        "updated_at": now_str,
+    })];
+
+    web_state.app.storage.inject_audit_failure(true);
+    let fail_import = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/policies/import"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "expected_revision": current_rev,
+            "rules": import_rules
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        fail_import.status(),
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR
+    );
+
+    let list_after_fail_import = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/policies"))
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    let list_import_json: serde_json::Value = list_after_fail_import.json().await.unwrap();
+    assert_eq!(list_import_json["rules"].as_array().unwrap().len(), 0);
+
+    // 9. Successful import -> HTTP 200, rule imported, audit logged
+    web_state.app.storage.inject_audit_failure(false);
+    let ok_import = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/policies/import"))
+        .header(COOKIE, &session_cookie)
+        .header("x-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "expected_revision": current_rev,
+            "rules": import_rules
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok_import.status(), reqwest::StatusCode::OK);
+
+    let audits_after_import = web_state
+        .app
+        .storage
+        .list_audit_events(guild_id, 10)
+        .await
+        .unwrap();
+    assert_eq!(audits_after_import[0].event, "rules_imported");
+    assert_eq!(audits_after_import[0].actor_id.as_deref(), Some(admin_id));
+    assert_eq!(audits_after_import[0].data["imported_count"], 1);
+}

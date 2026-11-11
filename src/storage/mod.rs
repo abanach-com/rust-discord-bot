@@ -4381,24 +4381,34 @@ impl Storage {
     pub async fn upsert_policy_rule(
         &self,
         rule: CommandPolicyRule,
+        actor_id: Option<&str>,
     ) -> anyhow::Result<CommandPolicyRule> {
         match self {
-            Self::Memory(store) => store.upsert_policy_rule(rule),
-            Self::Postgres(store) => store.upsert_policy_rule(rule).await,
+            Self::Memory(store) => store.upsert_policy_rule(rule, actor_id),
+            Self::Postgres(store) => store.upsert_policy_rule(rule, actor_id).await,
         }
     }
 
-    pub async fn delete_policy_rule(&self, guild_id: &str, rule_id: Uuid) -> anyhow::Result<bool> {
+    pub async fn delete_policy_rule(
+        &self,
+        guild_id: &str,
+        rule_id: Uuid,
+        actor_id: Option<&str>,
+    ) -> anyhow::Result<bool> {
         match self {
-            Self::Memory(store) => store.delete_policy_rule(guild_id, rule_id),
-            Self::Postgres(store) => store.delete_policy_rule(guild_id, rule_id).await,
+            Self::Memory(store) => store.delete_policy_rule(guild_id, rule_id, actor_id),
+            Self::Postgres(store) => store.delete_policy_rule(guild_id, rule_id, actor_id).await,
         }
     }
 
-    pub async fn reset_policy_rules(&self, guild_id: &str) -> anyhow::Result<usize> {
+    pub async fn reset_policy_rules(
+        &self,
+        guild_id: &str,
+        actor_id: Option<&str>,
+    ) -> anyhow::Result<usize> {
         match self {
-            Self::Memory(store) => store.reset_policy_rules(guild_id),
-            Self::Postgres(store) => store.reset_policy_rules(guild_id).await,
+            Self::Memory(store) => store.reset_policy_rules(guild_id, actor_id),
+            Self::Postgres(store) => store.reset_policy_rules(guild_id, actor_id).await,
         }
     }
 
@@ -4407,12 +4417,15 @@ impl Storage {
         guild_id: &str,
         expected_revision: Option<i64>,
         rules: Vec<CommandPolicyRule>,
+        actor_id: Option<&str>,
     ) -> anyhow::Result<Vec<CommandPolicyRule>> {
         match self {
-            Self::Memory(store) => store.replace_policy_rules(guild_id, expected_revision, rules),
+            Self::Memory(store) => {
+                store.replace_policy_rules(guild_id, expected_revision, rules, actor_id)
+            }
             Self::Postgres(store) => {
                 store
-                    .replace_policy_rules(guild_id, expected_revision, rules)
+                    .replace_policy_rules(guild_id, expected_revision, rules, actor_id)
                     .await
             }
         }
@@ -8829,13 +8842,13 @@ mod tests {
         .unwrap();
 
         // Upsert rule 1
-        let saved1 = store.upsert_policy_rule(rule1.clone()).await.unwrap();
+        let saved1 = store.upsert_policy_rule(rule1.clone(), None).await.unwrap();
         assert_eq!(saved1.id, rule1.id);
         let rev = store.get_policy_revision(guild_1).await.unwrap();
         assert!(rev >= 2);
 
         // Upsert rule 2
-        store.upsert_policy_rule(rule2.clone()).await.unwrap();
+        store.upsert_policy_rule(rule2.clone(), None).await.unwrap();
 
         // List rules: ordered by priority DESC (rule1 with priority 10 before rule2 with priority 0)
         let rules_g1 = store.list_policy_rules(guild_1).await.unwrap();
@@ -8848,14 +8861,17 @@ mod tests {
         assert!(rules_g2.is_empty());
 
         // Delete rule 1
-        let deleted = store.delete_policy_rule(guild_1, rule1.id).await.unwrap();
+        let deleted = store
+            .delete_policy_rule(guild_1, rule1.id, None)
+            .await
+            .unwrap();
         assert!(deleted);
         let rules_after_del = store.list_policy_rules(guild_1).await.unwrap();
         assert_eq!(rules_after_del.len(), 1);
         assert_eq!(rules_after_del[0].id, rule2.id);
 
         // Reset policies
-        let reset_count = store.reset_policy_rules(guild_1).await.unwrap();
+        let reset_count = store.reset_policy_rules(guild_1, None).await.unwrap();
         assert_eq!(reset_count, 1);
         let rules_after_reset = store.list_policy_rules(guild_1).await.unwrap();
         assert!(rules_after_reset.is_empty());
@@ -8881,7 +8897,10 @@ mod tests {
         )
         .unwrap();
 
-        let saved_a = store.upsert_policy_rule(rule_a.clone()).await.unwrap();
+        let saved_a = store
+            .upsert_policy_rule(rule_a.clone(), None)
+            .await
+            .unwrap();
         let rev_a_before = store.get_policy_revision(guild_a).await.unwrap();
         let rev_b_before = store.get_policy_revision(guild_b).await.unwrap();
 
@@ -8891,7 +8910,7 @@ mod tests {
         malicious_b.created_by = "admin_b".to_string();
         malicious_b.effect = "allow".to_string();
 
-        let res = store.upsert_policy_rule(malicious_b).await;
+        let res = store.upsert_policy_rule(malicious_b, None).await;
         assert!(res.is_err());
         assert!(
             res.unwrap_err()
@@ -8937,7 +8956,7 @@ mod tests {
         .unwrap();
 
         store
-            .upsert_policy_rule(initial_rule.clone())
+            .upsert_policy_rule(initial_rule.clone(), None)
             .await
             .unwrap();
         let rev_before = store.get_policy_revision(guild_1).await.unwrap();
@@ -8948,7 +8967,7 @@ mod tests {
         invalid_rule.effect = "invalid_effect".to_string();
 
         let res = store
-            .replace_policy_rules(guild_1, Some(rev_before), vec![invalid_rule])
+            .replace_policy_rules(guild_1, Some(rev_before), vec![invalid_rule], None)
             .await;
         assert!(res.is_err());
         let rules = store.list_policy_rules(guild_1).await.unwrap();
@@ -8968,7 +8987,12 @@ mod tests {
         .unwrap();
 
         let res_stale = store
-            .replace_policy_rules(guild_1, Some(rev_before + 99), vec![valid_new_rule.clone()])
+            .replace_policy_rules(
+                guild_1,
+                Some(rev_before + 99),
+                vec![valid_new_rule.clone()],
+                None,
+            )
             .await;
         assert!(res_stale.is_err());
         assert!(
@@ -8984,7 +9008,12 @@ mod tests {
 
         // 3. Successful atomic replace with correct expected_revision
         let replaced = store
-            .replace_policy_rules(guild_1, Some(rev_before), vec![valid_new_rule.clone()])
+            .replace_policy_rules(
+                guild_1,
+                Some(rev_before),
+                vec![valid_new_rule.clone()],
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(replaced.len(), 1);
@@ -8997,6 +9026,202 @@ mod tests {
             store.get_policy_revision(guild_1).await.unwrap(),
             rev_before + 1
         );
+    }
+
+    #[tokio::test]
+    async fn test_command_policy_atomic_audit_and_rollback_issue_399() {
+        let store = Storage::Memory(MemoryStore::default());
+        let guild_1 = "100000000000000001";
+        let guild_2 = "200000000000000002";
+        let user_id = "300000000000000003";
+
+        let rule1 = CommandPolicyRule::new_user_rule(
+            guild_1.to_string(),
+            user_id.to_string(),
+            crate::policy::PolicyResource::Command {
+                module_id: "music".to_string(),
+                command_name: "play".to_string(),
+            },
+            crate::policy::PolicyEffect::Deny,
+            10,
+            "admin_1".to_string(),
+        )
+        .unwrap();
+
+        // 1. Audit failure injection during upsert -> fails closed, no rule saved, revision not bumped, no audit
+        store.inject_audit_failure(true);
+        let rev_initial = store.get_policy_revision(guild_1).await.unwrap();
+        let upsert_err = store
+            .upsert_policy_rule(rule1.clone(), Some("actor_user"))
+            .await;
+        assert!(upsert_err.is_err());
+        assert_eq!(
+            store.get_policy_revision(guild_1).await.unwrap(),
+            rev_initial
+        );
+        assert!(store.list_policy_rules(guild_1).await.unwrap().is_empty());
+        assert!(
+            store
+                .list_audit_events(guild_1, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // 2. Successful upsert when audit failure is disabled -> exactly 1 audit event
+        store.inject_audit_failure(false);
+        let saved1 = store
+            .upsert_policy_rule(rule1.clone(), Some("actor_user"))
+            .await
+            .unwrap();
+        assert_eq!(saved1.id, rule1.id);
+        let rev_after_upsert = store.get_policy_revision(guild_1).await.unwrap();
+        assert!(rev_after_upsert > rev_initial);
+
+        let audits = store.list_audit_events(guild_1, 10).await.unwrap();
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].module_id, "command_policies");
+        assert_eq!(audits[0].event, "rule_upserted");
+        assert_eq!(audits[0].actor_id.as_deref(), Some("actor_user"));
+        assert_eq!(audits[0].data["rule_id"], saved1.id.to_string());
+        assert_eq!(audits[0].data["effect"], "deny");
+
+        // Isolation: guild_2 has no audit events
+        assert!(
+            store
+                .list_audit_events(guild_2, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // 3. Delete non-existent rule -> returns Ok(false), no revision bump, no audit emitted
+        let del_non_existent = store
+            .delete_policy_rule(guild_1, Uuid::new_v4(), Some("actor_user"))
+            .await
+            .unwrap();
+        assert!(!del_non_existent);
+        assert_eq!(
+            store.get_policy_revision(guild_1).await.unwrap(),
+            rev_after_upsert
+        );
+        assert_eq!(store.list_audit_events(guild_1, 10).await.unwrap().len(), 1);
+
+        // 4. Audit failure injection during delete -> fails closed, rule remains, revision not bumped
+        store.inject_audit_failure(true);
+        let del_err = store
+            .delete_policy_rule(guild_1, rule1.id, Some("actor_user"))
+            .await;
+        assert!(del_err.is_err());
+        assert_eq!(
+            store.get_policy_revision(guild_1).await.unwrap(),
+            rev_after_upsert
+        );
+        let rules_intact = store.list_policy_rules(guild_1).await.unwrap();
+        assert_eq!(rules_intact.len(), 1);
+        assert_eq!(rules_intact[0].id, rule1.id);
+
+        // 5. Successful delete -> exactly 2 audit events total (rule_upserted, rule_deleted)
+        store.inject_audit_failure(false);
+        let del_ok = store
+            .delete_policy_rule(guild_1, rule1.id, Some("actor_user"))
+            .await
+            .unwrap();
+        assert!(del_ok);
+        let rev_after_del = store.get_policy_revision(guild_1).await.unwrap();
+        assert!(rev_after_del > rev_after_upsert);
+        assert!(store.list_policy_rules(guild_1).await.unwrap().is_empty());
+
+        let audits_after_del = store.list_audit_events(guild_1, 10).await.unwrap();
+        assert_eq!(audits_after_del.len(), 2);
+        assert_eq!(audits_after_del[0].event, "rule_deleted");
+        assert_eq!(audits_after_del[0].actor_id.as_deref(), Some("actor_user"));
+        assert_eq!(audits_after_del[0].data["rule_id"], rule1.id.to_string());
+
+        // Re-insert rule1 for reset testing
+        let _ = store
+            .upsert_policy_rule(rule1.clone(), Some("actor_user"))
+            .await
+            .unwrap();
+        let rev_before_reset = store.get_policy_revision(guild_1).await.unwrap();
+
+        // 6. Audit failure injection during reset -> fails closed, rules remain, revision unchanged
+        store.inject_audit_failure(true);
+        let reset_err = store.reset_policy_rules(guild_1, Some("actor_user")).await;
+        assert!(reset_err.is_err());
+        assert_eq!(
+            store.get_policy_revision(guild_1).await.unwrap(),
+            rev_before_reset
+        );
+        assert_eq!(store.list_policy_rules(guild_1).await.unwrap().len(), 1);
+
+        // 7. Successful reset -> revision bumped, rules cleared, audit emitted
+        store.inject_audit_failure(false);
+        let reset_ok = store
+            .reset_policy_rules(guild_1, Some("actor_user"))
+            .await
+            .unwrap();
+        assert_eq!(reset_ok, 1);
+        let rev_after_reset = store.get_policy_revision(guild_1).await.unwrap();
+        assert!(rev_after_reset > rev_before_reset);
+        assert!(store.list_policy_rules(guild_1).await.unwrap().is_empty());
+
+        let audits_after_reset = store.list_audit_events(guild_1, 10).await.unwrap();
+        assert_eq!(audits_after_reset[0].event, "rules_reset");
+        assert_eq!(audits_after_reset[0].data["removed_count"], 1);
+
+        // 8. Audit failure injection during replace -> fails closed, revision unchanged, rules unchanged
+        let rule2 = CommandPolicyRule::new_guild_rule(
+            guild_1.to_string(),
+            crate::policy::PolicyResource::Module {
+                module_id: "fun".to_string(),
+            },
+            crate::policy::PolicyEffect::Allow,
+            0,
+            "admin".to_string(),
+        )
+        .unwrap();
+
+        store.inject_audit_failure(true);
+        let replace_err = store
+            .replace_policy_rules(
+                guild_1,
+                Some(rev_after_reset),
+                vec![rule2.clone()],
+                Some("importer"),
+            )
+            .await;
+        assert!(replace_err.is_err());
+        assert_eq!(
+            store.get_policy_revision(guild_1).await.unwrap(),
+            rev_after_reset
+        );
+        assert!(store.list_policy_rules(guild_1).await.unwrap().is_empty());
+
+        // 9. Successful replace -> revision bumped, new rules inserted, audit emitted
+        store.inject_audit_failure(false);
+        let replaced = store
+            .replace_policy_rules(
+                guild_1,
+                Some(rev_after_reset),
+                vec![rule2.clone()],
+                Some("importer"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replaced.len(), 1);
+        assert_eq!(replaced[0].id, rule2.id);
+        let rev_after_replace = store.get_policy_revision(guild_1).await.unwrap();
+        assert!(rev_after_replace > rev_after_reset);
+
+        let final_rules = store.list_policy_rules(guild_1).await.unwrap();
+        assert_eq!(final_rules.len(), 1);
+        assert_eq!(final_rules[0].id, rule2.id);
+
+        let audits_final = store.list_audit_events(guild_1, 10).await.unwrap();
+        assert_eq!(audits_final[0].event, "rules_imported");
+        assert_eq!(audits_final[0].actor_id.as_deref(), Some("importer"));
+        assert_eq!(audits_final[0].data["imported_count"], 1);
     }
 
     #[tokio::test]

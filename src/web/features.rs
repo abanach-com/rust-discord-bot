@@ -4590,37 +4590,23 @@ pub async fn upsert_policy_rule(
     let saved = state
         .app
         .storage
-        .upsert_policy_rule(rule)
+        .upsert_policy_rule(rule, Some(&session.user.id))
         .await
         .map_err(|e| {
             let msg = e.to_string();
             if msg.contains("belongs to another guild") {
                 ApiError::conflict("Rule ID belongs to another guild")
+            } else if msg.contains("invalid")
+                || msg.contains("must be")
+                || msg.contains("cannot be")
+            {
+                ApiError::bad_request(msg)
             } else {
                 ApiError::internal(msg)
             }
         })?;
 
     state.app.policy_engine.invalidate(&guild_id);
-
-    let _ = state
-        .app
-        .storage
-        .record_audit(
-            Some(&guild_id),
-            Some(&session.user.id),
-            "command_policies",
-            "rule_upserted",
-            json!({
-                "rule_id": saved.id,
-                "subject_kind": saved.subject_kind,
-                "subject_id": saved.subject_id,
-                "resource_kind": saved.resource_kind,
-                "effect": saved.effect,
-                "priority": saved.priority,
-            }),
-        )
-        .await;
 
     let new_revision = state
         .app
@@ -4648,23 +4634,12 @@ pub async fn delete_policy_rule(
     let deleted = state
         .app
         .storage
-        .delete_policy_rule(&guild_id, rule_id)
+        .delete_policy_rule(&guild_id, rule_id, Some(&session.user.id))
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     if deleted {
         state.app.policy_engine.invalidate(&guild_id);
-        let _ = state
-            .app
-            .storage
-            .record_audit(
-                Some(&guild_id),
-                Some(&session.user.id),
-                "command_policies",
-                "rule_deleted",
-                json!({ "rule_id": rule_id }),
-            )
-            .await;
     }
 
     let revision = state
@@ -4701,23 +4676,11 @@ pub async fn reset_policy_rules(
     let removed = state
         .app
         .storage
-        .reset_policy_rules(&guild_id)
+        .reset_policy_rules(&guild_id, Some(&session.user.id))
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     state.app.policy_engine.invalidate(&guild_id);
-
-    let _ = state
-        .app
-        .storage
-        .record_audit(
-            Some(&guild_id),
-            Some(&session.user.id),
-            "command_policies",
-            "rules_reset",
-            json!({ "removed_count": removed }),
-        )
-        .await;
 
     let revision = state
         .app
@@ -4902,30 +4865,25 @@ pub async fn import_policies(
     let imported = state
         .app
         .storage
-        .replace_policy_rules(&guild_id, payload.expected_revision, rules)
+        .replace_policy_rules(
+            &guild_id,
+            payload.expected_revision,
+            rules,
+            Some(&session.user.id),
+        )
         .await
         .map_err(|e| {
             let msg = e.to_string();
             if msg.to_lowercase().contains("revision conflict") {
                 ApiError::conflict(msg)
-            } else {
+            } else if msg.contains("mismatch") || msg.contains("invalid") {
                 ApiError::bad_request(msg)
+            } else {
+                ApiError::internal(msg)
             }
         })?;
 
     state.app.policy_engine.invalidate(&guild_id);
-
-    let _ = state
-        .app
-        .storage
-        .record_audit(
-            Some(&guild_id),
-            Some(&session.user.id),
-            "command_policies",
-            "rules_imported",
-            json!({ "imported_count": imported.len() }),
-        )
-        .await;
 
     let new_revision = state
         .app

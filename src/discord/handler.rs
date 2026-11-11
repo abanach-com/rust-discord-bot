@@ -1855,7 +1855,10 @@ async fn handle_policy_builtin_command(
             return Ok(());
         }
 
-        let count = state.storage.reset_policy_rules(&guild_id_str).await?;
+        let count = state
+            .storage
+            .reset_policy_rules(&guild_id_str, Some(&command.user.id.to_string()))
+            .await?;
         state.policy_engine.invalidate(&guild_id_str);
         let msg = format!("✅ Command policies reset to default ({count} custom rules removed).");
         respond_or_edit(ctx, command, deferred, responded, &msg).await?;

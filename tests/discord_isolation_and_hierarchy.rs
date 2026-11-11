@@ -1855,7 +1855,7 @@ async fn test_action_policy_denial_blocks_executor_without_discord_http_call() {
     };
     state
         .storage
-        .upsert_policy_rule(rule)
+        .upsert_policy_rule(rule, None)
         .await
         .expect("upsert action policy rule");
 

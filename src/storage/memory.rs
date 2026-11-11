@@ -163,6 +163,8 @@ pub struct MemoryStore {
 
     companion_lock: Arc<Mutex<()>>,
 
+    policy_write_lock: Arc<Mutex<()>>,
+
     policy_rules: Arc<DashMap<Uuid, CommandPolicyRule>>,
 
     policy_revisions: Arc<DashMap<String, i64>>,
@@ -4168,6 +4170,7 @@ impl MemoryStore {
     pub fn upsert_policy_rule(
         &self,
         mut rule: CommandPolicyRule,
+        actor_id: Option<&str>,
     ) -> anyhow::Result<CommandPolicyRule> {
         rule.normalize();
         validate_snowflake("guild_id", &rule.guild_id)?;
@@ -4180,12 +4183,34 @@ impl MemoryStore {
                 validate_snowflake("channel_id", uid)?;
             }
         }
+        let _guard = self
+            .policy_write_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+
         if let Some(existing) = self.policy_rules.get(&rule.id) {
             if existing.guild_id != rule.guild_id {
                 anyhow::bail!("policy rule ID belongs to another guild");
             }
             rule.version = existing.version + 1;
         }
+
+        let actor = actor_id.unwrap_or("system");
+        self.record_audit(
+            Some(&rule.guild_id),
+            Some(actor),
+            "command_policies",
+            "rule_upserted",
+            serde_json::json!({
+                "rule_id": rule.id,
+                "subject_kind": rule.subject_kind,
+                "subject_id": rule.subject_id,
+                "resource_kind": rule.resource_kind,
+                "effect": rule.effect,
+                "priority": rule.priority,
+            }),
+        )?;
+
         let now = Utc::now();
         rule.updated_at = now;
         self.policy_rules.insert(rule.id, rule.clone());
@@ -4193,26 +4218,69 @@ impl MemoryStore {
         Ok(rule)
     }
 
-    pub fn delete_policy_rule(&self, guild_id: &str, rule_id: Uuid) -> anyhow::Result<bool> {
+    pub fn delete_policy_rule(
+        &self,
+        guild_id: &str,
+        rule_id: Uuid,
+        actor_id: Option<&str>,
+    ) -> anyhow::Result<bool> {
         validate_snowflake("guild_id", guild_id)?;
-        if let Some((_, r)) = self.policy_rules.remove(&rule_id) {
-            if r.guild_id == guild_id {
-                self.bump_policy_revision(guild_id)?;
-                return Ok(true);
-            } else {
-                self.policy_rules.insert(r.id, r);
-            }
+        let _guard = self
+            .policy_write_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+
+        let exists = match self.policy_rules.get(&rule_id) {
+            Some(r) => r.guild_id == guild_id,
+            None => false,
+        };
+        if !exists {
+            return Ok(false);
         }
-        Ok(false)
+
+        let actor = actor_id.unwrap_or("system");
+        self.record_audit(
+            Some(guild_id),
+            Some(actor),
+            "command_policies",
+            "rule_deleted",
+            serde_json::json!({ "rule_id": rule_id }),
+        )?;
+
+        self.policy_rules.remove(&rule_id);
+        self.bump_policy_revision(guild_id)?;
+        Ok(true)
     }
 
-    pub fn reset_policy_rules(&self, guild_id: &str) -> anyhow::Result<usize> {
+    pub fn reset_policy_rules(
+        &self,
+        guild_id: &str,
+        actor_id: Option<&str>,
+    ) -> anyhow::Result<usize> {
         validate_snowflake("guild_id", guild_id)?;
-        let before = self.policy_rules.len();
+        let _guard = self
+            .policy_write_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+
+        let count = self
+            .policy_rules
+            .iter()
+            .filter(|r| r.guild_id == guild_id)
+            .count();
+
+        let actor = actor_id.unwrap_or("system");
+        self.record_audit(
+            Some(guild_id),
+            Some(actor),
+            "command_policies",
+            "rules_reset",
+            serde_json::json!({ "removed_count": count }),
+        )?;
+
         self.policy_rules.retain(|_, r| r.guild_id != guild_id);
-        let removed = before.saturating_sub(self.policy_rules.len());
         self.bump_policy_revision(guild_id)?;
-        Ok(removed)
+        Ok(count)
     }
 
     pub fn replace_policy_rules(
@@ -4220,6 +4288,7 @@ impl MemoryStore {
         guild_id: &str,
         expected_revision: Option<i64>,
         mut rules: Vec<CommandPolicyRule>,
+        actor_id: Option<&str>,
     ) -> anyhow::Result<Vec<CommandPolicyRule>> {
         validate_snowflake("guild_id", guild_id)?;
         for rule in &mut rules {
@@ -4229,6 +4298,11 @@ impl MemoryStore {
             }
             crate::policy::validate_policy_rule_fields(rule)?;
         }
+
+        let _guard = self
+            .policy_write_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
 
         let current_rev = self.get_policy_revision(guild_id).unwrap_or(1);
         if let Some(expected) = expected_revision
@@ -4240,6 +4314,15 @@ impl MemoryStore {
                 expected
             );
         }
+
+        let actor = actor_id.unwrap_or("system");
+        self.record_audit(
+            Some(guild_id),
+            Some(actor),
+            "command_policies",
+            "rules_imported",
+            serde_json::json!({ "imported_count": rules.len() }),
+        )?;
 
         self.policy_rules.retain(|_, r| r.guild_id != guild_id);
         let now = Utc::now();

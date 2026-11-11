@@ -2349,13 +2349,13 @@ async fn test_postgres_integration_suite() {
     .expect("construct channel rule");
 
     let saved_u = store
-        .upsert_policy_rule(rule_user.clone())
+        .upsert_policy_rule(rule_user.clone(), Some("pg_admin"))
         .await
         .expect("upsert user rule");
     assert_eq!(saved_u.id, rule_user.id);
 
     let saved_c = store
-        .upsert_policy_rule(rule_channel.clone())
+        .upsert_policy_rule(rule_channel.clone(), Some("pg_admin"))
         .await
         .expect("upsert channel rule");
     assert_eq!(saved_c.id, rule_channel.id);
@@ -2374,13 +2374,13 @@ async fn test_postgres_integration_suite() {
     assert_eq!(listed[0].id, rule_user.id);
 
     let deleted = store
-        .delete_policy_rule(policy_guild, rule_user.id)
+        .delete_policy_rule(policy_guild, rule_user.id, Some("pg_admin"))
         .await
         .expect("delete policy rule");
     assert!(deleted);
 
     let reset_count = store
-        .reset_policy_rules(policy_guild)
+        .reset_policy_rules(policy_guild, Some("pg_admin"))
         .await
         .expect("reset policy rules");
     assert_eq!(reset_count, 1);
@@ -2407,7 +2407,7 @@ async fn test_postgres_integration_suite() {
     .expect("build rule_guild1");
 
     let saved_g1 = store
-        .upsert_policy_rule(rule_guild1.clone())
+        .upsert_policy_rule(rule_guild1.clone(), Some("pg_admin"))
         .await
         .expect("upsert rule_guild1");
     let rev_g1_before = store.get_policy_revision(policy_guild).await.unwrap();
@@ -2417,7 +2417,9 @@ async fn test_postgres_integration_suite() {
     malicious_other.guild_id = guild_other.to_string();
     malicious_other.effect = "allow".to_string();
 
-    let cross_res = store.upsert_policy_rule(malicious_other).await;
+    let cross_res = store
+        .upsert_policy_rule(malicious_other, Some("pg_admin"))
+        .await;
     assert!(
         cross_res.is_err(),
         "cross-guild upsert must fail in PostgreSQL"
@@ -2444,7 +2446,12 @@ async fn test_postgres_integration_suite() {
     invalid_rule.effect = "corrupt".to_string();
 
     let rep_err = store
-        .replace_policy_rules(policy_guild, Some(rev_g1_before), vec![invalid_rule])
+        .replace_policy_rules(
+            policy_guild,
+            Some(rev_g1_before),
+            vec![invalid_rule],
+            Some("pg_admin"),
+        )
         .await;
     assert!(
         rep_err.is_err(),
@@ -2462,6 +2469,7 @@ async fn test_postgres_integration_suite() {
             policy_guild,
             Some(rev_g1_before + 99),
             vec![rule_channel.clone()],
+            Some("pg_admin"),
         )
         .await;
     assert!(rep_conflict.is_err());
@@ -2478,6 +2486,7 @@ async fn test_postgres_integration_suite() {
             policy_guild,
             Some(rev_g1_before),
             vec![rule_channel.clone()],
+            Some("pg_admin"),
         )
         .await
         .expect("successful replace");
@@ -2489,7 +2498,9 @@ async fn test_postgres_integration_suite() {
     );
 
     // Clean up
-    let _ = store.reset_policy_rules(policy_guild).await;
+    let _ = store
+        .reset_policy_rules(policy_guild, Some("pg_admin"))
+        .await;
 
     // Issue #168: Moderator Duty PostgreSQL Lifecycle
     let duty_guild = "888777666555444333";
