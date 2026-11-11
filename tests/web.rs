@@ -17909,3 +17909,500 @@ async fn test_ai_knowledge_doc_validation_quota_and_deletion_issue_377() {
         "Must reject insertion beyond MAX_AI_DOCUMENTS_PER_GUILD"
     );
 }
+
+#[tokio::test]
+async fn test_scheduled_events_validation_quota_and_pagination_issue_393() {
+    let (web_state, permissions_cache) = test_web_state().await;
+    let guild_id = "393000000000000099";
+    let foreign_guild_id = "393000000000000088";
+
+    let admin_id = "user_admin_393";
+    let admin_session = "session_admin_393";
+    let admin_csrf = "csrf_admin_393";
+
+    let member_id = "user_member_393";
+    let member_session = "session_member_393";
+    let member_csrf = "csrf_member_393";
+
+    let foreign_admin_id = "user_foreign_393";
+    let foreign_admin_session = "session_foreign_393";
+    let foreign_admin_csrf = "csrf_foreign_393";
+
+    // Seed sessions
+    web_state
+        .app
+        .sessions
+        .save_session(
+            admin_session,
+            DashboardUser {
+                id: admin_id.to_string(),
+                username: "Admin393".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Guild 393".to_string(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_string(),
+            }],
+            admin_csrf.to_string(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    web_state
+        .app
+        .sessions
+        .save_session(
+            member_session,
+            DashboardUser {
+                id: member_id.to_string(),
+                username: "Member393".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Guild 393".to_string(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_string(),
+            }],
+            member_csrf.to_string(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    web_state
+        .app
+        .sessions
+        .save_session(
+            foreign_admin_session,
+            DashboardUser {
+                id: foreign_admin_id.to_string(),
+                username: "Foreign393".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: foreign_guild_id.to_string(),
+                name: "Foreign Guild 393".to_string(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_string(),
+            }],
+            foreign_admin_csrf.to_string(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    permissions_cache.insert(
+        (admin_id.to_string(), guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+    permissions_cache.insert(
+        (member_id.to_string(), guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: false,
+            checked_at: Utc::now(),
+        },
+    );
+    permissions_cache.insert(
+        (foreign_admin_id.to_string(), foreign_guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = build_router(web_state.clone());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let admin_cookie = format!("rusty_discord_bot_session={admin_session}");
+    let member_cookie = format!("rusty_discord_bot_session={member_session}");
+    let foreign_cookie = format!("rusty_discord_bot_session={foreign_admin_session}");
+
+    let now = Utc::now();
+
+    // 1. Validation tests on POST /api/guilds/{guild_id}/scheduled-events
+    // 1a. Unauthenticated -> 401
+    let unauth_create = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .json(&serde_json::json!({
+            "title": "Unauth event",
+            "description": "desc",
+            "start_time": (now + Duration::hours(1)).to_rfc3339(),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth_create.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // 1b. Member without manage permission -> 403
+    let member_create = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .header(COOKIE, &member_cookie)
+        .header("X-CSRF-Token", member_csrf)
+        .json(&serde_json::json!({
+            "title": "Member event",
+            "description": "desc",
+            "start_time": (now + Duration::hours(1)).to_rfc3339(),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(member_create.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 1c. Missing CSRF -> 403
+    let no_csrf_create = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .header(COOKIE, &admin_cookie)
+        .json(&serde_json::json!({
+            "title": "No CSRF",
+            "description": "desc",
+            "start_time": (now + Duration::hours(1)).to_rfc3339(),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_csrf_create.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 1d. Empty or whitespace-only title -> 400
+    let empty_title_create = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "title": "   ",
+            "description": "desc",
+            "start_time": (now + Duration::hours(1)).to_rfc3339(),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        empty_title_create.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+
+    // 1e. Title > 200 chars -> 400
+    let long_title = "t".repeat(201);
+    let long_title_create = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "title": long_title,
+            "description": "desc",
+            "start_time": (now + Duration::hours(1)).to_rfc3339(),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(long_title_create.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 1f. Description > 4000 chars -> 400
+    let long_desc = "d".repeat(4001);
+    let long_desc_create = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "title": "Valid title",
+            "description": long_desc,
+            "start_time": (now + Duration::hours(1)).to_rfc3339(),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(long_desc_create.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 2. Quota enforcement on POST /scheduled-events
+    web_state
+        .app
+        .storage
+        .set_scheduled_events_quota_for_test(Some(2));
+
+    // 2a. Event 1 with whitespace padding -> 200 OK & verify trimmed fields
+    let ev1_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "title": "  Sprint Planning  ",
+            "description": "  Discuss Q4 roadmap  ",
+            "start_time": (now + Duration::hours(1)).to_rfc3339(),
+            "end_time": (now + Duration::hours(2)).to_rfc3339(),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ev1_resp.status(), reqwest::StatusCode::OK);
+    let ev1: serde_json::Value = ev1_resp.json().await.unwrap();
+    assert_eq!(ev1["title"], "Sprint Planning");
+    assert_eq!(ev1["description"], "Discuss Q4 roadmap");
+    let ev1_id = ev1["id"].as_str().unwrap().to_string();
+
+    // 2b. Event 2 -> 200 OK
+    let ev2_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "title": "Design Review",
+            "description": "Review UI mocks",
+            "start_time": (now + Duration::hours(3)).to_rfc3339(),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ev2_resp.status(), reqwest::StatusCode::OK);
+    let ev2: serde_json::Value = ev2_resp.json().await.unwrap();
+    let ev2_id = ev2["id"].as_str().unwrap().to_string();
+
+    // 2c. Event 3 -> 409 Conflict (quota exceeded)
+    let quota_blocked = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "title": "Event 3 blocked",
+            "description": "Blocked",
+            "start_time": (now + Duration::hours(5)).to_rfc3339(),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(quota_blocked.status(), reqwest::StatusCode::CONFLICT);
+
+    // 3. Deletion and slot reclamation
+    // 3a. Unauthenticated DELETE -> 401
+    let unauth_delete = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{ev1_id}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth_delete.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // 3b. Member without manage permission -> 403
+    let member_delete = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{ev1_id}"
+        ))
+        .header(COOKIE, &member_cookie)
+        .header("X-CSRF-Token", member_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(member_delete.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 3c. Foreign admin on guild_id -> 403
+    let foreign_delete = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{ev1_id}"
+        ))
+        .header(COOKIE, &foreign_cookie)
+        .header("X-CSRF-Token", foreign_admin_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(foreign_delete.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 3d. Non-existent event -> 404
+    let not_found_delete = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{}",
+            uuid::Uuid::new_v4()
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(not_found_delete.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // 3e. Admin deletes ev1 -> 200 OK
+    let delete_ok = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{ev1_id}"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(delete_ok.status(), reqwest::StatusCode::OK);
+
+    // 3f. Slot reclaimed: creating Event 3 now succeeds
+    let ev3_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "title": "Event 3 created",
+            "description": "After slot release",
+            "start_time": (now + Duration::hours(5)).to_rfc3339(),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ev3_resp.status(), reqwest::StatusCode::OK);
+
+    // 3g. Delete via alternate route /api/guilds/{guild_id}/events/{event_id} -> 200 OK
+    let alt_delete_ok = client
+        .delete(format!("{base_url}/api/guilds/{guild_id}/events/{ev2_id}"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(alt_delete_ok.status(), reqwest::StatusCode::OK);
+
+    // 4. Keyset pagination tests
+    web_state
+        .app
+        .storage
+        .set_scheduled_events_quota_for_test(None);
+
+    // Create 3 additional events
+    for i in 1..=3 {
+        let resp = client
+            .post(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+            .header(COOKIE, &admin_cookie)
+            .header("X-CSRF-Token", admin_csrf)
+            .json(&serde_json::json!({
+                "title": format!("Batch Event {i}"),
+                "description": format!("Desc {i}"),
+                "start_time": (now + Duration::hours(10 + i as i64)).to_rfc3339(),
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    }
+
+    // 4a. Unauthenticated GET /events/page -> 401
+    let unauth_page = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/page"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth_page.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // 4b. Foreign member GET /events/page -> 403
+    let foreign_page = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/page"
+        ))
+        .header(COOKIE, &foreign_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(foreign_page.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 4c. Member on guild_id with invalid limit (0 or 101) -> 400
+    let limit_zero = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/page?limit=0"
+        ))
+        .header(COOKIE, &member_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(limit_zero.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let limit_overflow = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/page?limit=101"
+        ))
+        .header(COOKIE, &member_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(limit_overflow.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 4d. Member fetches Page 1 (limit=2)
+    let page1_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/page?limit=2"
+        ))
+        .header(COOKIE, &member_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page1_resp.status(), reqwest::StatusCode::OK);
+    let page1: serde_json::Value = page1_resp.json().await.unwrap();
+    let p1_items = page1["items"].as_array().unwrap();
+    assert_eq!(p1_items.len(), 2);
+    assert_eq!(page1["has_more"], true);
+    let next_cur = page1["next_cursor"].as_str().unwrap();
+
+    // 4e. Cross-guild cursor tampering -> 400
+    let foreign_cursor = rusty_discord_bot::storage::encode_scheduled_event_cursor(
+        foreign_guild_id,
+        &now,
+        &uuid::Uuid::new_v4(),
+    );
+    let foreign_cur_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/page?cursor={foreign_cursor}"
+        ))
+        .header(COOKIE, &member_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(foreign_cur_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 4f. Page 2 via alternate route /api/guilds/{guild_id}/events/page
+    let page2_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/events/page?limit=2&cursor={next_cur}"
+        ))
+        .header(COOKIE, &member_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page2_resp.status(), reqwest::StatusCode::OK);
+    let page2: serde_json::Value = page2_resp.json().await.unwrap();
+    let p2_items = page2["items"].as_array().unwrap();
+    assert_eq!(p2_items.len(), 2);
+
+    // 5. Legacy GET /api/guilds/{guild_id}/scheduled-events returns 200 OK with Vec
+    let legacy_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .header(COOKIE, &member_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(legacy_resp.status(), reqwest::StatusCode::OK);
+    let legacy_events: serde_json::Value = legacy_resp.json().await.unwrap();
+    assert!(legacy_events.is_array());
+    assert!(!legacy_events.as_array().unwrap().is_empty());
+
+    // Reset quota override
+    web_state
+        .app
+        .storage
+        .set_scheduled_events_quota_for_test(None);
+}

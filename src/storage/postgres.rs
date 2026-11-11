@@ -19,22 +19,23 @@ use super::{
     HelpForumConfig, HelpForumSession, HelpForumStats, IntegrationConnection,
     IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking, KickStreamSubscription,
     LinkedAccount, MAX_AI_DOCUMENTS_BYTES_PER_GUILD, MAX_AI_DOCUMENTS_PER_GUILD,
-    MAX_COMPANION_MAPPINGS_PER_GUILD, McpToolAuthorization, MemberIdentityRecord, MemberProgress,
-    MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
-    ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
-    ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
-    ProgressionSeason, QuoteRecord, ReactionRoleBinding, ReactionRoleGrant,
+    MAX_COMPANION_MAPPINGS_PER_GUILD, MAX_SCHEDULED_EVENTS_PER_GUILD, McpToolAuthorization,
+    MemberIdentityRecord, MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot,
+    ModerationAppeal, ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings,
+    ModeratorDutyState, ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage,
+    ProgressMetric, ProgressionSeason, QuoteRecord, ReactionRoleBinding, ReactionRoleGrant,
     RecordCompanionLeaseParams, RecruitmentApplication, RecruitmentReview,
     RecruitmentRoleFulfillment, RecruitmentTrack, RedditSubscription,
-    ReleaseReactionRoleGrantOutcome, ReputationGrantOutcome, ScheduledEvent, ServerSnapshot,
-    SocialDraftApprovalError, SocialDraftsPage, SocialPublicationDraft, StarboardEntry,
-    SteamLfgPost, StickyMessage, StoreItem, StoreItemsPage, StorePurchase, StorePurchasesPage,
-    TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament,
-    TransitionApplicationParams, TupperError, TupperProfile, TwitchStreamSubscription,
+    ReleaseReactionRoleGrantOutcome, ReputationGrantOutcome, ScheduledEvent, ScheduledEventsPage,
+    ServerSnapshot, SocialDraftApprovalError, SocialDraftsPage, SocialPublicationDraft,
+    StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StoreItemsPage, StorePurchase,
+    StorePurchasesPage, TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant,
+    Tournament, TransitionApplicationParams, TupperError, TupperProfile, TwitchStreamSubscription,
     UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WORK_JOBS, WorkClaimOutcome,
     WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription,
-    encode_store_purchase_cursor, level_for_xp, parse_member_search_cursor, snowflake_created_at,
-    validate_birthday_date, validate_snowflake,
+    encode_scheduled_event_cursor, encode_store_purchase_cursor, level_for_xp,
+    parse_member_search_cursor, snowflake_created_at, validate_birthday_date,
+    validate_scheduled_event_content, validate_snowflake,
 };
 
 pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
@@ -5362,12 +5363,35 @@ impl PostgresStore {
             anyhow::ensure!(end > start_time, "end_time must be later than start_time");
         }
 
+        let (clean_title, clean_description) =
+            validate_scheduled_event_content(title, description)?;
+
+        let mut tx = self.pool.begin().await?;
+
+        // Transactional advisory lock per guild to serialize event creation quota
+        sqlx::query("SELECT pg_advisory_xact_lock(4350, hashtext($1))")
+            .bind(guild_id)
+            .execute(&mut *tx)
+            .await?;
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM scheduled_events WHERE guild_id = $1")
+                .bind(guild_id)
+                .fetch_one(&mut *tx)
+                .await?;
+
+        if count >= MAX_SCHEDULED_EVENTS_PER_GUILD as i64 {
+            anyhow::bail!(
+                "scheduled event quota exceeded for guild: maximum is {}",
+                MAX_SCHEDULED_EVENTS_PER_GUILD
+            );
+        }
+
         let id = Uuid::new_v4();
 
         let now = Utc::now();
 
         let rec = sqlx::query_as::<_, ScheduledEvent>(
-
             r#"
 
             INSERT INTO scheduled_events (id, guild_id, title, description, start_time, end_time, timezone, max_participants, created_at)
@@ -5377,30 +5401,20 @@ impl PostgresStore {
             RETURNING id, guild_id, title, description, start_time, end_time, timezone, max_participants, created_at
 
             "#,
-
         )
-
         .bind(id)
-
         .bind(guild_id)
-
-        .bind(title)
-
-        .bind(description)
-
+        .bind(&clean_title)
+        .bind(&clean_description)
         .bind(start_time)
-
         .bind(end_time)
-
         .bind(timezone)
-
         .bind(max_participants)
-
         .bind(now)
-
-        .fetch_one(&self.pool)
-
+        .fetch_one(&mut *tx)
         .await?;
+
+        tx.commit().await?;
 
         Ok(rec)
     }
@@ -5410,29 +5424,111 @@ impl PostgresStore {
 
         guild_id: &str,
     ) -> anyhow::Result<Vec<ScheduledEvent>> {
-        let rows = sqlx::query_as::<_, ScheduledEvent>(
+        self.list_scheduled_events_page(guild_id, 100, None)
+            .await
+            .map(|p| p.items)
+    }
 
-            r#"
+    pub async fn list_scheduled_events_page(
+        &self,
+        guild_id: &str,
+        limit: usize,
+        cursor: Option<(&DateTime<Utc>, &Uuid)>,
+    ) -> anyhow::Result<ScheduledEventsPage> {
+        let fetch_limit = (limit as i64) + 1;
+        let mut rows = match cursor {
+            None => {
+                sqlx::query_as::<_, ScheduledEvent>(
+                    r#"
+                    SELECT id, guild_id, title, description, start_time, end_time, timezone, max_participants, created_at
+                    FROM scheduled_events
+                    WHERE guild_id = $1
+                    ORDER BY start_time ASC, id ASC
+                    LIMIT $2
+                    "#,
+                )
+                .bind(guild_id)
+                .bind(fetch_limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            Some((cursor_time, cursor_id)) => {
+                sqlx::query_as::<_, ScheduledEvent>(
+                    r#"
+                    SELECT id, guild_id, title, description, start_time, end_time, timezone, max_participants, created_at
+                    FROM scheduled_events
+                    WHERE guild_id = $1 AND (start_time, id) > ($2, $3)
+                    ORDER BY start_time ASC, id ASC
+                    LIMIT $4
+                    "#,
+                )
+                .bind(guild_id)
+                .bind(cursor_time)
+                .bind(cursor_id)
+                .bind(fetch_limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
 
-            SELECT id, guild_id, title, description, start_time, end_time, timezone, max_participants, created_at
+        let has_more = rows.len() > limit;
+        if has_more {
+            rows.truncate(limit);
+        }
 
-            FROM scheduled_events
+        let next_cursor = if has_more {
+            rows.last()
+                .map(|last| encode_scheduled_event_cursor(guild_id, &last.start_time, &last.id))
+        } else {
+            None
+        };
 
-            WHERE guild_id = $1
+        Ok(ScheduledEventsPage {
+            items: rows,
+            next_cursor,
+            has_more,
+        })
+    }
 
-            ORDER BY start_time ASC
+    pub async fn delete_scheduled_event(
+        &self,
+        guild_id: &str,
+        event_id: Uuid,
+    ) -> anyhow::Result<bool> {
+        let mut tx = self.pool.begin().await?;
 
-            "#,
+        sqlx::query("SELECT pg_advisory_xact_lock(4350, hashtext($1))")
+            .bind(guild_id)
+            .execute(&mut *tx)
+            .await?;
 
+        let deleted = sqlx::query(
+            "DELETE FROM scheduled_events WHERE id = $1 AND guild_id = $2 RETURNING id",
         )
-
+        .bind(event_id)
         .bind(guild_id)
-
-        .fetch_all(&self.pool)
-
+        .fetch_optional(&mut *tx)
         .await?;
 
-        Ok(rows)
+        if deleted.is_none() {
+            return Ok(false);
+        }
+
+        sqlx::query(
+            "INSERT INTO audit_events (guild_id, module_id, event, data) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(guild_id)
+        .bind("events")
+        .bind("event_deleted")
+        .bind(serde_json::json!({
+            "event_id": event_id,
+        }))
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(true)
     }
 
     pub async fn get_scheduled_event(

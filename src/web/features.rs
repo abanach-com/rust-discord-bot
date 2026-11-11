@@ -23,8 +23,8 @@ use crate::storage::{
     Giveaway, HelpForumConfig, InviteTracking, MAX_COMPANION_MAPPINGS_PER_GUILD,
     ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState, ProgressionSeason,
     ReactionRoleBinding, RecruitmentApplication, RecruitmentReview, RecruitmentTrack,
-    RecruitmentTrackConfig, RecurringSchedule, ScheduledEvent, ServerSnapshot, StickyMessage,
-    StoreItem, SubmittedAnswer, TupperProfile, validate_snowflake,
+    RecruitmentTrackConfig, RecurringSchedule, ScheduledEvent, ScheduledEventsPage, ServerSnapshot,
+    StickyMessage, StoreItem, SubmittedAnswer, TupperProfile, validate_snowflake,
 };
 
 use super::{
@@ -2209,6 +2209,12 @@ fn default_timezone() -> String {
     "UTC".to_owned()
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ListScheduledEventsQuery {
+    pub limit: Option<usize>,
+    pub cursor: Option<String>,
+}
+
 pub async fn list_events(
     State(state): State<WebState>,
 
@@ -2228,6 +2234,51 @@ pub async fn list_events(
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(Json(events))
+}
+
+pub async fn list_events_page(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+    Query(query): Query<ListScheduledEventsQuery>,
+) -> Result<Json<ScheduledEventsPage>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
+
+    let limit = match query.limit {
+        None => crate::storage::DEFAULT_SCHEDULED_EVENTS_PAGE_LIMIT,
+        Some(l) if (1..=crate::storage::MAX_SCHEDULED_EVENTS_PAGE_LIMIT).contains(&l) => l,
+        Some(_) => {
+            return Err(ApiError::bad_request(format!(
+                "Query parameter 'limit' must be between 1 and {}",
+                crate::storage::MAX_SCHEDULED_EVENTS_PAGE_LIMIT
+            )));
+        }
+    };
+
+    let cursor_tuple = if let Some(ref cur_str) = query.cursor {
+        let decoded = crate::storage::decode_scheduled_event_cursor(cur_str)
+            .map_err(|e| ApiError::bad_request(format!("Invalid cursor format: {e}")))?;
+
+        if decoded.guild_id != guild_id {
+            return Err(ApiError::bad_request(
+                "Cursor guild does not match target guild",
+            ));
+        }
+
+        Some((decoded.start_time, decoded.id))
+    } else {
+        None
+    };
+
+    let page = state
+        .app
+        .storage
+        .list_scheduled_events_page(&guild_id, limit, cursor_tuple.as_ref().map(|(t, i)| (t, i)))
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(page))
 }
 
 pub async fn create_event(
@@ -2264,13 +2315,21 @@ pub async fn create_event(
         ));
     }
 
+    let (clean_title, clean_description) = match crate::storage::validate_scheduled_event_content(
+        &payload.title,
+        &payload.description,
+    ) {
+        Ok(v) => v,
+        Err(e) => return Err(ApiError::bad_request(e.to_string())),
+    };
+
     let ev = state
         .app
         .storage
         .create_scheduled_event(
             &guild_id,
-            &payload.title,
-            &payload.description,
+            &clean_title,
+            &clean_description,
             payload.start_time,
             payload.end_time,
             tz,
@@ -2279,14 +2338,42 @@ pub async fn create_event(
         .await
         .map_err(|e| {
             let msg = e.to_string();
-            if msg.contains("end_time must be later than start_time") {
-                ApiError::bad_request("end_time must be later than start_time")
+            if msg.contains("quota exceeded") {
+                ApiError::conflict(msg)
+            } else if msg.contains("end_time must be later than start_time")
+                || msg.contains("exceeds maximum")
+                || msg.contains("cannot be empty")
+            {
+                ApiError::bad_request(msg)
             } else {
                 ApiError::internal(msg)
             }
         })?;
 
     Ok(Json(ev))
+}
+
+pub async fn delete_event(
+    State(state): State<WebState>,
+    Path((guild_id, event_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+
+    let deleted = state
+        .app
+        .storage
+        .delete_scheduled_event(&guild_id, event_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    if !deleted {
+        return Err(ApiError::not_found("Event not found"));
+    }
+
+    Ok(Json(json!({ "deleted": true, "id": event_id })))
 }
 
 /// Publicly accessible via unguessable UUID for calendar subscriptions/direct downloads

@@ -19,21 +19,22 @@ use super::{
     GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway, GuildModuleSettings,
     IntegrationConnection, IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking,
     KickStreamSubscription, LinkedAccount, MAX_AI_DOCUMENTS_BYTES_PER_GUILD,
-    MAX_AI_DOCUMENTS_PER_GUILD, MAX_COMPANION_MAPPINGS_PER_GUILD, McpToolAuthorization,
-    MemberIdentityRecord, MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot,
-    ModerationAppeal, ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings,
-    ModeratorDutyState, ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage,
-    ProgressMetric, ProgressionSeason, QuoteRecord, ReactionRoleBinding, ReactionRoleGrant,
-    RecordCompanionLeaseParams, RedditSubscription, ReleaseReactionRoleGrantOutcome,
-    ReputationGrantOutcome, ScheduledEvent, ServerSnapshot, SocialDraftApprovalError,
-    SocialDraftsPage, SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage,
-    StoreItem, StoreItemsPage, StorePurchase, StorePurchasesPage, TagRecord, TelegramBridge,
-    TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError, TupperProfile,
-    TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport, VkSubscription,
-    WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
-    YouTubeChannelSubscription, encode_store_purchase_cursor, is_member_after_cursor, level_for_xp,
-    next_birthday_date, parse_member_search_cursor, snowflake_created_at, validate_birthday_date,
-    validate_snowflake,
+    MAX_AI_DOCUMENTS_PER_GUILD, MAX_COMPANION_MAPPINGS_PER_GUILD, MAX_SCHEDULED_EVENTS_PER_GUILD,
+    McpToolAuthorization, MemberIdentityRecord, MemberProgress, MemberSearchFilter,
+    MemberSearchRow, MemberSnapshot, ModerationAppeal, ModerationExecutionIntent,
+    ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState, ModuleDraftConfig,
+    PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric, ProgressionSeason,
+    QuoteRecord, ReactionRoleBinding, ReactionRoleGrant, RecordCompanionLeaseParams,
+    RedditSubscription, ReleaseReactionRoleGrantOutcome, ReputationGrantOutcome, ScheduledEvent,
+    ScheduledEventsPage, ServerSnapshot, SocialDraftApprovalError, SocialDraftsPage,
+    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StoreItemsPage,
+    StorePurchase, StorePurchasesPage, TagRecord, TelegramBridge, TelegramMessageMapping,
+    TimedRoleGrant, Tournament, TupperError, TupperProfile, TwitchStreamSubscription,
+    UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WORK_JOBS, WorkClaimOutcome,
+    WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription,
+    encode_scheduled_event_cursor, encode_store_purchase_cursor, is_member_after_cursor,
+    level_for_xp, next_birthday_date, parse_member_search_cursor, snowflake_created_at,
+    validate_birthday_date, validate_scheduled_event_content, validate_snowflake,
 };
 
 type ModuleKey = (String, String);
@@ -252,6 +253,8 @@ pub struct MemoryStore {
     store_items_quota_override: Arc<std::sync::RwLock<Option<usize>>>,
     social_drafts_write_lock: Arc<Mutex<()>>,
     social_drafts_quota_override: Arc<std::sync::RwLock<Option<usize>>>,
+    scheduled_events_write_lock: Arc<Mutex<()>>,
+    scheduled_events_quota_override: Arc<std::sync::RwLock<Option<usize>>>,
     birthdays: Arc<DashMap<(String, String), BirthdayRecord>>,
     afk: Arc<DashMap<(String, String), AfkRecord>>,
 }
@@ -331,6 +334,31 @@ impl Ord for SocialDraftHeapItem {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Reverse ordering so BinaryHeap acts as a min-heap on key
         other.key.cmp(&self.key)
+    }
+}
+
+struct ScheduledEventHeapItem {
+    key: (DateTime<Utc>, Uuid),
+    event: ScheduledEvent,
+}
+
+impl PartialEq for ScheduledEventHeapItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+impl Eq for ScheduledEventHeapItem {}
+
+impl PartialOrd for ScheduledEventHeapItem {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ScheduledEventHeapItem {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.key.cmp(&other.key)
     }
 }
 
@@ -4565,6 +4593,33 @@ impl MemoryStore {
             anyhow::ensure!(end > start_time, "end_time must be later than start_time");
         }
 
+        let (clean_title, clean_description) =
+            validate_scheduled_event_content(title, description)?;
+
+        let _guard = match self.scheduled_events_write_lock.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        let quota = self
+            .scheduled_events_quota_override
+            .read()
+            .map(|opt| opt.unwrap_or(MAX_SCHEDULED_EVENTS_PER_GUILD))
+            .unwrap_or(MAX_SCHEDULED_EVENTS_PER_GUILD);
+
+        let count = self
+            .events
+            .iter()
+            .filter(|e| e.guild_id == guild_id)
+            .count();
+
+        if count >= quota {
+            anyhow::bail!(
+                "scheduled event quota exceeded for guild: maximum is {}",
+                quota
+            );
+        }
+
         let id = Uuid::new_v4();
 
         let ev = ScheduledEvent {
@@ -4572,9 +4627,9 @@ impl MemoryStore {
 
             guild_id: guild_id.to_owned(),
 
-            title: title.to_owned(),
+            title: clean_title,
 
-            description: description.to_owned(),
+            description: clean_description,
 
             start_time,
 
@@ -4592,17 +4647,108 @@ impl MemoryStore {
         Ok(ev)
     }
 
+    pub fn set_scheduled_events_quota_for_test(&self, quota: Option<usize>) {
+        if let Ok(mut lock) = self.scheduled_events_quota_override.write() {
+            *lock = quota;
+        }
+    }
+
     pub fn list_scheduled_events(&self, guild_id: &str) -> Vec<ScheduledEvent> {
-        let mut list: Vec<_> = self
-            .events
-            .iter()
-            .filter(|e| e.guild_id == guild_id)
-            .map(|e| e.value().clone())
-            .collect();
+        self.list_scheduled_events_page(guild_id, 100, None)
+            .map(|p| p.items)
+            .unwrap_or_default()
+    }
 
-        list.sort_by_key(|e| e.start_time);
+    pub fn list_scheduled_events_page(
+        &self,
+        guild_id: &str,
+        limit: usize,
+        cursor: Option<(&DateTime<Utc>, &Uuid)>,
+    ) -> anyhow::Result<ScheduledEventsPage> {
+        let capacity = limit + 1;
+        let mut heap = std::collections::BinaryHeap::with_capacity(capacity);
 
-        list
+        for entry in self.events.iter() {
+            let ev = entry.value();
+            if ev.guild_id != guild_id {
+                continue;
+            }
+
+            if let Some((cursor_time, cursor_id)) = cursor
+                && (ev.start_time, ev.id) <= (*cursor_time, *cursor_id)
+            {
+                continue;
+            }
+
+            let item_key = (ev.start_time, ev.id);
+            if heap.len() < capacity {
+                heap.push(ScheduledEventHeapItem {
+                    key: item_key,
+                    event: ev.clone(),
+                });
+            } else if let Some(top) = heap.peek()
+                && item_key < top.key
+            {
+                heap.pop();
+                heap.push(ScheduledEventHeapItem {
+                    key: item_key,
+                    event: ev.clone(),
+                });
+            }
+        }
+
+        let sorted = heap.into_sorted_vec();
+        let mut items: Vec<ScheduledEvent> = sorted.into_iter().map(|h| h.event).collect();
+
+        let has_more = items.len() > limit;
+        if has_more {
+            items.truncate(limit);
+        }
+
+        let next_cursor = if has_more {
+            items
+                .last()
+                .map(|last| encode_scheduled_event_cursor(guild_id, &last.start_time, &last.id))
+        } else {
+            None
+        };
+
+        Ok(ScheduledEventsPage {
+            items,
+            next_cursor,
+            has_more,
+        })
+    }
+
+    pub fn delete_scheduled_event(&self, guild_id: &str, event_id: Uuid) -> anyhow::Result<bool> {
+        let _guard = match self.scheduled_events_write_lock.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        let exists = match self.events.get(&event_id) {
+            Some(entry) => entry.guild_id == guild_id,
+            None => false,
+        };
+
+        if !exists {
+            return Ok(false);
+        }
+
+        self.events.remove(&event_id);
+        self.rosters.remove(&event_id);
+
+        let _ = self.record_audit(
+            Some(guild_id),
+            None,
+            "events",
+            "event_deleted",
+            serde_json::json!({
+                "event_id": event_id,
+            }),
+        );
+
+        Ok(true)
     }
 
     pub fn get_scheduled_event(&self, event_id: Uuid) -> Option<ScheduledEvent> {

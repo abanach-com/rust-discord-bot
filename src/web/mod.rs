@@ -493,6 +493,22 @@ pub fn build_router(state: WebState) -> Router {
             get(features::list_events).post(features::create_event),
         )
         .route(
+            "/api/guilds/{guild_id}/scheduled-events/page",
+            get(features::list_events_page),
+        )
+        .route(
+            "/api/guilds/{guild_id}/scheduled-events/{event_id}",
+            delete(features::delete_event),
+        )
+        .route(
+            "/api/guilds/{guild_id}/events/page",
+            get(features::list_events_page),
+        )
+        .route(
+            "/api/guilds/{guild_id}/events/{event_id}",
+            delete(features::delete_event),
+        )
+        .route(
             "/api/guilds/{guild_id}/scheduled-events/{event_id}/ics",
             get(features::get_event_ics),
         )

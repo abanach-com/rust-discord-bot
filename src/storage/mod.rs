@@ -821,6 +821,110 @@ pub fn decode_social_draft_cursor(cursor: &str) -> anyhow::Result<SocialDraftCur
     })
 }
 
+pub const MAX_SCHEDULED_EVENTS_PER_GUILD: usize = 500;
+pub const MAX_SCHEDULED_EVENT_TITLE_CHARS: usize = 200;
+pub const MAX_SCHEDULED_EVENT_TITLE_BYTES: usize = 800;
+pub const MAX_SCHEDULED_EVENT_DESCRIPTION_CHARS: usize = 4_000;
+pub const MAX_SCHEDULED_EVENT_DESCRIPTION_BYTES: usize = 16 * 1024;
+pub const DEFAULT_SCHEDULED_EVENTS_PAGE_LIMIT: usize = 25;
+pub const MAX_SCHEDULED_EVENTS_PAGE_LIMIT: usize = 100;
+
+pub fn validate_scheduled_event_content(
+    title: &str,
+    description: &str,
+) -> anyhow::Result<(String, String)> {
+    let trimmed_title = title.trim();
+    if trimmed_title.is_empty() {
+        anyhow::bail!("title cannot be empty or whitespace only");
+    }
+    if trimmed_title.chars().count() > MAX_SCHEDULED_EVENT_TITLE_CHARS {
+        anyhow::bail!(
+            "title exceeds maximum length of {} characters",
+            MAX_SCHEDULED_EVENT_TITLE_CHARS
+        );
+    }
+    if trimmed_title.len() > MAX_SCHEDULED_EVENT_TITLE_BYTES {
+        anyhow::bail!(
+            "title exceeds maximum byte length of {} bytes",
+            MAX_SCHEDULED_EVENT_TITLE_BYTES
+        );
+    }
+
+    let trimmed_desc = description.trim();
+    if trimmed_desc.chars().count() > MAX_SCHEDULED_EVENT_DESCRIPTION_CHARS {
+        anyhow::bail!(
+            "description exceeds maximum length of {} characters",
+            MAX_SCHEDULED_EVENT_DESCRIPTION_CHARS
+        );
+    }
+    if trimmed_desc.len() > MAX_SCHEDULED_EVENT_DESCRIPTION_BYTES {
+        anyhow::bail!(
+            "description exceeds maximum byte length of {} bytes",
+            MAX_SCHEDULED_EVENT_DESCRIPTION_BYTES
+        );
+    }
+
+    Ok((trimmed_title.to_string(), trimmed_desc.to_string()))
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScheduledEventsPage {
+    pub items: Vec<ScheduledEvent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScheduledEventCursor {
+    pub guild_id: String,
+    pub start_time: DateTime<Utc>,
+    pub id: Uuid,
+}
+
+/// Encodes a scheduled events keyset pagination cursor binding `guild_id`, `start_time`, and `id`.
+pub fn encode_scheduled_event_cursor(
+    guild_id: &str,
+    start_time: &DateTime<Utc>,
+    id: &Uuid,
+) -> String {
+    let payload = format!("v1|{}|{}|{}", guild_id.trim(), start_time.to_rfc3339(), id);
+    base64url_encode_store_cursor(payload.as_bytes())
+}
+
+/// Decodes and validates a scheduled events pagination cursor.
+pub fn decode_scheduled_event_cursor(cursor: &str) -> anyhow::Result<ScheduledEventCursor> {
+    let trimmed = cursor.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("empty cursor");
+    }
+
+    let decoded = base64url_decode_store_cursor(trimmed).map_err(|e| {
+        anyhow::anyhow!("invalid base64url encoding for scheduled event cursor: {e}")
+    })?;
+    let payload = String::from_utf8(decoded)
+        .map_err(|e| anyhow::anyhow!("cursor is not valid UTF-8: {e}"))?;
+    let parts: Vec<&str> = payload.split('|').collect();
+    if parts.len() != 4 || parts[0] != "v1" {
+        anyhow::bail!("invalid scheduled event cursor format: expected v1 format");
+    }
+    let guild_id = parts[1].trim().to_string();
+    if guild_id.is_empty() {
+        anyhow::bail!("scheduled event cursor missing guild_id");
+    }
+    let start_time = DateTime::parse_from_rfc3339(parts[2].trim())
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| anyhow::anyhow!("Failed to parse cursor timestamp: {e}"))?;
+    let id = Uuid::parse_str(parts[3].trim())
+        .map_err(|e| anyhow::anyhow!("Failed to parse cursor UUID: {e}"))?;
+
+    Ok(ScheduledEventCursor {
+        guild_id,
+        start_time,
+        id,
+    })
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct EconomyPurchaseRequestRecord {
     pub guild_id: String,
@@ -5016,6 +5120,39 @@ impl Storage {
             Self::Memory(store) => Ok(store.list_scheduled_events(guild_id)),
 
             Self::Postgres(store) => store.list_scheduled_events(guild_id).await,
+        }
+    }
+
+    pub async fn list_scheduled_events_page(
+        &self,
+        guild_id: &str,
+        limit: usize,
+        cursor: Option<(&DateTime<Utc>, &Uuid)>,
+    ) -> anyhow::Result<ScheduledEventsPage> {
+        match self {
+            Self::Memory(store) => store.list_scheduled_events_page(guild_id, limit, cursor),
+            Self::Postgres(store) => {
+                store
+                    .list_scheduled_events_page(guild_id, limit, cursor)
+                    .await
+            }
+        }
+    }
+
+    pub async fn delete_scheduled_event(
+        &self,
+        guild_id: &str,
+        event_id: Uuid,
+    ) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => store.delete_scheduled_event(guild_id, event_id),
+            Self::Postgres(store) => store.delete_scheduled_event(guild_id, event_id).await,
+        }
+    }
+
+    pub fn set_scheduled_events_quota_for_test(&self, quota: Option<usize>) {
+        if let Self::Memory(store) = self {
+            store.set_scheduled_events_quota_for_test(quota);
         }
     }
 
@@ -9979,6 +10116,206 @@ mod tests {
             .unwrap()
             .expect("rejection should succeed when audit recovers");
         assert_eq!(ok_reject.status, "rejected");
+    }
+
+    #[tokio::test]
+    async fn test_scheduled_events_content_validation_quota_and_pagination_issue_393() {
+        // 1. Content validation unit tests
+        // 1a. Empty or whitespace-only title
+        assert!(validate_scheduled_event_content("", "valid description").is_err());
+        assert!(validate_scheduled_event_content("   ", "valid description").is_err());
+
+        // 1b. Title exceeding 200 chars
+        let long_title = "a".repeat(201);
+        assert!(validate_scheduled_event_content(&long_title, "valid description").is_err());
+
+        // 1c. Description exceeding 4000 chars
+        let long_desc = "d".repeat(4001);
+        assert!(validate_scheduled_event_content("Valid Title", &long_desc).is_err());
+
+        // 1d. Valid content is trimmed and returned
+        let (t, d) =
+            validate_scheduled_event_content("  My Event  ", "  Detailed Description  ").unwrap();
+        assert_eq!(t, "My Event");
+        assert_eq!(d, "Detailed Description");
+
+        // 2. Keyset cursor encode / decode & tamper tests
+        let guild_id = "393000000000000001";
+        let other_guild_id = "393000000000000002";
+        let now = Utc::now();
+        let ev_id = Uuid::new_v4();
+
+        let cursor_str = encode_scheduled_event_cursor(guild_id, &now, &ev_id);
+        let decoded = decode_scheduled_event_cursor(&cursor_str).unwrap();
+        assert_eq!(decoded.guild_id, guild_id);
+        assert_eq!(decoded.id, ev_id);
+        assert_eq!(decoded.start_time.timestamp(), now.timestamp());
+
+        // Invalid cursor formats
+        assert!(decode_scheduled_event_cursor("").is_err());
+        assert!(decode_scheduled_event_cursor("invalid-base64!").is_err());
+        assert!(decode_scheduled_event_cursor("v2|guild|time|id").is_err());
+
+        // 3. Storage lifecycle: Quota enforcement and slot reclamation via delete
+        let store = Storage::memory();
+        store.set_scheduled_events_quota_for_test(Some(2));
+
+        let ev1 = store
+            .create_scheduled_event(
+                guild_id,
+                "  Event 1  ",
+                "  Description 1  ",
+                now + chrono::Duration::hours(1),
+                Some(now + chrono::Duration::hours(2)),
+                "UTC",
+                Some(10),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ev1.title, "Event 1");
+        assert_eq!(ev1.description, "Description 1");
+
+        let ev2 = store
+            .create_scheduled_event(
+                guild_id,
+                "Event 2",
+                "Description 2",
+                now + chrono::Duration::hours(3),
+                None,
+                "UTC",
+                None,
+            )
+            .await
+            .unwrap();
+
+        // 3rd event exceeds quota
+        let quota_err = store
+            .create_scheduled_event(
+                guild_id,
+                "Event 3",
+                "Description 3",
+                now + chrono::Duration::hours(5),
+                None,
+                "UTC",
+                None,
+            )
+            .await;
+        assert!(quota_err.is_err(), "must fail when quota is exceeded");
+        let err_msg = quota_err.err().unwrap().to_string();
+        assert!(err_msg.contains("quota exceeded"));
+
+        // Delete non-existent event -> false
+        assert!(
+            !store
+                .delete_scheduled_event(guild_id, Uuid::new_v4())
+                .await
+                .unwrap()
+        );
+        // Delete cross-guild event -> false
+        assert!(
+            !store
+                .delete_scheduled_event(other_guild_id, ev1.id)
+                .await
+                .unwrap()
+        );
+
+        // Delete ev1 -> slot reclaimed
+        assert!(
+            store
+                .delete_scheduled_event(guild_id, ev1.id)
+                .await
+                .unwrap()
+        );
+        // Second delete -> false
+        assert!(
+            !store
+                .delete_scheduled_event(guild_id, ev1.id)
+                .await
+                .unwrap()
+        );
+
+        // Now event 3 can be created because slot was reclaimed
+        let ev3 = store
+            .create_scheduled_event(
+                guild_id,
+                "Event 3",
+                "Description 3",
+                now + chrono::Duration::hours(5),
+                None,
+                "UTC",
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(ev3.title, "Event 3");
+
+        // 4. Keyset pagination with tiebreakers and bounded top-K
+        store.set_scheduled_events_quota_for_test(None);
+        let shared_time = now + chrono::Duration::hours(10);
+        let ev4 = store
+            .create_scheduled_event(
+                guild_id,
+                "Event 4",
+                "Same time",
+                shared_time,
+                None,
+                "UTC",
+                None,
+            )
+            .await
+            .unwrap();
+        let ev5 = store
+            .create_scheduled_event(
+                guild_id,
+                "Event 5",
+                "Same time tiebreaker",
+                shared_time,
+                None,
+                "UTC",
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Create an event in other_guild_id to ensure tenant isolation
+        store
+            .create_scheduled_event(
+                other_guild_id,
+                "Foreign Event",
+                "Foreign",
+                now + chrono::Duration::hours(1),
+                None,
+                "UTC",
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Page 1 with limit 2
+        let p1 = store
+            .list_scheduled_events_page(guild_id, 2, None)
+            .await
+            .unwrap();
+        assert_eq!(p1.items.len(), 2);
+        assert!(p1.has_more);
+        assert!(p1.next_cursor.is_some());
+        assert_eq!(p1.items[0].id, ev2.id);
+        assert_eq!(p1.items[1].id, ev3.id);
+
+        // Page 2
+        let c1 = decode_scheduled_event_cursor(p1.next_cursor.as_deref().unwrap()).unwrap();
+        let p2 = store
+            .list_scheduled_events_page(guild_id, 2, Some((&c1.start_time, &c1.id)))
+            .await
+            .unwrap();
+        assert_eq!(p2.items.len(), 2);
+        assert!(!p2.has_more);
+        assert!(p2.next_cursor.is_none());
+        // Verify deterministic tiebreaker order for identical start_time:
+        let expected_first_tie = if ev4.id < ev5.id { ev4.id } else { ev5.id };
+        let expected_second_tie = if ev4.id < ev5.id { ev5.id } else { ev4.id };
+        assert_eq!(p2.items[0].id, expected_first_tie);
+        assert_eq!(p2.items[1].id, expected_second_tie);
     }
 
     #[tokio::test]
