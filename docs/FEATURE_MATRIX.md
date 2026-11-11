@@ -520,7 +520,7 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
 | Social Publisher Multi-Platform | Implemented | Cross-platform composer, scheduled release, two-person approval gates (#105) |
 | AI Gateway & Hard Budget | Implemented | Hard token/USD caps per guild with instant cutoff, prompt injection sanitization (#106) |
 | MCP Protocol Client/Server | Implemented | Model Context Protocol tool allowlists, mutating action approval gates (#106) |
-| Plugin Marketplace & Verification | Implemented | Semver manifests, SHA-256 cryptographic check, transactional install/rollback (#107) |
+| Plugin Marketplace & Verification | Implemented | Semver manifests, SHA-256 cryptographic check, transactional install/rollback (#107), keyset pagination & lightweight DTO catalog, publisher quotas & O(1) point lookup (#404) |
 
 ## 14. Platform & API Hardening (Issues #202, #203, #204, #205, #206)
 
@@ -793,6 +793,13 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Added strict lifecycle state guard in `reroll_giveaway`: rejects premature reroll attempts on active (`ended = false`) giveaways across storage (`ensure!(ga.ended)`) and web API (HTTP 409 Conflict) without mutating `ended` or winners state, preserving ongoing participant entry (`join_giveaway`).
   - Ensured idempotent conclusion: `finish_giveaway` returns existing winners on repeated invocations without re-drawing.
   - Enforced winner replacement semantics in `reroll_giveaway`: prefers non-winning participants to replace prior winners and strictly rejects drawings without participants with HTTP 400 Bad Request, preventing false-positive `rerolled: true` reports.
+
+- **Plugin Marketplace Keyset Pagination, Lightweight DTOs & Publisher Quota Protection (#404)**:
+  - Eliminated O(N) preflight scanning on `publish_marketplace_package` and `install_guild_plugin`: replaced unbounded `list_marketplace_packages()` calls with targeted O(1) point lookup `get_marketplace_package(&plugin_id)` backed by the existing `UNIQUE` index.
+  - Implemented keyset cursor pagination on `GET /api/marketplace/packages` (`limit=1..=100`, default 25, cursor `(created_at, id)` ordered descending) returning lightweight `MarketplacePackageSummary` DTOs omitting heavy `manifest` blobs from public catalog responses. Full manifests are served only via point lookup `GET /api/marketplace/packages/{plugin_id}`.
+  - Enforced strict input bounds and size validation across both HTTP and Storage layers (`validate_marketplace_package_input`): `plugin_id` restricted to 1–64 characters matching `[a-z0-9_-]`, `name` 1–120 characters, `version` 1–64 characters without whitespace, `author` 1–64 characters, and serialized `manifest` strictly bounded to 16 KiB (16384 bytes).
+  - Protected storage against unbounded catalog growth and publisher flooding: enforced a maximum quota of 100 packages per publisher identity (`MAX_MARKETPLACE_PACKAGES_PER_PUBLISHER`), managed atomically under transaction advisory lock (`pg_advisory_xact_lock`) in PostgreSQL and `marketplace_write_lock` in MemoryStore. Existing package updates do not consume new quota slots, and cross-author overwrite attempts fail closed with 403 Forbidden.
+  - Added additive migration `0066_marketplace_packages_pagination_and_quota_indexes.sql` creating keyset pagination index `idx_plugin_marketplace_packages_cursor` on `(created_at DESC, id DESC)` and publisher quota index `idx_plugin_marketplace_packages_author` on `(author)`.
 
 ## Delivery order
 

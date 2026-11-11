@@ -23,7 +23,8 @@ use rusty_discord_bot::{
     storage::{
         AiKnowledgeDocument, IntegrationConnection, IntegrationDeliveryLog, LinkedAccount,
         MAX_STEAM_LFG_DESCRIPTION_CHARS, MAX_STEAM_LFG_GAME_ID_CHARS,
-        MAX_STEAM_LFG_GAME_NAME_CHARS, run_integrations_retention_janitor,
+        MAX_STEAM_LFG_GAME_NAME_CHARS, PluginMarketplacePackage,
+        run_integrations_retention_janitor,
     },
     web::{
         WebState,
@@ -851,6 +852,88 @@ async fn test_phase4_integrations_and_extensibility_suite() {
         .await
         .unwrap();
     assert_eq!(install_resp.status(), reqwest::StatusCode::OK);
+
+    // Verify GET /api/marketplace/packages pagination and lightweight summary (Issue #404)
+    let list_pkg_resp = client
+        .get(format!("{base_url}/api/marketplace/packages?limit=10"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_pkg_resp.status(), reqwest::StatusCode::OK);
+    let page_json: serde_json::Value = list_pkg_resp.json().await.unwrap();
+    assert!(page_json.get("packages").is_some());
+    assert!(page_json.get("next_cursor").is_some());
+    let pkgs_arr = page_json["packages"].as_array().unwrap();
+    assert_eq!(pkgs_arr.len(), 1);
+    assert_eq!(pkgs_arr[0]["plugin_id"], "verified_economy_plus");
+    // Lightweight DTO MUST NOT leak manifest in listing (Issue #404)
+    assert!(pkgs_arr[0].get("manifest").is_none());
+
+    // Verify GET /api/marketplace/packages/{plugin_id} detail (Issue #404)
+    let detail_resp = client
+        .get(format!(
+            "{base_url}/api/marketplace/packages/verified_economy_plus"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(detail_resp.status(), reqwest::StatusCode::OK);
+    let detail_json: serde_json::Value = detail_resp.json().await.unwrap();
+    assert_eq!(detail_json["plugin_id"], "verified_economy_plus");
+    assert!(detail_json.get("manifest").is_some());
+
+    // Unknown plugin detail returns 404 (Issue #404)
+    let not_found_resp = client
+        .get(format!(
+            "{base_url}/api/marketplace/packages/unknown_plugin_xyz"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(not_found_resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // Validation rejection on publish: oversized manifest > 16 KiB (Issue #404)
+    let oversize_manifest = serde_json::json!({
+        "bloat": "x".repeat(17 * 1024)
+    });
+    let oversize_resp = client
+        .post(format!("{base_url}/api/marketplace/publish"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({
+            "plugin_id": "oversize_plugin",
+            "name": "Oversize",
+            "version": "1.0.0",
+            "author": "Verified Dev",
+            "sha256_hash": pkg_hash,
+            "manifest": oversize_manifest
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(oversize_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Publisher Quota test (Issue #404): set quota to 1
+    state.app.storage.set_marketplace_quota_for_test(Some(1));
+    let quota_exceeded_resp = client
+        .post(format!("{base_url}/api/marketplace/publish"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({
+            "plugin_id": "second_plugin_quota_fail",
+            "name": "Second Plugin",
+            "version": "1.0.0",
+            "author": "Verified Dev",
+            "sha256_hash": pkg_hash,
+            "manifest": {
+                "id": "second_plugin_quota_fail"
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(quota_exceeded_resp.status(), reqwest::StatusCode::CONFLICT);
+    state.app.storage.set_marketplace_quota_for_test(None);
 
     // ==========================================
     // 12. Agent 20: Full Verification & QA Gate
@@ -4435,4 +4518,98 @@ async fn test_steam_lfg_validation_normalization_and_isolation_issue_403() {
         .await
         .unwrap();
     assert!(guild_b_posts.is_empty());
+}
+
+#[tokio::test]
+async fn test_marketplace_http_keyset_pagination_and_tamper_isolation_issue_404() {
+    let (state, _) = test_web_state().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = build_router(state.clone());
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+
+    let valid_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    let base_time = Utc::now();
+
+    // Populate 5 packages directly via storage
+    for i in 1..=5 {
+        let pkg = PluginMarketplacePackage {
+            id: Uuid::new_v4(),
+            plugin_id: format!("plugin-http-page-{:02}", i),
+            name: format!("HTTP Plugin {:02}", i),
+            version: "1.0.0".to_string(),
+            author: "http_publisher".to_string(),
+            sha256_hash: valid_hash.to_string(),
+            manifest: serde_json::json!({"id": format!("plugin-http-page-{:02}", i)}),
+            is_verified: false,
+            created_at: base_time + chrono::Duration::seconds(i as i64),
+        };
+        state
+            .app
+            .storage
+            .publish_marketplace_package(pkg)
+            .await
+            .unwrap();
+    }
+
+    // Page 1: limit 2
+    let p1_resp = client
+        .get(format!("{base_url}/api/marketplace/packages?limit=2"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(p1_resp.status(), reqwest::StatusCode::OK);
+    let p1_body: serde_json::Value = p1_resp.json().await.unwrap();
+    let p1_pkgs = p1_body["packages"].as_array().unwrap();
+    assert_eq!(p1_pkgs.len(), 2);
+    assert_eq!(p1_pkgs[0]["plugin_id"], "plugin-http-page-05");
+    assert_eq!(p1_pkgs[1]["plugin_id"], "plugin-http-page-04");
+    assert!(p1_pkgs[0].get("manifest").is_none());
+    let cur1 = p1_body["next_cursor"].as_str().unwrap();
+
+    // Page 2: limit 2 with cursor 1
+    let p2_resp = client
+        .get(format!(
+            "{base_url}/api/marketplace/packages?limit=2&cursor={cur1}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(p2_resp.status(), reqwest::StatusCode::OK);
+    let p2_body: serde_json::Value = p2_resp.json().await.unwrap();
+    let p2_pkgs = p2_body["packages"].as_array().unwrap();
+    assert_eq!(p2_pkgs.len(), 2);
+    assert_eq!(p2_pkgs[0]["plugin_id"], "plugin-http-page-03");
+    assert_eq!(p2_pkgs[1]["plugin_id"], "plugin-http-page-02");
+    let cur2 = p2_body["next_cursor"].as_str().unwrap();
+
+    // Page 3: limit 2 with cursor 2 -> 1 item, next_cursor is null
+    let p3_resp = client
+        .get(format!(
+            "{base_url}/api/marketplace/packages?limit=2&cursor={cur2}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(p3_resp.status(), reqwest::StatusCode::OK);
+    let p3_body: serde_json::Value = p3_resp.json().await.unwrap();
+    let p3_pkgs = p3_body["packages"].as_array().unwrap();
+    assert_eq!(p3_pkgs.len(), 1);
+    assert_eq!(p3_pkgs[0]["plugin_id"], "plugin-http-page-01");
+    assert!(p3_body["next_cursor"].is_null());
+
+    // Malformed cursor yields 400 Bad Request
+    let bad_cur_resp = client
+        .get(format!(
+            "{base_url}/api/marketplace/packages?cursor=bad-cursor-content"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_cur_resp.status(), reqwest::StatusCode::BAD_REQUEST);
 }

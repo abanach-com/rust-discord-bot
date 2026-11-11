@@ -21,8 +21,10 @@ use super::{
     GitLabSubscription, Giveaway, GuildModuleSettings, HelpForumConfig, HelpForumSession,
     HelpForumStats, IntegrationConnection, IntegrationDeliveryLog, IntegrationWebhookSubscription,
     InviteTracking, KickStreamSubscription, LinkedAccount, MAX_AI_DOCUMENTS_BYTES_PER_GUILD,
-    MAX_AI_DOCUMENTS_PER_GUILD, MAX_COMPANION_MAPPINGS_PER_GUILD, MAX_SCHEDULED_EVENTS_PER_GUILD,
-    MAX_WORKFLOW_TOTAL_BYTES_PER_GUILD, MAX_WORKFLOWS_PAGE_LIMIT, MAX_WORKFLOWS_PER_GUILD,
+    MAX_AI_DOCUMENTS_PER_GUILD, MAX_COMPANION_MAPPINGS_PER_GUILD,
+    MAX_MARKETPLACE_PACKAGES_PER_PUBLISHER, MAX_MARKETPLACE_PAGE_LIMIT,
+    MAX_SCHEDULED_EVENTS_PER_GUILD, MAX_WORKFLOW_TOTAL_BYTES_PER_GUILD, MAX_WORKFLOWS_PAGE_LIMIT,
+    MAX_WORKFLOWS_PER_GUILD, MarketplacePackageSummary, MarketplacePackagesPage,
     McpToolAuthorization, MemberIdentityRecord, MemberProgress, MemberSearchFilter,
     MemberSearchRow, MemberSnapshot, ModerationAppeal, ModerationExecutionIntent,
     ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState, ModuleDraftConfig,
@@ -36,11 +38,12 @@ use super::{
     TimedRoleGrant, Tournament, TransitionApplicationParams, TupperError, TupperProfile,
     TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport, VkSubscription,
     WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowDefinitionsPage, WorkflowRunExecution,
-    WorkflowStorageError, XpAward, YouTubeChannelSubscription, decode_workflow_definition_cursor,
+    WorkflowStorageError, XpAward, YouTubeChannelSubscription, decode_marketplace_package_cursor,
+    decode_workflow_definition_cursor, encode_marketplace_package_cursor,
     encode_scheduled_event_cursor, encode_store_purchase_cursor, encode_workflow_definition_cursor,
     level_for_xp, normalize_steam_lfg_post, parse_member_search_cursor, snowflake_created_at,
-    validate_birthday_date, validate_event_voice_queue_config, validate_scheduled_event_content,
-    validate_snowflake, validate_workflow_definition_content,
+    validate_birthday_date, validate_event_voice_queue_config, validate_marketplace_package_input,
+    validate_scheduled_event_content, validate_snowflake, validate_workflow_definition_content,
 };
 
 pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
@@ -10413,70 +10416,165 @@ impl PostgresStore {
         Ok(rows)
     }
 
-    // Agent 19 (#107): Plugin Marketplace
+    // Agent 19 (#107, #404): Plugin Marketplace
+
+    pub async fn get_marketplace_package(
+        &self,
+        plugin_id: &str,
+    ) -> anyhow::Result<Option<PluginMarketplacePackage>> {
+        let row = sqlx::query_as::<_, PluginMarketplacePackage>(
+            "SELECT * FROM plugin_marketplace_packages WHERE plugin_id = $1",
+        )
+        .bind(plugin_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
 
     pub async fn publish_marketplace_package(
         &self,
-
         pkg: PluginMarketplacePackage,
     ) -> anyhow::Result<PluginMarketplacePackage> {
-        let row = sqlx::query_as::<_, PluginMarketplacePackage>(
+        validate_marketplace_package_input(&pkg).map_err(|e| anyhow::anyhow!("{e}"))?;
 
-            r#"
+        let mut tx = self.pool.begin().await?;
 
-            INSERT INTO plugin_marketplace_packages (id, plugin_id, name, version, author, sha256_hash, manifest, is_verified, created_at)
+        // Transaction-scoped advisory lock per publisher author
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('marketplace_pub_' || $1))")
+            .bind(&pkg.author)
+            .execute(&mut *tx)
+            .await?;
 
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-
-            ON CONFLICT (plugin_id) DO UPDATE SET
-
-                version = EXCLUDED.version,
-
-                sha256_hash = EXCLUDED.sha256_hash,
-
-                manifest = EXCLUDED.manifest,
-
-                is_verified = EXCLUDED.is_verified
-
-            RETURNING *
-
-            "#
-
+        let existing = sqlx::query_as::<_, PluginMarketplacePackage>(
+            "SELECT * FROM plugin_marketplace_packages WHERE plugin_id = $1",
         )
-
-        .bind(pkg.id)
-
         .bind(&pkg.plugin_id)
-
-        .bind(&pkg.name)
-
-        .bind(&pkg.version)
-
-        .bind(&pkg.author)
-
-        .bind(&pkg.sha256_hash)
-
-        .bind(&pkg.manifest)
-
-        .bind(pkg.is_verified)
-
-        .bind(pkg.created_at)
-
-        .fetch_one(&self.pool)
-
+        .fetch_optional(&mut *tx)
         .await?;
+
+        if let Some(existing_pkg) = existing {
+            if existing_pkg.author != pkg.author {
+                anyhow::bail!("You cannot modify a package published by another author");
+            }
+            if existing_pkg.version == pkg.version {
+                anyhow::bail!("Package version already exists");
+            }
+        } else {
+            let count: (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM plugin_marketplace_packages WHERE author = $1",
+            )
+            .bind(&pkg.author)
+            .fetch_one(&mut *tx)
+            .await?;
+
+            if count.0 >= MAX_MARKETPLACE_PACKAGES_PER_PUBLISHER as i64 {
+                anyhow::bail!(
+                    "Publisher package quota exceeded (maximum {} packages)",
+                    MAX_MARKETPLACE_PACKAGES_PER_PUBLISHER
+                );
+            }
+        }
+
+        let row = sqlx::query_as::<_, PluginMarketplacePackage>(
+            r#"
+            INSERT INTO plugin_marketplace_packages (id, plugin_id, name, version, author, sha256_hash, manifest, is_verified, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (plugin_id) DO UPDATE SET
+                name = EXCLUDED.name,
+                version = EXCLUDED.version,
+                author = EXCLUDED.author,
+                sha256_hash = EXCLUDED.sha256_hash,
+                manifest = EXCLUDED.manifest,
+                is_verified = EXCLUDED.is_verified
+            RETURNING *
+            "#,
+        )
+        .bind(pkg.id)
+        .bind(&pkg.plugin_id)
+        .bind(&pkg.name)
+        .bind(&pkg.version)
+        .bind(&pkg.author)
+        .bind(&pkg.sha256_hash)
+        .bind(&pkg.manifest)
+        .bind(pkg.is_verified)
+        .bind(pkg.created_at)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
 
         Ok(row)
     }
 
     pub async fn list_marketplace_packages(&self) -> anyhow::Result<Vec<PluginMarketplacePackage>> {
         let rows = sqlx::query_as::<_, PluginMarketplacePackage>(
-            "SELECT * FROM plugin_marketplace_packages",
+            "SELECT * FROM plugin_marketplace_packages ORDER BY created_at DESC, id DESC LIMIT 100",
         )
         .fetch_all(&self.pool)
         .await?;
 
         Ok(rows)
+    }
+
+    pub async fn list_marketplace_packages_page(
+        &self,
+        limit: usize,
+        cursor: Option<&str>,
+    ) -> anyhow::Result<MarketplacePackagesPage> {
+        let decoded_cursor = match cursor {
+            Some(c) if !c.trim().is_empty() => Some(decode_marketplace_package_cursor(c)?),
+            _ => None,
+        };
+
+        let clamped_limit = limit.clamp(1, MAX_MARKETPLACE_PAGE_LIMIT);
+        let query_limit = (clamped_limit + 1) as i64;
+
+        let mut rows = if let Some(cur) = decoded_cursor {
+            sqlx::query_as::<_, MarketplacePackageSummary>(
+                r#"
+                SELECT id, plugin_id, name, version, author, sha256_hash, is_verified, created_at
+                FROM plugin_marketplace_packages
+                WHERE (created_at, id) < ($1, $2)
+                ORDER BY created_at DESC, id DESC
+                LIMIT $3
+                "#,
+            )
+            .bind(cur.created_at)
+            .bind(cur.id)
+            .bind(query_limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, MarketplacePackageSummary>(
+                r#"
+                SELECT id, plugin_id, name, version, author, sha256_hash, is_verified, created_at
+                FROM plugin_marketplace_packages
+                ORDER BY created_at DESC, id DESC
+                LIMIT $1
+                "#,
+            )
+            .bind(query_limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        let has_more = rows.len() > clamped_limit;
+        if has_more {
+            rows.truncate(clamped_limit);
+        }
+
+        let next_cursor = if has_more {
+            rows.last()
+                .map(|last| encode_marketplace_package_cursor(&last.created_at, &last.id))
+        } else {
+            None
+        };
+
+        Ok(MarketplacePackagesPage {
+            packages: rows,
+            next_cursor,
+        })
     }
 
     pub async fn install_plugin_package(

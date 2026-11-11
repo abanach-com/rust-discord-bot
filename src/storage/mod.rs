@@ -2589,6 +2589,158 @@ pub struct PluginMarketplacePackage {
     pub created_at: DateTime<Utc>,
 }
 
+pub const MAX_MARKETPLACE_PACKAGES_PER_PUBLISHER: usize = 100;
+pub const MAX_MARKETPLACE_MANIFEST_BYTES: usize = 16 * 1024; // 16 KiB
+pub const MAX_MARKETPLACE_PLUGIN_ID_CHARS: usize = 64;
+pub const MAX_MARKETPLACE_NAME_CHARS: usize = 120;
+pub const MAX_MARKETPLACE_VERSION_CHARS: usize = 64;
+pub const MAX_MARKETPLACE_AUTHOR_CHARS: usize = 64;
+pub const DEFAULT_MARKETPLACE_PAGE_LIMIT: usize = 25;
+pub const MAX_MARKETPLACE_PAGE_LIMIT: usize = 100;
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow, PartialEq, Eq)]
+pub struct MarketplacePackageSummary {
+    pub id: Uuid,
+    pub plugin_id: String,
+    pub name: String,
+    pub version: String,
+    pub author: String,
+    pub sha256_hash: String,
+    pub is_verified: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<PluginMarketplacePackage> for MarketplacePackageSummary {
+    fn from(pkg: PluginMarketplacePackage) -> Self {
+        Self {
+            id: pkg.id,
+            plugin_id: pkg.plugin_id,
+            name: pkg.name,
+            version: pkg.version,
+            author: pkg.author,
+            sha256_hash: pkg.sha256_hash,
+            is_verified: pkg.is_verified,
+            created_at: pkg.created_at,
+        }
+    }
+}
+
+impl From<&PluginMarketplacePackage> for MarketplacePackageSummary {
+    fn from(pkg: &PluginMarketplacePackage) -> Self {
+        Self {
+            id: pkg.id,
+            plugin_id: pkg.plugin_id.clone(),
+            name: pkg.name.clone(),
+            version: pkg.version.clone(),
+            author: pkg.author.clone(),
+            sha256_hash: pkg.sha256_hash.clone(),
+            is_verified: pkg.is_verified,
+            created_at: pkg.created_at,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MarketplacePackagesPage {
+    pub packages: Vec<MarketplacePackageSummary>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarketplacePackageCursor {
+    pub created_at: DateTime<Utc>,
+    pub id: Uuid,
+}
+
+pub fn encode_marketplace_package_cursor(created_at: &DateTime<Utc>, id: &Uuid) -> String {
+    let payload = format!("v1|{}|{}", created_at.to_rfc3339(), id);
+    base64url_encode_store_cursor(payload.as_bytes())
+}
+
+pub fn decode_marketplace_package_cursor(cursor: &str) -> anyhow::Result<MarketplacePackageCursor> {
+    let trimmed = cursor.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("empty cursor");
+    }
+    if trimmed.len() > 512 {
+        anyhow::bail!("cursor exceeds maximum allowed length");
+    }
+    let decoded = base64url_decode_store_cursor(trimmed).map_err(|e| {
+        anyhow::anyhow!("invalid base64url encoding for marketplace package cursor: {e}")
+    })?;
+    let payload = String::from_utf8(decoded)
+        .map_err(|e| anyhow::anyhow!("cursor is not valid UTF-8: {e}"))?;
+    let parts: Vec<&str> = payload.split('|').collect();
+    if parts.len() != 3 || parts[0] != "v1" {
+        anyhow::bail!("invalid marketplace package cursor format: expected v1 format");
+    }
+    let created_at = DateTime::parse_from_rfc3339(parts[1].trim())
+        .map_err(|e| anyhow::anyhow!("invalid cursor created_at timestamp: {e}"))?
+        .with_timezone(&Utc);
+    let id = Uuid::parse_str(parts[2].trim())
+        .map_err(|e| anyhow::anyhow!("invalid cursor id uuid: {e}"))?;
+    Ok(MarketplacePackageCursor { created_at, id })
+}
+
+pub fn validate_marketplace_package_input(
+    pkg: &PluginMarketplacePackage,
+) -> Result<(), &'static str> {
+    let plugin_id = pkg.plugin_id.trim();
+    if plugin_id.is_empty() || plugin_id.chars().count() > MAX_MARKETPLACE_PLUGIN_ID_CHARS {
+        return Err("Invalid plugin_id: must be 1-64 characters");
+    }
+    for b in plugin_id.bytes() {
+        if !matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_') {
+            return Err(
+                "Invalid plugin_id: must contain only lowercase alphanumeric characters, '-' or '_'",
+            );
+        }
+    }
+
+    let name = pkg.name.trim();
+    if name.is_empty() || name.chars().count() > MAX_MARKETPLACE_NAME_CHARS {
+        return Err("Invalid package name: must be 1-120 characters");
+    }
+    if name.chars().any(|c| c.is_control()) {
+        return Err("Invalid package name: control characters are not allowed");
+    }
+
+    let version = pkg.version.trim();
+    if version.is_empty() || version.chars().count() > MAX_MARKETPLACE_VERSION_CHARS {
+        return Err("Invalid package version: must be 1-64 characters");
+    }
+    if version.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("Invalid package version: whitespace and control characters are not allowed");
+    }
+
+    let author = pkg.author.trim();
+    if author.is_empty() || author.chars().count() > MAX_MARKETPLACE_AUTHOR_CHARS {
+        return Err("Invalid package author: must be 1-64 characters");
+    }
+    if author.chars().any(|c| c.is_control()) {
+        return Err("Invalid package author: control characters are not allowed");
+    }
+
+    let hash = pkg.sha256_hash.trim();
+    if hash.is_empty()
+        || hash.chars().count() > 64
+        || hash.chars().any(|c| c.is_control() || c.is_whitespace())
+    {
+        return Err("Invalid sha256_hash: must be 1-64 non-whitespace characters");
+    }
+
+    if !pkg.manifest.is_object() {
+        return Err("Marketplace manifest must be a JSON object");
+    }
+    let manifest_bytes = serde_json::to_vec(&pkg.manifest)
+        .map_err(|_| "Failed to serialize marketplace manifest")?;
+    if manifest_bytes.len() > MAX_MARKETPLACE_MANIFEST_BYTES {
+        return Err("Marketplace manifest exceeds maximum size of 16384 bytes");
+    }
+
+    Ok(())
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct PluginGuildInstallation {
     pub id: Uuid,
@@ -7186,16 +7338,30 @@ impl Storage {
         }
     }
 
-    // Agent 19 (#107): Plugin Marketplace
+    // Agent 19 (#107, #404): Plugin Marketplace
+
+    pub fn set_marketplace_quota_for_test(&self, quota: Option<usize>) {
+        if let Self::Memory(store) = self {
+            store.set_marketplace_quota_for_test(quota);
+        }
+    }
+
+    pub async fn get_marketplace_package(
+        &self,
+        plugin_id: &str,
+    ) -> anyhow::Result<Option<PluginMarketplacePackage>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_marketplace_package(plugin_id)),
+            Self::Postgres(store) => store.get_marketplace_package(plugin_id).await,
+        }
+    }
 
     pub async fn publish_marketplace_package(
         &self,
-
         pkg: PluginMarketplacePackage,
     ) -> anyhow::Result<PluginMarketplacePackage> {
         match self {
-            Self::Memory(store) => Ok(store.publish_marketplace_package(pkg)),
-
+            Self::Memory(store) => store.publish_marketplace_package(pkg),
             Self::Postgres(store) => store.publish_marketplace_package(pkg).await,
         }
     }
@@ -7203,8 +7369,18 @@ impl Storage {
     pub async fn list_marketplace_packages(&self) -> anyhow::Result<Vec<PluginMarketplacePackage>> {
         match self {
             Self::Memory(store) => Ok(store.list_marketplace_packages()),
-
             Self::Postgres(store) => store.list_marketplace_packages().await,
+        }
+    }
+
+    pub async fn list_marketplace_packages_page(
+        &self,
+        limit: usize,
+        cursor: Option<&str>,
+    ) -> anyhow::Result<MarketplacePackagesPage> {
+        match self {
+            Self::Memory(store) => store.list_marketplace_packages_page(limit, cursor),
+            Self::Postgres(store) => store.list_marketplace_packages_page(limit, cursor).await,
         }
     }
 
@@ -13072,5 +13248,283 @@ mod tests {
         assert_eq!(audit_entry.data["lobby_channel_id"], lobby_id);
         assert_eq!(audit_entry.data["target_channel_id"], target_id);
         assert_eq!(audit_entry.data["actor_id"], actor);
+    }
+
+    #[test]
+    fn test_marketplace_package_validation_issue_404() {
+        let valid_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let valid_pkg = PluginMarketplacePackage {
+            id: Uuid::new_v4(),
+            plugin_id: "valid_plugin-123_test".to_string(),
+            name: "Valid Plugin Name".to_string(),
+            version: "1.0.0".to_string(),
+            author: "author_user_123".to_string(),
+            sha256_hash: valid_hash.to_string(),
+            manifest: serde_json::json!({"id": "valid_plugin-123_test", "version": "1.0.0"}),
+            is_verified: false,
+            created_at: Utc::now(),
+        };
+
+        // 1. Valid package passes
+        assert!(validate_marketplace_package_input(&valid_pkg).is_ok());
+
+        // 2. plugin_id validations:
+        let mut pkg = valid_pkg.clone();
+        pkg.plugin_id = "".to_string();
+        assert!(validate_marketplace_package_input(&pkg).is_err());
+
+        pkg.plugin_id = "a".repeat(65);
+        assert!(validate_marketplace_package_input(&pkg).is_err());
+
+        pkg.plugin_id = "Plugin_Uppercase".to_string();
+        assert!(validate_marketplace_package_input(&pkg).is_err());
+
+        pkg.plugin_id = "plugin with spaces".to_string();
+        assert!(validate_marketplace_package_input(&pkg).is_err());
+
+        pkg.plugin_id = "plugin$invalid#chars!".to_string();
+        assert!(validate_marketplace_package_input(&pkg).is_err());
+
+        // 3. name validations:
+        let mut pkg = valid_pkg.clone();
+        pkg.name = "".to_string();
+        assert!(validate_marketplace_package_input(&pkg).is_err());
+
+        pkg.name = "n".repeat(121);
+        assert!(validate_marketplace_package_input(&pkg).is_err());
+
+        pkg.name = "Control\x00Name".to_string();
+        assert!(validate_marketplace_package_input(&pkg).is_err());
+
+        // 4. version validations:
+        let mut pkg = valid_pkg.clone();
+        pkg.version = "".to_string();
+        assert!(validate_marketplace_package_input(&pkg).is_err());
+
+        pkg.version = "1.0.0 with spaces".to_string();
+        assert!(validate_marketplace_package_input(&pkg).is_err());
+
+        pkg.version = "v".repeat(65);
+        assert!(validate_marketplace_package_input(&pkg).is_err());
+
+        // 5. author validations:
+        let mut pkg = valid_pkg.clone();
+        pkg.author = "".to_string();
+        assert!(validate_marketplace_package_input(&pkg).is_err());
+
+        pkg.author = "a".repeat(65);
+        assert!(validate_marketplace_package_input(&pkg).is_err());
+
+        pkg.author = "Author\x07Bell".to_string();
+        assert!(validate_marketplace_package_input(&pkg).is_err());
+
+        // 6. sha256_hash validations:
+        let mut pkg = valid_pkg.clone();
+        pkg.sha256_hash = "".to_string();
+        assert!(validate_marketplace_package_input(&pkg).is_err());
+
+        pkg.sha256_hash = "h".repeat(65);
+        assert!(validate_marketplace_package_input(&pkg).is_err());
+
+        pkg.sha256_hash = "hash with spaces".to_string();
+        assert!(validate_marketplace_package_input(&pkg).is_err());
+
+        // 7. manifest validations:
+        let mut pkg = valid_pkg.clone();
+        pkg.manifest = serde_json::json!(["array", "not", "object"]);
+        assert!(validate_marketplace_package_input(&pkg).is_err());
+
+        pkg.manifest = serde_json::Value::Null;
+        assert!(validate_marketplace_package_input(&pkg).is_err());
+
+        // Manifest over 16 KiB limit (16384 bytes)
+        let big_blob = "x".repeat(17 * 1024);
+        pkg.manifest = serde_json::json!({"bloat": big_blob});
+        assert!(validate_marketplace_package_input(&pkg).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_marketplace_package_pagination_and_storage_issue_404() {
+        let store = Storage::memory();
+        let valid_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+        // Initial point lookup on empty store returns None
+        assert!(
+            store
+                .get_marketplace_package("pkg-001")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let base_time = Utc::now();
+        let mut created_ids = Vec::new();
+        for i in 1..=5 {
+            let pkg = PluginMarketplacePackage {
+                id: Uuid::new_v4(),
+                plugin_id: format!("plugin-item-{:03}", i),
+                name: format!("Package {:03}", i),
+                version: "1.0.0".to_string(),
+                author: "publisher_alpha".to_string(),
+                sha256_hash: valid_hash.to_string(),
+                manifest: serde_json::json!({"id": format!("plugin-item-{:03}", i)}),
+                is_verified: false,
+                created_at: base_time + chrono::Duration::seconds(i as i64),
+            };
+            let published = store.publish_marketplace_package(pkg).await.unwrap();
+            created_ids.push(published.id);
+        }
+
+        // Point lookup for existing package
+        let item1 = store
+            .get_marketplace_package("plugin-item-001")
+            .await
+            .unwrap();
+        assert!(item1.is_some());
+        assert_eq!(item1.unwrap().plugin_id, "plugin-item-001");
+
+        // Page 1: limit 2
+        let page1 = store.list_marketplace_packages_page(2, None).await.unwrap();
+        assert_eq!(page1.packages.len(), 2);
+        assert!(page1.next_cursor.is_some());
+        assert_eq!(page1.packages[0].plugin_id, "plugin-item-005");
+        assert_eq!(page1.packages[1].plugin_id, "plugin-item-004");
+        let cur1 = page1.next_cursor.as_deref().unwrap();
+
+        // Page 2: limit 2 with cur1
+        let page2 = store
+            .list_marketplace_packages_page(2, Some(cur1))
+            .await
+            .unwrap();
+        assert_eq!(page2.packages.len(), 2);
+        assert!(page2.next_cursor.is_some());
+        assert_eq!(page2.packages[0].plugin_id, "plugin-item-003");
+        assert_eq!(page2.packages[1].plugin_id, "plugin-item-002");
+        let cur2 = page2.next_cursor.as_deref().unwrap();
+
+        // Page 3: limit 2 with cur2 -> 1 item, no next cursor
+        let page3 = store
+            .list_marketplace_packages_page(2, Some(cur2))
+            .await
+            .unwrap();
+        assert_eq!(page3.packages.len(), 1);
+        assert!(page3.next_cursor.is_none());
+        assert_eq!(page3.packages[0].plugin_id, "plugin-item-001");
+
+        // Malformed cursor returns error
+        assert!(
+            store
+                .list_marketplace_packages_page(2, Some("invalid-base64-not-v1"))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_marketplace_package_quota_and_author_isolation_issue_404() {
+        let store = Storage::memory();
+        let valid_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+        // Set test quota to 2 packages per author
+        store.set_marketplace_quota_for_test(Some(2));
+
+        let user_a = "publisher_a";
+        let user_b = "publisher_b";
+
+        // User A publishes package 1 -> ok
+        let pkg_a1 = PluginMarketplacePackage {
+            id: Uuid::new_v4(),
+            plugin_id: "plugin-a-one".to_string(),
+            name: "Plugin A1".to_string(),
+            version: "1.0.0".to_string(),
+            author: user_a.to_string(),
+            sha256_hash: valid_hash.to_string(),
+            manifest: serde_json::json!({"id": "plugin-a-one"}),
+            is_verified: false,
+            created_at: Utc::now(),
+        };
+        assert!(store.publish_marketplace_package(pkg_a1).await.is_ok());
+
+        // User A publishes package 2 -> ok
+        let pkg_a2 = PluginMarketplacePackage {
+            id: Uuid::new_v4(),
+            plugin_id: "plugin-a-two".to_string(),
+            name: "Plugin A2".to_string(),
+            version: "1.0.0".to_string(),
+            author: user_a.to_string(),
+            sha256_hash: valid_hash.to_string(),
+            manifest: serde_json::json!({"id": "plugin-a-two"}),
+            is_verified: false,
+            created_at: Utc::now(),
+        };
+        assert!(store.publish_marketplace_package(pkg_a2).await.is_ok());
+
+        // User A publishes package 3 (new package) -> QUOTA EXCEEDED
+        let pkg_a3 = PluginMarketplacePackage {
+            id: Uuid::new_v4(),
+            plugin_id: "plugin-a-three".to_string(),
+            name: "Plugin A3".to_string(),
+            version: "1.0.0".to_string(),
+            author: user_a.to_string(),
+            sha256_hash: valid_hash.to_string(),
+            manifest: serde_json::json!({"id": "plugin-a-three"}),
+            is_verified: false,
+            created_at: Utc::now(),
+        };
+        let err_a3 = store.publish_marketplace_package(pkg_a3).await;
+        assert!(err_a3.is_err());
+        assert!(err_a3.unwrap_err().to_string().contains("quota exceeded"));
+
+        // User B publishes package 1 -> OK (publisher quota is isolated per author)
+        let pkg_b1 = PluginMarketplacePackage {
+            id: Uuid::new_v4(),
+            plugin_id: "plugin-b-one".to_string(),
+            name: "Plugin B1".to_string(),
+            version: "1.0.0".to_string(),
+            author: user_b.to_string(),
+            sha256_hash: valid_hash.to_string(),
+            manifest: serde_json::json!({"id": "plugin-b-one"}),
+            is_verified: false,
+            created_at: Utc::now(),
+        };
+        assert!(store.publish_marketplace_package(pkg_b1).await.is_ok());
+
+        // User A re-publishes existing package 1 with new version -> OK (does not consume new slot)
+        let pkg_a1_v2 = PluginMarketplacePackage {
+            id: Uuid::new_v4(),
+            plugin_id: "plugin-a-one".to_string(),
+            name: "Plugin A1 Updated".to_string(),
+            version: "1.1.0".to_string(),
+            author: user_a.to_string(),
+            sha256_hash: valid_hash.to_string(),
+            manifest: serde_json::json!({"id": "plugin-a-one", "version": "1.1.0"}),
+            is_verified: false,
+            created_at: Utc::now(),
+        };
+        assert!(store.publish_marketplace_package(pkg_a1_v2).await.is_ok());
+
+        // User B attempts to publish/modify package owned by User A -> 403 / Err
+        let pkg_b_tamper = PluginMarketplacePackage {
+            id: Uuid::new_v4(),
+            plugin_id: "plugin-a-one".to_string(),
+            name: "Plugin Tampered".to_string(),
+            version: "2.0.0".to_string(),
+            author: user_b.to_string(),
+            sha256_hash: valid_hash.to_string(),
+            manifest: serde_json::json!({"id": "plugin-a-one"}),
+            is_verified: false,
+            created_at: Utc::now(),
+        };
+        let tamper_err = store.publish_marketplace_package(pkg_b_tamper).await;
+        assert!(tamper_err.is_err());
+        assert!(
+            tamper_err
+                .unwrap_err()
+                .to_string()
+                .contains("cannot modify a package published by another author")
+        );
+
+        // Reset test quota
+        store.set_marketplace_quota_for_test(None);
     }
 }

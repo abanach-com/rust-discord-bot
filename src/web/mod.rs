@@ -920,6 +920,10 @@ pub fn build_router(state: WebState) -> Router {
             get(integrations::list_marketplace_packages),
         )
         .route(
+            "/api/marketplace/packages/{plugin_id}",
+            get(integrations::get_marketplace_package_detail),
+        )
+        .route(
             "/api/marketplace/publish",
             post(integrations::publish_marketplace_package),
         )

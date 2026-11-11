@@ -24,26 +24,28 @@ use super::{
     GitLabSubscription, Giveaway, GuildModuleSettings, IntegrationConnection,
     IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking, KickStreamSubscription,
     LinkedAccount, MAX_AI_DOCUMENTS_BYTES_PER_GUILD, MAX_AI_DOCUMENTS_PER_GUILD,
-    MAX_COMPANION_MAPPINGS_PER_GUILD, MAX_SCHEDULED_EVENTS_PER_GUILD,
-    MAX_WORKFLOW_TOTAL_BYTES_PER_GUILD, MAX_WORKFLOWS_PAGE_LIMIT, MAX_WORKFLOWS_PER_GUILD,
-    McpToolAuthorization, MemberIdentityRecord, MemberProgress, MemberSearchFilter,
-    MemberSearchRow, MemberSnapshot, ModerationAppeal, ModerationExecutionIntent,
-    ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState, ModuleDraftConfig,
-    PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric, ProgressionSeason,
-    QuoteRecord, ReactionRoleBinding, ReactionRoleGrant, RecordCompanionLeaseParams,
-    RedditSubscription, ReleaseReactionRoleGrantOutcome, ReputationGrantOutcome, ScheduledEvent,
-    ScheduledEventsPage, ServerSnapshot, SocialDraftApprovalError, SocialDraftsPage,
-    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StoreItemsPage,
-    StorePurchase, StorePurchasesPage, TagRecord, TelegramBridge, TelegramMessageMapping,
-    TimedRoleGrant, Tournament, TupperError, TupperProfile, TwitchStreamSubscription,
-    UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WORK_JOBS, WorkClaimOutcome,
-    WorkflowDefinition, WorkflowDefinitionsPage, WorkflowRunExecution, WorkflowStorageError,
-    XpAward, YouTubeChannelSubscription, decode_workflow_definition_cursor,
-    encode_scheduled_event_cursor, encode_store_purchase_cursor, encode_workflow_definition_cursor,
-    is_member_after_cursor, level_for_xp, next_birthday_date, normalize_steam_lfg_post,
-    parse_member_search_cursor, snowflake_created_at, validate_birthday_date,
-    validate_event_voice_queue_config, validate_scheduled_event_content, validate_snowflake,
-    validate_workflow_definition_content,
+    MAX_COMPANION_MAPPINGS_PER_GUILD, MAX_MARKETPLACE_PACKAGES_PER_PUBLISHER,
+    MAX_MARKETPLACE_PAGE_LIMIT, MAX_SCHEDULED_EVENTS_PER_GUILD, MAX_WORKFLOW_TOTAL_BYTES_PER_GUILD,
+    MAX_WORKFLOWS_PAGE_LIMIT, MAX_WORKFLOWS_PER_GUILD, MarketplacePackageSummary,
+    MarketplacePackagesPage, McpToolAuthorization, MemberIdentityRecord, MemberProgress,
+    MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
+    ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
+    ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
+    ProgressionSeason, QuoteRecord, ReactionRoleBinding, ReactionRoleGrant,
+    RecordCompanionLeaseParams, RedditSubscription, ReleaseReactionRoleGrantOutcome,
+    ReputationGrantOutcome, ScheduledEvent, ScheduledEventsPage, ServerSnapshot,
+    SocialDraftApprovalError, SocialDraftsPage, SocialPublicationDraft, StarboardEntry,
+    SteamLfgPost, StickyMessage, StoreItem, StoreItemsPage, StorePurchase, StorePurchasesPage,
+    TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError,
+    TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
+    VkSubscription, WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowDefinitionsPage,
+    WorkflowRunExecution, WorkflowStorageError, XpAward, YouTubeChannelSubscription,
+    decode_marketplace_package_cursor, decode_workflow_definition_cursor,
+    encode_marketplace_package_cursor, encode_scheduled_event_cursor, encode_store_purchase_cursor,
+    encode_workflow_definition_cursor, is_member_after_cursor, level_for_xp, next_birthday_date,
+    normalize_steam_lfg_post, parse_member_search_cursor, snowflake_created_at,
+    validate_birthday_date, validate_event_voice_queue_config, validate_marketplace_package_input,
+    validate_scheduled_event_content, validate_snowflake, validate_workflow_definition_content,
 };
 
 type ModuleKey = (String, String);
@@ -248,6 +250,10 @@ pub struct MemoryStore {
     mcp_tool_auths: Arc<DashMap<(String, String), McpToolAuthorization>>,
 
     marketplace_packages: Arc<DashMap<String, PluginMarketplacePackage>>,
+
+    marketplace_write_lock: Arc<Mutex<()>>,
+
+    marketplace_quota_override: Arc<std::sync::RwLock<Option<usize>>>,
 
     plugin_guild_installs: Arc<DashMap<(String, String), PluginGuildInstallation>>,
 
@@ -7594,24 +7600,127 @@ impl MemoryStore {
             .collect()
     }
 
-    // Agent 19 (#107): Plugin Marketplace
+    // Agent 19 (#107, #404): Plugin Marketplace
+
+    pub fn set_marketplace_quota_for_test(&self, quota: Option<usize>) {
+        if let Ok(mut lock) = self.marketplace_quota_override.write() {
+            *lock = quota;
+        }
+    }
+
+    pub fn get_marketplace_package(&self, plugin_id: &str) -> Option<PluginMarketplacePackage> {
+        self.marketplace_packages
+            .get(plugin_id)
+            .map(|e| e.value().clone())
+    }
 
     pub fn publish_marketplace_package(
         &self,
-
         pkg: PluginMarketplacePackage,
-    ) -> PluginMarketplacePackage {
+    ) -> anyhow::Result<PluginMarketplacePackage> {
+        validate_marketplace_package_input(&pkg).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        let _guard = self
+            .marketplace_write_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+
+        let max_packages = self
+            .marketplace_quota_override
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .unwrap_or(MAX_MARKETPLACE_PACKAGES_PER_PUBLISHER);
+
+        let existing = self.marketplace_packages.get(&pkg.plugin_id);
+        if let Some(existing_pkg) = existing {
+            if existing_pkg.author != pkg.author {
+                anyhow::bail!("You cannot modify a package published by another author");
+            }
+            if existing_pkg.version == pkg.version {
+                anyhow::bail!("Package version already exists");
+            }
+        } else {
+            let author_count = self
+                .marketplace_packages
+                .iter()
+                .filter(|e| e.value().author == pkg.author)
+                .count();
+            if author_count >= max_packages {
+                anyhow::bail!("Publisher package quota exceeded (maximum {max_packages} packages)");
+            }
+        }
+
         self.marketplace_packages
             .insert(pkg.plugin_id.clone(), pkg.clone());
 
-        pkg
+        Ok(pkg)
     }
 
     pub fn list_marketplace_packages(&self) -> Vec<PluginMarketplacePackage> {
-        self.marketplace_packages
+        let mut pkgs: Vec<PluginMarketplacePackage> = self
+            .marketplace_packages
             .iter()
             .map(|e| e.value().clone())
-            .collect()
+            .collect();
+        pkgs.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+        pkgs.truncate(100);
+        pkgs
+    }
+
+    pub fn list_marketplace_packages_page(
+        &self,
+        limit: usize,
+        cursor: Option<&str>,
+    ) -> anyhow::Result<MarketplacePackagesPage> {
+        let decoded_cursor = match cursor {
+            Some(c) if !c.trim().is_empty() => Some(decode_marketplace_package_cursor(c)?),
+            _ => None,
+        };
+
+        let clamped_limit = limit.clamp(1, MAX_MARKETPLACE_PAGE_LIMIT);
+
+        let mut all: Vec<PluginMarketplacePackage> = self
+            .marketplace_packages
+            .iter()
+            .map(|e| e.value().clone())
+            .collect();
+
+        // Keyset sorting: created_at DESC, id DESC
+        all.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+
+        if let Some(ref cur) = decoded_cursor {
+            all.retain(|p| {
+                p.created_at < cur.created_at || (p.created_at == cur.created_at && p.id < cur.id)
+            });
+        }
+
+        let has_more = all.len() > clamped_limit;
+        let items: Vec<MarketplacePackageSummary> = all
+            .into_iter()
+            .take(clamped_limit)
+            .map(Into::into)
+            .collect();
+
+        let next_cursor = if has_more {
+            items
+                .last()
+                .map(|last| encode_marketplace_package_cursor(&last.created_at, &last.id))
+        } else {
+            None
+        };
+
+        Ok(MarketplacePackagesPage {
+            packages: items,
+            next_cursor,
+        })
     }
 
     pub fn install_plugin_package(

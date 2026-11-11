@@ -16,11 +16,13 @@ use crate::integrations::{
     webhook::{verify_hmac_sha256, verify_secret_token},
 };
 use crate::storage::{
-    AiGuildBudget, AiKnowledgeDocument, DEFAULT_WORKFLOWS_PAGE_LIMIT, GamingHubGameStatus,
-    GitHubDevopsMapping, IntegrationConnection, IntegrationDeliveryLog, LinkedAccount,
-    PluginGuildInstallation, PluginMarketplacePackage, SocialDraftApprovalError, SocialDraftsPage,
-    SocialPublicationDraft, SteamLfgInput, SteamLfgPost, SteamLfgValidationError, TelegramBridge,
-    WorkflowDefinition, WorkflowDefinitionsPage, WorkflowStorageError, validate_steam_lfg_game_id,
+    AiGuildBudget, AiKnowledgeDocument, DEFAULT_MARKETPLACE_PAGE_LIMIT,
+    DEFAULT_WORKFLOWS_PAGE_LIMIT, GamingHubGameStatus, GitHubDevopsMapping, IntegrationConnection,
+    IntegrationDeliveryLog, LinkedAccount, MarketplacePackagesPage, PluginGuildInstallation,
+    PluginMarketplacePackage, SocialDraftApprovalError, SocialDraftsPage, SocialPublicationDraft,
+    SteamLfgInput, SteamLfgPost, SteamLfgValidationError, TelegramBridge, WorkflowDefinition,
+    WorkflowDefinitionsPage, WorkflowStorageError, validate_marketplace_package_input,
+    validate_steam_lfg_game_id,
 };
 
 use super::{
@@ -1517,18 +1519,50 @@ pub async fn search_ai_knowledge(
 // ==========================================
 // Agent 19 (#107): Plugin Marketplace
 // ==========================================
+// Agent 19 (#107, #404): Plugin Marketplace
+// ==========================================
+
+#[derive(Debug, Deserialize, Default)]
+pub struct MarketplacePackagesQuery {
+    pub limit: Option<usize>,
+    pub cursor: Option<String>,
+}
 
 pub async fn list_marketplace_packages(
     State(state): State<WebState>,
-) -> Result<Json<Vec<PluginMarketplacePackage>>, ApiError> {
-    let packages = state
+    Query(query): Query<MarketplacePackagesQuery>,
+) -> Result<Json<MarketplacePackagesPage>, ApiError> {
+    let limit = query.limit.unwrap_or(DEFAULT_MARKETPLACE_PAGE_LIMIT);
+    let page = state
         .app
         .storage
-        .list_marketplace_packages()
+        .list_marketplace_packages_page(limit, query.cursor.as_deref())
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("cursor") {
+                ApiError::bad_request(msg)
+            } else {
+                ApiError::internal(msg)
+            }
+        })?;
 
-    Ok(Json(packages))
+    Ok(Json(page))
+}
+
+pub async fn get_marketplace_package_detail(
+    State(state): State<WebState>,
+    Path(plugin_id): Path<String>,
+) -> Result<Json<PluginMarketplacePackage>, ApiError> {
+    let pkg = state
+        .app
+        .storage
+        .get_marketplace_package(&plugin_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Marketplace package not found"))?;
+
+    Ok(Json(pkg))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1536,6 +1570,7 @@ pub struct PublishPackageRequest {
     pub plugin_id: String,
     pub name: String,
     pub version: String,
+    #[serde(default)]
     pub author: String,
     pub sha256_hash: String,
     pub manifest: Value,
@@ -1597,16 +1632,16 @@ pub async fn publish_marketplace_package(
     let (_, session) = authenticate(&state, &headers).await?;
     verify_csrf(&headers, &session)?;
 
-    // Check if package already exists: must not overwrite another author's package or existing version (Issue #117)
-    let packages = state
+    // Point lookup for existing package (O(1), Issue #117, #404)
+    let existing = state
         .app
         .storage
-        .list_marketplace_packages()
+        .get_marketplace_package(&payload.plugin_id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    if let Some(existing) = packages.iter().find(|p| p.plugin_id == payload.plugin_id) {
-        if existing.author != session.user.id && existing.author != payload.author {
+    if let Some(existing) = existing {
+        if existing.author != session.user.id {
             return Err(ApiError::forbidden(
                 "You cannot modify a package published by another author",
             ));
@@ -1633,19 +1668,35 @@ pub async fn publish_marketplace_package(
         plugin_id: payload.plugin_id,
         name: payload.name,
         version: payload.version,
-        author: payload.author,
+        author: session.user.id.clone(),
         sha256_hash: payload.sha256_hash,
         manifest: payload.manifest,
         is_verified: false, // Default to unverified until trusted review (Issue #117)
         created_at: Utc::now(),
     };
 
+    // Pre-validate in HTTP layer before storage
+    if let Err(err_msg) = validate_marketplace_package_input(&pkg) {
+        return Err(ApiError::bad_request(err_msg));
+    }
+
     let saved = state
         .app
         .storage
         .publish_marketplace_package(pkg)
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("quota exceeded") {
+                ApiError::conflict(msg)
+            } else if msg.contains("cannot modify") {
+                ApiError::forbidden(msg)
+            } else if msg.contains("already exists") || msg.contains("Invalid") {
+                ApiError::bad_request(msg)
+            } else {
+                ApiError::internal(msg)
+            }
+        })?;
 
     Ok(Json(saved))
 }
@@ -1668,16 +1719,13 @@ pub async fn install_guild_plugin(
     verify_csrf(&headers, &session)?;
     ensure_guild_access(&state, &session, &guild_id).await?;
 
-    // Verify that the requested package exists and version matches (Issue #117)
-    let packages = state
+    // Point lookup package existence and version match (Issue #117, #404)
+    let pkg = state
         .app
         .storage
-        .list_marketplace_packages()
+        .get_marketplace_package(&payload.plugin_id)
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-    let pkg = packages
-        .iter()
-        .find(|p| p.plugin_id == payload.plugin_id)
+        .map_err(|e| ApiError::internal(e.to_string()))?
         .ok_or_else(|| ApiError::not_found("Marketplace package not found"))?;
 
     if pkg.version != payload.version {
