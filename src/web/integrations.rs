@@ -19,8 +19,8 @@ use crate::storage::{
     AiGuildBudget, AiKnowledgeDocument, DEFAULT_WORKFLOWS_PAGE_LIMIT, GamingHubGameStatus,
     GitHubDevopsMapping, IntegrationConnection, IntegrationDeliveryLog, LinkedAccount,
     PluginGuildInstallation, PluginMarketplacePackage, SocialDraftApprovalError, SocialDraftsPage,
-    SocialPublicationDraft, SteamLfgPost, TelegramBridge, WorkflowDefinition,
-    WorkflowDefinitionsPage, WorkflowStorageError,
+    SocialPublicationDraft, SteamLfgInput, SteamLfgPost, SteamLfgValidationError, TelegramBridge,
+    WorkflowDefinition, WorkflowDefinitionsPage, WorkflowStorageError, validate_steam_lfg_game_id,
 };
 
 use super::{
@@ -532,6 +532,14 @@ pub async fn create_steam_lfg(
     verify_csrf(&headers, &session)?;
     ensure_guild_member_access(&state, &session, &guild_id).await?;
 
+    let normalized = SteamLfgInput {
+        game_id: &payload.game_id,
+        game_name: &payload.game_name,
+        description: &payload.description,
+    }
+    .validate_normalize()
+    .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
     let active_user_posts = state
         .app
         .storage
@@ -561,9 +569,9 @@ pub async fn create_steam_lfg(
         id: Uuid::new_v4(),
         guild_id,
         author_id: session.user.id.clone(),
-        game_id: payload.game_id,
-        game_name: payload.game_name,
-        description: payload.description,
+        game_id: normalized.game_id,
+        game_name: normalized.game_name,
+        description: normalized.description,
         max_players: payload.max_players.clamp(2, 64),
         current_players: json!([session.user.id]),
         expires_at: Utc::now() + chrono::Duration::minutes(ttl),
@@ -575,7 +583,13 @@ pub async fn create_steam_lfg(
         .storage
         .create_steam_lfg_post(post)
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(|e| {
+            if let Some(val_err) = e.downcast_ref::<SteamLfgValidationError>() {
+                ApiError::bad_request(val_err.to_string())
+            } else {
+                ApiError::internal(e.to_string())
+            }
+        })?;
 
     Ok(Json(saved))
 }
@@ -589,11 +603,16 @@ pub async fn list_steam_lfg(
     let (_, session) = authenticate(&state, &headers).await?;
     ensure_guild_member_access(&state, &session, &guild_id).await?;
 
-    let game_id = params.get("game_id").map(|s| s.as_str());
+    let normalized_game_id = match params.get("game_id").map(String::as_str) {
+        Some(raw) if !raw.is_empty() => Some(
+            validate_steam_lfg_game_id(raw).map_err(|e| ApiError::bad_request(e.to_string()))?,
+        ),
+        _ => None,
+    };
     let posts = state
         .app
         .storage
-        .list_steam_lfg_posts(&guild_id, game_id)
+        .list_steam_lfg_posts(&guild_id, normalized_game_id.as_deref())
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 

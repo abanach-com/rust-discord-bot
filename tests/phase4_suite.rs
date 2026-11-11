@@ -22,7 +22,8 @@ use rusty_discord_bot::{
     state::AppState,
     storage::{
         AiKnowledgeDocument, IntegrationConnection, IntegrationDeliveryLog, LinkedAccount,
-        run_integrations_retention_janitor,
+        MAX_STEAM_LFG_DESCRIPTION_CHARS, MAX_STEAM_LFG_GAME_ID_CHARS,
+        MAX_STEAM_LFG_GAME_NAME_CHARS, run_integrations_retention_janitor,
     },
     web::{
         WebState,
@@ -4092,4 +4093,346 @@ async fn test_social_drafts_reject_and_quota_release_single_admin_issue_392() {
 
     // Reset quota override
     state.app.storage.set_social_drafts_quota_for_test(None);
+}
+
+#[tokio::test]
+async fn test_steam_lfg_validation_normalization_and_isolation_issue_403() {
+    let config = test_config();
+    let app = AppState::bootstrap(config).await.expect("bootstrap");
+    let state = WebState::new(
+        app,
+        Arc::new(LoginRateLimiter::new()),
+        Arc::new(DashMap::new()),
+    );
+
+    let guild_a = "900000000000000401";
+    let guild_b = "900000000000000402";
+    let member_a_id = "800000000000000401";
+    let member_b_id = "800000000000000402";
+
+    // Regular member in Guild A (permissions = "0", NOT admin)
+    let session_a = "steam_lfg_member_a_sess";
+    let csrf_a = "steam_lfg_member_a_csrf";
+    state
+        .app
+        .sessions
+        .save_session(
+            session_a,
+            DashboardUser {
+                id: member_a_id.to_string(),
+                username: "MemberA".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_a.to_string(),
+                name: "Guild A".to_string(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_string(),
+            }],
+            csrf_a.to_string(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .expect("save member A session");
+
+    // Member only in Guild B
+    let session_b = "steam_lfg_member_b_sess";
+    let csrf_b = "steam_lfg_member_b_csrf";
+    state
+        .app
+        .sessions
+        .save_session(
+            session_b,
+            DashboardUser {
+                id: member_b_id.to_string(),
+                username: "MemberB".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_b.to_string(),
+                name: "Guild B".to_string(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_string(),
+            }],
+            csrf_b.to_string(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .expect("save member B session");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().unwrap();
+    let router = build_router(state.clone());
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let cookie_a = format!("rusty_discord_bot_session={session_a}");
+    let cookie_b = format!("rusty_discord_bot_session={session_b}");
+
+    // 1. Rejections must return 400 Bad Request and NOT persist or consume quota
+    let invalid_payloads = vec![
+        serde_json::json!({ "game_id": "", "game_name": "CS2", "description": "ok", "max_players": 5 }),
+        serde_json::json!({ "game_id": "   ", "game_name": "CS2", "description": "ok", "max_players": 5 }),
+        serde_json::json!({ "game_id": "cs 2", "game_name": "CS2", "description": "ok", "max_players": 5 }),
+        serde_json::json!({ "game_id": "730\n", "game_name": "CS2", "description": "ok", "max_players": 5 }),
+        serde_json::json!({ "game_id": "730\0", "game_name": "CS2", "description": "ok", "max_players": 5 }),
+        serde_json::json!({ "game_id": "730", "game_name": "", "description": "ok", "max_players": 5 }),
+        serde_json::json!({ "game_id": "730", "game_name": "   ", "description": "ok", "max_players": 5 }),
+        serde_json::json!({ "game_id": "730", "game_name": "CS2\n", "description": "ok", "max_players": 5 }),
+        serde_json::json!({ "game_id": "730", "game_name": "CS2", "description": "bad\0null", "max_players": 5 }),
+        serde_json::json!({ "game_id": "a".repeat(MAX_STEAM_LFG_GAME_ID_CHARS + 1), "game_name": "CS2", "description": "ok", "max_players": 5 }),
+        serde_json::json!({ "game_id": "🎮".repeat(MAX_STEAM_LFG_GAME_ID_CHARS + 1), "game_name": "CS2", "description": "ok", "max_players": 5 }),
+        serde_json::json!({ "game_id": "730", "game_name": "a".repeat(MAX_STEAM_LFG_GAME_NAME_CHARS + 1), "description": "ok", "max_players": 5 }),
+        serde_json::json!({ "game_id": "730", "game_name": "ą".repeat(MAX_STEAM_LFG_GAME_NAME_CHARS + 1), "description": "ok", "max_players": 5 }),
+        serde_json::json!({ "game_id": "730", "game_name": "CS2", "description": "x".repeat(MAX_STEAM_LFG_DESCRIPTION_CHARS + 1), "max_players": 5 }),
+        serde_json::json!({ "game_id": "730", "game_name": "CS2", "description": "🎮".repeat(MAX_STEAM_LFG_DESCRIPTION_CHARS + 1), "max_players": 5 }),
+        serde_json::json!({ "game_id": "730", "game_name": "CS2", "description": "x".repeat(512 * 1024), "max_players": 5 }),
+    ];
+
+    for payload in invalid_payloads {
+        let resp = client
+            .post(format!("{base_url}/api/guilds/{guild_a}/steam/lfg"))
+            .header(COOKIE, &cookie_a)
+            .header("X-CSRF-Token", csrf_a)
+            .json(&payload)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::BAD_REQUEST,
+            "expected 400 for invalid payload: {payload:?}"
+        );
+    }
+
+    assert_eq!(
+        state
+            .app
+            .storage
+            .count_active_steam_lfg_posts(guild_a, member_a_id)
+            .await
+            .unwrap(),
+        0
+    );
+    let empty_list: Vec<serde_json::Value> = client
+        .get(format!("{base_url}/api/guilds/{guild_a}/steam/lfg"))
+        .header(COOKIE, &cookie_a)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(empty_list.is_empty());
+
+    // 2. Boundary exact acceptances + normalization (all 5 active quota slots still free!)
+    // Slot 1: Exact max UTF-8 game_id (64), exact max UTF-8 game_name (120), whitespace-only description -> ""
+    let boundary_id_utf8 = "🎮".repeat(MAX_STEAM_LFG_GAME_ID_CHARS);
+    let boundary_name_utf8 = "ą".repeat(MAX_STEAM_LFG_GAME_NAME_CHARS);
+    let r1 = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/steam/lfg"))
+        .header(COOKIE, &cookie_a)
+        .header("X-CSRF-Token", csrf_a)
+        .json(&serde_json::json!({
+            "game_id": format!("  {boundary_id_utf8}  "),
+            "game_name": format!("  {boundary_name_utf8}  "),
+            "description": "   ",
+            "max_players": 4
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r1.status(), reqwest::StatusCode::OK);
+    let b1: serde_json::Value = r1.json().await.unwrap();
+    assert_eq!(b1["game_id"], boundary_id_utf8);
+    assert_eq!(b1["game_name"], boundary_name_utf8);
+    assert_eq!(b1["description"], "");
+
+    // Slot 2: Exact max ASCII description (1000)
+    let boundary_desc_ascii = "d".repeat(MAX_STEAM_LFG_DESCRIPTION_CHARS);
+    let r2 = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/steam/lfg"))
+        .header(COOKIE, &cookie_a)
+        .header("X-CSRF-Token", csrf_a)
+        .json(&serde_json::json!({
+            "game_id": "poe2",
+            "game_name": "Path of Exile 2",
+            "description": boundary_desc_ascii,
+            "max_players": 6
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r2.status(), reqwest::StatusCode::OK);
+    let b2: serde_json::Value = r2.json().await.unwrap();
+    assert_eq!(b2["description"], boundary_desc_ascii);
+
+    // Slot 3: Exact max 4-byte UTF-8 description (1000)
+    let boundary_desc_utf8 = "🎮".repeat(MAX_STEAM_LFG_DESCRIPTION_CHARS);
+    let r3 = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/steam/lfg"))
+        .header(COOKIE, &cookie_a)
+        .header("X-CSRF-Token", csrf_a)
+        .json(&serde_json::json!({
+            "game_id": "570",
+            "game_name": "Dota 2",
+            "description": boundary_desc_utf8,
+            "max_players": 5
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r3.status(), reqwest::StatusCode::OK);
+    let b3: serde_json::Value = r3.json().await.unwrap();
+    assert_eq!(b3["description"], boundary_desc_utf8);
+
+    // Slot 4: Padded leading/trailing spaces must be normalized consistently in POST and GET
+    let r4 = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/steam/lfg"))
+        .header(COOKIE, &cookie_a)
+        .header("X-CSRF-Token", csrf_a)
+        .json(&serde_json::json!({
+            "game_id": "   730   ",
+            "game_name": "   Counter-Strike 2   ",
+            "description": "   Need 2\nHave mic   ",
+            "max_players": 5
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r4.status(), reqwest::StatusCode::OK);
+    let b4: serde_json::Value = r4.json().await.unwrap();
+    assert_eq!(b4["game_id"], "730");
+    assert_eq!(b4["game_name"], "Counter-Strike 2");
+    assert_eq!(b4["description"], "Need 2\nHave mic");
+
+    // Slot 5: Exact max ASCII game_id (64)
+    let boundary_id_ascii = "g".repeat(MAX_STEAM_LFG_GAME_ID_CHARS);
+    let r5 = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/steam/lfg"))
+        .header(COOKIE, &cookie_a)
+        .header("X-CSRF-Token", csrf_a)
+        .json(&serde_json::json!({
+            "game_id": boundary_id_ascii,
+            "game_name": "Custom Game",
+            "description": "Casual",
+            "max_players": 3
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r5.status(), reqwest::StatusCode::OK);
+
+    // 6th valid post hits user quota (429 Too Many Requests), confirming rejected requests consumed 0 slots
+    let r6 = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/steam/lfg"))
+        .header(COOKIE, &cookie_a)
+        .header("X-CSRF-Token", csrf_a)
+        .json(&serde_json::json!({
+            "game_id": "730",
+            "game_name": "CS2",
+            "description": "6th post",
+            "max_players": 5
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r6.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+
+    // 3. Verify GET returns trimmed records and validates/normalizes ?game_id query param
+    let filtered_posts: Vec<serde_json::Value> = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/steam/lfg?game_id=%20730%20"
+        ))
+        .header(COOKIE, &cookie_a)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(filtered_posts.len(), 1);
+    assert_eq!(filtered_posts[0]["game_id"], "730");
+    assert_eq!(filtered_posts[0]["game_name"], "Counter-Strike 2");
+
+    let bad_query_ws = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/steam/lfg?game_id=%20%20"
+        ))
+        .header(COOKIE, &cookie_a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_query_ws.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let bad_query_long = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_a}/steam/lfg?game_id={}",
+            "x".repeat(MAX_STEAM_LFG_GAME_ID_CHARS + 1)
+        ))
+        .header(COOKIE, &cookie_a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_query_long.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 4. CSRF, membership, and cross-guild isolation remain strict
+    let no_csrf = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/steam/lfg"))
+        .header(COOKIE, &cookie_a)
+        .json(&serde_json::json!({
+            "game_id": "730",
+            "game_name": "CS2",
+            "description": "no csrf",
+            "max_players": 5
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let cross_guild_get = client
+        .get(format!("{base_url}/api/guilds/{guild_a}/steam/lfg"))
+        .header(COOKIE, &cookie_b)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cross_guild_get.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let cross_guild_post = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/steam/lfg"))
+        .header(COOKIE, &cookie_b)
+        .header("X-CSRF-Token", csrf_b)
+        .json(&serde_json::json!({
+            "game_id": "730",
+            "game_name": "CS2",
+            "description": "cross guild",
+            "max_players": 5
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cross_guild_post.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let guild_b_posts: Vec<serde_json::Value> = client
+        .get(format!("{base_url}/api/guilds/{guild_b}/steam/lfg"))
+        .header(COOKIE, &cookie_b)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(guild_b_posts.is_empty());
 }

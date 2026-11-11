@@ -40,9 +40,10 @@ use super::{
     WorkflowDefinition, WorkflowDefinitionsPage, WorkflowRunExecution, WorkflowStorageError,
     XpAward, YouTubeChannelSubscription, decode_workflow_definition_cursor,
     encode_scheduled_event_cursor, encode_store_purchase_cursor, encode_workflow_definition_cursor,
-    is_member_after_cursor, level_for_xp, next_birthday_date, parse_member_search_cursor,
-    snowflake_created_at, validate_birthday_date, validate_event_voice_queue_config,
-    validate_scheduled_event_content, validate_snowflake, validate_workflow_definition_content,
+    is_member_after_cursor, level_for_xp, next_birthday_date, normalize_steam_lfg_post,
+    parse_member_search_cursor, snowflake_created_at, validate_birthday_date,
+    validate_event_voice_queue_config, validate_scheduled_event_content, validate_snowflake,
+    validate_workflow_definition_content,
 };
 
 type ModuleKey = (String, String);
@@ -6445,10 +6446,11 @@ impl MemoryStore {
 
     // Agent 05 (#94) & Agent 15 (#104): Steam & Gaming Hub LFG
 
-    pub fn create_steam_lfg_post(&self, post: SteamLfgPost) -> SteamLfgPost {
+    pub fn create_steam_lfg_post(&self, post: SteamLfgPost) -> anyhow::Result<SteamLfgPost> {
+        let post = normalize_steam_lfg_post(post)?;
         self.steam_lfg_posts.insert(post.id, post.clone());
 
-        post
+        Ok(post)
     }
 
     pub fn count_active_steam_lfg_posts(&self, guild_id: &str, author_id: &str) -> usize {

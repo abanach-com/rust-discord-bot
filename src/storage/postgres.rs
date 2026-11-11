@@ -38,9 +38,9 @@ use super::{
     WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowDefinitionsPage, WorkflowRunExecution,
     WorkflowStorageError, XpAward, YouTubeChannelSubscription, decode_workflow_definition_cursor,
     encode_scheduled_event_cursor, encode_store_purchase_cursor, encode_workflow_definition_cursor,
-    level_for_xp, parse_member_search_cursor, snowflake_created_at, validate_birthday_date,
-    validate_event_voice_queue_config, validate_scheduled_event_content, validate_snowflake,
-    validate_workflow_definition_content,
+    level_for_xp, normalize_steam_lfg_post, parse_member_search_cursor, snowflake_created_at,
+    validate_birthday_date, validate_event_voice_queue_config, validate_scheduled_event_content,
+    validate_snowflake, validate_workflow_definition_content,
 };
 
 pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
@@ -8444,6 +8444,8 @@ impl PostgresStore {
     // Agent 05 (#94) & Agent 15 (#104): Steam & Gaming Hub LFG
 
     pub async fn create_steam_lfg_post(&self, post: SteamLfgPost) -> anyhow::Result<SteamLfgPost> {
+        let post = normalize_steam_lfg_post(post)?;
+
         let row = sqlx::query_as::<_, SteamLfgPost>(
 
             r#"

@@ -1944,6 +1944,144 @@ pub struct SteamLfgPost {
     pub created_at: DateTime<Utc>,
 }
 
+pub const MAX_STEAM_LFG_GAME_ID_CHARS: usize = 64;
+pub const MAX_STEAM_LFG_GAME_ID_BYTES: usize = MAX_STEAM_LFG_GAME_ID_CHARS * 4;
+pub const MAX_STEAM_LFG_GAME_NAME_CHARS: usize = 120;
+pub const MAX_STEAM_LFG_GAME_NAME_BYTES: usize = MAX_STEAM_LFG_GAME_NAME_CHARS * 4;
+pub const MAX_STEAM_LFG_DESCRIPTION_CHARS: usize = 1_000;
+pub const MAX_STEAM_LFG_DESCRIPTION_BYTES: usize = MAX_STEAM_LFG_DESCRIPTION_CHARS * 4;
+/// Maximum combined UTF-8 byte budget of user-supplied text fields (`game_id` + `game_name` + `description`)
+/// stored in a single `SteamLfgPost` record (256 + 480 + 4,000 = 4,736 bytes).
+pub const MAX_STEAM_LFG_TEXT_PAYLOAD_BYTES: usize =
+    MAX_STEAM_LFG_GAME_ID_BYTES + MAX_STEAM_LFG_GAME_NAME_BYTES + MAX_STEAM_LFG_DESCRIPTION_BYTES;
+
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum SteamLfgValidationError {
+    #[error("{0}")]
+    InvalidInput(String),
+}
+
+/// Unvalidated Steam LFG text payload before trimming, character/byte bounds checks,
+/// and control-character sanitization.
+#[derive(Debug, Clone)]
+pub struct SteamLfgInput<'a> {
+    pub game_id: &'a str,
+    pub game_name: &'a str,
+    pub description: &'a str,
+}
+
+/// Validated and trimmed Steam LFG text fields guaranteed to stay within `MAX_STEAM_LFG_TEXT_PAYLOAD_BYTES`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedSteamLfgInput {
+    pub game_id: String,
+    pub game_name: String,
+    pub description: String,
+}
+
+fn normalize_steam_lfg_text(
+    input: &str,
+    field: &str,
+    min_chars: usize,
+    max_chars: usize,
+    max_bytes: usize,
+    allow_newlines_and_tabs: bool,
+) -> Result<String, SteamLfgValidationError> {
+    let trimmed = input.trim();
+    let trimmed_bytes = trimmed.len();
+    if trimmed_bytes == 0 && min_chars > 0 {
+        return Err(SteamLfgValidationError::InvalidInput(format!(
+            "{field} cannot be empty or whitespace only"
+        )));
+    }
+    if trimmed_bytes > max_bytes {
+        return Err(SteamLfgValidationError::InvalidInput(format!(
+            "{field} exceeds maximum size of {max_bytes} bytes ({max_chars} characters)"
+        )));
+    }
+    let char_count = trimmed.chars().count();
+    if char_count < min_chars || char_count > max_chars {
+        return Err(SteamLfgValidationError::InvalidInput(format!(
+            "{field} must contain {min_chars}..={max_chars} characters"
+        )));
+    }
+    if input
+        .chars()
+        .any(|c| c.is_control() && !(allow_newlines_and_tabs && matches!(c, '\n' | '\r' | '\t')))
+    {
+        return Err(SteamLfgValidationError::InvalidInput(format!(
+            "{field} contains forbidden control characters"
+        )));
+    }
+    Ok(trimmed.to_owned())
+}
+
+/// Validates and normalizes a Steam LFG `game_id` identifier.
+///
+/// Accepts Steam AppIDs (e.g. `"730"`) as well as non-Steam game slugs/identifiers (e.g. `"poe2"`,
+/// `"game_0"`), enforcing 1..=64 Unicode characters (max 256 UTF-8 bytes) with no control characters
+/// or internal whitespace after trimming.
+pub fn validate_steam_lfg_game_id(input: &str) -> Result<String, SteamLfgValidationError> {
+    let normalized = normalize_steam_lfg_text(
+        input,
+        "game_id",
+        1,
+        MAX_STEAM_LFG_GAME_ID_CHARS,
+        MAX_STEAM_LFG_GAME_ID_BYTES,
+        false,
+    )?;
+    if normalized.chars().any(char::is_whitespace) {
+        return Err(SteamLfgValidationError::InvalidInput(
+            "game_id cannot contain internal whitespace".to_string(),
+        ));
+    }
+    Ok(normalized)
+}
+
+impl<'a> SteamLfgInput<'a> {
+    /// Validates and normalizes `game_id`, `game_name`, and `description`.
+    pub fn validate_normalize(&self) -> Result<NormalizedSteamLfgInput, SteamLfgValidationError> {
+        let game_id = validate_steam_lfg_game_id(self.game_id)?;
+        let game_name = normalize_steam_lfg_text(
+            self.game_name,
+            "game_name",
+            1,
+            MAX_STEAM_LFG_GAME_NAME_CHARS,
+            MAX_STEAM_LFG_GAME_NAME_BYTES,
+            false,
+        )?;
+        let description = normalize_steam_lfg_text(
+            self.description,
+            "description",
+            0,
+            MAX_STEAM_LFG_DESCRIPTION_CHARS,
+            MAX_STEAM_LFG_DESCRIPTION_BYTES,
+            true,
+        )?;
+        Ok(NormalizedSteamLfgInput {
+            game_id,
+            game_name,
+            description,
+        })
+    }
+}
+
+/// Validates and normalizes a [`SteamLfgPost`] prior to storage persistence so callers outside
+/// the HTTP layer cannot bypass field length or control-character bounds.
+pub fn normalize_steam_lfg_post(
+    mut post: SteamLfgPost,
+) -> Result<SteamLfgPost, SteamLfgValidationError> {
+    let normalized = SteamLfgInput {
+        game_id: &post.game_id,
+        game_name: &post.game_name,
+        description: &post.description,
+    }
+    .validate_normalize()?;
+    post.game_id = normalized.game_id;
+    post.game_name = normalized.game_name;
+    post.description = normalized.description;
+    Ok(post)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct GitHubDevopsMapping {
     pub id: Uuid,
@@ -6380,7 +6518,7 @@ impl Storage {
 
     pub async fn create_steam_lfg_post(&self, post: SteamLfgPost) -> anyhow::Result<SteamLfgPost> {
         match self {
-            Self::Memory(store) => Ok(store.create_steam_lfg_post(post)),
+            Self::Memory(store) => store.create_steam_lfg_post(post),
 
             Self::Postgres(store) => store.create_steam_lfg_post(post).await,
         }
@@ -9909,6 +10047,200 @@ mod tests {
             .await
             .expect("count active after prune");
         assert_eq!(active_after, 3);
+    }
+
+    #[tokio::test]
+    async fn test_steam_lfg_input_validation_and_normalization_issue_403() {
+        let store = Storage::Memory(MemoryStore::default());
+
+        // 1. Trimming and valid normalization (including optional empty description & newlines in description)
+        let norm = SteamLfgInput {
+            game_id: "  730  ",
+            game_name: "  Counter-Strike 2  ",
+            description: "  Line 1\nLine 2\tOK  ",
+        }
+        .validate_normalize()
+        .expect("valid padded LFG input");
+        assert_eq!(norm.game_id, "730");
+        assert_eq!(norm.game_name, "Counter-Strike 2");
+        assert_eq!(norm.description, "Line 1\nLine 2\tOK");
+
+        let empty_desc = SteamLfgInput {
+            game_id: "poe2",
+            game_name: "Path of Exile 2",
+            description: "   ",
+        }
+        .validate_normalize()
+        .expect("whitespace description normalizes to empty string");
+        assert_eq!(empty_desc.description, "");
+
+        // 2. Empty or whitespace-only game_id / game_name rejected
+        for bad_id in ["", "   ", "\t", "game 1", "730\n", "730\0", "\x1b[31m730"] {
+            assert!(
+                SteamLfgInput {
+                    game_id: bad_id,
+                    game_name: "Valid Name",
+                    description: "Valid desc",
+                }
+                .validate_normalize()
+                .is_err(),
+                "expected error for game_id={bad_id:?}"
+            );
+        }
+
+        for bad_name in ["", "   ", "CS2\n", "CS2\0", "CS2\x07"] {
+            assert!(
+                SteamLfgInput {
+                    game_id: "730",
+                    game_name: bad_name,
+                    description: "Valid desc",
+                }
+                .validate_normalize()
+                .is_err(),
+                "expected error for game_name={bad_name:?}"
+            );
+        }
+
+        for bad_desc in ["bad\0null", "ansi\x1b[31mred"] {
+            assert!(
+                SteamLfgInput {
+                    game_id: "730",
+                    game_name: "CS2",
+                    description: bad_desc,
+                }
+                .validate_normalize()
+                .is_err(),
+                "expected error for description={bad_desc:?}"
+            );
+        }
+
+        // 3. Exact boundaries for ASCII and 4-byte UTF-8 characters (🎮)
+        let max_id_ascii = "a".repeat(MAX_STEAM_LFG_GAME_ID_CHARS);
+        let max_id_utf8 = "🎮".repeat(MAX_STEAM_LFG_GAME_ID_CHARS);
+        let over_id = "🎮".repeat(MAX_STEAM_LFG_GAME_ID_CHARS + 1);
+        assert!(
+            SteamLfgInput {
+                game_id: &max_id_ascii,
+                game_name: "Valid",
+                description: "",
+            }
+            .validate_normalize()
+            .is_ok()
+        );
+        assert!(
+            SteamLfgInput {
+                game_id: &max_id_utf8,
+                game_name: "Valid",
+                description: "",
+            }
+            .validate_normalize()
+            .is_ok()
+        );
+        assert!(
+            SteamLfgInput {
+                game_id: &over_id,
+                game_name: "Valid",
+                description: "",
+            }
+            .validate_normalize()
+            .is_err()
+        );
+
+        let max_name_utf8 = "ą".repeat(MAX_STEAM_LFG_GAME_NAME_CHARS);
+        let over_name_utf8 = "ą".repeat(MAX_STEAM_LFG_GAME_NAME_CHARS + 1);
+        assert!(
+            SteamLfgInput {
+                game_id: "730",
+                game_name: &max_name_utf8,
+                description: "",
+            }
+            .validate_normalize()
+            .is_ok()
+        );
+        assert!(
+            SteamLfgInput {
+                game_id: "730",
+                game_name: &over_name_utf8,
+                description: "",
+            }
+            .validate_normalize()
+            .is_err()
+        );
+
+        let max_desc_utf8 = "🎮".repeat(MAX_STEAM_LFG_DESCRIPTION_CHARS);
+        let over_desc_utf8 = "🎮".repeat(MAX_STEAM_LFG_DESCRIPTION_CHARS + 1);
+        assert!(
+            SteamLfgInput {
+                game_id: "730",
+                game_name: "CS2",
+                description: &max_desc_utf8,
+            }
+            .validate_normalize()
+            .is_ok()
+        );
+        assert!(
+            SteamLfgInput {
+                game_id: "730",
+                game_name: "CS2",
+                description: &over_desc_utf8,
+            }
+            .validate_normalize()
+            .is_err()
+        );
+
+        // Oversized ~512 KiB description must fail fast
+        let huge_desc = "x".repeat(512 * 1024);
+        assert!(
+            SteamLfgInput {
+                game_id: "730",
+                game_name: "CS2",
+                description: &huge_desc,
+            }
+            .validate_normalize()
+            .is_err()
+        );
+
+        // 4. Storage layer enforces validation & normalization directly (cannot bypass HTTP)
+        let direct_bad = store
+            .create_steam_lfg_post(SteamLfgPost {
+                id: Uuid::new_v4(),
+                guild_id: "111222333444555666".to_string(),
+                author_id: "author_123".to_string(),
+                game_id: "   ".to_string(),
+                game_name: "CS2".to_string(),
+                description: "desc".to_string(),
+                max_players: 5,
+                current_players: serde_json::json!(["author_123"]),
+                expires_at: Utc::now() + chrono::Duration::hours(1),
+                created_at: Utc::now(),
+            })
+            .await;
+        assert!(direct_bad.is_err());
+
+        let direct_padded = store
+            .create_steam_lfg_post(SteamLfgPost {
+                id: Uuid::new_v4(),
+                guild_id: "111222333444555666".to_string(),
+                author_id: "author_123".to_string(),
+                game_id: "  730  ".to_string(),
+                game_name: "  Counter-Strike 2  ".to_string(),
+                description: "  Ready to queue  ".to_string(),
+                max_players: 5,
+                current_players: serde_json::json!(["author_123"]),
+                expires_at: Utc::now() + chrono::Duration::hours(1),
+                created_at: Utc::now(),
+            })
+            .await
+            .expect("storage normalizes valid padded post");
+        assert_eq!(direct_padded.game_id, "730");
+        assert_eq!(direct_padded.game_name, "Counter-Strike 2");
+        assert_eq!(direct_padded.description, "Ready to queue");
+        assert!(
+            direct_padded.game_id.len()
+                + direct_padded.game_name.len()
+                + direct_padded.description.len()
+                <= MAX_STEAM_LFG_TEXT_PAYLOAD_BYTES
+        );
     }
 
     #[tokio::test]
