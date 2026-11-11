@@ -6323,6 +6323,11 @@ impl MemoryStore {
         id: Uuid,
         approver_id: &str,
     ) -> anyhow::Result<Result<SocialPublicationDraft, SocialDraftApprovalError>> {
+        let _guard = match self.social_drafts_write_lock.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
         let mut draft = match self.social_drafts.get_mut(&id) {
             Some(d) => d,
             None => return Ok(Err(SocialDraftApprovalError::NotFound)),
@@ -6368,6 +6373,59 @@ impl MemoryStore {
         }
 
         Ok(Ok(approved_draft))
+    }
+
+    pub fn reject_social_draft(
+        &self,
+        guild_id: &str,
+        id: Uuid,
+        actor_id: &str,
+        reason: Option<&str>,
+    ) -> anyhow::Result<Result<SocialPublicationDraft, SocialDraftApprovalError>> {
+        let _guard = match self.social_drafts_write_lock.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        let mut draft = match self.social_drafts.get_mut(&id) {
+            Some(d) => d,
+            None => return Ok(Err(SocialDraftApprovalError::NotFound)),
+        };
+
+        if draft.guild_id != guild_id {
+            return Ok(Err(SocialDraftApprovalError::NotFound));
+        }
+
+        if draft.status != "draft" {
+            return Ok(Err(SocialDraftApprovalError::AlreadyDecided));
+        }
+
+        let previous_status = draft.status.clone();
+        draft.status = "rejected".to_string();
+        let rejected_draft = draft.clone();
+
+        drop(draft);
+
+        let reason_val = reason.map(str::trim).filter(|r| !r.is_empty());
+        if let Err(err) = self.record_audit(
+            Some(guild_id),
+            Some(actor_id),
+            "social_publisher",
+            "draft_rejected",
+            serde_json::json!({
+                "draft_id": id,
+                "author_id": rejected_draft.author_id,
+                "actor_id": actor_id,
+                "reason": reason_val,
+            }),
+        ) {
+            if let Some(mut draft) = self.social_drafts.get_mut(&id) {
+                draft.status = previous_status;
+            }
+            return Err(err);
+        }
+
+        Ok(Ok(rejected_draft))
     }
 
     // Agent 17 & 18 (#106): AI + MCP

@@ -1129,6 +1129,60 @@ pub async fn approve_social_draft(
     Ok(Json(approved))
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct RejectSocialDraftRequest {
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+pub async fn reject_social_draft(
+    State(state): State<WebState>,
+    Path((guild_id, draft_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Json<SocialPublicationDraft>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+
+    let reason = if body.trim().is_empty() {
+        None
+    } else {
+        let req: RejectSocialDraftRequest = serde_json::from_str(&body)
+            .map_err(|e| ApiError::bad_request(format!("Invalid JSON payload: {e}")))?;
+        req.reason
+    };
+
+    if reason.as_ref().is_some_and(|r| r.chars().count() > 500) {
+        return Err(ApiError::bad_request(
+            "Reject reason exceeds maximum length of 500 characters",
+        ));
+    }
+
+    let rejected = match state
+        .app
+        .storage
+        .reject_social_draft(&guild_id, draft_id, &session.user.id, reason.as_deref())
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+    {
+        Ok(draft) => draft,
+        Err(SocialDraftApprovalError::NotFound) => {
+            return Err(ApiError::not_found("Draft not found"));
+        }
+        Err(SocialDraftApprovalError::AlreadyDecided) => {
+            return Err(ApiError::conflict(
+                "Draft has already been approved or rejected",
+            ));
+        }
+        Err(SocialDraftApprovalError::SelfApproval) => {
+            return Err(ApiError::forbidden("Self approval error"));
+        }
+    };
+
+    Ok(Json(rejected))
+}
+
 // ==========================================
 // Agent 17 & 18 (#106): AI + MCP
 // ==========================================

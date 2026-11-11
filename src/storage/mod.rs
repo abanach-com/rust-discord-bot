@@ -6339,6 +6339,23 @@ impl Storage {
         }
     }
 
+    pub async fn reject_social_draft(
+        &self,
+        guild_id: &str,
+        id: Uuid,
+        actor_id: &str,
+        reason: Option<&str>,
+    ) -> anyhow::Result<Result<SocialPublicationDraft, SocialDraftApprovalError>> {
+        match self {
+            Self::Memory(store) => store.reject_social_draft(guild_id, id, actor_id, reason),
+            Self::Postgres(store) => {
+                store
+                    .reject_social_draft(guild_id, id, actor_id, reason)
+                    .await
+            }
+        }
+    }
+
     // Agent 17 & 18 (#106): AI + MCP
 
     pub async fn get_or_create_ai_budget(&self, guild_id: &str) -> anyhow::Result<AiGuildBudget> {
@@ -9844,6 +9861,124 @@ mod tests {
             2,
             "must have draft_created and draft_approved"
         );
+    }
+
+    #[tokio::test]
+    async fn test_reject_social_draft_lifecycle_and_audit_issue_392() {
+        let store = Storage::memory();
+        let guild_id = "100000000000000002";
+        let author_id = "operator_author";
+        let other_id = "operator_moderator";
+
+        let draft = SocialPublicationDraft {
+            id: Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            author_id: author_id.to_string(),
+            content: "Draft to be rejected".to_string(),
+            media_urls: serde_json::json!([]),
+            targets: serde_json::json!(["discord"]),
+            scheduled_at: None,
+            approved_by: None,
+            status: "draft".to_string(),
+            created_at: Utc::now(),
+        };
+
+        let created = store.create_social_draft(draft).await.unwrap();
+        assert_eq!(created.status, "draft");
+
+        // 1. Cross-guild rejection must return NotFound
+        let cross_guild_res = store
+            .reject_social_draft("999999999999999999", created.id, author_id, None)
+            .await
+            .unwrap();
+        assert_eq!(cross_guild_res, Err(SocialDraftApprovalError::NotFound));
+
+        // 2. Non-existent draft ID rejection must return NotFound
+        let not_found_res = store
+            .reject_social_draft(guild_id, Uuid::new_v4(), author_id, None)
+            .await
+            .unwrap();
+        assert_eq!(not_found_res, Err(SocialDraftApprovalError::NotFound));
+
+        // 3. Author self-reject MUST succeed (single-admin / self-cancel workflow)
+        let reject_res = store
+            .reject_social_draft(guild_id, created.id, author_id, Some("Obsolete content"))
+            .await
+            .unwrap()
+            .expect("rejection by author should succeed");
+        assert_eq!(reject_res.status, "rejected");
+
+        // 4. Subsequent rejection or approval attempt must return AlreadyDecided
+        let re_reject_res = store
+            .reject_social_draft(guild_id, created.id, other_id, None)
+            .await
+            .unwrap();
+        assert_eq!(re_reject_res, Err(SocialDraftApprovalError::AlreadyDecided));
+
+        let approve_rejected_res = store
+            .approve_social_draft(guild_id, created.id, other_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            approve_rejected_res,
+            Err(SocialDraftApprovalError::AlreadyDecided)
+        );
+
+        // 5. Verify audit log entry
+        let events = store.list_audit_events(guild_id, 10).await.unwrap();
+        assert_eq!(
+            events.len(),
+            2,
+            "must have draft_created and draft_rejected"
+        );
+        assert!(events.iter().any(|e| {
+            e.module_id == "social_publisher"
+                && e.event == "draft_rejected"
+                && e.actor_id.as_deref() == Some(author_id)
+                && e.data["draft_id"] == serde_json::json!(created.id)
+                && e.data["author_id"] == serde_json::json!(author_id)
+                && e.data["actor_id"] == serde_json::json!(author_id)
+                && e.data["reason"] == "Obsolete content"
+        }));
+
+        // 6. Test audit failure rollback
+        let draft2 = SocialPublicationDraft {
+            id: Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            author_id: author_id.to_string(),
+            content: "Draft rollback test".to_string(),
+            media_urls: serde_json::json!([]),
+            targets: serde_json::json!(["twitter"]),
+            scheduled_at: None,
+            approved_by: None,
+            status: "draft".to_string(),
+            created_at: Utc::now(),
+        };
+        let created2 = store.create_social_draft(draft2).await.unwrap();
+
+        store.inject_audit_failure(true);
+        let reject_err = store
+            .reject_social_draft(guild_id, created2.id, author_id, Some("fail test"))
+            .await;
+        assert!(reject_err.is_err(), "reject must fail when audit fails");
+
+        let drafts_after_fail = store.list_social_drafts(guild_id).await.unwrap();
+        let target_draft = drafts_after_fail
+            .iter()
+            .find(|d| d.id == created2.id)
+            .unwrap();
+        assert_eq!(
+            target_draft.status, "draft",
+            "draft status must rollback to 'draft'"
+        );
+
+        store.inject_audit_failure(false);
+        let ok_reject = store
+            .reject_social_draft(guild_id, created2.id, author_id, None)
+            .await
+            .unwrap()
+            .expect("rejection should succeed when audit recovers");
+        assert_eq!(ok_reject.status, "rejected");
     }
 
     #[tokio::test]

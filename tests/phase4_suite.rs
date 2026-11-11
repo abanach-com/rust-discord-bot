@@ -3324,3 +3324,420 @@ async fn test_social_draft_discovery_queue_pagination_and_security_issue_390() {
         "Response JSON must not duplicate items in drafts array"
     );
 }
+
+#[tokio::test]
+async fn test_social_drafts_reject_and_quota_release_single_admin_issue_392() {
+    let (state, permissions_cache) = test_web_state().await;
+    let guild_id = "392000000000000001";
+    let foreign_guild_id = "392000000000000002";
+
+    let admin_id = "user_admin_392";
+    let admin_session = "session_admin_392";
+    let admin_csrf = "csrf_admin_392";
+
+    let member_no_manage_id = "user_member_392";
+    let member_no_manage_session = "session_member_392";
+    let member_no_manage_csrf = "csrf_member_392";
+
+    let foreign_admin_id = "user_foreign_admin_392";
+    let foreign_admin_session = "session_foreign_admin_392";
+    let foreign_admin_csrf = "csrf_foreign_admin_392";
+
+    let admin2_id = "user_admin2_392";
+    let admin2_session = "session_admin2_392";
+    let admin2_csrf = "csrf_admin2_392";
+
+    // Seed sessions
+    state
+        .app
+        .sessions
+        .save_session(
+            admin_session,
+            DashboardUser {
+                id: admin_id.to_string(),
+                username: "SingleAdmin392".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Guild 392".to_string(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_string(),
+            }],
+            admin_csrf.to_string(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    state
+        .app
+        .sessions
+        .save_session(
+            admin2_session,
+            DashboardUser {
+                id: admin2_id.to_string(),
+                username: "SecondAdmin392".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Guild 392".to_string(),
+                icon: None,
+                owner: false,
+                permissions: "8".to_string(),
+            }],
+            admin2_csrf.to_string(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    state
+        .app
+        .sessions
+        .save_session(
+            member_no_manage_session,
+            DashboardUser {
+                id: member_no_manage_id.to_string(),
+                username: "Member392".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Guild 392".to_string(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_string(),
+            }],
+            member_no_manage_csrf.to_string(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    state
+        .app
+        .sessions
+        .save_session(
+            foreign_admin_session,
+            DashboardUser {
+                id: foreign_admin_id.to_string(),
+                username: "ForeignAdmin392".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: foreign_guild_id.to_string(),
+                name: "Foreign Guild 392".to_string(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_string(),
+            }],
+            foreign_admin_csrf.to_string(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    permissions_cache.insert(
+        (admin_id.to_string(), guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+    permissions_cache.insert(
+        (admin2_id.to_string(), guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+    permissions_cache.insert(
+        (member_no_manage_id.to_string(), guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: false,
+            checked_at: Utc::now(),
+        },
+    );
+    permissions_cache.insert(
+        (foreign_admin_id.to_string(), foreign_guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = build_router(state.clone());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let admin_cookie = format!("rusty_discord_bot_session={admin_session}");
+    let admin2_cookie = format!("rusty_discord_bot_session={admin2_session}");
+    let member_cookie = format!("rusty_discord_bot_session={member_no_manage_session}");
+    let foreign_cookie = format!("rusty_discord_bot_session={foreign_admin_session}");
+
+    // Set quota to 2 pending drafts for test
+    state.app.storage.set_social_drafts_quota_for_test(Some(2));
+
+    // 1. Create 2 drafts to reach quota
+    let draft1_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/social/drafts"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "content": "Draft 1 announcement",
+            "targets": ["discord"],
+            "media_urls": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(draft1_resp.status(), reqwest::StatusCode::OK);
+    let draft1: serde_json::Value = draft1_resp.json().await.unwrap();
+    let draft1_id = draft1["id"].as_str().unwrap().to_string();
+
+    let draft2_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/social/drafts"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "content": "Draft 2 announcement",
+            "targets": ["discord"],
+            "media_urls": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(draft2_resp.status(), reqwest::StatusCode::OK);
+
+    // 2. 3rd draft must fail with 409 Conflict (quota exceeded)
+    let quota_blocked = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/social/drafts"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "content": "Draft 3 blocked by quota",
+            "targets": ["discord"],
+            "media_urls": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(quota_blocked.status(), reqwest::StatusCode::CONFLICT);
+
+    // 3. Security checks for reject endpoint
+    // 3a. Unauthenticated -> 401
+    let unauth_reject = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts/{draft1_id}/reject"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth_reject.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // 3b. Missing CSRF -> 403
+    let no_csrf_reject = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts/{draft1_id}/reject"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_csrf_reject.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 3c. Unprivileged member -> 403
+    let member_reject = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts/{draft1_id}/reject"
+        ))
+        .header(COOKIE, &member_cookie)
+        .header("X-CSRF-Token", member_no_manage_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(member_reject.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 3d. Foreign admin -> 403
+    let foreign_reject = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts/{draft1_id}/reject"
+        ))
+        .header(COOKIE, &foreign_cookie)
+        .header("X-CSRF-Token", foreign_admin_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(foreign_reject.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 3e. Non-existent draft -> 404
+    let not_found_reject = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts/{}/reject",
+            uuid::Uuid::new_v4()
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(not_found_reject.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // 3f. Reason too long (> 500 chars) -> 400
+    let long_reason = "r".repeat(501);
+    let invalid_reason_reject = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts/{draft1_id}/reject"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({ "reason": long_reason }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        invalid_reason_reject.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+
+    // 4. Reject draft 1 as single admin (who is also the author) -> 200 OK
+    let reject_ok = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts/{draft1_id}/reject"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({ "reason": "Draft replaced by newer announcement" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reject_ok.status(), reqwest::StatusCode::OK);
+    let rejected_draft: serde_json::Value = reject_ok.json().await.unwrap();
+    assert_eq!(rejected_draft["status"], "rejected");
+
+    // 5. Verify draft queues
+    // 5a. Pending queue now has 1 draft
+    let draft_queue_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts?status=draft"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(draft_queue_resp.status(), reqwest::StatusCode::OK);
+    let draft_queue: serde_json::Value = draft_queue_resp.json().await.unwrap();
+    let draft_items = draft_queue["items"].as_array().unwrap();
+    assert_eq!(draft_items.len(), 1);
+    assert_ne!(draft_items[0]["id"], draft1_id);
+
+    // 5b. Rejected queue now contains draft 1
+    let rejected_queue_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts?status=rejected"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected_queue_resp.status(), reqwest::StatusCode::OK);
+    let rejected_queue: serde_json::Value = rejected_queue_resp.json().await.unwrap();
+    let rejected_items = rejected_queue["items"].as_array().unwrap();
+    assert!(
+        rejected_items
+            .iter()
+            .any(|d| d["id"] == draft1_id && d["status"] == "rejected")
+    );
+
+    // 6. Quota is now released: single-admin can create draft 3 successfully!
+    let draft3_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/social/drafts"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "content": "Draft 3 successfully created after slot release",
+            "targets": ["discord"],
+            "media_urls": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(draft3_resp.status(), reqwest::StatusCode::OK);
+
+    // 7. Repeated reject or approve on already decided draft
+    // 7a. Re-rejecting returns 409 Conflict (AlreadyDecided)
+    let re_reject = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts/{draft1_id}/reject"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(re_reject.status(), reqwest::StatusCode::CONFLICT);
+
+    // 7b. Author attempting to approve their own rejected draft returns 403 Forbidden (SelfApproval)
+    let author_approve_rejected = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts/{draft1_id}/approve"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        author_approve_rejected.status(),
+        reqwest::StatusCode::FORBIDDEN
+    );
+
+    // 7c. Distinct operator attempting to approve already rejected draft returns 409 Conflict (AlreadyDecided)
+    let admin2_approve_rejected = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts/{draft1_id}/approve"
+        ))
+        .header(COOKIE, &admin2_cookie)
+        .header("X-CSRF-Token", admin2_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        admin2_approve_rejected.status(),
+        reqwest::StatusCode::CONFLICT
+    );
+
+    // 8. Verify audit log entry
+    let audit_events = state
+        .app
+        .storage
+        .list_audit_events(guild_id, 20)
+        .await
+        .unwrap();
+    assert!(audit_events.iter().any(|e| {
+        e.module_id == "social_publisher"
+            && e.event == "draft_rejected"
+            && e.actor_id.as_deref() == Some(admin_id)
+            && e.data["draft_id"] == draft1_id
+            && e.data["reason"] == "Draft replaced by newer announcement"
+    }));
+
+    // Reset quota override
+    state.app.storage.set_social_drafts_quota_for_test(None);
+}

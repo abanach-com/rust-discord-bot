@@ -828,6 +828,10 @@ pub fn build_router(state: WebState) -> Router {
             post(integrations::approve_social_draft),
         )
         .route(
+            "/api/guilds/{guild_id}/social/drafts/{draft_id}/reject",
+            post(integrations::reject_social_draft),
+        )
+        .route(
             "/api/guilds/{guild_id}/ai/budget",
             get(integrations::get_ai_budget),
         )

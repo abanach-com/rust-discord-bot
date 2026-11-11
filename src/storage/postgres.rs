@@ -9009,6 +9009,12 @@ impl PostgresStore {
     ) -> anyhow::Result<Result<SocialPublicationDraft, SocialDraftApprovalError>> {
         let mut tx = self.pool.begin().await?;
 
+        // Transactional advisory lock per guild to serialize draft state decisions
+        sqlx::query("SELECT pg_advisory_xact_lock(4347, hashtext($1))")
+            .bind(guild_id)
+            .execute(&mut *tx)
+            .await?;
+
         let updated = sqlx::query_as::<_, SocialPublicationDraft>(
             "UPDATE social_publication_drafts \
              SET approved_by = $1, status = 'approved' \
@@ -9065,6 +9071,75 @@ impl PostgresStore {
             Some(row) if row.author_id == approver_id => {
                 Ok(Err(SocialDraftApprovalError::SelfApproval))
             }
+            Some(_) => Ok(Err(SocialDraftApprovalError::AlreadyDecided)),
+        }
+    }
+
+    pub async fn reject_social_draft(
+        &self,
+        guild_id: &str,
+        id: Uuid,
+        actor_id: &str,
+        reason: Option<&str>,
+    ) -> anyhow::Result<Result<SocialPublicationDraft, SocialDraftApprovalError>> {
+        let mut tx = self.pool.begin().await?;
+
+        // Transactional advisory lock per guild to serialize draft state decisions
+        sqlx::query("SELECT pg_advisory_xact_lock(4347, hashtext($1))")
+            .bind(guild_id)
+            .execute(&mut *tx)
+            .await?;
+
+        let updated = sqlx::query_as::<_, SocialPublicationDraft>(
+            "UPDATE social_publication_drafts \
+             SET status = 'rejected' \
+             WHERE id = $1 AND guild_id = $2 AND status = 'draft' \
+             RETURNING *",
+        )
+        .bind(id)
+        .bind(guild_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if let Some(draft) = updated {
+            let reason_val = reason.map(str::trim).filter(|r| !r.is_empty());
+            sqlx::query(
+                "INSERT INTO audit_events (guild_id, actor_id, module_id, event, data) \
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(guild_id)
+            .bind(actor_id)
+            .bind("social_publisher")
+            .bind("draft_rejected")
+            .bind(serde_json::json!({
+                "draft_id": id,
+                "author_id": draft.author_id,
+                "actor_id": actor_id,
+                "reason": reason_val,
+            }))
+            .execute(&mut *tx)
+            .await?;
+
+            tx.commit().await?;
+            return Ok(Ok(draft));
+        }
+
+        #[derive(sqlx::FromRow)]
+        struct DraftCheck {
+            #[allow(dead_code)]
+            status: String,
+        }
+
+        let existing = sqlx::query_as::<_, DraftCheck>(
+            "SELECT status FROM social_publication_drafts WHERE id = $1 AND guild_id = $2",
+        )
+        .bind(id)
+        .bind(guild_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        match existing {
+            None => Ok(Err(SocialDraftApprovalError::NotFound)),
             Some(_) => Ok(Err(SocialDraftApprovalError::AlreadyDecided)),
         }
     }
