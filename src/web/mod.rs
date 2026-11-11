@@ -821,7 +821,7 @@ pub fn build_router(state: WebState) -> Router {
         )
         .route(
             "/api/guilds/{guild_id}/social/drafts",
-            post(integrations::create_social_draft),
+            get(integrations::list_social_drafts).post(integrations::create_social_draft),
         )
         .route(
             "/api/guilds/{guild_id}/social/drafts/{draft_id}/approve",

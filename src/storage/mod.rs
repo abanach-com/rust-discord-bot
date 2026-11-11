@@ -765,6 +765,62 @@ pub fn decode_store_item_cursor(cursor: &str) -> anyhow::Result<StoreItemCursor>
     })
 }
 
+/// Encodes a social publication drafts keyset pagination cursor binding `guild_id`, `status`, `created_at`, and `id`.
+pub fn encode_social_draft_cursor(
+    guild_id: &str,
+    status: Option<&str>,
+    created_at: &DateTime<Utc>,
+    id: &Uuid,
+) -> String {
+    let status_str = status.unwrap_or("");
+    let payload = format!(
+        "v1|{}|{}|{}|{}",
+        guild_id.trim(),
+        status_str.trim(),
+        created_at.to_rfc3339(),
+        id
+    );
+    base64url_encode_store_cursor(payload.as_bytes())
+}
+
+/// Decodes and validates a social publication drafts pagination cursor.
+pub fn decode_social_draft_cursor(cursor: &str) -> anyhow::Result<SocialDraftCursor> {
+    let trimmed = cursor.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("empty cursor");
+    }
+
+    let decoded = base64url_decode_store_cursor(trimmed)
+        .map_err(|e| anyhow::anyhow!("invalid base64url encoding for social draft cursor: {e}"))?;
+    let payload = String::from_utf8(decoded)
+        .map_err(|e| anyhow::anyhow!("cursor is not valid UTF-8: {e}"))?;
+    let parts: Vec<&str> = payload.split('|').collect();
+    if parts.len() != 5 || parts[0] != "v1" {
+        anyhow::bail!("invalid social draft cursor format: expected v1 format");
+    }
+    let guild_id = parts[1].trim().to_string();
+    if guild_id.is_empty() {
+        anyhow::bail!("social draft cursor missing guild_id");
+    }
+    let status = if parts[2].trim().is_empty() {
+        None
+    } else {
+        Some(parts[2].trim().to_string())
+    };
+    let created_at = DateTime::parse_from_rfc3339(parts[3].trim())
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| anyhow::anyhow!("Failed to parse cursor timestamp: {e}"))?;
+    let id = Uuid::parse_str(parts[4].trim())
+        .map_err(|e| anyhow::anyhow!("Failed to parse cursor UUID: {e}"))?;
+
+    Ok(SocialDraftCursor {
+        guild_id,
+        status,
+        created_at,
+        id,
+    })
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct EconomyPurchaseRequestRecord {
     pub guild_id: String,
@@ -1928,6 +1984,22 @@ pub enum SocialDraftApprovalError {
     SelfApproval,
     #[error("draft has already been approved or is not in pending draft status")]
     AlreadyDecided,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SocialDraftsPage {
+    pub items: Vec<SocialPublicationDraft>,
+    pub drafts: Vec<SocialPublicationDraft>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SocialDraftCursor {
+    pub guild_id: String,
+    pub status: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub id: Uuid,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -6210,6 +6282,25 @@ impl Storage {
         }
     }
 
+    pub async fn list_social_drafts_page(
+        &self,
+        guild_id: &str,
+        status: Option<&str>,
+        limit: usize,
+        cursor: Option<(&DateTime<Utc>, &Uuid)>,
+    ) -> anyhow::Result<SocialDraftsPage> {
+        match self {
+            Self::Memory(store) => {
+                Ok(store.list_social_drafts_page(guild_id, status, limit, cursor))
+            }
+            Self::Postgres(store) => {
+                store
+                    .list_social_drafts_page(guild_id, status, limit, cursor)
+                    .await
+            }
+        }
+    }
+
     pub async fn approve_social_draft(
         &self,
         guild_id: &str,
@@ -10283,5 +10374,154 @@ mod tests {
             .await
             .unwrap();
         assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn test_social_draft_cursor_encoding_and_validation_issue_390() {
+        let guild_id = "guild_12345";
+        let now = Utc::now();
+        let draft_id = Uuid::new_v4();
+
+        // 1. With status
+        let cursor_with_status =
+            encode_social_draft_cursor(guild_id, Some("draft"), &now, &draft_id);
+        let decoded = decode_social_draft_cursor(&cursor_with_status).unwrap();
+        assert_eq!(decoded.guild_id, guild_id);
+        assert_eq!(decoded.status.as_deref(), Some("draft"));
+        assert_eq!(
+            decoded.created_at.timestamp_millis(),
+            now.timestamp_millis()
+        );
+        assert_eq!(decoded.id, draft_id);
+
+        // 2. Without status
+        let cursor_no_status = encode_social_draft_cursor(guild_id, None, &now, &draft_id);
+        let decoded_no_status = decode_social_draft_cursor(&cursor_no_status).unwrap();
+        assert_eq!(decoded_no_status.guild_id, guild_id);
+        assert!(decoded_no_status.status.is_none());
+        assert_eq!(
+            decoded_no_status.created_at.timestamp_millis(),
+            now.timestamp_millis()
+        );
+        assert_eq!(decoded_no_status.id, draft_id);
+
+        // 3. Error cases
+        assert!(decode_social_draft_cursor("").is_err());
+        assert!(decode_social_draft_cursor("   ").is_err());
+        assert!(decode_social_draft_cursor("invalid_base64!@#$").is_err());
+        let bad_ver = base64url_encode_store_cursor(
+            b"v2|guild|draft|2026-01-01T00:00:00Z|00000000-0000-0000-0000-000000000000",
+        );
+        assert!(decode_social_draft_cursor(&bad_ver).is_err());
+        let missing_guild = base64url_encode_store_cursor(
+            b"v1||draft|2026-01-01T00:00:00Z|00000000-0000-0000-0000-000000000000",
+        );
+        assert!(decode_social_draft_cursor(&missing_guild).is_err());
+        let bad_date = base64url_encode_store_cursor(
+            b"v1|guild|draft|not_a_date|00000000-0000-0000-0000-000000000000",
+        );
+        assert!(decode_social_draft_cursor(&bad_date).is_err());
+        let bad_uuid =
+            base64url_encode_store_cursor(b"v1|guild|draft|2026-01-01T00:00:00Z|not_a_uuid");
+        assert!(decode_social_draft_cursor(&bad_uuid).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_memory_social_drafts_keyset_pagination_and_tie_breaking_issue_390() {
+        let mem = MemoryStore::default();
+        let store = Storage::Memory(mem.clone());
+        let guild_id = "social_guild_1";
+        let other_guild = "social_guild_2";
+        let base_time = Utc::now();
+
+        // Insert 6 drafts with known ordering
+        let mut expected_draft_ids = Vec::new();
+        for i in 0..6 {
+            // i=2 and i=3 share the exact same timestamp to test deterministic tie-breaking by UUID
+            let dt = base_time + chrono::Duration::minutes((i / 2) * 5);
+            let status = if i < 4 { "draft" } else { "approved" };
+            let draft = SocialPublicationDraft {
+                id: Uuid::new_v4(),
+                guild_id: guild_id.to_string(),
+                author_id: format!("author_{i}"),
+                content: format!("Post {i}"),
+                media_urls: serde_json::json!([]),
+                targets: serde_json::json!(["discord"]),
+                scheduled_at: None,
+                approved_by: if status == "approved" {
+                    Some("approver_1".to_string())
+                } else {
+                    None
+                },
+                status: status.to_string(),
+                created_at: dt,
+            };
+            if status == "draft" {
+                expected_draft_ids.push(draft.id);
+            }
+            store.create_social_draft(draft).await.unwrap();
+        }
+
+        // Insert foreign guild draft
+        let foreign_draft = SocialPublicationDraft {
+            id: Uuid::new_v4(),
+            guild_id: other_guild.to_string(),
+            author_id: "foreign_author".to_string(),
+            content: "Foreign post".to_string(),
+            media_urls: serde_json::json!([]),
+            targets: serde_json::json!(["discord"]),
+            scheduled_at: None,
+            approved_by: None,
+            status: "draft".to_string(),
+            created_at: base_time,
+        };
+        store.create_social_draft(foreign_draft).await.unwrap();
+
+        // Page 1: limit 2 for "draft" status
+        let p1 = store
+            .list_social_drafts_page(guild_id, Some("draft"), 2, None)
+            .await
+            .unwrap();
+        assert_eq!(p1.items.len(), 2);
+        assert_eq!(p1.drafts.len(), 2);
+        assert!(p1.has_more);
+        assert!(p1.next_cursor.is_some());
+
+        // Decode cursor
+        let c1 = decode_social_draft_cursor(p1.next_cursor.as_deref().unwrap()).unwrap();
+        assert_eq!(c1.guild_id, guild_id);
+        assert_eq!(c1.status.as_deref(), Some("draft"));
+
+        // Page 2: limit 2 using cursor
+        let cursor_ref = Some((&c1.created_at, &c1.id));
+        let p2 = store
+            .list_social_drafts_page(guild_id, Some("draft"), 2, cursor_ref)
+            .await
+            .unwrap();
+        assert_eq!(p2.items.len(), 2);
+        assert!(!p2.has_more);
+        assert!(p2.next_cursor.is_none());
+
+        // Verify all 4 draft items were returned uniquely
+        let collected: Vec<Uuid> = p1
+            .items
+            .iter()
+            .chain(p2.items.iter())
+            .map(|d| d.id)
+            .collect();
+        assert_eq!(collected.len(), 4);
+        let unique: std::collections::HashSet<Uuid> = collected.iter().copied().collect();
+        assert_eq!(unique.len(), 4);
+
+        // Verify status filter: "approved" returns only 2 items
+        let approved_page = store
+            .list_social_drafts_page(guild_id, Some("approved"), 10, None)
+            .await
+            .unwrap();
+        assert_eq!(approved_page.items.len(), 2);
+        assert!(!approved_page.has_more);
+        for d in &approved_page.items {
+            assert_eq!(d.status, "approved");
+        }
     }
 }

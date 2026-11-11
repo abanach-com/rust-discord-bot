@@ -27,13 +27,14 @@ use super::{
     RecordCompanionLeaseParams, RecruitmentApplication, RecruitmentReview,
     RecruitmentRoleFulfillment, RecruitmentTrack, RedditSubscription,
     ReleaseReactionRoleGrantOutcome, ReputationGrantOutcome, ScheduledEvent, ServerSnapshot,
-    SocialDraftApprovalError, SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage,
-    StoreItem, StoreItemsPage, StorePurchase, StorePurchasesPage, TagRecord, TelegramBridge,
-    TelegramMessageMapping, TimedRoleGrant, Tournament, TransitionApplicationParams, TupperError,
-    TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
-    VkSubscription, WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
-    YouTubeChannelSubscription, encode_store_purchase_cursor, level_for_xp,
-    parse_member_search_cursor, snowflake_created_at, validate_birthday_date, validate_snowflake,
+    SocialDraftApprovalError, SocialDraftsPage, SocialPublicationDraft, StarboardEntry,
+    SteamLfgPost, StickyMessage, StoreItem, StoreItemsPage, StorePurchase, StorePurchasesPage,
+    TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament,
+    TransitionApplicationParams, TupperError, TupperProfile, TwitchStreamSubscription,
+    UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WORK_JOBS, WorkClaimOutcome,
+    WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription,
+    encode_store_purchase_cursor, level_for_xp, parse_member_search_cursor, snowflake_created_at,
+    validate_birthday_date, validate_snowflake,
 };
 
 pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
@@ -8874,6 +8875,108 @@ impl PostgresStore {
         .await?;
 
         Ok(rows)
+    }
+
+    pub async fn list_social_drafts_page(
+        &self,
+        guild_id: &str,
+        status: Option<&str>,
+        limit: usize,
+        cursor: Option<(&DateTime<Utc>, &Uuid)>,
+    ) -> anyhow::Result<SocialDraftsPage> {
+        let limit = limit.clamp(1, 100);
+        let fetch_limit = (limit as i64) + 1;
+
+        let mut rows = match (status, cursor) {
+            (Some(st), Some((cur_time, cur_id))) => {
+                sqlx::query_as::<_, SocialPublicationDraft>(
+                    r#"
+                    SELECT id, guild_id, author_id, content, media_urls, targets, scheduled_at, approved_by, status, created_at
+                    FROM social_publication_drafts
+                    WHERE guild_id = $1 AND status = $2
+                      AND (created_at, id) < ($3, $4)
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT $5
+                    "#,
+                )
+                .bind(guild_id)
+                .bind(st)
+                .bind(cur_time)
+                .bind(cur_id)
+                .bind(fetch_limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (Some(st), None) => {
+                sqlx::query_as::<_, SocialPublicationDraft>(
+                    r#"
+                    SELECT id, guild_id, author_id, content, media_urls, targets, scheduled_at, approved_by, status, created_at
+                    FROM social_publication_drafts
+                    WHERE guild_id = $1 AND status = $2
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT $3
+                    "#,
+                )
+                .bind(guild_id)
+                .bind(st)
+                .bind(fetch_limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (None, Some((cur_time, cur_id))) => {
+                sqlx::query_as::<_, SocialPublicationDraft>(
+                    r#"
+                    SELECT id, guild_id, author_id, content, media_urls, targets, scheduled_at, approved_by, status, created_at
+                    FROM social_publication_drafts
+                    WHERE guild_id = $1
+                      AND (created_at, id) < ($2, $3)
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT $4
+                    "#,
+                )
+                .bind(guild_id)
+                .bind(cur_time)
+                .bind(cur_id)
+                .bind(fetch_limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (None, None) => {
+                sqlx::query_as::<_, SocialPublicationDraft>(
+                    r#"
+                    SELECT id, guild_id, author_id, content, media_urls, targets, scheduled_at, approved_by, status, created_at
+                    FROM social_publication_drafts
+                    WHERE guild_id = $1
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT $2
+                    "#,
+                )
+                .bind(guild_id)
+                .bind(fetch_limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
+
+        let has_more = rows.len() > limit;
+        if has_more {
+            rows.truncate(limit);
+        }
+
+        let next_cursor = if has_more {
+            rows.last().map(|last| {
+                super::encode_social_draft_cursor(guild_id, status, &last.created_at, &last.id)
+            })
+        } else {
+            None
+        };
+
+        Ok(SocialDraftsPage {
+            items: rows.clone(),
+            drafts: rows,
+            next_cursor,
+            has_more,
+        })
     }
 
     pub async fn approve_social_draft(

@@ -26,13 +26,14 @@ use super::{
     ProgressMetric, ProgressionSeason, QuoteRecord, ReactionRoleBinding, ReactionRoleGrant,
     RecordCompanionLeaseParams, RedditSubscription, ReleaseReactionRoleGrantOutcome,
     ReputationGrantOutcome, ScheduledEvent, ServerSnapshot, SocialDraftApprovalError,
-    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StoreItemsPage,
-    StorePurchase, StorePurchasesPage, TagRecord, TelegramBridge, TelegramMessageMapping,
-    TimedRoleGrant, Tournament, TupperError, TupperProfile, TwitchStreamSubscription,
-    UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WORK_JOBS, WorkClaimOutcome,
-    WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription,
-    encode_store_purchase_cursor, is_member_after_cursor, level_for_xp, next_birthday_date,
-    parse_member_search_cursor, snowflake_created_at, validate_birthday_date, validate_snowflake,
+    SocialDraftsPage, SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage,
+    StoreItem, StoreItemsPage, StorePurchase, StorePurchasesPage, TagRecord, TelegramBridge,
+    TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError, TupperProfile,
+    TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport, VkSubscription,
+    WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
+    YouTubeChannelSubscription, encode_store_purchase_cursor, is_member_after_cursor, level_for_xp,
+    next_birthday_date, parse_member_search_cursor, snowflake_created_at, validate_birthday_date,
+    validate_snowflake,
 };
 
 type ModuleKey = (String, String);
@@ -299,6 +300,32 @@ impl PartialOrd for StorePurchaseHeapItem {
 }
 
 impl Ord for StorePurchaseHeapItem {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Reverse ordering so BinaryHeap acts as a min-heap on key
+        other.key.cmp(&self.key)
+    }
+}
+
+struct SocialDraftHeapItem {
+    key: (DateTime<Utc>, Uuid),
+    draft: SocialPublicationDraft,
+}
+
+impl PartialEq for SocialDraftHeapItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+impl Eq for SocialDraftHeapItem {}
+
+impl PartialOrd for SocialDraftHeapItem {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SocialDraftHeapItem {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Reverse ordering so BinaryHeap acts as a min-heap on key
         other.key.cmp(&self.key)
@@ -6183,6 +6210,77 @@ impl MemoryStore {
             .filter(|e| e.guild_id == guild_id)
             .map(|e| e.value().clone())
             .collect()
+    }
+
+    pub fn list_social_drafts_page(
+        &self,
+        guild_id: &str,
+        status: Option<&str>,
+        limit: usize,
+        cursor: Option<(&DateTime<Utc>, &Uuid)>,
+    ) -> SocialDraftsPage {
+        let limit = limit.clamp(1, 100);
+        let capacity = limit.saturating_add(1);
+        let mut heap: std::collections::BinaryHeap<SocialDraftHeapItem> =
+            std::collections::BinaryHeap::with_capacity(capacity);
+
+        for entry in self.social_drafts.iter() {
+            let draft = entry.value();
+            if draft.guild_id != guild_id {
+                continue;
+            }
+            if status.is_some_and(|st| draft.status != st) {
+                continue;
+            }
+
+            if let Some((cur_time, cur_id)) = cursor {
+                let is_after_cursor = draft.created_at < *cur_time
+                    || (draft.created_at == *cur_time && draft.id < *cur_id);
+                if !is_after_cursor {
+                    continue;
+                }
+            }
+
+            let key = (draft.created_at, draft.id);
+            if heap.len() < capacity {
+                heap.push(SocialDraftHeapItem {
+                    key,
+                    draft: draft.clone(),
+                });
+            } else if let Some(min_top) = heap.peek()
+                && key > min_top.key
+            {
+                heap.pop();
+                heap.push(SocialDraftHeapItem {
+                    key,
+                    draft: draft.clone(),
+                });
+            }
+        }
+
+        let mut drafts: Vec<SocialPublicationDraft> =
+            heap.into_iter().map(|item| item.draft).collect();
+        drafts.sort_by_key(|a| std::cmp::Reverse((a.created_at, a.id)));
+
+        let has_more = drafts.len() > limit;
+        if has_more {
+            drafts.truncate(limit);
+        }
+
+        let next_cursor = if has_more {
+            drafts.last().map(|last| {
+                super::encode_social_draft_cursor(guild_id, status, &last.created_at, &last.id)
+            })
+        } else {
+            None
+        };
+
+        SocialDraftsPage {
+            items: drafts.clone(),
+            drafts,
+            next_cursor,
+            has_more,
+        }
     }
 
     pub fn approve_social_draft(

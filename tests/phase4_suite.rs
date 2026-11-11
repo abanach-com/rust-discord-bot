@@ -639,8 +639,25 @@ async fn test_phase4_integrations_and_extensibility_suite() {
         "Author must not be allowed to self-approve draft"
     );
 
-    // 2) Approval by a second authorized guild operator must succeed (#338)
+    // 1b) Discovery: second authorized operator discovers pending draft in GET /social/drafts queue (#390)
     let approver_cookie = format!("rusty_discord_bot_session={approver_session_id}");
+    let list_drafts_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts?status=draft"
+        ))
+        .header(COOKIE, &approver_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_drafts_resp.status(), reqwest::StatusCode::OK);
+    let list_drafts_data: serde_json::Value = list_drafts_resp.json().await.unwrap();
+    let discovered_items = list_drafts_data["items"].as_array().unwrap();
+    assert!(
+        discovered_items.iter().any(|d| d["id"] == draft_id),
+        "Second operator must be able to discover pending draft in GET queue"
+    );
+
+    // 2) Approval by a second authorized guild operator must succeed (#338)
     let approve_resp = client
         .post(format!(
             "{base_url}/api/guilds/{guild_id}/social/drafts/{draft_id}/approve"
@@ -654,6 +671,45 @@ async fn test_phase4_integrations_and_extensibility_suite() {
     let approved_data: serde_json::Value = approve_resp.json().await.unwrap();
     assert_eq!(approved_data["status"], "approved");
     assert_eq!(approved_data["approved_by"], approver_user_id);
+
+    // 2b) Verifying status transition in discovery queues: draft removed from pending, present in approved (#390)
+    let list_pending_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts?status=draft"
+        ))
+        .header(COOKIE, &approver_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_pending_resp.status(), reqwest::StatusCode::OK);
+    let list_pending_data: serde_json::Value = list_pending_resp.json().await.unwrap();
+    assert!(
+        !list_pending_data["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["id"] == draft_id),
+        "Approved draft must not appear in pending drafts queue"
+    );
+
+    let list_approved_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts?status=approved"
+        ))
+        .header(COOKIE, &approver_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_approved_resp.status(), reqwest::StatusCode::OK);
+    let list_approved_data: serde_json::Value = list_approved_resp.json().await.unwrap();
+    assert!(
+        list_approved_data["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["id"] == draft_id),
+        "Approved draft must appear in approved drafts queue"
+    );
 
     // 3) Re-approval attempt must be rejected with 409 Conflict (#338)
     let re_approve_resp = client
@@ -2847,4 +2903,295 @@ async fn test_postgres_startup_preflight_fails_fast_without_integration_credenti
         AppState::bootstrap(config_mem).await.is_ok(),
         "MemoryStore must bootstrap without requiring persistent encryption keys"
     );
+}
+
+#[tokio::test]
+async fn test_social_draft_discovery_queue_pagination_and_security_issue_390() {
+    let (state, permissions_cache) = test_web_state().await;
+    let guild_id = "111000000000000099";
+    let foreign_guild_id = "222000000000000099";
+
+    let admin_id = "user_admin_390";
+    let admin_session = "session_admin_390";
+    let admin_csrf = "csrf_admin_390";
+
+    let member_no_manage_id = "user_member_390";
+    let member_no_manage_session = "session_member_390";
+    let member_no_manage_csrf = "csrf_member_390";
+
+    let foreign_admin_id = "user_foreign_admin_390";
+    let foreign_admin_session = "session_foreign_admin_390";
+    let foreign_admin_csrf = "csrf_foreign_admin_390";
+
+    // 1. Seed sessions
+    // Admin with MANAGE_GUILD on guild_id
+    state
+        .app
+        .sessions
+        .save_session(
+            admin_session,
+            DashboardUser {
+                id: admin_id.to_string(),
+                username: "Admin390".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Guild 390".to_string(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_string(),
+            }],
+            admin_csrf.to_string(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Member on guild_id WITHOUT manage permissions
+    state
+        .app
+        .sessions
+        .save_session(
+            member_no_manage_session,
+            DashboardUser {
+                id: member_no_manage_id.to_string(),
+                username: "Member390".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Guild 390".to_string(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_string(), // no manage permissions
+            }],
+            member_no_manage_csrf.to_string(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Foreign admin only on foreign_guild_id
+    state
+        .app
+        .sessions
+        .save_session(
+            foreign_admin_session,
+            DashboardUser {
+                id: foreign_admin_id.to_string(),
+                username: "ForeignAdmin390".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: foreign_guild_id.to_string(),
+                name: "Foreign Guild 390".to_string(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_string(),
+            }],
+            foreign_admin_csrf.to_string(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Seed permission cache for member so ensure_guild_access fails with 403
+    permissions_cache.insert(
+        (member_no_manage_id.to_string(), guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: false,
+            checked_at: Utc::now(),
+        },
+    );
+    // Seed permission cache for admin so ensure_guild_access succeeds with 200
+    permissions_cache.insert(
+        (admin_id.to_string(), guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = build_router(state.clone());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let admin_cookie = format!("rusty_discord_bot_session={admin_session}");
+    let member_cookie = format!("rusty_discord_bot_session={member_no_manage_session}");
+    let foreign_cookie = format!("rusty_discord_bot_session={foreign_admin_session}");
+
+    // 2. Security & RBAC Checks
+    // Unauthenticated GET returns 401 Unauthorized
+    let unauth_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/social/drafts"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth_resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // Member without MANAGE_GUILD returns 403 Forbidden
+    let member_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/social/drafts"))
+        .header(COOKIE, &member_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(member_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Admin of foreign guild accessing guild_id returns 403 Forbidden
+    let foreign_resp = client
+        .get(format!("{base_url}/api/guilds/{guild_id}/social/drafts"))
+        .header(COOKIE, &foreign_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(foreign_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 3. Input validation: invalid status and limit
+    let invalid_status_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts?status=malicious_status"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        invalid_status_resp.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+
+    let invalid_limit_zero_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts?limit=0"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        invalid_limit_zero_resp.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+
+    let invalid_limit_huge_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts?limit=101"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        invalid_limit_huge_resp.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+
+    // 4. Create 5 drafts for keyset pagination test
+    let now = Utc::now();
+    for i in 0..5 {
+        let draft = rusty_discord_bot::storage::SocialPublicationDraft {
+            id: uuid::Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            author_id: admin_id.to_string(),
+            content: format!("Publication post content {i}"),
+            media_urls: serde_json::json!([]),
+            targets: serde_json::json!(["discord"]),
+            scheduled_at: None,
+            approved_by: None,
+            status: "draft".to_string(),
+            created_at: now + chrono::Duration::seconds(i * 10),
+        };
+        state.app.storage.create_social_draft(draft).await.unwrap();
+    }
+
+    // 5. Keyset pagination traversal: page size 2
+    let p1_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts?status=draft&limit=2"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(p1_resp.status(), reqwest::StatusCode::OK);
+    let p1_body: serde_json::Value = p1_resp.json().await.unwrap();
+    assert_eq!(p1_body["items"].as_array().unwrap().len(), 2);
+    assert_eq!(p1_body["has_more"], true);
+    let c1 = p1_body["next_cursor"].as_str().unwrap().to_string();
+
+    let p2_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts?status=draft&limit=2&cursor={c1}"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(p2_resp.status(), reqwest::StatusCode::OK);
+    let p2_body: serde_json::Value = p2_resp.json().await.unwrap();
+    assert_eq!(p2_body["items"].as_array().unwrap().len(), 2);
+    assert_eq!(p2_body["has_more"], true);
+    let c2 = p2_body["next_cursor"].as_str().unwrap().to_string();
+
+    let p3_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts?status=draft&limit=2&cursor={c2}"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(p3_resp.status(), reqwest::StatusCode::OK);
+    let p3_body: serde_json::Value = p3_resp.json().await.unwrap();
+    assert_eq!(p3_body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(p3_body["has_more"], false);
+    assert!(p3_body["next_cursor"].is_null());
+
+    // 6. Security: cursor tampering detection
+    // Cross-guild cursor -> 400 Bad Request
+    let foreign_cursor = rusty_discord_bot::storage::encode_social_draft_cursor(
+        foreign_guild_id,
+        Some("draft"),
+        &now,
+        &uuid::Uuid::new_v4(),
+    );
+    let cross_guild_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts?status=draft&cursor={foreign_cursor}"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cross_guild_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Cross-status cursor -> 400 Bad Request
+    let cross_status_cursor = rusty_discord_bot::storage::encode_social_draft_cursor(
+        guild_id,
+        Some("approved"),
+        &now,
+        &uuid::Uuid::new_v4(),
+    );
+    let cross_status_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts?status=draft&cursor={cross_status_cursor}"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cross_status_resp.status(), reqwest::StatusCode::BAD_REQUEST);
 }

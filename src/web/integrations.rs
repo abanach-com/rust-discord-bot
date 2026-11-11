@@ -18,8 +18,8 @@ use crate::integrations::{
 use crate::storage::{
     AiGuildBudget, AiKnowledgeDocument, GamingHubGameStatus, GitHubDevopsMapping,
     IntegrationConnection, IntegrationDeliveryLog, LinkedAccount, PluginGuildInstallation,
-    PluginMarketplacePackage, SocialDraftApprovalError, SocialPublicationDraft, SteamLfgPost,
-    TelegramBridge, WorkflowDefinition,
+    PluginMarketplacePackage, SocialDraftApprovalError, SocialDraftsPage, SocialPublicationDraft,
+    SteamLfgPost, TelegramBridge, WorkflowDefinition,
 };
 
 use super::{
@@ -912,6 +912,76 @@ pub async fn get_poe_leagues(Path(version): Path<String>) -> Result<Json<Value>,
 // ==========================================
 // Agent 16 (#105): Social Publisher
 // ==========================================
+
+#[derive(Debug, Deserialize)]
+pub struct ListSocialDraftsQuery {
+    pub status: Option<String>,
+    pub limit: Option<usize>,
+    pub cursor: Option<String>,
+}
+
+pub async fn list_social_drafts(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+    Query(query): Query<ListSocialDraftsQuery>,
+) -> Result<Json<SocialDraftsPage>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+
+    let effective_status = match query.status.as_deref() {
+        Some(st) => {
+            let trimmed = st.trim();
+            if trimmed != "draft" && trimmed != "approved" && trimmed != "rejected" {
+                return Err(ApiError::bad_request(
+                    "invalid status: must be one of 'draft', 'approved', 'rejected'",
+                ));
+            }
+            trimmed
+        }
+        None => "draft",
+    };
+
+    let limit = match query.limit {
+        Some(l) => {
+            if l == 0 || l > 100 {
+                return Err(ApiError::bad_request("limit must be between 1 and 100"));
+            }
+            l
+        }
+        None => 25,
+    };
+
+    let decoded_cursor = if let Some(ref c) = query.cursor {
+        let decoded = crate::storage::decode_social_draft_cursor(c)
+            .map_err(|e| ApiError::bad_request(format!("invalid cursor: {e}")))?;
+        if decoded.guild_id != guild_id {
+            return Err(ApiError::bad_request("cursor belongs to a different guild"));
+        }
+        if decoded
+            .status
+            .as_deref()
+            .is_some_and(|st| st != effective_status)
+        {
+            return Err(ApiError::bad_request(
+                "cursor status does not match requested status",
+            ));
+        }
+        Some(decoded)
+    } else {
+        None
+    };
+
+    let cursor_ref = decoded_cursor.as_ref().map(|c| (&c.created_at, &c.id));
+    let page = state
+        .app
+        .storage
+        .list_social_drafts_page(&guild_id, Some(effective_status), limit, cursor_ref)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(page))
+}
 
 #[derive(Debug, Deserialize)]
 pub struct CreateSocialDraftRequest {
