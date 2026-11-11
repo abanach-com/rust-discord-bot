@@ -6779,6 +6779,10 @@ impl MemoryStore {
         }
     }
 
+    pub fn insert_workflow_definition_raw_for_test(&self, wf: WorkflowDefinition) {
+        self.workflows.insert(wf.id, wf);
+    }
+
     pub fn create_workflow_definition(
         &self,
         mut wf: WorkflowDefinition,

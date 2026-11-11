@@ -160,7 +160,8 @@ impl ProviderAdapter for WorkflowBuilderAdapter {
             },
             ProviderCapability {
                 name: "dry_run".to_string(),
-                description: "Simulate execution on sample inputs without mutations".to_string(),
+                description: "Structural DAG validation without mutations (validation_only mode)"
+                    .to_string(),
                 status: CapabilityStatus::Supported,
                 read_only: true,
                 requires_write_scope: false,

@@ -6656,6 +6656,12 @@ impl Storage {
         }
     }
 
+    pub fn insert_workflow_definition_raw_for_test(&self, wf: WorkflowDefinition) {
+        if let Self::Memory(store) = self {
+            store.insert_workflow_definition_raw_for_test(wf);
+        }
+    }
+
     pub async fn create_workflow_definition(
         &self,
         wf: WorkflowDefinition,

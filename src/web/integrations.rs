@@ -964,16 +964,26 @@ pub async fn dry_run_workflow(
     let dag = WorkflowDag { nodes, edges };
     dag.validate_dag().map_err(ApiError::bad_request)?;
 
-    let steps = dag.nodes.len();
-    let estimated_ms = (steps as u64) * 12;
-
     Ok(Json(json!({
         "workflow_id": wf.id,
         "name": wf.name,
         "dry_run": true,
         "valid": true,
-        "simulated_steps": steps,
-        "estimated_execution_ms": estimated_ms,
+        "validation": {
+            "valid_dag": true,
+            "node_count": dag.nodes.len(),
+            "edge_count": dag.edges.len(),
+        },
+        "execution": {
+            "mode": "validation_only",
+            "simulated": false,
+            "executed_steps": 0,
+            "effects_applied": false,
+            "estimated_execution_ms": serde_json::Value::Null,
+        },
+        "warnings": [
+            "Conditions, permissions, provider availability and actions were not simulated"
+        ],
     })))
 }
 

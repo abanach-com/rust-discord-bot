@@ -746,11 +746,16 @@ async fn test_security_privacy_workflow_suite() {
     let dry_json: serde_json::Value = dry_res.json().await.unwrap();
     assert_eq!(dry_json["dry_run"], true);
     assert_eq!(dry_json["valid"], true);
-    assert_eq!(
-        dry_json["simulated_steps"], 3,
-        "Dry-run should report 3 simulated steps matching node count"
-    );
-    assert_eq!(dry_json["estimated_execution_ms"], 36);
+    assert_eq!(dry_json["validation"]["valid_dag"], true);
+    assert_eq!(dry_json["validation"]["node_count"], 3);
+    assert_eq!(dry_json["validation"]["edge_count"], 2);
+    assert_eq!(dry_json["execution"]["mode"], "validation_only");
+    assert_eq!(dry_json["execution"]["simulated"], false);
+    assert_eq!(dry_json["execution"]["executed_steps"], 0);
+    assert_eq!(dry_json["execution"]["effects_applied"], false);
+    assert!(dry_json["execution"]["estimated_execution_ms"].is_null());
+    assert!(dry_json.get("simulated_steps").is_none());
+    assert!(!dry_json["warnings"].as_array().unwrap().is_empty());
 
     // =========================================================================
     // Issue #136 & #137: Event Roster Capacity & CSRF Protection
@@ -1698,4 +1703,234 @@ async fn test_security_privacy_workflow_suite() {
         pruned_transcripts_future, 1,
         "Transcript older than cutoff must be pruned"
     );
+}
+
+#[tokio::test]
+async fn test_workflow_dry_run_validation_only_semantics_issue_400() {
+    let (state, perms_cache) = test_web_state().await;
+    let app = build_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{}", addr);
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::builder().build().unwrap();
+
+    let guild_id = "100100100100";
+    let other_guild_id = "200200200200";
+    let user_id = "300300300300";
+    let session_id = "test_dry_run_session_400";
+    let csrf_token = "test_dry_run_csrf_400";
+
+    perms_cache.insert(
+        (user_id.to_string(), guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+    perms_cache.insert(
+        (user_id.to_string(), other_guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    state
+        .app
+        .sessions
+        .save_session(
+            session_id,
+            DashboardUser {
+                id: user_id.to_string(),
+                username: "WorkflowAdmin".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![
+                DashboardGuild {
+                    id: guild_id.to_string(),
+                    name: "Primary Guild".to_string(),
+                    icon: None,
+                    owner: true,
+                    permissions: "8".to_string(),
+                },
+                DashboardGuild {
+                    id: other_guild_id.to_string(),
+                    name: "Other Guild".to_string(),
+                    icon: None,
+                    owner: true,
+                    permissions: "8".to_string(),
+                },
+            ],
+            csrf_token.to_string(),
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let session_cookie = format!("rusty_discord_bot_session={session_id}");
+
+    // 1. Create two workflows with identical node counts but different condition values
+    // WF A: trigger -> condition(false) -> action
+    let wf_a_body = json!({
+        "name": "Workflow Condition False",
+        "dag_nodes": [
+            { "id": "t1", "node_type": "trigger", "config": { "event": "member_join" } },
+            { "id": "c1", "node_type": "condition", "config": { "predicate": "always_false" } },
+            { "id": "a1", "node_type": "action", "config": { "action": "send_welcome" } }
+        ],
+        "dag_edges": [
+            { "from": "t1", "to": "c1" },
+            { "from": "c1", "to": "a1" }
+        ]
+    });
+
+    let res_a = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/workflows"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&wf_a_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res_a.status(), 200);
+    let json_a: serde_json::Value = res_a.json().await.unwrap();
+    let wf_a_id = json_a["id"].as_str().unwrap();
+
+    // WF B: trigger -> condition(true) -> action
+    let wf_b_body = json!({
+        "name": "Workflow Condition True",
+        "dag_nodes": [
+            { "id": "t1", "node_type": "trigger", "config": { "event": "member_join" } },
+            { "id": "c1", "node_type": "condition", "config": { "predicate": "always_true" } },
+            { "id": "a1", "node_type": "action", "config": { "action": "send_welcome" } }
+        ],
+        "dag_edges": [
+            { "from": "t1", "to": "c1" },
+            { "from": "c1", "to": "a1" }
+        ]
+    });
+
+    let res_b = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/workflows"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&wf_b_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res_b.status(), 200);
+    let json_b: serde_json::Value = res_b.json().await.unwrap();
+    let wf_b_id = json_b["id"].as_str().unwrap();
+
+    // 2. Perform dry_run on WF A and verify validation_only contract
+    let dry_a_res = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/workflows/{wf_a_id}/dry-run"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dry_a_res.status(), 200);
+    let dry_a_json: serde_json::Value = dry_a_res.json().await.unwrap();
+
+    // Verification of fields:
+    assert_eq!(dry_a_json["dry_run"], true);
+    assert_eq!(dry_a_json["valid"], true);
+    assert_eq!(dry_a_json["validation"]["valid_dag"], true);
+    assert_eq!(dry_a_json["validation"]["node_count"], 3);
+    assert_eq!(dry_a_json["validation"]["edge_count"], 2);
+    assert_eq!(dry_a_json["execution"]["mode"], "validation_only");
+    assert_eq!(dry_a_json["execution"]["simulated"], false);
+    assert_eq!(dry_a_json["execution"]["executed_steps"], 0);
+    assert_eq!(dry_a_json["execution"]["effects_applied"], false);
+    assert!(dry_a_json["execution"]["estimated_execution_ms"].is_null());
+    assert!(dry_a_json.get("simulated_steps").is_none());
+    assert!(!dry_a_json["warnings"].as_array().unwrap().is_empty());
+
+    // 3. Perform dry_run on WF B: also explicitly reports validation_only and zero executed steps
+    let dry_b_res = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/workflows/{wf_b_id}/dry-run"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dry_b_res.status(), 200);
+    let dry_b_json: serde_json::Value = dry_b_res.json().await.unwrap();
+    assert_eq!(dry_b_json["execution"]["mode"], "validation_only");
+    assert_eq!(dry_b_json["execution"]["executed_steps"], 0);
+    assert_eq!(dry_b_json["execution"]["simulated"], false);
+
+    // 4. Zero mutation assertions: dry_run must not mutate PostgreSQL / MemoryStore or emit audit
+    let audits_after = state
+        .app
+        .storage
+        .list_audit_events(guild_id, 50)
+        .await
+        .unwrap();
+    // Only workflow_created events should exist from the initial creation, zero dry_run audits
+    assert!(
+        !audits_after
+            .iter()
+            .any(|a| a.event == "workflow_dry_run" || a.event == "dry_run")
+    );
+
+    // 5. Cyclic DAG dry-run rejection: create workflow with cycle in storage
+    let cyclic_wf_id = Uuid::new_v4();
+    let cyclic_def = rusty_discord_bot::storage::WorkflowDefinition {
+        id: cyclic_wf_id,
+        guild_id: guild_id.to_string(),
+        name: "Cyclic Forged WF".to_string(),
+        dag_nodes: json!([
+            { "id": "n1", "node_type": "trigger", "config": {} },
+            { "id": "n2", "node_type": "action", "config": {} }
+        ]),
+        dag_edges: json!([
+            { "from": "n1", "to": "n2" },
+            { "from": "n2", "to": "n1" }
+        ]),
+        is_active: true,
+        version: 1,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    // Direct store insertion (simulating database edge-case or legacy stored state)
+    state
+        .app
+        .storage
+        .insert_workflow_definition_raw_for_test(cyclic_def);
+
+    let cyclic_dry_res = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/workflows/{cyclic_wf_id}/dry-run"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cyclic_dry_res.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 6. Cross-guild tenant isolation: accessing guild A's workflow from other_guild_id returns 404
+    let cross_res = client
+        .post(format!(
+            "{base_url}/api/guilds/{other_guild_id}/workflows/{wf_a_id}/dry-run"
+        ))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cross_res.status(), reqwest::StatusCode::NOT_FOUND);
 }
