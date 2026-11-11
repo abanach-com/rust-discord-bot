@@ -687,6 +687,18 @@ pub async fn ensure_channel_view_access(
     check_member_channel_view_perms(state, session, channel_id, &channel_scope).await
 }
 
+/// Returns true if the channel type can act as a parent for threads mapped in GitHub DevOps integrations.
+///
+/// Supported parent channel types in Discord:
+/// - `0`: `GuildText`
+/// - `5`: `GuildAnnouncement`
+/// - `15`: `GuildForum`
+/// - `16`: `GuildMedia`
+#[must_use]
+pub const fn is_supported_thread_parent_type(channel_type: u8) -> bool {
+    matches!(channel_type, 0 | 5 | 15 | 16)
+}
+
 pub async fn verify_thread_scope(
     state: &WebState,
     session: &Session,
@@ -712,10 +724,10 @@ pub async fn verify_thread_scope(
         ));
     }
 
-    // Parent can be GuildText (0), GuildAnnouncement (5), or GuildForum (15)
-    if !matches!(parent_scope.channel_type, 0 | 5 | 15) {
+    // Parent can be GuildText (0), GuildAnnouncement (5), GuildForum (15), or GuildMedia (16)
+    if !is_supported_thread_parent_type(parent_scope.channel_type) {
         return Err(ApiError::bad_request(
-            "Kanał nadrzędny musi być kanałem tekstowym, ogłoszeniowym lub forum",
+            "Kanał nadrzędny musi być kanałem tekstowym, ogłoszeniowym, forum lub media",
         ));
     }
 
@@ -1674,5 +1686,29 @@ mod tests {
             .unwrap_err();
         assert_eq!(err_missing.status, StatusCode::BAD_REQUEST);
         assert_eq!(err_missing.message, "Missing Discord authorization code.");
+    }
+
+    #[test]
+    fn test_is_supported_thread_parent_type_issue_401() {
+        // Allowed: GuildText (0), GuildAnnouncement (5), GuildForum (15), GuildMedia (16)
+        assert!(is_supported_thread_parent_type(0));
+        assert!(is_supported_thread_parent_type(5));
+        assert!(is_supported_thread_parent_type(15));
+        assert!(is_supported_thread_parent_type(16));
+
+        // Rejected: DM (1), GuildVoice (2), GroupDM (3), GuildCategory (4),
+        // Threads (10, 11, 12), Stage (13), Directory (14), unknown types
+        assert!(!is_supported_thread_parent_type(1));
+        assert!(!is_supported_thread_parent_type(2));
+        assert!(!is_supported_thread_parent_type(3));
+        assert!(!is_supported_thread_parent_type(4));
+        assert!(!is_supported_thread_parent_type(6));
+        assert!(!is_supported_thread_parent_type(10));
+        assert!(!is_supported_thread_parent_type(11));
+        assert!(!is_supported_thread_parent_type(12));
+        assert!(!is_supported_thread_parent_type(13));
+        assert!(!is_supported_thread_parent_type(14));
+        assert!(!is_supported_thread_parent_type(17));
+        assert!(!is_supported_thread_parent_type(255));
     }
 }

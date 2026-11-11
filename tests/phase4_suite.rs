@@ -1837,6 +1837,18 @@ async fn test_github_thread_mapping_and_telegram_bridge_tenant_isolation_issues_
     let not_a_thread_id = "111000000000000005";
     let voice_channel_id = "111000000000000006";
     let valid_tg_channel_id = "111000000000000008";
+    let parent_media_id = "111000000000000010";
+    let valid_media_thread_id = "111000000000000011";
+    let parent_announcement_id = "111000000000000012";
+    let valid_announcement_thread_id = "111000000000000013";
+    let category_channel_id = "111000000000000014";
+    let stage_channel_id = "111000000000000015";
+    let no_view_media_parent_id = "111000000000000016";
+    let no_view_media_thread_id = "111000000000000017";
+    let no_view_thread_in_valid_media_id = "111000000000000018";
+    let private_thread_in_media_id = "111000000000000019";
+    let api_error_thread_id = "111000000000000020";
+    let parent_text_id = "111000000000000003";
 
     let foreign_channel_id = "222000000000000001";
     let foreign_thread_id = "222000000000000002";
@@ -1897,6 +1909,81 @@ async fn test_github_thread_mapping_and_telegram_bridge_tenant_isolation_issues_
                             "parent_id": null
                         }))
                         .into_response(),
+                        "111000000000000010" => axum::Json(serde_json::json!({
+                            "id": "111000000000000010",
+                            "guild_id": "100000000000000001",
+                            "type": 16,
+                            "parent_id": null
+                        }))
+                        .into_response(),
+                        "111000000000000011" => axum::Json(serde_json::json!({
+                            "id": "111000000000000011",
+                            "guild_id": "100000000000000001",
+                            "type": 11,
+                            "parent_id": "111000000000000010"
+                        }))
+                        .into_response(),
+                        "111000000000000012" => axum::Json(serde_json::json!({
+                            "id": "111000000000000012",
+                            "guild_id": "100000000000000001",
+                            "type": 5,
+                            "parent_id": null
+                        }))
+                        .into_response(),
+                        "111000000000000013" => axum::Json(serde_json::json!({
+                            "id": "111000000000000013",
+                            "guild_id": "100000000000000001",
+                            "type": 10,
+                            "parent_id": "111000000000000012"
+                        }))
+                        .into_response(),
+                        "111000000000000014" => axum::Json(serde_json::json!({
+                            "id": "111000000000000014",
+                            "guild_id": "100000000000000001",
+                            "type": 4,
+                            "parent_id": null
+                        }))
+                        .into_response(),
+                        "111000000000000015" => axum::Json(serde_json::json!({
+                            "id": "111000000000000015",
+                            "guild_id": "100000000000000001",
+                            "type": 13,
+                            "parent_id": null
+                        }))
+                        .into_response(),
+                        "111000000000000016" => axum::Json(serde_json::json!({
+                            "id": "111000000000000016",
+                            "guild_id": "100000000000000001",
+                            "type": 16,
+                            "parent_id": null
+                        }))
+                        .into_response(),
+                        "111000000000000017" => axum::Json(serde_json::json!({
+                            "id": "111000000000000017",
+                            "guild_id": "100000000000000001",
+                            "type": 11,
+                            "parent_id": "111000000000000016"
+                        }))
+                        .into_response(),
+                        "111000000000000018" => axum::Json(serde_json::json!({
+                            "id": "111000000000000018",
+                            "guild_id": "100000000000000001",
+                            "type": 11,
+                            "parent_id": "111000000000000010"
+                        }))
+                        .into_response(),
+                        "111000000000000019" => axum::Json(serde_json::json!({
+                            "id": "111000000000000019",
+                            "guild_id": "100000000000000001",
+                            "type": 12,
+                            "parent_id": "111000000000000010"
+                        }))
+                        .into_response(),
+                        "111000000000000020" => (
+                            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                            axum::Json(serde_json::json!({"message": "Internal Discord error"})),
+                        )
+                            .into_response(),
                         "222000000000000001" => axum::Json(serde_json::json!({
                             "id": "222000000000000001",
                             "guild_id": "200000000000000002",
@@ -1925,16 +2012,35 @@ async fn test_github_thread_mapping_and_telegram_bridge_tenant_isolation_issues_
         .route(
             "/channels/{channel_id}/permissions/member/{user_id}",
             get(
-                |axum::extract::Path((_channel_id, user_id)): axum::extract::Path<(
+                |axum::extract::Path((channel_id, user_id)): axum::extract::Path<(
                     String,
                     String,
                 )>| async move {
+                    if channel_id == "111000000000000016" || channel_id == "111000000000000018" {
+                        return axum::Json(serde_json::json!({ "permissions": "0" }))
+                            .into_response();
+                    }
                     if user_id == "500000000000000001" {
                         // VIEW_CHANNEL = 1024
                         axum::Json(serde_json::json!({ "permissions": "1024" })).into_response()
                     } else {
                         axum::Json(serde_json::json!({ "permissions": "0" })).into_response()
                     }
+                },
+            ),
+        )
+        .route(
+            "/channels/{channel_id}/thread-members/{user_id}",
+            get(
+                |axum::extract::Path((_channel_id, _user_id)): axum::extract::Path<(
+                    String,
+                    String,
+                )>| async move {
+                    (
+                        reqwest::StatusCode::NOT_FOUND,
+                        axum::Json(serde_json::json!({"code": 10003, "message": "Unknown Member"})),
+                    )
+                        .into_response()
                 },
             ),
         )
@@ -2201,6 +2307,252 @@ async fn test_github_thread_mapping_and_telegram_bridge_tenant_isolation_issues_
         .unwrap();
     assert!(stored_mapping.is_some());
     assert_eq!(stored_mapping.unwrap().discord_thread_id, valid_thread_id);
+
+    // Case 9b (Issue #401): Success case - GuildMedia (type 16) parent and matching PublicThread (type 11) in Guild A
+    let resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/github/thread-map"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({
+            "repo_full_name": "owner/repo",
+            "thread_channel_id": parent_media_id,
+            "issue_or_pr_number": 43,
+            "discord_thread_id": valid_media_thread_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let map_body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(map_body["guild_id"], guild_a);
+    assert_eq!(map_body["repo_full_name"], "owner/repo");
+    assert_eq!(map_body["issue_or_pr_number"], 43);
+    assert_eq!(map_body["discord_thread_id"], valid_media_thread_id);
+
+    // Verify storage has mapping for Media channel
+    let stored_mapping = state
+        .app
+        .storage
+        .get_github_devops_mapping(guild_a, "owner/repo", 43)
+        .await
+        .unwrap();
+    assert!(stored_mapping.is_some());
+    assert_eq!(
+        stored_mapping.unwrap().discord_thread_id,
+        valid_media_thread_id
+    );
+
+    // Case 9c (Issue #401): Success case - GuildAnnouncement (type 5) parent and matching AnnouncementThread (type 10) in Guild A
+    let resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/github/thread-map"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({
+            "repo_full_name": "owner/repo",
+            "thread_channel_id": parent_announcement_id,
+            "issue_or_pr_number": 44,
+            "discord_thread_id": valid_announcement_thread_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    // Case 9d (Issue #401): Parent channel is GuildCategory (type 4) -> 400 Bad Request
+    let resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/github/thread-map"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({
+            "repo_full_name": "owner/repo",
+            "thread_channel_id": category_channel_id,
+            "issue_or_pr_number": 45,
+            "discord_thread_id": valid_media_thread_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Case 9e (Issue #401): Parent channel is GuildStageVoice (type 13) -> 400 Bad Request
+    let resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/github/thread-map"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({
+            "repo_full_name": "owner/repo",
+            "thread_channel_id": stage_channel_id,
+            "issue_or_pr_number": 46,
+            "discord_thread_id": valid_media_thread_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Case 9f (Issue #401): Media parent with mismatched thread parent_id -> 403 Forbidden
+    let resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/github/thread-map"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({
+            "repo_full_name": "owner/repo",
+            "thread_channel_id": parent_media_id,
+            "issue_or_pr_number": 47,
+            "discord_thread_id": valid_thread_id // parent is forum 0001, not media 0010
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Case 9g (Issue #401): Media parent with thread in foreign guild -> 403 Forbidden
+    let resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/github/thread-map"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({
+            "repo_full_name": "owner/repo",
+            "thread_channel_id": parent_media_id,
+            "issue_or_pr_number": 48,
+            "discord_thread_id": foreign_thread_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Case 9h (Issue #401): Success case - GuildText (type 0) parent and matching PublicThread (type 11) in Guild A
+    let resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/github/thread-map"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({
+            "repo_full_name": "owner/repo",
+            "thread_channel_id": parent_text_id,
+            "issue_or_pr_number": 49,
+            "discord_thread_id": wrong_parent_thread_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    // Case 9i (Issue #401): Media parent without VIEW_CHANNEL permission -> 403 Forbidden (fail-closed)
+    let resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/github/thread-map"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({
+            "repo_full_name": "owner/repo",
+            "thread_channel_id": no_view_media_parent_id,
+            "issue_or_pr_number": 50,
+            "discord_thread_id": no_view_media_thread_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    assert!(
+        state
+            .app
+            .storage
+            .get_github_devops_mapping(guild_a, "owner/repo", 50)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Case 9j (Issue #401): Media parent with VIEW_CHANNEL, but thread denies VIEW_CHANNEL -> 403 Forbidden
+    let resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/github/thread-map"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({
+            "repo_full_name": "owner/repo",
+            "thread_channel_id": parent_media_id,
+            "issue_or_pr_number": 51,
+            "discord_thread_id": no_view_thread_in_valid_media_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    assert!(
+        state
+            .app
+            .storage
+            .get_github_devops_mapping(guild_a, "owner/repo", 51)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Case 9k (Issue #401): Media parent with PrivateThread (type 12) without membership -> 403 Forbidden
+    let resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/github/thread-map"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({
+            "repo_full_name": "owner/repo",
+            "thread_channel_id": parent_media_id,
+            "issue_or_pr_number": 52,
+            "discord_thread_id": private_thread_in_media_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    assert!(
+        state
+            .app
+            .storage
+            .get_github_devops_mapping(guild_a, "owner/repo", 52)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Case 9l (Issue #401): Media parent with unavailable Discord API for thread -> 403 Forbidden (fail-closed)
+    let resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/github/thread-map"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({
+            "repo_full_name": "owner/repo",
+            "thread_channel_id": parent_media_id,
+            "issue_or_pr_number": 53,
+            "discord_thread_id": api_error_thread_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    assert!(
+        state
+            .app
+            .storage
+            .get_github_devops_mapping(guild_a, "owner/repo", 53)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Case 9m (Issue #401): Ensure direct messaging channel check (ensure_channel_view_access via telegram bridge)
+    // STILL rejects GuildMedia (type 16) with 400 Bad Request
+    let resp = client
+        .post(format!("{base_url}/api/guilds/{guild_a}/telegram/bridge"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({
+            "telegram_chat_id": "-100123456789",
+            "discord_channel_id": parent_media_id,
+            "secret_token": "tg_sec_123"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
 
     // =========================================================================
     // Issue #352 Tests: create_telegram_bridge
