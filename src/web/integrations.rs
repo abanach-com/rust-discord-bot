@@ -16,10 +16,11 @@ use crate::integrations::{
     webhook::{verify_hmac_sha256, verify_secret_token},
 };
 use crate::storage::{
-    AiGuildBudget, AiKnowledgeDocument, GamingHubGameStatus, GitHubDevopsMapping,
-    IntegrationConnection, IntegrationDeliveryLog, LinkedAccount, PluginGuildInstallation,
-    PluginMarketplacePackage, SocialDraftApprovalError, SocialDraftsPage, SocialPublicationDraft,
-    SteamLfgPost, TelegramBridge, WorkflowDefinition,
+    AiGuildBudget, AiKnowledgeDocument, DEFAULT_WORKFLOWS_PAGE_LIMIT, GamingHubGameStatus,
+    GitHubDevopsMapping, IntegrationConnection, IntegrationDeliveryLog, LinkedAccount,
+    PluginGuildInstallation, PluginMarketplacePackage, SocialDraftApprovalError, SocialDraftsPage,
+    SocialPublicationDraft, SteamLfgPost, TelegramBridge, WorkflowDefinition,
+    WorkflowDefinitionsPage, WorkflowStorageError,
 };
 
 use super::{
@@ -790,6 +791,92 @@ pub struct CreateWorkflowRequest {
     pub dag_edges: Value,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ListWorkflowsQuery {
+    pub limit: Option<usize>,
+    pub cursor: Option<String>,
+}
+
+pub async fn list_workflows(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+    Query(query): Query<ListWorkflowsQuery>,
+) -> Result<Json<WorkflowDefinitionsPage>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+
+    let limit = query.limit.unwrap_or(DEFAULT_WORKFLOWS_PAGE_LIMIT);
+    let page = state
+        .app
+        .storage
+        .list_workflow_definitions_page(&guild_id, limit, query.cursor.as_deref())
+        .await
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.to_lowercase().contains("cursor") {
+                ApiError::bad_request(msg)
+            } else {
+                ApiError::internal(msg)
+            }
+        })?;
+
+    Ok(Json(page))
+}
+
+pub async fn get_workflow(
+    State(state): State<WebState>,
+    Path((guild_id, wf_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<WorkflowDefinition>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+
+    let wf = state
+        .app
+        .storage
+        .get_workflow_definition(wf_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    match wf {
+        Some(w) if w.guild_id == guild_id => Ok(Json(w)),
+        _ => Err(ApiError::not_found(
+            "Workflow definition not found in this guild.",
+        )),
+    }
+}
+
+pub async fn delete_workflow(
+    State(state): State<WebState>,
+    Path((guild_id, wf_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+
+    let actor_id = session.user.id.clone();
+    let deleted = state
+        .app
+        .storage
+        .delete_workflow_definition(&guild_id, wf_id, Some(&actor_id))
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    if !deleted {
+        return Err(ApiError::not_found(
+            "Workflow definition not found in this guild.",
+        ));
+    }
+
+    Ok(Json(json!({
+        "deleted": true,
+        "id": wf_id,
+        "guild_id": guild_id,
+    })))
+}
+
 pub async fn create_workflow(
     State(state): State<WebState>,
     Path(guild_id): Path<String>,
@@ -800,30 +887,12 @@ pub async fn create_workflow(
     verify_csrf(&headers, &session)?;
     ensure_guild_access(&state, &session, &guild_id).await?;
 
-    let name = payload.name.trim();
-    if name.is_empty() {
-        return Err(ApiError::bad_request("Workflow name cannot be empty."));
-    }
-
-    let nodes: Vec<WorkflowNode> = serde_json::from_value(payload.dag_nodes)
-        .map_err(|e| ApiError::bad_request(format!("Invalid dag_nodes: {e}")))?;
-    let edges: Vec<WorkflowEdge> = serde_json::from_value(payload.dag_edges)
-        .map_err(|e| ApiError::bad_request(format!("Invalid dag_edges: {e}")))?;
-
-    let dag = WorkflowDag { nodes, edges };
-    dag.validate_dag().map_err(ApiError::bad_request)?;
-
-    let validated_nodes =
-        serde_json::to_value(&dag.nodes).map_err(|e| ApiError::internal(e.to_string()))?;
-    let validated_edges =
-        serde_json::to_value(&dag.edges).map_err(|e| ApiError::internal(e.to_string()))?;
-
     let wf = WorkflowDefinition {
         id: Uuid::new_v4(),
-        guild_id,
-        name: name.to_string(),
-        dag_nodes: validated_nodes,
-        dag_edges: validated_edges,
+        guild_id: guild_id.clone(),
+        name: payload.name,
+        dag_nodes: payload.dag_nodes,
+        dag_edges: payload.dag_edges,
         is_active: true,
         version: 1,
         created_at: Utc::now(),
@@ -835,7 +904,47 @@ pub async fn create_workflow(
         .storage
         .create_workflow_definition(wf)
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(|e| {
+            if let Some(wf_err) = e.downcast_ref::<WorkflowStorageError>() {
+                match wf_err {
+                    WorkflowStorageError::QuotaExceeded(msg) => ApiError::conflict(msg),
+                    WorkflowStorageError::Validation(msg) => ApiError::bad_request(msg),
+                    WorkflowStorageError::NotFound(id) => {
+                        ApiError::not_found(format!("Workflow {id} not found"))
+                    }
+                }
+            } else {
+                let msg = e.to_string();
+                if msg.contains("quota exceeded") {
+                    ApiError::conflict(msg)
+                } else if msg.contains("Validation failed")
+                    || msg.contains("invalid")
+                    || msg.contains("exceeds")
+                    || msg.contains("cannot be empty")
+                    || msg.contains("must not contain")
+                {
+                    ApiError::bad_request(msg)
+                } else {
+                    ApiError::internal(msg)
+                }
+            }
+        })?;
+
+    let actor_id = session.user.id.clone();
+    let _ = state
+        .app
+        .storage
+        .record_audit(
+            Some(&guild_id),
+            Some(&actor_id),
+            "workflow_builder",
+            "workflow_created",
+            serde_json::json!({
+                "workflow_id": saved.id,
+                "workflow_name": saved.name,
+            }),
+        )
+        .await;
 
     Ok(Json(saved))
 }

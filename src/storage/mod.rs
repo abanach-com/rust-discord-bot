@@ -2058,6 +2058,139 @@ pub struct TelegramMessageMapping {
     pub created_at: DateTime<Utc>,
 }
 
+pub const MAX_WORKFLOWS_PER_GUILD: usize = 200;
+pub const MAX_WORKFLOW_TOTAL_BYTES_PER_GUILD: usize = 8 * 1024 * 1024; // 8 MiB
+pub const MAX_WORKFLOW_NAME_CHARS: usize = 120;
+pub const MAX_WORKFLOW_NAME_BYTES: usize = 480;
+pub const MAX_WORKFLOW_NODE_ID_CHARS: usize = 64;
+pub const MAX_WORKFLOW_NODE_CONFIG_BYTES: usize = 8 * 1024; // 8 KiB
+pub const MAX_WORKFLOW_DEFINITION_BYTES: usize = 64 * 1024; // 64 KiB
+pub const DEFAULT_WORKFLOWS_PAGE_LIMIT: usize = 25;
+pub const MAX_WORKFLOWS_PAGE_LIMIT: usize = 100;
+
+#[derive(Debug, thiserror::Error)]
+pub enum WorkflowStorageError {
+    #[error("Workflow quota exceeded for guild: {0}")]
+    QuotaExceeded(String),
+    #[error("Workflow definition not found: {0}")]
+    NotFound(Uuid),
+    #[error("Invalid workflow content: {0}")]
+    Validation(String),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkflowDefinitionsPage {
+    pub items: Vec<WorkflowDefinition>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkflowDefinitionCursor {
+    pub guild_id: String,
+    pub created_at: DateTime<Utc>,
+    pub id: Uuid,
+}
+
+pub fn encode_workflow_definition_cursor(
+    guild_id: &str,
+    created_at: &DateTime<Utc>,
+    id: &Uuid,
+) -> String {
+    let payload = format!("v1|{}|{}|{}", guild_id.trim(), created_at.to_rfc3339(), id);
+    base64url_encode_store_cursor(payload.as_bytes())
+}
+
+pub fn decode_workflow_definition_cursor(cursor: &str) -> anyhow::Result<WorkflowDefinitionCursor> {
+    let trimmed = cursor.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("empty cursor");
+    }
+
+    let decoded = base64url_decode_store_cursor(trimmed).map_err(|e| {
+        anyhow::anyhow!("invalid base64url encoding for workflow definition cursor: {e}")
+    })?;
+    let payload = String::from_utf8(decoded)
+        .map_err(|e| anyhow::anyhow!("cursor is not valid UTF-8: {e}"))?;
+    let parts: Vec<&str> = payload.split('|').collect();
+    if parts.len() != 4 || parts[0] != "v1" {
+        anyhow::bail!("invalid workflow definition cursor format: expected v1 format");
+    }
+    let guild_id = parts[1].trim().to_string();
+    if guild_id.is_empty() {
+        anyhow::bail!("workflow definition cursor missing guild_id");
+    }
+    let created_at = DateTime::parse_from_rfc3339(parts[2].trim())
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| anyhow::anyhow!("Failed to parse cursor timestamp: {e}"))?;
+    let id = Uuid::parse_str(parts[3].trim())
+        .map_err(|e| anyhow::anyhow!("Failed to parse cursor UUID: {e}"))?;
+
+    Ok(WorkflowDefinitionCursor {
+        guild_id,
+        created_at,
+        id,
+    })
+}
+
+pub fn validate_workflow_definition_content(
+    name: &str,
+    dag_nodes: &Value,
+    dag_edges: &Value,
+) -> anyhow::Result<(String, usize)> {
+    let trimmed_name = name.trim();
+    if trimmed_name.is_empty() {
+        anyhow::bail!(WorkflowStorageError::Validation(
+            "Workflow name cannot be empty".to_string()
+        ));
+    }
+    if trimmed_name.chars().count() > MAX_WORKFLOW_NAME_CHARS {
+        anyhow::bail!(WorkflowStorageError::Validation(format!(
+            "Workflow name exceeds maximum length of {} characters",
+            MAX_WORKFLOW_NAME_CHARS
+        )));
+    }
+    if trimmed_name.len() > MAX_WORKFLOW_NAME_BYTES {
+        anyhow::bail!(WorkflowStorageError::Validation(format!(
+            "Workflow name exceeds maximum limit of {} bytes",
+            MAX_WORKFLOW_NAME_BYTES
+        )));
+    }
+
+    let nodes: Vec<crate::integrations::providers::workflow::WorkflowNode> =
+        serde_json::from_value(dag_nodes.clone())
+            .map_err(|e| WorkflowStorageError::Validation(format!("Invalid dag_nodes: {e}")))?;
+    let edges: Vec<crate::integrations::providers::workflow::WorkflowEdge> =
+        serde_json::from_value(dag_edges.clone())
+            .map_err(|e| WorkflowStorageError::Validation(format!("Invalid dag_edges: {e}")))?;
+
+    let dag = crate::integrations::providers::workflow::WorkflowDag {
+        nodes: nodes.clone(),
+        edges: edges.clone(),
+    };
+    dag.validate_dag().map_err(|e| {
+        WorkflowStorageError::Validation(format!("Workflow DAG validation failed: {e}"))
+    })?;
+
+    let nodes_bytes = serde_json::to_vec(dag_nodes).map_err(|e| {
+        WorkflowStorageError::Validation(format!("Failed to serialize dag_nodes: {e}"))
+    })?;
+    let edges_bytes = serde_json::to_vec(dag_edges).map_err(|e| {
+        WorkflowStorageError::Validation(format!("Failed to serialize dag_edges: {e}"))
+    })?;
+    let total_definition_bytes = trimmed_name.len() + nodes_bytes.len() + edges_bytes.len();
+
+    if total_definition_bytes > MAX_WORKFLOW_DEFINITION_BYTES {
+        anyhow::bail!(WorkflowStorageError::Validation(format!(
+            "Workflow definition exceeds maximum limit of {} bytes (got {} bytes)",
+            MAX_WORKFLOW_DEFINITION_BYTES, total_definition_bytes
+        )));
+    }
+
+    Ok((trimmed_name.to_string(), total_definition_bytes))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct WorkflowDefinition {
     pub id: Uuid,
@@ -6501,41 +6634,73 @@ impl Storage {
         }
     }
 
-    // Agent 11 (#100): Workflow Builder
+    // Agent 11 (#100, #395): Workflow Builder
+
+    pub fn set_workflows_quota_for_test(&self, quota: Option<(usize, usize)>) {
+        if let Self::Memory(store) = self {
+            store.set_workflows_quota_for_test(quota);
+        }
+    }
 
     pub async fn create_workflow_definition(
         &self,
-
         wf: WorkflowDefinition,
     ) -> anyhow::Result<WorkflowDefinition> {
         match self {
-            Self::Memory(store) => Ok(store.create_workflow_definition(wf)),
-
+            Self::Memory(store) => store.create_workflow_definition(wf),
             Self::Postgres(store) => store.create_workflow_definition(wf).await,
         }
     }
 
     pub async fn get_workflow_definition(
         &self,
-
         id: Uuid,
     ) -> anyhow::Result<Option<WorkflowDefinition>> {
         match self {
             Self::Memory(store) => Ok(store.get_workflow_definition(id)),
-
             Self::Postgres(store) => store.get_workflow_definition(id).await,
         }
     }
 
     pub async fn list_workflow_definitions(
         &self,
-
         guild_id: &str,
     ) -> anyhow::Result<Vec<WorkflowDefinition>> {
         match self {
             Self::Memory(store) => Ok(store.list_workflow_definitions(guild_id)),
-
             Self::Postgres(store) => store.list_workflow_definitions(guild_id).await,
+        }
+    }
+
+    pub async fn list_workflow_definitions_page(
+        &self,
+        guild_id: &str,
+        limit: usize,
+        cursor: Option<&str>,
+    ) -> anyhow::Result<WorkflowDefinitionsPage> {
+        match self {
+            Self::Memory(store) => store.list_workflow_definitions_page(guild_id, limit, cursor),
+            Self::Postgres(store) => {
+                store
+                    .list_workflow_definitions_page(guild_id, limit, cursor)
+                    .await
+            }
+        }
+    }
+
+    pub async fn delete_workflow_definition(
+        &self,
+        guild_id: &str,
+        id: Uuid,
+        actor_id: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => store.delete_workflow_definition(guild_id, id, actor_id),
+            Self::Postgres(store) => {
+                store
+                    .delete_workflow_definition(guild_id, id, actor_id)
+                    .await
+            }
         }
     }
 
@@ -11575,5 +11740,319 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn test_workflow_definitions_validation_quota_and_pagination_issue_395() {
+        let store = Storage::memory();
+        let guild_id = "999888777666555";
+        let other_guild_id = "111222333444555";
+
+        // 1. Validation: empty name -> error
+        let empty_name_res = store
+            .create_workflow_definition(WorkflowDefinition {
+                id: Uuid::new_v4(),
+                guild_id: guild_id.to_string(),
+                name: "   ".to_string(),
+                dag_nodes: serde_json::json!([
+                    { "id": "t1", "node_type": "trigger", "config": {} }
+                ]),
+                dag_edges: serde_json::json!([]),
+                is_active: true,
+                version: 1,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+        assert!(empty_name_res.is_err());
+
+        // 2. Validation: name > 120 chars -> error
+        let long_name_res = store
+            .create_workflow_definition(WorkflowDefinition {
+                id: Uuid::new_v4(),
+                guild_id: guild_id.to_string(),
+                name: "w".repeat(121),
+                dag_nodes: serde_json::json!([
+                    { "id": "t1", "node_type": "trigger", "config": {} }
+                ]),
+                dag_edges: serde_json::json!([]),
+                is_active: true,
+                version: 1,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+        assert!(long_name_res.is_err());
+
+        // 3. Validation: node.id with invalid characters / whitespace -> error
+        let invalid_node_id_res = store
+            .create_workflow_definition(WorkflowDefinition {
+                id: Uuid::new_v4(),
+                guild_id: guild_id.to_string(),
+                name: "Invalid Node".to_string(),
+                dag_nodes: serde_json::json!([
+                    { "id": "t1 space", "node_type": "trigger", "config": {} }
+                ]),
+                dag_edges: serde_json::json!([]),
+                is_active: true,
+                version: 1,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+        assert!(invalid_node_id_res.is_err());
+
+        // 4. Validation: node.config > 8 KiB -> error
+        let huge_config = "x".repeat(8193);
+        let huge_config_res = store
+            .create_workflow_definition(WorkflowDefinition {
+                id: Uuid::new_v4(),
+                guild_id: guild_id.to_string(),
+                name: "Huge Config".to_string(),
+                dag_nodes: serde_json::json!([
+                    { "id": "t1", "node_type": "trigger", "config": { "payload": huge_config } }
+                ]),
+                dag_edges: serde_json::json!([]),
+                is_active: true,
+                version: 1,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+        assert!(huge_config_res.is_err());
+
+        // 5. Validation: cyclic DAG -> error
+        let cyclic_res = store
+            .create_workflow_definition(WorkflowDefinition {
+                id: Uuid::new_v4(),
+                guild_id: guild_id.to_string(),
+                name: "Cyclic Workflow".to_string(),
+                dag_nodes: serde_json::json!([
+                    { "id": "a", "node_type": "trigger", "config": {} },
+                    { "id": "b", "node_type": "action", "config": {} }
+                ]),
+                dag_edges: serde_json::json!([
+                    { "from": "a", "to": "b" },
+                    { "from": "b", "to": "a" }
+                ]),
+                is_active: true,
+                version: 1,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+        assert!(cyclic_res.is_err());
+
+        // 6. Quota count enforcement: set quota to (2, 100_000)
+        store.set_workflows_quota_for_test(Some((2, 100_000)));
+
+        let wf1 = store
+            .create_workflow_definition(WorkflowDefinition {
+                id: Uuid::new_v4(),
+                guild_id: guild_id.to_string(),
+                name: "  Workflow 1  ".to_string(), // verify whitespace trimming
+                dag_nodes: serde_json::json!([
+                    { "id": "t1", "node_type": "trigger", "config": {} }
+                ]),
+                dag_edges: serde_json::json!([]),
+                is_active: true,
+                version: 1,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await
+            .expect("wf1 created");
+        assert_eq!(wf1.name, "Workflow 1");
+
+        let wf2 = store
+            .create_workflow_definition(WorkflowDefinition {
+                id: Uuid::new_v4(),
+                guild_id: guild_id.to_string(),
+                name: "Workflow 2".to_string(),
+                dag_nodes: serde_json::json!([
+                    { "id": "t1", "node_type": "trigger", "config": {} }
+                ]),
+                dag_edges: serde_json::json!([]),
+                is_active: true,
+                version: 1,
+                created_at: Utc::now() + chrono::Duration::seconds(1),
+                updated_at: Utc::now(),
+            })
+            .await
+            .expect("wf2 created");
+
+        // 3rd workflow in guild_id exceeds count quota
+        let wf3_res = store
+            .create_workflow_definition(WorkflowDefinition {
+                id: Uuid::new_v4(),
+                guild_id: guild_id.to_string(),
+                name: "Workflow 3".to_string(),
+                dag_nodes: serde_json::json!([
+                    { "id": "t1", "node_type": "trigger", "config": {} }
+                ]),
+                dag_edges: serde_json::json!([]),
+                is_active: true,
+                version: 1,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+        assert!(wf3_res.is_err());
+
+        // Multi-tenant isolation: other_guild_id can still create up to its quota
+        let other_wf = store
+            .create_workflow_definition(WorkflowDefinition {
+                id: Uuid::new_v4(),
+                guild_id: other_guild_id.to_string(),
+                name: "Other Guild WF".to_string(),
+                dag_nodes: serde_json::json!([
+                    { "id": "t1", "node_type": "trigger", "config": {} }
+                ]),
+                dag_edges: serde_json::json!([]),
+                is_active: true,
+                version: 1,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await
+            .expect("other guild wf created");
+        assert_eq!(other_wf.guild_id, other_guild_id);
+
+        // 7. Keyset pagination test: populate 5 workflows
+        store.set_workflows_quota_for_test(Some((10, 500_000)));
+        let mut created_ids = vec![wf1.id, wf2.id];
+        let base_time = Utc::now();
+        for i in 3..=5 {
+            let wf = store
+                .create_workflow_definition(WorkflowDefinition {
+                    id: Uuid::new_v4(),
+                    guild_id: guild_id.to_string(),
+                    name: format!("Workflow {i}"),
+                    dag_nodes: serde_json::json!([
+                        { "id": "t1", "node_type": "trigger", "config": {} }
+                    ]),
+                    dag_edges: serde_json::json!([]),
+                    is_active: true,
+                    version: 1,
+                    created_at: base_time + chrono::Duration::seconds(i as i64),
+                    updated_at: Utc::now(),
+                })
+                .await
+                .unwrap();
+            created_ids.push(wf.id);
+        }
+
+        // Page 1: limit 2
+        let page1 = store
+            .list_workflow_definitions_page(guild_id, 2, None)
+            .await
+            .unwrap();
+        assert_eq!(page1.items.len(), 2);
+        assert!(page1.has_more);
+        assert!(page1.next_cursor.is_some());
+        let cur1 = page1.next_cursor.unwrap();
+
+        // Page 2: limit 2 with cur1
+        let page2 = store
+            .list_workflow_definitions_page(guild_id, 2, Some(&cur1))
+            .await
+            .unwrap();
+        assert_eq!(page2.items.len(), 2);
+        assert!(page2.has_more);
+        let cur2 = page2.next_cursor.unwrap();
+
+        // Page 3: limit 2 with cur2 -> 1 item, has_more = false
+        let page3 = store
+            .list_workflow_definitions_page(guild_id, 2, Some(&cur2))
+            .await
+            .unwrap();
+        assert_eq!(page3.items.len(), 1);
+        assert!(!page3.has_more);
+        assert!(page3.next_cursor.is_none());
+
+        // Cross-guild cursor tamper rejection
+        let foreign_cur = encode_workflow_definition_cursor(other_guild_id, &base_time, &wf1.id);
+        let tamper_err = store
+            .list_workflow_definitions_page(guild_id, 2, Some(&foreign_cur))
+            .await;
+        assert!(tamper_err.is_err());
+
+        // 8. Deletion & quota slot reclamation:
+        // Set quota to (5, 500_000) -> currently 5 exist, adding 6th fails
+        store.set_workflows_quota_for_test(Some((5, 500_000)));
+        let over_quota = store
+            .create_workflow_definition(WorkflowDefinition {
+                id: Uuid::new_v4(),
+                guild_id: guild_id.to_string(),
+                name: "Workflow 6".to_string(),
+                dag_nodes: serde_json::json!([
+                    { "id": "t1", "node_type": "trigger", "config": {} }
+                ]),
+                dag_edges: serde_json::json!([]),
+                is_active: true,
+                version: 1,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+        assert!(over_quota.is_err());
+
+        // Cross-guild delete attempt -> returns false
+        let foreign_del = store
+            .delete_workflow_definition(other_guild_id, wf1.id, Some("admin_user"))
+            .await
+            .unwrap();
+        assert!(!foreign_del);
+
+        // Record a mock workflow run for wf1 to verify cascading delete
+        let _run = store
+            .record_workflow_run(WorkflowRunExecution {
+                id: Uuid::new_v4(),
+                workflow_id: wf1.id,
+                guild_id: guild_id.to_string(),
+                trigger_event: "manual".to_string(),
+                status: "success".to_string(),
+                logs: serde_json::json!([]),
+                created_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        // Delete wf1 in guild_id -> returns true
+        let del_ok = store
+            .delete_workflow_definition(guild_id, wf1.id, Some("admin_user"))
+            .await
+            .unwrap();
+        assert!(del_ok);
+
+        // wf1 is gone
+        assert!(
+            store
+                .get_workflow_definition(wf1.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // Now creating a new workflow succeeds because quota slot was freed!
+        let reclaimed = store
+            .create_workflow_definition(WorkflowDefinition {
+                id: Uuid::new_v4(),
+                guild_id: guild_id.to_string(),
+                name: "Workflow Reclaimed".to_string(),
+                dag_nodes: serde_json::json!([
+                    { "id": "t1", "node_type": "trigger", "config": {} }
+                ]),
+                dag_edges: serde_json::json!([]),
+                is_active: true,
+                version: 1,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+        assert!(reclaimed.is_ok());
+
+        // 9. Reset quota override
+        store.set_workflows_quota_for_test(None);
     }
 }

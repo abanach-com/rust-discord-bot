@@ -22,6 +22,7 @@ use super::{
     HelpForumStats, IntegrationConnection, IntegrationDeliveryLog, IntegrationWebhookSubscription,
     InviteTracking, KickStreamSubscription, LinkedAccount, MAX_AI_DOCUMENTS_BYTES_PER_GUILD,
     MAX_AI_DOCUMENTS_PER_GUILD, MAX_COMPANION_MAPPINGS_PER_GUILD, MAX_SCHEDULED_EVENTS_PER_GUILD,
+    MAX_WORKFLOW_TOTAL_BYTES_PER_GUILD, MAX_WORKFLOWS_PAGE_LIMIT, MAX_WORKFLOWS_PER_GUILD,
     McpToolAuthorization, MemberIdentityRecord, MemberProgress, MemberSearchFilter,
     MemberSearchRow, MemberSnapshot, ModerationAppeal, ModerationExecutionIntent,
     ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState, ModuleDraftConfig,
@@ -34,10 +35,12 @@ use super::{
     StorePurchase, StorePurchasesPage, TagRecord, TelegramBridge, TelegramMessageMapping,
     TimedRoleGrant, Tournament, TransitionApplicationParams, TupperError, TupperProfile,
     TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport, VkSubscription,
-    WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
-    YouTubeChannelSubscription, encode_scheduled_event_cursor, encode_store_purchase_cursor,
+    WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowDefinitionsPage, WorkflowRunExecution,
+    WorkflowStorageError, XpAward, YouTubeChannelSubscription, decode_workflow_definition_cursor,
+    encode_scheduled_event_cursor, encode_store_purchase_cursor, encode_workflow_definition_cursor,
     level_for_xp, parse_member_search_cursor, snowflake_created_at, validate_birthday_date,
     validate_event_voice_queue_config, validate_scheduled_event_content, validate_snowflake,
+    validate_workflow_definition_content,
 };
 
 pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
@@ -9018,55 +9021,77 @@ impl PostgresStore {
         Ok(res.rows_affected() > 0)
     }
 
-    // Agent 11 (#100): Workflow Builder
+    // Agent 11 (#100, #395): Workflow Builder
 
     pub async fn create_workflow_definition(
         &self,
-
-        wf: WorkflowDefinition,
+        mut wf: WorkflowDefinition,
     ) -> anyhow::Result<WorkflowDefinition> {
-        let row = sqlx::query_as::<_, WorkflowDefinition>(
+        let (trimmed_name, def_bytes) =
+            validate_workflow_definition_content(&wf.name, &wf.dag_nodes, &wf.dag_edges)?;
+        wf.name = trimmed_name;
 
+        let mut tx = self.pool.begin().await?;
+
+        // Per-guild advisory lock 4352
+        sqlx::query("SELECT pg_advisory_xact_lock(4352, hashtext($1))")
+            .bind(&wf.guild_id)
+            .execute(&mut *tx)
+            .await?;
+
+        let (count, total_bytes): (i64, i64) = sqlx::query_as(
             r#"
-
-            INSERT INTO workflow_definitions (id, guild_id, name, dag_nodes, dag_edges, is_active, version, created_at, updated_at)
-
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-
-            RETURNING *
-
-            "#
-
+            SELECT
+                COUNT(*)::bigint,
+                COALESCE(SUM(octet_length(name) + octet_length(dag_nodes::text) + octet_length(dag_edges::text)), 0)::bigint
+            FROM workflow_definitions
+            WHERE guild_id = $1
+            "#,
         )
-
-        .bind(wf.id)
-
         .bind(&wf.guild_id)
-
-        .bind(&wf.name)
-
-        .bind(&wf.dag_nodes)
-
-        .bind(&wf.dag_edges)
-
-        .bind(wf.is_active)
-
-        .bind(wf.version)
-
-        .bind(wf.created_at)
-
-        .bind(wf.updated_at)
-
-        .fetch_one(&self.pool)
-
+        .fetch_one(&mut *tx)
         .await?;
 
+        if count >= MAX_WORKFLOWS_PER_GUILD as i64 {
+            anyhow::bail!(WorkflowStorageError::QuotaExceeded(format!(
+                "Guild has reached maximum limit of {} workflows",
+                MAX_WORKFLOWS_PER_GUILD
+            )));
+        }
+
+        if total_bytes.saturating_add(def_bytes as i64) > MAX_WORKFLOW_TOTAL_BYTES_PER_GUILD as i64
+        {
+            anyhow::bail!(WorkflowStorageError::QuotaExceeded(format!(
+                "Guild has reached maximum storage limit of {} bytes for workflows",
+                MAX_WORKFLOW_TOTAL_BYTES_PER_GUILD
+            )));
+        }
+
+        let row = sqlx::query_as::<_, WorkflowDefinition>(
+            r#"
+            INSERT INTO workflow_definitions (id, guild_id, name, dag_nodes, dag_edges, is_active, version, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            RETURNING *
+            "#,
+        )
+        .bind(wf.id)
+        .bind(&wf.guild_id)
+        .bind(&wf.name)
+        .bind(&wf.dag_nodes)
+        .bind(&wf.dag_edges)
+        .bind(wf.is_active)
+        .bind(wf.version)
+        .bind(wf.created_at)
+        .bind(wf.updated_at)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
         Ok(row)
     }
 
     pub async fn get_workflow_definition(
         &self,
-
         id: Uuid,
     ) -> anyhow::Result<Option<WorkflowDefinition>> {
         let row = sqlx::query_as::<_, WorkflowDefinition>(
@@ -9079,19 +9104,145 @@ impl PostgresStore {
         Ok(row)
     }
 
+    pub async fn delete_workflow_definition(
+        &self,
+        guild_id: &str,
+        workflow_id: Uuid,
+        actor_id: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query("SELECT pg_advisory_xact_lock(4352, hashtext($1))")
+            .bind(guild_id)
+            .execute(&mut *tx)
+            .await?;
+
+        let existing: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM workflow_definitions WHERE id = $1 AND guild_id = $2 FOR UPDATE",
+        )
+        .bind(workflow_id)
+        .bind(guild_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let existing_name = match existing {
+            Some(name) => name,
+            None => return Ok(false),
+        };
+
+        sqlx::query("DELETE FROM workflow_definitions WHERE id = $1 AND guild_id = $2")
+            .bind(workflow_id)
+            .bind(guild_id)
+            .execute(&mut *tx)
+            .await?;
+
+        let actor = actor_id.unwrap_or("system");
+        sqlx::query(
+            "INSERT INTO audit_events (guild_id, actor_id, module_id, event, data) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(guild_id)
+        .bind(actor)
+        .bind("workflow_builder")
+        .bind("workflow_deleted")
+        .bind(serde_json::json!({
+            "workflow_id": workflow_id,
+            "workflow_name": existing_name,
+            "actor_id": actor,
+        }))
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(true)
+    }
+
     pub async fn list_workflow_definitions(
         &self,
-
         guild_id: &str,
     ) -> anyhow::Result<Vec<WorkflowDefinition>> {
         let rows = sqlx::query_as::<_, WorkflowDefinition>(
-            "SELECT * FROM workflow_definitions WHERE guild_id = $1",
+            "SELECT * FROM workflow_definitions WHERE guild_id = $1 ORDER BY created_at DESC, id DESC LIMIT 100",
         )
         .bind(guild_id)
         .fetch_all(&self.pool)
         .await?;
 
         Ok(rows)
+    }
+
+    pub async fn list_workflow_definitions_page(
+        &self,
+        guild_id: &str,
+        limit: usize,
+        cursor: Option<&str>,
+    ) -> anyhow::Result<WorkflowDefinitionsPage> {
+        let decoded_cursor = match cursor {
+            Some(c) if !c.trim().is_empty() => {
+                let cur = decode_workflow_definition_cursor(c)?;
+                if cur.guild_id != guild_id {
+                    anyhow::bail!(
+                        "Cursor guild_id '{}' does not match request guild_id '{}'",
+                        cur.guild_id,
+                        guild_id
+                    );
+                }
+                Some(cur)
+            }
+            _ => None,
+        };
+
+        let clamped_limit = limit.clamp(1, MAX_WORKFLOWS_PAGE_LIMIT);
+        let query_limit = (clamped_limit + 1) as i64;
+
+        let mut rows = if let Some(cur) = decoded_cursor {
+            sqlx::query_as::<_, WorkflowDefinition>(
+                r#"
+                SELECT * FROM workflow_definitions
+                WHERE guild_id = $1
+                  AND (created_at, id) < ($2, $3)
+                ORDER BY created_at DESC, id DESC
+                LIMIT $4
+                "#,
+            )
+            .bind(guild_id)
+            .bind(cur.created_at)
+            .bind(cur.id)
+            .bind(query_limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, WorkflowDefinition>(
+                r#"
+                SELECT * FROM workflow_definitions
+                WHERE guild_id = $1
+                ORDER BY created_at DESC, id DESC
+                LIMIT $2
+                "#,
+            )
+            .bind(guild_id)
+            .bind(query_limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        let has_more = rows.len() > clamped_limit;
+        if has_more {
+            rows.truncate(clamped_limit);
+        }
+
+        let next_cursor = if has_more {
+            rows.last()
+                .map(|last| encode_workflow_definition_cursor(guild_id, &last.created_at, &last.id))
+        } else {
+            None
+        };
+
+        Ok(WorkflowDefinitionsPage {
+            items: rows,
+            next_cursor,
+            has_more,
+        })
     }
 
     pub async fn record_workflow_run(

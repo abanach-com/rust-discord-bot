@@ -24,22 +24,25 @@ use super::{
     GitLabSubscription, Giveaway, GuildModuleSettings, IntegrationConnection,
     IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking, KickStreamSubscription,
     LinkedAccount, MAX_AI_DOCUMENTS_BYTES_PER_GUILD, MAX_AI_DOCUMENTS_PER_GUILD,
-    MAX_COMPANION_MAPPINGS_PER_GUILD, MAX_SCHEDULED_EVENTS_PER_GUILD, McpToolAuthorization,
-    MemberIdentityRecord, MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot,
-    ModerationAppeal, ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings,
-    ModeratorDutyState, ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage,
-    ProgressMetric, ProgressionSeason, QuoteRecord, ReactionRoleBinding, ReactionRoleGrant,
-    RecordCompanionLeaseParams, RedditSubscription, ReleaseReactionRoleGrantOutcome,
-    ReputationGrantOutcome, ScheduledEvent, ScheduledEventsPage, ServerSnapshot,
-    SocialDraftApprovalError, SocialDraftsPage, SocialPublicationDraft, StarboardEntry,
-    SteamLfgPost, StickyMessage, StoreItem, StoreItemsPage, StorePurchase, StorePurchasesPage,
-    TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError,
-    TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
-    VkSubscription, WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
-    YouTubeChannelSubscription, encode_scheduled_event_cursor, encode_store_purchase_cursor,
+    MAX_COMPANION_MAPPINGS_PER_GUILD, MAX_SCHEDULED_EVENTS_PER_GUILD,
+    MAX_WORKFLOW_TOTAL_BYTES_PER_GUILD, MAX_WORKFLOWS_PAGE_LIMIT, MAX_WORKFLOWS_PER_GUILD,
+    McpToolAuthorization, MemberIdentityRecord, MemberProgress, MemberSearchFilter,
+    MemberSearchRow, MemberSnapshot, ModerationAppeal, ModerationExecutionIntent,
+    ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState, ModuleDraftConfig,
+    PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric, ProgressionSeason,
+    QuoteRecord, ReactionRoleBinding, ReactionRoleGrant, RecordCompanionLeaseParams,
+    RedditSubscription, ReleaseReactionRoleGrantOutcome, ReputationGrantOutcome, ScheduledEvent,
+    ScheduledEventsPage, ServerSnapshot, SocialDraftApprovalError, SocialDraftsPage,
+    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StoreItemsPage,
+    StorePurchase, StorePurchasesPage, TagRecord, TelegramBridge, TelegramMessageMapping,
+    TimedRoleGrant, Tournament, TupperError, TupperProfile, TwitchStreamSubscription,
+    UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WORK_JOBS, WorkClaimOutcome,
+    WorkflowDefinition, WorkflowDefinitionsPage, WorkflowRunExecution, WorkflowStorageError,
+    XpAward, YouTubeChannelSubscription, decode_workflow_definition_cursor,
+    encode_scheduled_event_cursor, encode_store_purchase_cursor, encode_workflow_definition_cursor,
     is_member_after_cursor, level_for_xp, next_birthday_date, parse_member_search_cursor,
     snowflake_created_at, validate_birthday_date, validate_event_voice_queue_config,
-    validate_scheduled_event_content, validate_snowflake,
+    validate_scheduled_event_content, validate_snowflake, validate_workflow_definition_content,
 };
 
 type ModuleKey = (String, String);
@@ -268,6 +271,8 @@ pub struct MemoryStore {
     social_drafts_quota_override: Arc<std::sync::RwLock<Option<usize>>>,
     scheduled_events_write_lock: Arc<Mutex<()>>,
     scheduled_events_quota_override: Arc<std::sync::RwLock<Option<usize>>>,
+    workflows_write_lock: Arc<Mutex<()>>,
+    workflows_quota_override: Arc<std::sync::RwLock<Option<(usize, usize)>>>,
     birthdays: Arc<DashMap<(String, String), BirthdayRecord>>,
     afk: Arc<DashMap<(String, String), AfkRecord>>,
 }
@@ -6657,24 +6662,173 @@ impl MemoryStore {
         }
     }
 
-    // Agent 11 (#100): Workflow Builder
+    // Agent 11 (#100, #395): Workflow Builder
 
-    pub fn create_workflow_definition(&self, wf: WorkflowDefinition) -> WorkflowDefinition {
+    pub fn set_workflows_quota_for_test(&self, quota: Option<(usize, usize)>) {
+        if let Ok(mut lock) = self.workflows_quota_override.write() {
+            *lock = quota;
+        }
+    }
+
+    pub fn create_workflow_definition(
+        &self,
+        mut wf: WorkflowDefinition,
+    ) -> anyhow::Result<WorkflowDefinition> {
+        let (trimmed_name, def_bytes) =
+            validate_workflow_definition_content(&wf.name, &wf.dag_nodes, &wf.dag_edges)?;
+        wf.name = trimmed_name;
+
+        let _guard = self
+            .workflows_write_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+
+        let (max_count, max_bytes) = self
+            .workflows_quota_override
+            .read()
+            .map(|opt| opt.unwrap_or((MAX_WORKFLOWS_PER_GUILD, MAX_WORKFLOW_TOTAL_BYTES_PER_GUILD)))
+            .unwrap_or((MAX_WORKFLOWS_PER_GUILD, MAX_WORKFLOW_TOTAL_BYTES_PER_GUILD));
+
+        let mut current_count = 0usize;
+        let mut current_bytes = 0usize;
+        for entry in self.workflows.iter() {
+            if entry.guild_id == wf.guild_id {
+                current_count += 1;
+                let n_bytes = serde_json::to_vec(&entry.dag_nodes)
+                    .map(|v| v.len())
+                    .unwrap_or(0);
+                let e_bytes = serde_json::to_vec(&entry.dag_edges)
+                    .map(|v| v.len())
+                    .unwrap_or(0);
+                current_bytes = current_bytes.saturating_add(entry.name.len() + n_bytes + e_bytes);
+            }
+        }
+
+        if current_count >= max_count {
+            anyhow::bail!(WorkflowStorageError::QuotaExceeded(format!(
+                "Guild has reached maximum limit of {max_count} workflows"
+            )));
+        }
+
+        if current_bytes.saturating_add(def_bytes) > max_bytes {
+            anyhow::bail!(WorkflowStorageError::QuotaExceeded(format!(
+                "Guild has reached maximum storage limit of {max_bytes} bytes for workflows (current: {current_bytes}, requested: {def_bytes})"
+            )));
+        }
+
         self.workflows.insert(wf.id, wf.clone());
-
-        wf
+        Ok(wf)
     }
 
     pub fn get_workflow_definition(&self, id: Uuid) -> Option<WorkflowDefinition> {
         self.workflows.get(&id).map(|e| e.value().clone())
     }
 
+    pub fn delete_workflow_definition(
+        &self,
+        guild_id: &str,
+        workflow_id: Uuid,
+        actor_id: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let _guard = self
+            .workflows_write_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+
+        let existing = match self.workflows.get(&workflow_id) {
+            Some(w) if w.guild_id == guild_id => w.clone(),
+            _ => return Ok(false),
+        };
+
+        // Record audit before mutating state, so simulated audit failure properly rolls back
+        self.record_audit(
+            Some(guild_id),
+            actor_id,
+            "workflow_builder",
+            "workflow_deleted",
+            serde_json::json!({
+                "workflow_id": workflow_id,
+                "workflow_name": existing.name,
+                "actor_id": actor_id,
+            }),
+        )?;
+
+        self.workflows.remove(&workflow_id);
+        self.workflow_runs
+            .retain(|_, run| run.workflow_id != workflow_id);
+
+        Ok(true)
+    }
+
     pub fn list_workflow_definitions(&self, guild_id: &str) -> Vec<WorkflowDefinition> {
-        self.workflows
+        self.list_workflow_definitions_page(guild_id, 100, None)
+            .map(|p| p.items)
+            .unwrap_or_default()
+    }
+
+    pub fn list_workflow_definitions_page(
+        &self,
+        guild_id: &str,
+        limit: usize,
+        cursor: Option<&str>,
+    ) -> anyhow::Result<WorkflowDefinitionsPage> {
+        let decoded_cursor = match cursor {
+            Some(c) if !c.trim().is_empty() => {
+                let cur = decode_workflow_definition_cursor(c)?;
+                if cur.guild_id != guild_id {
+                    anyhow::bail!(
+                        "Cursor guild_id '{}' does not match request guild_id '{}'",
+                        cur.guild_id,
+                        guild_id
+                    );
+                }
+                Some(cur)
+            }
+            _ => None,
+        };
+
+        let clamped_limit = limit.clamp(1, MAX_WORKFLOWS_PAGE_LIMIT);
+
+        let mut matches: Vec<WorkflowDefinition> = self
+            .workflows
             .iter()
             .filter(|e| e.guild_id == guild_id)
+            .filter(|e| {
+                if let Some(ref cur) = decoded_cursor {
+                    (e.created_at < cur.created_at)
+                        || (e.created_at == cur.created_at && e.id < cur.id)
+                } else {
+                    true
+                }
+            })
             .map(|e| e.value().clone())
-            .collect()
+            .collect();
+
+        // Sort descending by (created_at DESC, id DESC)
+        matches.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+
+        let has_more = matches.len() > clamped_limit;
+        if has_more {
+            matches.truncate(clamped_limit);
+        }
+
+        let next_cursor = if has_more {
+            matches
+                .last()
+                .map(|last| encode_workflow_definition_cursor(guild_id, &last.created_at, &last.id))
+        } else {
+            None
+        };
+
+        Ok(WorkflowDefinitionsPage {
+            items: matches,
+            next_cursor,
+            has_more,
+        })
     }
 
     pub fn record_workflow_run(&self, run: WorkflowRunExecution) -> WorkflowRunExecution {

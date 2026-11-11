@@ -865,7 +865,11 @@ pub fn build_router(state: WebState) -> Router {
         )
         .route(
             "/api/guilds/{guild_id}/workflows",
-            post(integrations::create_workflow),
+            post(integrations::create_workflow).get(integrations::list_workflows),
+        )
+        .route(
+            "/api/guilds/{guild_id}/workflows/{wf_id}",
+            get(integrations::get_workflow).delete(integrations::delete_workflow),
         )
         .route(
             "/api/guilds/{guild_id}/workflows/{wf_id}/dry-run",

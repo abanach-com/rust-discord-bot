@@ -39,8 +39,39 @@ impl WorkflowDag {
             if node.id.trim().is_empty() {
                 return Err("Node id cannot be empty".to_string());
             }
+            if node.id.trim() != node.id {
+                return Err(format!(
+                    "Node id '{}' must not contain leading or trailing whitespace",
+                    node.id
+                ));
+            }
+            if node.id.chars().count() > 64 {
+                return Err(format!(
+                    "Node id '{}' exceeds maximum length of 64 characters",
+                    node.id
+                ));
+            }
+            if !node
+                .id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                return Err(format!(
+                    "Node id '{}' contains invalid characters; must be alphanumeric, underscore, or dash",
+                    node.id
+                ));
+            }
             if !seen_ids.insert(&node.id) {
                 return Err(format!("Duplicate node id: {}", node.id));
+            }
+            let config_bytes = serde_json::to_vec(&node.config)
+                .map_err(|e| format!("Failed to serialize node config for '{}': {e}", node.id))?;
+            if config_bytes.len() > 8 * 1024 {
+                return Err(format!(
+                    "Node config for '{}' exceeds maximum limit of 8192 bytes (got {} bytes)",
+                    node.id,
+                    config_bytes.len()
+                ));
             }
             match node.node_type.as_str() {
                 "trigger" | "condition" | "action" | "delay" => {}

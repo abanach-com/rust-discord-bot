@@ -18741,3 +18741,367 @@ async fn test_event_voice_queue_config_ready_and_outbox_issue_394() {
         .unwrap();
     assert_eq!(after_del_resp.status(), reqwest::StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn test_workflow_builder_crud_quota_and_pagination_issue_395() {
+    let (web_state, permissions_cache) = test_web_state().await;
+    let guild_id = "395000000000000099";
+    let foreign_guild_id = "395000000000000088";
+
+    let admin_id = "user_admin_395";
+    let admin_session = "session_admin_395";
+    let admin_csrf = "csrf_admin_395";
+
+    let member_id = "user_member_395";
+    let member_session = "session_member_395";
+    let member_csrf = "csrf_member_395";
+
+    // Seed sessions
+    web_state
+        .app
+        .sessions
+        .save_session(
+            admin_session,
+            DashboardUser {
+                id: admin_id.to_string(),
+                username: "Admin395".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Guild 395".to_string(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_string(),
+            }],
+            admin_csrf.to_string(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    web_state
+        .app
+        .sessions
+        .save_session(
+            member_session,
+            DashboardUser {
+                id: member_id.to_string(),
+                username: "Member395".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Guild 395".to_string(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_string(),
+            }],
+            member_csrf.to_string(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    permissions_cache.insert(
+        (admin_id.to_string(), guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+    permissions_cache.insert(
+        (member_id.to_string(), guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: false,
+            checked_at: Utc::now(),
+        },
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = build_router(web_state.clone());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let admin_cookie = format!("rusty_discord_bot_session={admin_session}");
+    let member_cookie = format!("rusty_discord_bot_session={member_session}");
+
+    // 1. Validation tests on POST /api/guilds/{guild_id}/workflows
+    // 1a. Empty name -> 400
+    let empty_name_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/workflows"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "name": "   ",
+            "dag_nodes": [{ "id": "t1", "node_type": "trigger", "config": {} }],
+            "dag_edges": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(empty_name_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 1b. Name > 120 chars -> 400
+    let long_name_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/workflows"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "name": "w".repeat(121),
+            "dag_nodes": [{ "id": "t1", "node_type": "trigger", "config": {} }],
+            "dag_edges": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(long_name_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 1c. Invalid node ID characters -> 400
+    let invalid_node_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/workflows"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "name": "Valid Name",
+            "dag_nodes": [{ "id": "t1 bad id!", "node_type": "trigger", "config": {} }],
+            "dag_edges": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid_node_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 1d. Node config > 8 KiB -> 400
+    let huge_config_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/workflows"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "name": "Valid Name",
+            "dag_nodes": [{ "id": "t1", "node_type": "trigger", "config": { "payload": "x".repeat(8193) } }],
+            "dag_edges": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(huge_config_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 1e. Unauthorized member without manage permissions -> 403 Forbidden
+    let forbidden_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/workflows"))
+        .header(COOKIE, &member_cookie)
+        .header("X-CSRF-Token", member_csrf)
+        .json(&serde_json::json!({
+            "name": "Unauthorized WF",
+            "dag_nodes": [{ "id": "t1", "node_type": "trigger", "config": {} }],
+            "dag_edges": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forbidden_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 2. Quota enforcement on POST /workflows
+    web_state
+        .app
+        .storage
+        .set_workflows_quota_for_test(Some((2, 100_000)));
+
+    // 2a. Workflow 1 created with whitespace padding -> 200 OK & verify trimmed name
+    let wf1_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/workflows"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "name": "  Discord Alert WF  ",
+            "dag_nodes": [{ "id": "start", "node_type": "trigger", "config": {} }],
+            "dag_edges": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wf1_resp.status(), reqwest::StatusCode::OK);
+    let wf1: serde_json::Value = wf1_resp.json().await.unwrap();
+    assert_eq!(wf1["name"], "Discord Alert WF");
+    let wf1_id = wf1["id"].as_str().unwrap().to_string();
+
+    // 2b. Workflow 2 -> 200 OK
+    let wf2_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/workflows"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "name": "Role Assign WF",
+            "dag_nodes": [{ "id": "t1", "node_type": "trigger", "config": {} }],
+            "dag_edges": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wf2_resp.status(), reqwest::StatusCode::OK);
+
+    // 2c. Workflow 3 -> 409 Conflict (quota exceeded)
+    let wf3_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/workflows"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "name": "Quota Over WF",
+            "dag_nodes": [{ "id": "t1", "node_type": "trigger", "config": {} }],
+            "dag_edges": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wf3_resp.status(), reqwest::StatusCode::CONFLICT);
+
+    // 3. Keyset Pagination on GET /api/guilds/{guild_id}/workflows
+    // 3a. Member without manage permissions cannot list workflows -> 403 Forbidden
+    let forbidden_get = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/workflows?limit=2"
+        ))
+        .header(COOKIE, &member_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forbidden_get.status(), reqwest::StatusCode::FORBIDDEN);
+
+    web_state
+        .app
+        .storage
+        .set_workflows_quota_for_test(Some((10, 500_000)));
+
+    // Create 2 more workflows (total 4)
+    for i in 3..=4 {
+        let resp = client
+            .post(format!("{base_url}/api/guilds/{guild_id}/workflows"))
+            .header(COOKIE, &admin_cookie)
+            .header("X-CSRF-Token", admin_csrf)
+            .json(&serde_json::json!({
+                "name": format!("Batch WF {i}"),
+                "dag_nodes": [{ "id": "t1", "node_type": "trigger", "config": {} }],
+                "dag_edges": []
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    }
+
+    // Page 1: limit=2 as admin -> 200 OK
+    let page1_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/workflows?limit=2"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page1_resp.status(), reqwest::StatusCode::OK);
+    let page1: serde_json::Value = page1_resp.json().await.unwrap();
+    assert_eq!(page1["items"].as_array().unwrap().len(), 2);
+    assert_eq!(page1["has_more"], true);
+    let next_cursor = page1["next_cursor"].as_str().unwrap().to_string();
+
+    // Cross-guild cursor tampering -> 400 Bad Request
+    let foreign_cursor = rusty_discord_bot::storage::encode_workflow_definition_cursor(
+        foreign_guild_id,
+        &Utc::now(),
+        &uuid::Uuid::new_v4(),
+    );
+    let tamper_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/workflows?cursor={foreign_cursor}"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tamper_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Page 2: limit=2 with valid next_cursor as admin -> 200 OK
+    let page2_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/workflows?limit=2&cursor={next_cursor}"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page2_resp.status(), reqwest::StatusCode::OK);
+    let page2: serde_json::Value = page2_resp.json().await.unwrap();
+    assert_eq!(page2["items"].as_array().unwrap().len(), 2);
+
+    // 4. GET /api/guilds/{guild_id}/workflows/{wf1_id} -> 200 OK
+    let get_single = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/workflows/{wf1_id}"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_single.status(), reqwest::StatusCode::OK);
+
+    // 5. DELETE tests
+    // 5a. Member without manage permissions -> 403 Forbidden
+    let del_forbidden = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/workflows/{wf1_id}"
+        ))
+        .header(COOKIE, &member_cookie)
+        .header("X-CSRF-Token", member_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del_forbidden.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 5b. Non-existent workflow -> 404 Not Found
+    let random_id = uuid::Uuid::new_v4();
+    let del_not_found = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/workflows/{random_id}"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del_not_found.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // 5c. Admin successfully deletes wf1 -> 200 OK
+    let del_ok = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/workflows/{wf1_id}"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del_ok.status(), reqwest::StatusCode::OK);
+
+    // 5d. Subsequent GET for wf1 -> 404 Not Found
+    let get_deleted = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/workflows/{wf1_id}"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_deleted.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // Reset quota override
+    web_state.app.storage.set_workflows_quota_for_test(None);
+}
