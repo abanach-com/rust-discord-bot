@@ -5461,10 +5461,11 @@ impl Storage {
     pub async fn set_event_voice_queue_config(
         &self,
         config: EventVoiceQueueConfig,
+        actor_id: Option<&str>,
     ) -> anyhow::Result<EventVoiceQueueConfig> {
         match self {
-            Self::Memory(store) => store.set_event_voice_queue_config(config),
-            Self::Postgres(store) => store.set_event_voice_queue_config(config).await,
+            Self::Memory(store) => store.set_event_voice_queue_config(config, actor_id),
+            Self::Postgres(store) => store.set_event_voice_queue_config(config, actor_id).await,
         }
     }
 
@@ -11597,7 +11598,10 @@ mod tests {
         // 5. Configure voice queue on the event
         let mut cfg = valid_cfg;
         cfg.event_id = event.id;
-        let saved_cfg = store.set_event_voice_queue_config(cfg).await.unwrap();
+        let saved_cfg = store
+            .set_event_voice_queue_config(cfg, Some("admin_user"))
+            .await
+            .unwrap();
         assert!(saved_cfg.enabled);
 
         // 6. User A confirms ready -> job of kind notify_ready created
@@ -11694,7 +11698,7 @@ mod tests {
         let mut auto_move_cfg = saved_cfg;
         auto_move_cfg.mode = EVENT_VOICE_MODE_AUTO_MOVE.to_string();
         store
-            .set_event_voice_queue_config(auto_move_cfg)
+            .set_event_voice_queue_config(auto_move_cfg, Some("admin_user"))
             .await
             .unwrap();
 
@@ -11767,15 +11771,18 @@ mod tests {
 
         // 2. Configure event voice queue
         store
-            .set_event_voice_queue_config(EventVoiceQueueConfig {
-                event_id: event.id,
-                guild_id: guild_id.to_string(),
-                enabled: true,
-                lobby_channel_id: Some(lobby_id.to_string()),
-                target_channel_id: Some(target_id.to_string()),
-                mode: EVENT_VOICE_MODE_NOTIFY_ONLY.to_string(),
-                updated_at: Utc::now(),
-            })
+            .set_event_voice_queue_config(
+                EventVoiceQueueConfig {
+                    event_id: event.id,
+                    guild_id: guild_id.to_string(),
+                    enabled: true,
+                    lobby_channel_id: Some(lobby_id.to_string()),
+                    target_channel_id: Some(target_id.to_string()),
+                    mode: EVENT_VOICE_MODE_NOTIFY_ONLY.to_string(),
+                    updated_at: Utc::now(),
+                },
+                Some("admin_user"),
+            )
             .await
             .unwrap();
 
@@ -12373,5 +12380,134 @@ mod tests {
 
         // 10. Reset quota override
         store.set_workflows_quota_for_test(None);
+    }
+
+    #[tokio::test]
+    async fn test_event_voice_queue_config_atomic_audit_and_rollback_issue_398() {
+        let store = Storage::memory();
+        let guild_id = "398111111111111111";
+        let other_guild_id = "398222222222222222";
+        let lobby_id = "398333333333333333";
+        let target_id = "398444444444444444";
+        let actor = "admin_actor_398";
+
+        // Create scheduled event
+        let event = store
+            .create_scheduled_event(
+                guild_id,
+                "Voice Audit Event",
+                "Testing atomic audit logging on voice queue config",
+                Utc::now() + chrono::Duration::hours(2),
+                None,
+                "UTC",
+                Some(10),
+            )
+            .await
+            .unwrap();
+
+        // 1. Validation failure: invalid mode -> error, no config saved, no audit
+        let invalid_cfg = EventVoiceQueueConfig {
+            event_id: event.id,
+            guild_id: guild_id.to_string(),
+            enabled: true,
+            lobby_channel_id: Some(lobby_id.to_string()),
+            target_channel_id: Some(target_id.to_string()),
+            mode: "teleport_now".to_string(),
+            updated_at: Utc::now(),
+        };
+        let val_err = store
+            .set_event_voice_queue_config(invalid_cfg, Some(actor))
+            .await;
+        assert!(val_err.is_err());
+        assert!(
+            store
+                .get_event_voice_queue_config(event.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let audits = store.list_audit_events(guild_id, 10).await.unwrap();
+        assert!(audits.is_empty());
+
+        // 2. Guild mismatch failure -> error, no config saved, no audit
+        let mismatch_cfg = EventVoiceQueueConfig {
+            event_id: event.id,
+            guild_id: other_guild_id.to_string(),
+            enabled: true,
+            lobby_channel_id: Some(lobby_id.to_string()),
+            target_channel_id: Some(target_id.to_string()),
+            mode: EVENT_VOICE_MODE_NOTIFY_ONLY.to_string(),
+            updated_at: Utc::now(),
+        };
+        let mis_err = store
+            .set_event_voice_queue_config(mismatch_cfg, Some(actor))
+            .await;
+        assert!(mis_err.is_err());
+        assert!(
+            store
+                .get_event_voice_queue_config(event.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let audits = store.list_audit_events(guild_id, 10).await.unwrap();
+        assert!(audits.is_empty());
+
+        // 3. Simulated audit failure: inject_audit_failure(true) -> fail-closed rollback!
+        store.inject_audit_failure(true);
+        let valid_cfg = EventVoiceQueueConfig {
+            event_id: event.id,
+            guild_id: guild_id.to_string(),
+            enabled: true,
+            lobby_channel_id: Some(lobby_id.to_string()),
+            target_channel_id: Some(target_id.to_string()),
+            mode: EVENT_VOICE_MODE_AUTO_MOVE.to_string(),
+            updated_at: Utc::now(),
+        };
+        let audit_fail_err = store
+            .set_event_voice_queue_config(valid_cfg.clone(), Some(actor))
+            .await;
+        assert!(audit_fail_err.is_err());
+        assert_eq!(
+            audit_fail_err.unwrap_err().to_string(),
+            "simulated audit failure"
+        );
+        // Configuration MUST NOT be persisted when audit fails
+        assert!(
+            store
+                .get_event_voice_queue_config(event.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        store.inject_audit_failure(false);
+
+        // 4. Successful configuration update -> atomic persistence and exactly one config_updated audit event
+        let saved = store
+            .set_event_voice_queue_config(valid_cfg, Some(actor))
+            .await
+            .unwrap();
+        assert!(saved.enabled);
+        assert_eq!(saved.mode, EVENT_VOICE_MODE_AUTO_MOVE);
+
+        let retrieved = store
+            .get_event_voice_queue_config(event.id)
+            .await
+            .unwrap()
+            .expect("config must exist");
+        assert_eq!(retrieved.mode, EVENT_VOICE_MODE_AUTO_MOVE);
+
+        let audits_after = store.list_audit_events(guild_id, 10).await.unwrap();
+        assert_eq!(audits_after.len(), 1);
+        let audit_entry = &audits_after[0];
+        assert_eq!(audit_entry.module_id, "event_voice_queue");
+        assert_eq!(audit_entry.event, "config_updated");
+        assert_eq!(audit_entry.actor_id.as_deref(), Some(actor));
+        assert_eq!(audit_entry.data["event_id"], event.id.to_string());
+        assert_eq!(audit_entry.data["enabled"], true);
+        assert_eq!(audit_entry.data["mode"], EVENT_VOICE_MODE_AUTO_MOVE);
+        assert_eq!(audit_entry.data["lobby_channel_id"], lobby_id);
+        assert_eq!(audit_entry.data["target_channel_id"], target_id);
+        assert_eq!(audit_entry.data["actor_id"], actor);
     }
 }

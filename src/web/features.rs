@@ -2599,30 +2599,24 @@ pub async fn update_event_voice_queue(
         updated_at: Utc::now(),
     };
 
+    let actor_id = session.user.id.clone();
     let saved = state
         .app
         .storage
-        .set_event_voice_queue_config(config)
+        .set_event_voice_queue_config(config, Some(&actor_id))
         .await
-        .map_err(|e| ApiError::bad_request(e.to_string()))?;
-
-    let _ = state
-        .app
-        .storage
-        .record_audit(
-            Some(&guild_id),
-            Some(&session.user.id),
-            "event_voice_queue",
-            "config_updated",
-            serde_json::json!({
-                "event_id": event_id,
-                "enabled": saved.enabled,
-                "mode": saved.mode,
-                "lobby_channel_id": saved.lobby_channel_id,
-                "target_channel_id": saved.target_channel_id,
-            }),
-        )
-        .await;
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("Validation failed")
+                || msg.contains("invalid")
+                || msg.contains("mismatch")
+                || msg.contains("not found")
+            {
+                ApiError::bad_request(msg)
+            } else {
+                ApiError::internal(msg)
+            }
+        })?;
 
     Ok(Json(saved))
 }

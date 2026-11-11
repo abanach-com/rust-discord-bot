@@ -4950,6 +4950,7 @@ impl MemoryStore {
     pub fn set_event_voice_queue_config(
         &self,
         config: EventVoiceQueueConfig,
+        actor_id: Option<&str>,
     ) -> anyhow::Result<EventVoiceQueueConfig> {
         validate_event_voice_queue_config(&config)?;
         let _lock = self
@@ -4963,6 +4964,23 @@ impl MemoryStore {
         anyhow::ensure!(event.guild_id == config.guild_id, "Event guild_id mismatch");
         let mut cfg = config;
         cfg.updated_at = Utc::now();
+
+        let actor = actor_id.unwrap_or("system");
+        self.record_audit(
+            Some(&cfg.guild_id),
+            Some(actor),
+            "event_voice_queue",
+            "config_updated",
+            serde_json::json!({
+                "event_id": cfg.event_id,
+                "enabled": cfg.enabled,
+                "mode": cfg.mode,
+                "lobby_channel_id": cfg.lobby_channel_id,
+                "target_channel_id": cfg.target_channel_id,
+                "actor_id": actor,
+            }),
+        )?;
+
         self.event_voice_configs.insert(cfg.event_id, cfg.clone());
         Ok(cfg)
     }

@@ -5841,6 +5841,7 @@ impl PostgresStore {
     pub async fn set_event_voice_queue_config(
         &self,
         config: EventVoiceQueueConfig,
+        actor_id: Option<&str>,
     ) -> anyhow::Result<EventVoiceQueueConfig> {
         validate_event_voice_queue_config(&config)?;
         let mut tx = self.pool.begin().await?;
@@ -5890,6 +5891,26 @@ impl PostgresStore {
         .bind(&config.mode)
         .bind(now)
         .fetch_one(&mut *tx)
+        .await?;
+
+        let actor = actor_id.unwrap_or("system");
+        sqlx::query(
+            "INSERT INTO audit_events (guild_id, actor_id, module_id, event, data) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(&saved.guild_id)
+        .bind(actor)
+        .bind("event_voice_queue")
+        .bind("config_updated")
+        .bind(serde_json::json!({
+            "event_id": saved.event_id,
+            "enabled": saved.enabled,
+            "mode": saved.mode,
+            "lobby_channel_id": saved.lobby_channel_id,
+            "target_channel_id": saved.target_channel_id,
+            "actor_id": actor,
+        }))
+        .execute(&mut *tx)
         .await?;
 
         tx.commit().await?;

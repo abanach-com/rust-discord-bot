@@ -18568,6 +18568,41 @@ async fn test_event_voice_queue_config_ready_and_outbox_issue_394() {
         .unwrap();
     assert_eq!(put_invalid_mode.status(), reqwest::StatusCode::BAD_REQUEST);
 
+    // 4b. Issue #398: Injected audit failure causes PUT to fail with 500 and rollback
+    web_state.app.storage.inject_audit_failure(true);
+    let put_audit_fail = client
+        .put(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{event_id}/voice-queue"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "enabled": true,
+            "lobby_channel_id": "111222333444",
+            "target_channel_id": "555666777888",
+            "mode": "auto_move"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        put_audit_fail.status(),
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR
+    );
+    web_state.app.storage.inject_audit_failure(false);
+
+    // Config must still be default (enabled: false)
+    let get_after_fail = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{event_id}/voice-queue"
+        ))
+        .header(COOKIE, &member_cookie)
+        .send()
+        .await
+        .unwrap();
+    let vq_after_fail: serde_json::Value = get_after_fail.json().await.unwrap();
+    assert_eq!(vq_after_fail["enabled"], false);
+
     // 5. PUT voice queue config as admin with auto_move -> 200 OK
     let lobby_ch = "111222333444";
     let target_ch = "555666777888";
@@ -18592,6 +18627,23 @@ async fn test_event_voice_queue_config_ready_and_outbox_issue_394() {
     assert_eq!(updated_vq["lobby_channel_id"], lobby_ch);
     assert_eq!(updated_vq["target_channel_id"], target_ch);
     assert_eq!(updated_vq["mode"], "auto_move");
+
+    // Verify config_updated audit event was atomically written
+    let audits = web_state
+        .app
+        .storage
+        .list_audit_events(guild_id, 10)
+        .await
+        .unwrap();
+    let vq_audits: Vec<_> = audits
+        .iter()
+        .filter(|a| a.event == "config_updated" && a.module_id == "event_voice_queue")
+        .collect();
+    assert_eq!(vq_audits.len(), 1);
+    assert_eq!(vq_audits[0].actor_id.as_deref(), Some(admin_id));
+    assert_eq!(vq_audits[0].data["event_id"], event_id);
+    assert_eq!(vq_audits[0].data["enabled"], true);
+    assert_eq!(vq_audits[0].data["mode"], "auto_move");
 
     // 6. Add admin as main roster member, member as reserve roster member
     let ev_uuid = uuid::Uuid::parse_str(&event_id).unwrap();
