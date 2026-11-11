@@ -6008,9 +6008,13 @@ impl PostgresStore {
                 INSERT INTO event_voice_outbox (id, event_id, guild_id, user_id, kind, state, attempts, next_attempt_at, generation, created_at, updated_at)
                 VALUES ($1, $2, $3, $4, $5, 'pending', 0, $6, $7, $6, $6)
                 ON CONFLICT (event_id, user_id, generation, kind) DO UPDATE SET
+                    state = 'pending',
                     next_attempt_at = EXCLUDED.next_attempt_at,
+                    lease_owner = NULL,
+                    lease_until = NULL,
+                    last_error = NULL,
                     updated_at = EXCLUDED.updated_at
-                WHERE event_voice_outbox.state IN ('pending', 'failed')
+                WHERE event_voice_outbox.state = 'failed'
                 RETURNING id, event_id, guild_id, user_id, kind, state, attempts, next_attempt_at, lease_owner, lease_until, generation, last_error, created_at, updated_at
                 "#,
             )
@@ -6024,7 +6028,24 @@ impl PostgresStore {
             .fetch_optional(&mut *tx)
             .await?;
 
-            job = outbox_job;
+            job = match outbox_job {
+                Some(j) => Some(j),
+                None => {
+                    sqlx::query_as::<_, EventVoiceOutboxJob>(
+                        r#"
+                        SELECT id, event_id, guild_id, user_id, kind, state, attempts, next_attempt_at, lease_owner, lease_until, generation, last_error, created_at, updated_at
+                        FROM event_voice_outbox
+                        WHERE event_id = $1 AND user_id = $2 AND generation = $3 AND kind = $4
+                        "#,
+                    )
+                    .bind(event_id)
+                    .bind(user_id)
+                    .bind(member_state.generation)
+                    .bind(kind)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                }
+            };
         }
 
         tx.commit().await?;

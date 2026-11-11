@@ -5040,14 +5040,22 @@ impl MemoryStore {
                 .event_voice_outbox
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            if let Some(existing) = outbox.iter().find(|j| {
+            if let Some(existing) = outbox.iter_mut().find(|j| {
                 j.event_id == event_id
                     && j.user_id == user_id
                     && j.generation == current_gen
                     && j.kind == kind
-                    && (j.state == EVENT_VOICE_JOB_STATE_PENDING
-                        || j.state == EVENT_VOICE_JOB_STATE_LEASED)
             }) {
+                if existing.state == EVENT_VOICE_JOB_STATE_FAILED {
+                    // Requeue failed job to pending on conscious user Ready
+                    existing.state = EVENT_VOICE_JOB_STATE_PENDING.to_string();
+                    existing.next_attempt_at = now;
+                    existing.lease_owner = None;
+                    existing.lease_until = None;
+                    existing.last_error = None;
+                    existing.updated_at = now;
+                }
+                // For pending, leased, done, canceled: do not alter state or next_attempt_at backoff
                 job = Some(existing.clone());
             } else {
                 let new_job = EventVoiceOutboxJob {

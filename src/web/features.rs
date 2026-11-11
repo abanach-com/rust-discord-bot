@@ -19,7 +19,8 @@ use crate::discord::events::generate_icalendar_event;
 
 use crate::storage::{
     CardCollection, CardTrade, CleanupPlan, CommandPolicyRule, CommunityPoll, CompanionMappingItem,
-    CustomAutomation, DynamicVoiceRoom, EVENT_VOICE_MODE_NOTIFY_ONLY, EventRoster,
+    CustomAutomation, DynamicVoiceRoom, EVENT_VOICE_JOB_STATE_LEASED,
+    EVENT_VOICE_JOB_STATE_PENDING, EVENT_VOICE_MODE_NOTIFY_ONLY, EventRoster,
     EventVoiceQueueConfig, EventVoiceQueueRosterEntry, FaqEntry, FeedSubscription, GameAccountLink,
     Giveaway, HelpForumConfig, InviteTracking, MAX_COMPANION_MAPPINGS_PER_GUILD,
     ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState, ProgressionSeason,
@@ -2689,13 +2690,20 @@ pub async fn set_event_voice_member_ready(
             }
         })?;
 
+    let queued = job
+        .as_ref()
+        .map(|j| {
+            j.state == EVENT_VOICE_JOB_STATE_PENDING || j.state == EVENT_VOICE_JOB_STATE_LEASED
+        })
+        .unwrap_or(false);
+
     Ok(Json(json!({
         "event_id": m_state.event_id,
         "user_id": m_state.user_id,
         "ready_status": m_state.ready_status,
         "consent_auto_move": m_state.consent_auto_move,
         "generation": m_state.generation,
-        "queued": job.is_some(),
+        "queued": queued,
         "job_id": job.as_ref().map(|j| j.id),
         "job_kind": job.as_ref().map(|j| j.kind.as_str()),
     })))

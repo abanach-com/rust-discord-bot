@@ -18743,6 +18743,280 @@ async fn test_event_voice_queue_config_ready_and_outbox_issue_394() {
 }
 
 #[tokio::test]
+async fn test_event_voice_outbox_requeue_and_backoff_issue_396() {
+    let (web_state, permissions_cache) = test_web_state().await;
+    let guild_id = "396000000000000099";
+
+    let admin_id = "user_admin_396";
+    let admin_session = "session_admin_396";
+    let admin_csrf = "csrf_admin_396";
+
+    // Seed admin session
+    web_state
+        .app
+        .sessions
+        .save_session(
+            admin_session,
+            DashboardUser {
+                id: admin_id.to_string(),
+                username: "Admin396".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Guild 396".to_string(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_string(),
+            }],
+            admin_csrf.to_string(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    permissions_cache.insert(
+        (admin_id.to_string(), guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = build_router(web_state.clone());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let admin_cookie = format!("rusty_discord_bot_session={admin_session}");
+    let now = Utc::now();
+
+    // 1. Create a scheduled event
+    let create_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "title": "Voice Outbox Test Event",
+            "description": "Testing outbox requeue and backoff policies",
+            "start_time": (now + Duration::hours(1)).to_rfc3339(),
+            "max_participants": 1,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), reqwest::StatusCode::OK);
+    let created_event: serde_json::Value = create_resp.json().await.unwrap();
+    let event_id = created_event["id"].as_str().unwrap().to_string();
+    let ev_uuid = uuid::Uuid::parse_str(&event_id).unwrap();
+
+    // 2. Configure voice queue
+    let put_resp = client
+        .put(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{event_id}/voice-queue"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "enabled": true,
+            "lobby_channel_id": "111222333",
+            "target_channel_id": "444555666",
+            "mode": "notify_only"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put_resp.status(), reqwest::StatusCode::OK);
+
+    // 3. Admin joins roster as main
+    let r_admin = web_state
+        .app
+        .storage
+        .join_event_roster(ev_uuid, admin_id)
+        .await
+        .unwrap();
+    assert_eq!(r_admin.role_type, "main");
+
+    // 4. Admin marks ready -> queued: true
+    let ready_resp1 = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{event_id}/voice-queue/ready"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ready_resp1.status(), reqwest::StatusCode::OK);
+    let ready_val1: serde_json::Value = ready_resp1.json().await.unwrap();
+    assert_eq!(ready_val1["queued"], true);
+    let job_id_1 = ready_val1["job_id"].as_str().unwrap();
+
+    // 5. Worker claims job -> leased
+    let claimed = web_state
+        .app
+        .storage
+        .claim_event_voice_outbox_job("worker_1", Duration::seconds(30))
+        .await
+        .unwrap();
+    assert!(claimed.is_some());
+    let cl = claimed.unwrap();
+    assert_eq!(cl.id.to_string(), job_id_1);
+
+    // 6. Worker fails job with backoff (e.g. 429 rate limit with 60s delay)
+    let failed = web_state
+        .app
+        .storage
+        .fail_event_voice_outbox_job(
+            cl.id,
+            "worker_1",
+            "Rate limited 429",
+            Some(chrono::Duration::seconds(60)),
+        )
+        .await
+        .unwrap();
+    assert!(failed);
+
+    // 7. Repeated Ready calls during delayed pending still return queued: true, but do not shorten backoff
+    let ready_resp2 = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{event_id}/voice-queue/ready"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ready_resp2.status(), reqwest::StatusCode::OK);
+    let ready_val2: serde_json::Value = ready_resp2.json().await.unwrap();
+    assert_eq!(ready_val2["queued"], true);
+
+    // Worker cannot claim yet because backoff has not expired
+    assert!(
+        web_state
+            .app
+            .storage
+            .claim_event_voice_outbox_job("worker_2", Duration::seconds(30))
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // 8. Cancel ready -> increments generation to 2
+    let cancel_resp = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{event_id}/voice-queue/ready"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cancel_resp.status(), reqwest::StatusCode::OK);
+    let cancel_val: serde_json::Value = cancel_resp.json().await.unwrap();
+    assert_eq!(cancel_val["generation"], 2);
+
+    // 9. Ready on generation 2 creates new job and returns queued: true
+    let ready_resp3 = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{event_id}/voice-queue/ready"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ready_resp3.status(), reqwest::StatusCode::OK);
+    let ready_val3: serde_json::Value = ready_resp3.json().await.unwrap();
+    assert_eq!(ready_val3["queued"], true);
+    assert_eq!(ready_val3["generation"], 2);
+
+    // Claim on gen 2
+    let claimed2 = web_state
+        .app
+        .storage
+        .claim_event_voice_outbox_job("worker_3", Duration::seconds(30))
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Fail permanently (retry_delay = None) -> state = 'failed'
+    assert!(
+        web_state
+            .app
+            .storage
+            .fail_event_voice_outbox_job(claimed2.id, "worker_3", "Permanent error", None)
+            .await
+            .unwrap()
+    );
+
+    // 10. Calling Ready after failure successfully requeues to pending -> queued: true
+    let ready_requeue = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{event_id}/voice-queue/ready"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ready_requeue.status(), reqwest::StatusCode::OK);
+    let requeue_val: serde_json::Value = ready_requeue.json().await.unwrap();
+    assert_eq!(requeue_val["queued"], true);
+    assert_eq!(
+        requeue_val["job_id"].as_str().unwrap(),
+        claimed2.id.to_string()
+    );
+
+    // Worker can now claim the requeued job!
+    let claimed_after_requeue = web_state
+        .app
+        .storage
+        .claim_event_voice_outbox_job("worker_3", Duration::seconds(30))
+        .await
+        .unwrap();
+    assert!(claimed_after_requeue.is_some());
+    let cr = claimed_after_requeue.unwrap();
+    assert_eq!(cr.id, claimed2.id);
+
+    // Worker completes it -> 'done'
+    assert!(
+        web_state
+            .app
+            .storage
+            .complete_event_voice_outbox_job(cr.id, "worker_3")
+            .await
+            .unwrap()
+    );
+
+    // 11. Repeated Ready after 'done' in the same generation returns queued: false (never duplicates job)
+    let ready_after_done = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{event_id}/voice-queue/ready"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ready_after_done.status(), reqwest::StatusCode::OK);
+    let done_val: serde_json::Value = ready_after_done.json().await.unwrap();
+    assert_eq!(done_val["queued"], false);
+    assert_eq!(done_val["job_id"].as_str().unwrap(), cr.id.to_string());
+}
+
+#[tokio::test]
 async fn test_workflow_builder_crud_quota_and_pagination_issue_395() {
     let (web_state, permissions_cache) = test_web_state().await;
     let guild_id = "395000000000000099";

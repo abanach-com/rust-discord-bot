@@ -11743,6 +11743,233 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_event_voice_outbox_requeue_and_backoff_issue_396() {
+        let store = Storage::memory();
+        let guild_id = "396111111111111111";
+        let user_id = "396222222222222222";
+        let lobby_id = "396333333333333333";
+        let target_id = "396444444444444444";
+
+        // 1. Create event
+        let event = store
+            .create_scheduled_event(
+                guild_id,
+                "Raid Outbox Test",
+                "Test requeue, backoff, and terminal state idempotency",
+                Utc::now() + chrono::Duration::hours(2),
+                None,
+                "UTC",
+                Some(1),
+            )
+            .await
+            .unwrap();
+
+        // 2. Configure event voice queue
+        store
+            .set_event_voice_queue_config(EventVoiceQueueConfig {
+                event_id: event.id,
+                guild_id: guild_id.to_string(),
+                enabled: true,
+                lobby_channel_id: Some(lobby_id.to_string()),
+                target_channel_id: Some(target_id.to_string()),
+                mode: EVENT_VOICE_MODE_NOTIFY_ONLY.to_string(),
+                updated_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        // 3. User joins roster as main
+        let r_entry = store.join_event_roster(event.id, user_id).await.unwrap();
+        assert_eq!(r_entry.role_type, "main");
+
+        // 4. Initial Ready -> creates job of kind notify_ready in pending state
+        let (s1, j1) = store
+            .set_event_voice_member_ready(event.id, user_id, false)
+            .await
+            .unwrap();
+        assert_eq!(s1.generation, 1);
+        assert!(j1.is_some());
+        let j1 = j1.unwrap();
+        assert_eq!(j1.state, EVENT_VOICE_JOB_STATE_PENDING);
+
+        // 5. Worker claims job -> leased
+        let claimed = store
+            .claim_event_voice_outbox_job("worker_alpha", chrono::Duration::seconds(30))
+            .await
+            .unwrap();
+        assert!(claimed.is_some());
+        let c = claimed.unwrap();
+        assert_eq!(c.id, j1.id);
+        assert_eq!(c.state, EVENT_VOICE_JOB_STATE_LEASED);
+
+        // 6. Ready while leased -> does not steal lease, does not create duplicate
+        let (_s_leased, j_leased) = store
+            .set_event_voice_member_ready(event.id, user_id, false)
+            .await
+            .unwrap();
+        assert!(j_leased.is_some());
+        let jl = j_leased.unwrap();
+        assert_eq!(jl.id, j1.id);
+        assert_eq!(jl.state, EVENT_VOICE_JOB_STATE_LEASED);
+        assert_eq!(jl.lease_owner.as_deref(), Some("worker_alpha"));
+
+        // 7. Worker fails job with backoff (e.g. 429 rate limit, 60 seconds retry delay)
+        let failed_with_delay = store
+            .fail_event_voice_outbox_job(
+                c.id,
+                "worker_alpha",
+                "Rate limited 429",
+                Some(chrono::Duration::seconds(60)),
+            )
+            .await
+            .unwrap();
+        assert!(failed_with_delay);
+
+        // Multiple Ready calls during delayed pending DO NOT advance next_attempt_at or bypass backoff!
+        for _ in 0..5 {
+            let (_s_p, j_p) = store
+                .set_event_voice_member_ready(event.id, user_id, false)
+                .await
+                .unwrap();
+            let jp = j_p.unwrap();
+            assert_eq!(jp.state, EVENT_VOICE_JOB_STATE_PENDING);
+            assert!(jp.next_attempt_at > Utc::now() + chrono::Duration::seconds(50));
+        }
+
+        // Claim cannot pick up the job before backoff expires
+        let early_claim = store
+            .claim_event_voice_outbox_job("worker_beta", chrono::Duration::seconds(30))
+            .await
+            .unwrap();
+        assert!(early_claim.is_none());
+
+        // 8. Cancel ready -> increments generation to 2, transitions to waiting
+        let canceled = store
+            .cancel_event_voice_member_ready(event.id, user_id)
+            .await
+            .unwrap();
+        assert_eq!(canceled.generation, 2);
+        assert_eq!(canceled.ready_status, EVENT_VOICE_READY_STATUS_WAITING);
+
+        // 9. Ready on generation 2 creates exactly one new job
+        let (s2, j2) = store
+            .set_event_voice_member_ready(event.id, user_id, false)
+            .await
+            .unwrap();
+        assert_eq!(s2.generation, 2);
+        assert!(j2.is_some());
+        let j2 = j2.unwrap();
+        assert_eq!(j2.generation, 2);
+        assert_eq!(j2.state, EVENT_VOICE_JOB_STATE_PENDING);
+        assert_ne!(j2.id, j1.id);
+
+        // Claim gen 2 job
+        let claimed_gen2 = store
+            .claim_event_voice_outbox_job("worker_gamma", chrono::Duration::seconds(30))
+            .await
+            .unwrap();
+        assert!(claimed_gen2.is_some());
+        let cg2 = claimed_gen2.unwrap();
+
+        // Worker completes gen 2 job -> transitions to 'done'
+        let completed = store
+            .complete_event_voice_outbox_job(cg2.id, "worker_gamma")
+            .await
+            .unwrap();
+        assert!(completed);
+
+        // Ready after done within same generation does NOT emit another job and keeps state done
+        let (_s_done, j_done) = store
+            .set_event_voice_member_ready(event.id, user_id, false)
+            .await
+            .unwrap();
+        assert!(j_done.is_some());
+        let jd = j_done.unwrap();
+        assert_eq!(jd.id, cg2.id);
+        assert_eq!(jd.state, EVENT_VOICE_JOB_STATE_DONE);
+
+        // No new job to claim
+        assert!(
+            store
+                .claim_event_voice_outbox_job("worker_gamma", chrono::Duration::seconds(30))
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // 10. Cancel ready again -> generation 3
+        let canceled_gen3 = store
+            .cancel_event_voice_member_ready(event.id, user_id)
+            .await
+            .unwrap();
+        assert_eq!(canceled_gen3.generation, 3);
+
+        // 11. Ready on generation 3
+        let (s3, j3) = store
+            .set_event_voice_member_ready(event.id, user_id, false)
+            .await
+            .unwrap();
+        assert_eq!(s3.generation, 3);
+        assert!(j3.is_some());
+        let j3 = j3.unwrap();
+        assert_eq!(j3.generation, 3);
+        assert_eq!(j3.state, EVENT_VOICE_JOB_STATE_PENDING);
+
+        // Claim gen 3 job
+        let claimed_gen3 = store
+            .claim_event_voice_outbox_job("worker_delta", chrono::Duration::seconds(30))
+            .await
+            .unwrap();
+        assert!(claimed_gen3.is_some());
+        let cg3 = claimed_gen3.unwrap();
+
+        // Worker fails gen 3 job permanently (retry_delay = None) -> state becomes 'failed'
+        let failed_perm = store
+            .fail_event_voice_outbox_job(
+                cg3.id,
+                "worker_delta",
+                "Channel permissions missing",
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(failed_perm);
+
+        // While failed, claim yields None
+        assert!(
+            store
+                .claim_event_voice_outbox_job("worker_delta", chrono::Duration::seconds(30))
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // 12. Conscious user Ready after failed -> successfully requeues to pending!
+        let (s_requeue, j_requeue) = store
+            .set_event_voice_member_ready(event.id, user_id, false)
+            .await
+            .unwrap();
+        assert_eq!(s_requeue.generation, 3);
+        assert!(j_requeue.is_some());
+        let jr = j_requeue.unwrap();
+        assert_eq!(jr.id, cg3.id); // Same natural record updated in-place without duplicates
+        assert_eq!(jr.state, EVENT_VOICE_JOB_STATE_PENDING);
+        assert!(jr.last_error.is_none());
+        assert!(jr.lease_owner.is_none());
+        assert!(jr.lease_until.is_none());
+
+        // Now claim immediately picks it up!
+        let claimed_requeued = store
+            .claim_event_voice_outbox_job("worker_delta", chrono::Duration::seconds(30))
+            .await
+            .unwrap();
+        assert!(claimed_requeued.is_some());
+        let cr = claimed_requeued.unwrap();
+        assert_eq!(cr.id, cg3.id);
+        assert_eq!(cr.state, EVENT_VOICE_JOB_STATE_LEASED);
+    }
+
+    #[tokio::test]
     async fn test_workflow_definitions_validation_quota_and_pagination_issue_395() {
         let store = Storage::memory();
         let guild_id = "999888777666555";
