@@ -1976,6 +1976,26 @@ pub struct SocialPublicationDraft {
     pub created_at: DateTime<Utc>,
 }
 
+pub const MAX_PENDING_SOCIAL_DRAFTS_PER_GUILD: usize = 200;
+pub const MAX_SOCIAL_DRAFT_CONTENT_CHARS: usize = 4_000;
+pub const MAX_SOCIAL_DRAFT_MEDIA_URLS: usize = 10;
+pub const MAX_SOCIAL_DRAFT_MEDIA_URL_LEN: usize = 2_048;
+pub const MAX_SOCIAL_DRAFT_TARGETS: usize = 10;
+pub const ALLOWED_SOCIAL_TARGETS: &[&str] = &[
+    "discord",
+    "telegram",
+    "vk",
+    "twitter",
+    "x",
+    "facebook",
+    "instagram",
+    "mastodon",
+    "bluesky",
+    "youtube",
+    "reddit",
+    "linkedin",
+];
+
 #[derive(thiserror::Error, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SocialDraftApprovalError {
     #[error("draft not found")]
@@ -1988,8 +2008,8 @@ pub enum SocialDraftApprovalError {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SocialDraftsPage {
+    #[serde(alias = "drafts")]
     pub items: Vec<SocialPublicationDraft>,
-    pub drafts: Vec<SocialPublicationDraft>,
     pub next_cursor: Option<String>,
     pub has_more: bool,
 }
@@ -6301,6 +6321,12 @@ impl Storage {
         }
     }
 
+    pub fn set_social_drafts_quota_for_test(&self, quota: Option<usize>) {
+        if let Self::Memory(store) = self {
+            store.set_social_drafts_quota_for_test(quota);
+        }
+    }
+
     pub async fn approve_social_draft(
         &self,
         guild_id: &str,
@@ -10483,7 +10509,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(p1.items.len(), 2);
-        assert_eq!(p1.drafts.len(), 2);
         assert!(p1.has_more);
         assert!(p1.next_cursor.is_some());
 
@@ -10523,5 +10548,80 @@ mod tests {
         for d in &approved_page.items {
             assert_eq!(d.status, "approved");
         }
+    }
+
+    #[tokio::test]
+    async fn test_social_drafts_quota_enforcement_and_single_payload_issue_391() {
+        let mem = MemoryStore::default();
+        let store = Storage::Memory(mem.clone());
+        let guild_1 = "social_quota_guild_1";
+        let guild_2 = "social_quota_guild_2";
+
+        // Set quota to 2 pending drafts
+        mem.set_social_drafts_quota_for_test(Some(2));
+
+        let make_draft = |guild: &str, status: &str| SocialPublicationDraft {
+            id: Uuid::new_v4(),
+            guild_id: guild.to_string(),
+            author_id: "author_1".to_string(),
+            content: "Post content".to_string(),
+            media_urls: serde_json::json!([]),
+            targets: serde_json::json!(["discord"]),
+            scheduled_at: None,
+            approved_by: None,
+            status: status.to_string(),
+            created_at: Utc::now(),
+        };
+
+        // 1 & 2 succeed
+        assert!(
+            store
+                .create_social_draft(make_draft(guild_1, "draft"))
+                .await
+                .is_ok()
+        );
+        assert!(
+            store
+                .create_social_draft(make_draft(guild_1, "draft"))
+                .await
+                .is_ok()
+        );
+
+        // 3rd draft exceeds quota
+        let res_3 = store
+            .create_social_draft(make_draft(guild_1, "draft"))
+            .await;
+        assert!(res_3.is_err());
+        assert!(res_3.unwrap_err().to_string().contains("quota exceeded"));
+
+        // Already approved draft does not count against pending quota
+        assert!(
+            store
+                .create_social_draft(make_draft(guild_1, "approved"))
+                .await
+                .is_ok()
+        );
+
+        // Multi-tenant isolation: guild_2 can still create drafts
+        assert!(
+            store
+                .create_social_draft(make_draft(guild_2, "draft"))
+                .await
+                .is_ok()
+        );
+
+        // Verify single payload serialization (Issue #391: no duplicate arrays)
+        let page = store
+            .list_social_drafts_page(guild_1, Some("draft"), 10, None)
+            .await
+            .unwrap();
+        let serialized = serde_json::to_value(&page).unwrap();
+        assert!(serialized.get("items").is_some());
+        assert!(
+            serialized.get("drafts").is_none(),
+            "drafts array must not be duplicated in JSON serialization"
+        );
+        assert!(serialized.get("has_more").is_some());
+        assert!(serialized.get("next_cursor").is_some());
     }
 }

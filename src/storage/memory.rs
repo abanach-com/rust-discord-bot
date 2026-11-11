@@ -250,6 +250,8 @@ pub struct MemoryStore {
     quotes_quota_override: Arc<std::sync::RwLock<Option<(usize, usize)>>>,
     store_items_write_lock: Arc<Mutex<()>>,
     store_items_quota_override: Arc<std::sync::RwLock<Option<usize>>>,
+    social_drafts_write_lock: Arc<Mutex<()>>,
+    social_drafts_quota_override: Arc<std::sync::RwLock<Option<usize>>>,
     birthdays: Arc<DashMap<(String, String), BirthdayRecord>>,
     afk: Arc<DashMap<(String, String), AfkRecord>>,
 }
@@ -6185,6 +6187,33 @@ impl MemoryStore {
         &self,
         draft: SocialPublicationDraft,
     ) -> anyhow::Result<SocialPublicationDraft> {
+        let _guard = match self.social_drafts_write_lock.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        let quota = self
+            .social_drafts_quota_override
+            .read()
+            .ok()
+            .and_then(|g| *g)
+            .unwrap_or(super::MAX_PENDING_SOCIAL_DRAFTS_PER_GUILD);
+
+        if draft.status == "draft" {
+            let current_count = self
+                .social_drafts
+                .iter()
+                .filter(|d| d.guild_id == draft.guild_id && d.status == "draft")
+                .count();
+
+            if current_count >= quota {
+                anyhow::bail!(
+                    "social draft quota exceeded for guild {}: maximum {quota} pending drafts allowed",
+                    draft.guild_id
+                );
+            }
+        }
+
         self.social_drafts.insert(draft.id, draft.clone());
 
         if let Err(err) = self.record_audit(
@@ -6202,6 +6231,12 @@ impl MemoryStore {
         }
 
         Ok(draft)
+    }
+
+    pub fn set_social_drafts_quota_for_test(&self, quota: Option<usize>) {
+        if let Ok(mut g) = self.social_drafts_quota_override.write() {
+            *g = quota;
+        }
     }
 
     pub fn list_social_drafts(&self, guild_id: &str) -> Vec<SocialPublicationDraft> {
@@ -6276,8 +6311,7 @@ impl MemoryStore {
         };
 
         SocialDraftsPage {
-            items: drafts.clone(),
-            drafts,
+            items: drafts,
             next_cursor,
             has_more,
         }

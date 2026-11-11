@@ -3194,4 +3194,133 @@ async fn test_social_draft_discovery_queue_pagination_and_security_issue_390() {
         .await
         .unwrap();
     assert_eq!(cross_status_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 7. Issue #391: Social draft payload validation on creation
+    // Empty content -> 400 Bad Request
+    let empty_content_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/social/drafts"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "content": "    ",
+            "targets": ["discord"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        empty_content_resp.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+
+    // Overlong content (>4000 chars) -> 400 Bad Request
+    let long_content = "a".repeat(4001);
+    let overlong_content_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/social/drafts"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "content": long_content,
+            "targets": ["discord"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        overlong_content_resp.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+
+    // Empty targets -> 400 Bad Request
+    let empty_targets_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/social/drafts"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "content": "Valid content",
+            "targets": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        empty_targets_resp.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+
+    // Unknown/unsupported target platform -> 400 Bad Request
+    let unknown_target_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/social/drafts"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "content": "Valid content",
+            "targets": ["myspace_unsupported"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        unknown_target_resp.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+
+    // Non-HTTPS media URL -> 400 Bad Request
+    let non_https_media_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/social/drafts"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "content": "Valid content",
+            "targets": ["discord"],
+            "media_urls": ["http://insecure.example.com/image.png"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        non_https_media_resp.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+
+    // 8. Issue #391: Quota enforcement and conflict error
+    // Set quota to 5 (we already created 5 drafts above)
+    state.app.storage.set_social_drafts_quota_for_test(Some(5));
+    let quota_exceeded_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/social/drafts"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "content": "Valid content exceeding quota",
+            "targets": ["discord"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(quota_exceeded_resp.status(), reqwest::StatusCode::CONFLICT);
+    let conflict_body: serde_json::Value = quota_exceeded_resp.json().await.unwrap();
+    assert!(
+        conflict_body["error"]
+            .as_str()
+            .unwrap()
+            .contains("quota exceeded")
+    );
+    state.app.storage.set_social_drafts_quota_for_test(None);
+
+    // 9. Issue #391: Verify single payload in GET response (no duplicate "drafts" array)
+    let single_payload_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/social/drafts?status=draft&limit=5"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(single_payload_resp.status(), reqwest::StatusCode::OK);
+    let single_payload_body: serde_json::Value = single_payload_resp.json().await.unwrap();
+    assert!(single_payload_body.get("items").is_some());
+    assert!(
+        single_payload_body.get("drafts").is_none(),
+        "Response JSON must not duplicate items in drafts array"
+    );
 }

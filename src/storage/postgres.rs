@@ -8821,6 +8821,29 @@ impl PostgresStore {
     ) -> anyhow::Result<SocialPublicationDraft> {
         let mut tx = self.pool.begin().await?;
 
+        // Transactional advisory lock per guild to serialize quota checks
+        sqlx::query("SELECT pg_advisory_xact_lock(4347, hashtext($1))")
+            .bind(&draft.guild_id)
+            .execute(&mut *tx)
+            .await?;
+
+        if draft.status == "draft" {
+            let count: (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM social_publication_drafts WHERE guild_id = $1 AND status = 'draft'",
+            )
+            .bind(&draft.guild_id)
+            .fetch_one(&mut *tx)
+            .await?;
+
+            if count.0 >= super::MAX_PENDING_SOCIAL_DRAFTS_PER_GUILD as i64 {
+                anyhow::bail!(
+                    "social draft quota exceeded for guild {}: maximum {} pending drafts allowed",
+                    draft.guild_id,
+                    super::MAX_PENDING_SOCIAL_DRAFTS_PER_GUILD
+                );
+            }
+        }
+
         let row = sqlx::query_as::<_, SocialPublicationDraft>(
             r#"
             INSERT INTO social_publication_drafts (id, guild_id, author_id, content, media_urls, targets, scheduled_at, approved_by, status, created_at)
@@ -8972,8 +8995,7 @@ impl PostgresStore {
         };
 
         Ok(SocialDraftsPage {
-            items: rows.clone(),
-            drafts: rows,
+            items: rows,
             next_cursor,
             has_more,
         })

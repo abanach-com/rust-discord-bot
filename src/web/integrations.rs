@@ -1002,11 +1002,76 @@ pub async fn create_social_draft(
     verify_csrf(&headers, &session)?;
     ensure_guild_access(&state, &session, &guild_id).await?;
 
+    let trimmed_content = payload.content.trim();
+    if trimmed_content.is_empty() {
+        return Err(ApiError::bad_request(
+            "Social draft content cannot be empty",
+        ));
+    }
+    if trimmed_content.chars().count() > crate::storage::MAX_SOCIAL_DRAFT_CONTENT_CHARS {
+        return Err(ApiError::bad_request(format!(
+            "Social draft content exceeds maximum length of {} characters",
+            crate::storage::MAX_SOCIAL_DRAFT_CONTENT_CHARS
+        )));
+    }
+
+    if payload.targets.is_empty() {
+        return Err(ApiError::bad_request(
+            "At least one target platform must be specified",
+        ));
+    }
+    if payload.targets.len() > crate::storage::MAX_SOCIAL_DRAFT_TARGETS {
+        return Err(ApiError::bad_request(format!(
+            "Too many targets: maximum is {}",
+            crate::storage::MAX_SOCIAL_DRAFT_TARGETS
+        )));
+    }
+    for target in &payload.targets {
+        let t = target.trim().to_lowercase();
+        if t.is_empty() || !crate::storage::ALLOWED_SOCIAL_TARGETS.contains(&t.as_str()) {
+            return Err(ApiError::bad_request(format!(
+                "Invalid target '{}': must be one of {:?}",
+                target,
+                crate::storage::ALLOWED_SOCIAL_TARGETS
+            )));
+        }
+    }
+
+    if payload.media_urls.len() > crate::storage::MAX_SOCIAL_DRAFT_MEDIA_URLS {
+        return Err(ApiError::bad_request(format!(
+            "Too many media URLs: maximum is {}",
+            crate::storage::MAX_SOCIAL_DRAFT_MEDIA_URLS
+        )));
+    }
+    for media_url in &payload.media_urls {
+        let trimmed_url = media_url.trim();
+        if trimmed_url.is_empty()
+            || trimmed_url.len() > crate::storage::MAX_SOCIAL_DRAFT_MEDIA_URL_LEN
+        {
+            return Err(ApiError::bad_request(format!(
+                "Media URL exceeds maximum length of {} characters",
+                crate::storage::MAX_SOCIAL_DRAFT_MEDIA_URL_LEN
+            )));
+        }
+        let parsed_url = url::Url::parse(trimmed_url)
+            .map_err(|e| ApiError::bad_request(format!("Invalid media URL '{media_url}': {e}")))?;
+        if parsed_url.scheme() != "https" {
+            return Err(ApiError::bad_request(format!(
+                "Media URL '{media_url}' must use HTTPS scheme"
+            )));
+        }
+        if parsed_url.host_str().unwrap_or("").is_empty() {
+            return Err(ApiError::bad_request(format!(
+                "Media URL '{media_url}' has invalid host"
+            )));
+        }
+    }
+
     let draft = SocialPublicationDraft {
         id: Uuid::new_v4(),
         guild_id,
         author_id: session.user.id,
-        content: payload.content,
+        content: trimmed_content.to_string(),
         media_urls: json!(payload.media_urls),
         targets: json!(payload.targets),
         scheduled_at: payload.scheduled_at,
@@ -1015,12 +1080,16 @@ pub async fn create_social_draft(
         created_at: Utc::now(),
     };
 
-    let saved = state
-        .app
-        .storage
-        .create_social_draft(draft)
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let saved = match state.app.storage.create_social_draft(draft).await {
+        Ok(s) => s,
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("quota exceeded") {
+                return Err(ApiError::conflict(msg));
+            }
+            return Err(ApiError::internal(msg));
+        }
+    };
 
     Ok(Json(saved))
 }
