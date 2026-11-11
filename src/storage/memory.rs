@@ -30,8 +30,8 @@ use super::{
     MarketplacePackagesPage, McpToolAuthorization, MemberIdentityRecord, MemberProgress,
     MemberSearchFilter, MemberSearchRow, MemberSnapshot, ModerationAppeal,
     ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState,
-    ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric,
-    ProgressionSeason, QuoteRecord, ReactionRoleBinding, ReactionRoleGrant,
+    ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage, PluginMarketplaceRelease,
+    ProgressMetric, ProgressionSeason, QuoteRecord, ReactionRoleBinding, ReactionRoleGrant,
     RecordCompanionLeaseParams, RedditSubscription, ReleaseReactionRoleGrantOutcome,
     ReputationGrantOutcome, ScheduledEvent, ScheduledEventsPage, ServerSnapshot,
     SocialDraftApprovalError, SocialDraftsPage, SocialPublicationDraft, StarboardEntry,
@@ -250,6 +250,8 @@ pub struct MemoryStore {
     mcp_tool_auths: Arc<DashMap<(String, String), McpToolAuthorization>>,
 
     marketplace_packages: Arc<DashMap<String, PluginMarketplacePackage>>,
+
+    marketplace_releases: Arc<DashMap<(String, String), PluginMarketplaceRelease>>,
 
     marketplace_write_lock: Arc<Mutex<()>>,
 
@@ -7656,10 +7658,49 @@ impl MemoryStore {
         }
         drop(existing);
 
+        if self
+            .marketplace_releases
+            .contains_key(&(saved.plugin_id.clone(), saved.version.clone()))
+        {
+            anyhow::bail!("Package version already exists");
+        }
+
+        let release = PluginMarketplaceRelease {
+            plugin_id: saved.plugin_id.clone(),
+            version: saved.version.clone(),
+            sha256_hash: saved.sha256_hash.clone(),
+            manifest: saved.manifest.clone(),
+            is_verified: saved.is_verified,
+            published_at: Utc::now(),
+        };
+        self.marketplace_releases
+            .insert((saved.plugin_id.clone(), saved.version.clone()), release);
+
         self.marketplace_packages
             .insert(saved.plugin_id.clone(), saved.clone());
 
         Ok(saved)
+    }
+
+    pub fn get_marketplace_release(
+        &self,
+        plugin_id: &str,
+        version: &str,
+    ) -> Option<PluginMarketplaceRelease> {
+        self.marketplace_releases
+            .get(&(plugin_id.to_string(), version.to_string()))
+            .map(|r| r.value().clone())
+    }
+
+    pub fn list_marketplace_releases(&self, plugin_id: &str) -> Vec<PluginMarketplaceRelease> {
+        let mut releases: Vec<PluginMarketplaceRelease> = self
+            .marketplace_releases
+            .iter()
+            .filter(|e| e.key().0 == plugin_id)
+            .map(|e| e.value().clone())
+            .collect();
+        releases.sort_by_key(|a| std::cmp::Reverse(a.published_at));
+        releases
     }
 
     pub fn list_marketplace_packages(&self) -> Vec<PluginMarketplacePackage> {
@@ -7731,14 +7772,24 @@ impl MemoryStore {
 
     pub fn install_plugin_package(
         &self,
-
         install: PluginGuildInstallation,
-    ) -> PluginGuildInstallation {
-        let key = (install.guild_id.clone(), install.plugin_id.clone());
+    ) -> anyhow::Result<PluginGuildInstallation> {
+        let _guard = self
+            .marketplace_write_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
 
+        if !self
+            .marketplace_releases
+            .contains_key(&(install.plugin_id.clone(), install.version.clone()))
+        {
+            anyhow::bail!("Requested package version not found");
+        }
+
+        let key = (install.guild_id.clone(), install.plugin_id.clone());
         self.plugin_guild_installs.insert(key, install.clone());
 
-        install
+        Ok(install)
     }
 
     pub fn list_installed_plugins(&self, guild_id: &str) -> Vec<PluginGuildInstallation> {

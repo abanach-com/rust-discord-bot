@@ -28,17 +28,18 @@ use super::{
     McpToolAuthorization, MemberIdentityRecord, MemberProgress, MemberSearchFilter,
     MemberSearchRow, MemberSnapshot, ModerationAppeal, ModerationExecutionIntent,
     ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState, ModuleDraftConfig,
-    PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric, ProgressionSeason,
-    QuoteRecord, ReactionRoleBinding, ReactionRoleGrant, RecordCompanionLeaseParams,
-    RecruitmentApplication, RecruitmentReview, RecruitmentRoleFulfillment, RecruitmentTrack,
-    RedditSubscription, ReleaseReactionRoleGrantOutcome, ReputationGrantOutcome, ScheduledEvent,
-    ScheduledEventsPage, ServerSnapshot, SocialDraftApprovalError, SocialDraftsPage,
-    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StoreItemsPage,
-    StorePurchase, StorePurchasesPage, TagRecord, TelegramBridge, TelegramMessageMapping,
-    TimedRoleGrant, Tournament, TransitionApplicationParams, TupperError, TupperProfile,
-    TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport, VkSubscription,
-    WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowDefinitionsPage, WorkflowRunExecution,
-    WorkflowStorageError, XpAward, YouTubeChannelSubscription, decode_marketplace_package_cursor,
+    PluginGuildInstallation, PluginMarketplacePackage, PluginMarketplaceRelease, ProgressMetric,
+    ProgressionSeason, QuoteRecord, ReactionRoleBinding, ReactionRoleGrant,
+    RecordCompanionLeaseParams, RecruitmentApplication, RecruitmentReview,
+    RecruitmentRoleFulfillment, RecruitmentTrack, RedditSubscription,
+    ReleaseReactionRoleGrantOutcome, ReputationGrantOutcome, ScheduledEvent, ScheduledEventsPage,
+    ServerSnapshot, SocialDraftApprovalError, SocialDraftsPage, SocialPublicationDraft,
+    StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StoreItemsPage, StorePurchase,
+    StorePurchasesPage, TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant,
+    Tournament, TransitionApplicationParams, TupperError, TupperProfile, TwitchStreamSubscription,
+    UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WORK_JOBS, WorkClaimOutcome,
+    WorkflowDefinition, WorkflowDefinitionsPage, WorkflowRunExecution, WorkflowStorageError,
+    XpAward, YouTubeChannelSubscription, decode_marketplace_package_cursor,
     decode_workflow_definition_cursor, encode_marketplace_package_cursor,
     encode_scheduled_event_cursor, encode_store_purchase_cursor, encode_workflow_definition_cursor,
     level_for_xp, normalize_steam_lfg_post, parse_member_search_cursor, snowflake_created_at,
@@ -10482,6 +10483,18 @@ impl PostgresStore {
             }
         }
 
+        let release_exists: Option<(String,)> = sqlx::query_as(
+            "SELECT version FROM plugin_marketplace_releases WHERE plugin_id = $1 AND version = $2",
+        )
+        .bind(&pkg.plugin_id)
+        .bind(&pkg.version)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if release_exists.is_some() {
+            anyhow::bail!("Package version already exists");
+        }
+
         let row = sqlx::query_as::<_, PluginMarketplacePackage>(
             r#"
             INSERT INTO plugin_marketplace_packages
@@ -10531,6 +10544,23 @@ impl PostgresStore {
                 "Package already exists, is owned by another publisher, or version unchanged"
             );
         };
+
+        sqlx::query(
+            r#"
+            INSERT INTO plugin_marketplace_releases
+                (plugin_id, version, sha256_hash, manifest, is_verified, published_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (plugin_id, version) DO NOTHING
+            "#,
+        )
+        .bind(&pkg.plugin_id)
+        .bind(&pkg.version)
+        .bind(&pkg.sha256_hash)
+        .bind(&pkg.manifest)
+        .bind(pkg.is_verified)
+        .bind(pkg.created_at)
+        .execute(&mut *tx)
+        .await?;
 
         tx.commit().await?;
 
@@ -10607,11 +10637,60 @@ impl PostgresStore {
         })
     }
 
+    pub async fn get_marketplace_release(
+        &self,
+        plugin_id: &str,
+        version: &str,
+    ) -> anyhow::Result<Option<PluginMarketplaceRelease>> {
+        let row = sqlx::query_as::<_, PluginMarketplaceRelease>(
+            "SELECT * FROM plugin_marketplace_releases WHERE plugin_id = $1 AND version = $2",
+        )
+        .bind(plugin_id)
+        .bind(version)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    pub async fn list_marketplace_releases(
+        &self,
+        plugin_id: &str,
+    ) -> anyhow::Result<Vec<PluginMarketplaceRelease>> {
+        let rows = sqlx::query_as::<_, PluginMarketplaceRelease>(
+            "SELECT * FROM plugin_marketplace_releases WHERE plugin_id = $1 ORDER BY published_at DESC",
+        )
+        .bind(plugin_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
     pub async fn install_plugin_package(
         &self,
 
         install: PluginGuildInstallation,
     ) -> anyhow::Result<PluginGuildInstallation> {
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('marketplace_pkg_' || $1))")
+            .bind(&install.plugin_id)
+            .execute(&mut *tx)
+            .await?;
+
+        let release = sqlx::query_as::<_, PluginMarketplaceRelease>(
+            "SELECT * FROM plugin_marketplace_releases WHERE plugin_id = $1 AND version = $2",
+        )
+        .bind(&install.plugin_id)
+        .bind(&install.version)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if release.is_none() {
+            anyhow::bail!("Requested package version not found");
+        }
+
         let row = sqlx::query_as::<_, PluginGuildInstallation>(
 
             r#"
@@ -10648,9 +10727,11 @@ impl PostgresStore {
 
         .bind(install.installed_at)
 
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
 
         .await?;
+
+        tx.commit().await?;
 
         Ok(row)
     }

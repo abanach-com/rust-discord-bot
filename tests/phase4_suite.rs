@@ -4613,3 +4613,228 @@ async fn test_marketplace_http_keyset_pagination_and_tamper_isolation_issue_404(
         .unwrap();
     assert_eq!(bad_cur_resp.status(), reqwest::StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn test_marketplace_immutable_releases_and_version_pinning_http_issue_407() {
+    let (state, _) = test_web_state().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = build_router(state.clone());
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+
+    let guild_1 = "407000000000000001";
+    let guild_2 = "407000000000000002";
+    let session_token = "sess_pinning_issue_407";
+    let csrf_token = "csrf_pinning_issue_407";
+    let cookie = format!("rusty_discord_bot_session={session_token}");
+
+    let user = DashboardUser {
+        id: "publisher_and_admin".to_string(),
+        username: "AdminDev".to_string(),
+        global_name: None,
+        avatar: None,
+    };
+    let guilds = vec![
+        DashboardGuild {
+            id: guild_1.to_string(),
+            name: "Guild 1".to_string(),
+            icon: None,
+            owner: true,
+            permissions: "8".to_string(),
+        },
+        DashboardGuild {
+            id: guild_2.to_string(),
+            name: "Guild 2".to_string(),
+            icon: None,
+            owner: true,
+            permissions: "8".to_string(),
+        },
+    ];
+    state
+        .app
+        .sessions
+        .save_session(
+            session_token,
+            user,
+            guilds,
+            csrf_token.to_string(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let valid_hash_1 = "1111111111111111111111111111111111111111111111111111111111111111";
+    let valid_hash_2 = "2222222222222222222222222222222222222222222222222222222222222222";
+
+    // 1. Publish pinned_pkg v1.0.0
+    let pub_v1_resp = client
+        .post(format!("{base_url}/api/marketplace/publish"))
+        .header(COOKIE, &cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({
+            "plugin_id": "pinned_pkg",
+            "name": "Pinned Pkg",
+            "version": "1.0.0",
+            "sha256_hash": valid_hash_1,
+            "manifest": { "v": "1.0.0", "cap": "basic" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pub_v1_resp.status(), reqwest::StatusCode::OK);
+
+    // 2. Install pinned_pkg v1.0.0 in guild 1
+    let inst_v1_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_1}/marketplace/install"
+        ))
+        .header(COOKIE, &cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({
+            "plugin_id": "pinned_pkg",
+            "version": "1.0.0"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(inst_v1_resp.status(), reqwest::StatusCode::OK);
+
+    // 3. Publish pinned_pkg v2.0.0
+    let pub_v2_resp = client
+        .post(format!("{base_url}/api/marketplace/publish"))
+        .header(COOKIE, &cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({
+            "plugin_id": "pinned_pkg",
+            "name": "Pinned Pkg Updated",
+            "version": "2.0.0",
+            "sha256_hash": valid_hash_2,
+            "manifest": { "v": "2.0.0", "cap": "advanced" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pub_v2_resp.status(), reqwest::StatusCode::OK);
+
+    // 4. GET /api/marketplace/packages/pinned_pkg/releases returns 2 releases
+    let list_rel_resp = client
+        .get(format!(
+            "{base_url}/api/marketplace/packages/pinned_pkg/releases"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_rel_resp.status(), reqwest::StatusCode::OK);
+    let releases_json: Vec<serde_json::Value> = list_rel_resp.json().await.unwrap();
+    assert_eq!(releases_json.len(), 2);
+    assert_eq!(releases_json[0]["version"], "2.0.0");
+    assert_eq!(releases_json[1]["version"], "1.0.0");
+
+    // 5. GET /api/marketplace/packages/pinned_pkg/releases/1.0.0 returns v1.0.0 with original hash
+    let rel_v1_resp = client
+        .get(format!(
+            "{base_url}/api/marketplace/packages/pinned_pkg/releases/1.0.0"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rel_v1_resp.status(), reqwest::StatusCode::OK);
+    let rel_v1_json: serde_json::Value = rel_v1_resp.json().await.unwrap();
+    assert_eq!(rel_v1_json["version"], "1.0.0");
+    assert_eq!(rel_v1_json["sha256_hash"], valid_hash_1);
+    assert_eq!(rel_v1_json["manifest"]["cap"], "basic");
+
+    // 6. GET /api/marketplace/packages/pinned_pkg/releases/2.0.0 returns v2.0.0
+    let rel_v2_resp = client
+        .get(format!(
+            "{base_url}/api/marketplace/packages/pinned_pkg/releases/2.0.0"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rel_v2_resp.status(), reqwest::StatusCode::OK);
+    let rel_v2_json: serde_json::Value = rel_v2_resp.json().await.unwrap();
+    assert_eq!(rel_v2_json["version"], "2.0.0");
+    assert_eq!(rel_v2_json["sha256_hash"], valid_hash_2);
+    assert_eq!(rel_v2_json["manifest"]["cap"], "advanced");
+
+    // 7. GET /api/marketplace/packages/pinned_pkg/releases/3.0.0 returns 404
+    let rel_v3_resp = client
+        .get(format!(
+            "{base_url}/api/marketplace/packages/pinned_pkg/releases/3.0.0"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rel_v3_resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // 8. Guild 1's installed plugins STILL points to v1.0.0
+    let installed_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_1}/marketplace/installed"
+        ))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(installed_resp.status(), reqwest::StatusCode::OK);
+    let installed_json: Vec<serde_json::Value> = installed_resp.json().await.unwrap();
+    assert_eq!(installed_json.len(), 1);
+    assert_eq!(installed_json[0]["plugin_id"], "pinned_pkg");
+    assert_eq!(installed_json[0]["version"], "1.0.0");
+
+    // 9. Guild 2 can install v2.0.0
+    let inst_g2_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_2}/marketplace/install"
+        ))
+        .header(COOKIE, &cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({
+            "plugin_id": "pinned_pkg",
+            "version": "2.0.0"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(inst_g2_resp.status(), reqwest::StatusCode::OK);
+
+    // 10. Attempting to install non-existent v3.0.0 returns 400 Bad Request
+    let inst_v3_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_1}/marketplace/install"
+        ))
+        .header(COOKIE, &cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({
+            "plugin_id": "pinned_pkg",
+            "version": "3.0.0"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(inst_v3_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 11. Attempting to re-publish v1.0.0 returns 400 Bad Request (version exists)
+    let repub_v1_resp = client
+        .post(format!("{base_url}/api/marketplace/publish"))
+        .header(COOKIE, &cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({
+            "plugin_id": "pinned_pkg",
+            "name": "Pinned Pkg Tampered",
+            "version": "1.0.0",
+            "sha256_hash": valid_hash_1,
+            "manifest": { "v": "1.0.0", "cap": "tampered" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(repub_v1_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+}

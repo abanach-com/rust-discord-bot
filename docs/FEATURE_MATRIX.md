@@ -520,7 +520,7 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
 | Social Publisher Multi-Platform | Implemented | Cross-platform composer, scheduled release, two-person approval gates (#105) |
 | AI Gateway & Hard Budget | Implemented | Hard token/USD caps per guild with instant cutoff, prompt injection sanitization (#106) |
 | MCP Protocol Client/Server | Implemented | Model Context Protocol tool allowlists, mutating action approval gates (#106) |
-| Plugin Marketplace & Verification | Implemented | Semver manifests, SHA-256 cryptographic check, transactional install/rollback (#107), keyset pagination & lightweight DTO catalog, publisher quotas & O(1) point lookup (#404), identity & pagination parity (#406) |
+| Plugin Marketplace & Verification | Implemented | Semver manifests, SHA-256 cryptographic check, transactional install/rollback (#107), keyset pagination & lightweight DTO catalog, publisher quotas & O(1) point lookup (#404), identity & pagination parity (#406), immutable versioned releases & guild pinning (#407) |
 
 ## 14. Platform & API Hardening (Issues #202, #203, #204, #205, #206)
 
@@ -809,6 +809,12 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Eliminated backend parity discrepancy where updating a marketplace package in `MemoryStore` generated a new `id` and `created_at` timestamp, shifting the package's cursor position and dropping it from paginated catalog views.
   - Preserved the existing package's permanent `id` and initial `created_at` on version updates in `MemoryStore::publish_marketplace_package`, matching PostgreSQL's `ON CONFLICT (plugin_id) DO UPDATE` behavior.
   - Reset `is_verified` to `false` upon version updates to require re-verification across both backends.
+- **Marketplace Immutable Versioned Releases & Guild Installation Pinning (#407)**:
+  - Eliminated catalog drift where updating a package version in `plugin_marketplace_packages` wiped out historical releases referenced by guild installations.
+  - Introduced immutable `plugin_marketplace_releases` table/store keyed by `(plugin_id, version)` storing permanent release snapshots (`sha256_hash`, `manifest`, `is_verified`, `published_at`).
+  - Added additive migration `0067_marketplace_immutable_releases.sql` establishing foreign key `fk_plugin_guild_installations_release` from `plugin_guild_installations(plugin_id, version)` to `plugin_marketplace_releases(plugin_id, version)` with `ON DELETE RESTRICT`, preventing broken references.
+  - Ensured publishing new versions is strictly append-only: duplicate versions are rejected across HTTP and Storage layers, and guild installations remain pinned to their selected version without unintended automatic upgrades.
+  - Added dedicated release discovery endpoints `GET /api/marketplace/packages/{plugin_id}/releases` and `GET /api/marketplace/packages/{plugin_id}/releases/{version}` enabling provenance and manifest auditing for any pinned installation.
 
 ## Delivery order
 

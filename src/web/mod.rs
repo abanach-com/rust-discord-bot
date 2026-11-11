@@ -924,6 +924,14 @@ pub fn build_router(state: WebState) -> Router {
             get(integrations::get_marketplace_package_detail),
         )
         .route(
+            "/api/marketplace/packages/{plugin_id}/releases",
+            get(integrations::list_marketplace_package_releases),
+        )
+        .route(
+            "/api/marketplace/packages/{plugin_id}/releases/{version}",
+            get(integrations::get_marketplace_package_release_detail),
+        )
+        .route(
             "/api/marketplace/publish",
             post(integrations::publish_marketplace_package),
         )

@@ -19,10 +19,10 @@ use crate::storage::{
     AiGuildBudget, AiKnowledgeDocument, DEFAULT_MARKETPLACE_PAGE_LIMIT,
     DEFAULT_WORKFLOWS_PAGE_LIMIT, GamingHubGameStatus, GitHubDevopsMapping, IntegrationConnection,
     IntegrationDeliveryLog, LinkedAccount, MarketplacePackagesPage, PluginGuildInstallation,
-    PluginMarketplacePackage, SocialDraftApprovalError, SocialDraftsPage, SocialPublicationDraft,
-    SteamLfgInput, SteamLfgPost, SteamLfgValidationError, TelegramBridge, WorkflowDefinition,
-    WorkflowDefinitionsPage, WorkflowStorageError, validate_marketplace_package_input,
-    validate_steam_lfg_game_id,
+    PluginMarketplacePackage, PluginMarketplaceRelease, SocialDraftApprovalError, SocialDraftsPage,
+    SocialPublicationDraft, SteamLfgInput, SteamLfgPost, SteamLfgValidationError, TelegramBridge,
+    WorkflowDefinition, WorkflowDefinitionsPage, WorkflowStorageError,
+    validate_marketplace_package_input, validate_steam_lfg_game_id,
 };
 
 use super::{
@@ -1565,6 +1565,43 @@ pub async fn get_marketplace_package_detail(
     Ok(Json(pkg))
 }
 
+pub async fn list_marketplace_package_releases(
+    State(state): State<WebState>,
+    Path(plugin_id): Path<String>,
+) -> Result<Json<Vec<PluginMarketplaceRelease>>, ApiError> {
+    let pkg = state
+        .app
+        .storage
+        .get_marketplace_package(&plugin_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Marketplace package not found"))?;
+
+    let releases = state
+        .app
+        .storage
+        .list_marketplace_releases(&pkg.plugin_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(releases))
+}
+
+pub async fn get_marketplace_package_release_detail(
+    State(state): State<WebState>,
+    Path((plugin_id, version)): Path<(String, String)>,
+) -> Result<Json<PluginMarketplaceRelease>, ApiError> {
+    let release = state
+        .app
+        .storage
+        .get_marketplace_release(&plugin_id, &version)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Marketplace package release not found"))?;
+
+    Ok(Json(release))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PublishPackageRequest {
     pub plugin_id: String,
@@ -1651,6 +1688,17 @@ pub async fn publish_marketplace_package(
         }
     }
 
+    // Check if release already exists (Issue #407 immutable releases)
+    let release_exists = state
+        .app
+        .storage
+        .get_marketplace_release(&payload.plugin_id, &payload.version)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    if release_exists.is_some() {
+        return Err(ApiError::bad_request("Package version already exists"));
+    }
+
     // Strict base64 decoding and hash verification (Issue #117)
     if let Some(ref raw_b64) = payload.raw_content_base64 {
         let bytes = decode_base64_strict(raw_b64)
@@ -1719,8 +1767,8 @@ pub async fn install_guild_plugin(
     verify_csrf(&headers, &session)?;
     ensure_guild_access(&state, &session, &guild_id).await?;
 
-    // Point lookup package existence and version match (Issue #117, #404)
-    let pkg = state
+    // Point lookup package existence and release match (Issue #117, #404, #407)
+    let _pkg = state
         .app
         .storage
         .get_marketplace_package(&payload.plugin_id)
@@ -1728,9 +1776,13 @@ pub async fn install_guild_plugin(
         .map_err(|e| ApiError::internal(e.to_string()))?
         .ok_or_else(|| ApiError::not_found("Marketplace package not found"))?;
 
-    if pkg.version != payload.version {
-        return Err(ApiError::bad_request("Requested package version not found"));
-    }
+    let _release = state
+        .app
+        .storage
+        .get_marketplace_release(&payload.plugin_id, &payload.version)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::bad_request("Requested package version not found"))?;
 
     let install = PluginGuildInstallation {
         id: Uuid::new_v4(),
@@ -1747,7 +1799,14 @@ pub async fn install_guild_plugin(
         .storage
         .install_plugin_package(install)
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("version not found") {
+                ApiError::bad_request(msg)
+            } else {
+                ApiError::internal(msg)
+            }
+        })?;
 
     Ok(Json(saved))
 }

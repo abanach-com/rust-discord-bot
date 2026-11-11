@@ -2599,6 +2599,16 @@ pub const DEFAULT_MARKETPLACE_PAGE_LIMIT: usize = 25;
 pub const MAX_MARKETPLACE_PAGE_LIMIT: usize = 100;
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow, PartialEq, Eq)]
+pub struct PluginMarketplaceRelease {
+    pub plugin_id: String,
+    pub version: String,
+    pub sha256_hash: String,
+    pub manifest: Value,
+    pub is_verified: bool,
+    pub published_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow, PartialEq, Eq)]
 pub struct MarketplacePackageSummary {
     pub id: Uuid,
     pub plugin_id: String,
@@ -7384,13 +7394,34 @@ impl Storage {
         }
     }
 
+    pub async fn get_marketplace_release(
+        &self,
+        plugin_id: &str,
+        version: &str,
+    ) -> anyhow::Result<Option<PluginMarketplaceRelease>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_marketplace_release(plugin_id, version)),
+            Self::Postgres(store) => store.get_marketplace_release(plugin_id, version).await,
+        }
+    }
+
+    pub async fn list_marketplace_releases(
+        &self,
+        plugin_id: &str,
+    ) -> anyhow::Result<Vec<PluginMarketplaceRelease>> {
+        match self {
+            Self::Memory(store) => Ok(store.list_marketplace_releases(plugin_id)),
+            Self::Postgres(store) => store.list_marketplace_releases(plugin_id).await,
+        }
+    }
+
     pub async fn install_plugin_package(
         &self,
 
         install: PluginGuildInstallation,
     ) -> anyhow::Result<PluginGuildInstallation> {
         match self {
-            Self::Memory(store) => Ok(store.install_plugin_package(install)),
+            Self::Memory(store) => store.install_plugin_package(install),
 
             Self::Postgres(store) => store.install_plugin_package(install).await,
         }
@@ -13610,5 +13641,151 @@ mod tests {
         assert_eq!(page2.packages[0].id, orig_id_a);
         assert_eq!(page2.packages[0].created_at, time_a);
         assert!(page2.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_marketplace_immutable_releases_and_guild_pinning_issue_407() {
+        let store = Storage::memory();
+        let hash_v1 = "1111111111111111111111111111111111111111111111111111111111111111";
+        let hash_v2 = "2222222222222222222222222222222222222222222222222222222222222222";
+        let manifest_v1 =
+            serde_json::json!({"id": "pkg-pinned", "version": "1.0.0", "title": "Version 1"});
+        let manifest_v2 =
+            serde_json::json!({"id": "pkg-pinned", "version": "2.0.0", "title": "Version 2"});
+
+        // 1. Publish pkg-pinned at 1.0.0
+        let pkg_v1 = PluginMarketplacePackage {
+            id: Uuid::new_v4(),
+            plugin_id: "pkg-pinned".to_string(),
+            name: "Pinned Package".to_string(),
+            version: "1.0.0".to_string(),
+            author: "dev_author".to_string(),
+            sha256_hash: hash_v1.to_string(),
+            manifest: manifest_v1.clone(),
+            is_verified: true,
+            created_at: Utc::now(),
+        };
+        let published_v1 = store.publish_marketplace_package(pkg_v1).await.unwrap();
+        assert_eq!(published_v1.version, "1.0.0");
+
+        // 2. Release 1.0.0 exists and matches original payload
+        let rel_v1 = store
+            .get_marketplace_release("pkg-pinned", "1.0.0")
+            .await
+            .unwrap()
+            .expect("release 1.0.0 must exist");
+        assert_eq!(rel_v1.sha256_hash, hash_v1);
+        assert_eq!(rel_v1.manifest, manifest_v1);
+        assert!(rel_v1.is_verified);
+
+        // 3. Guild G1 installs 1.0.0
+        let inst_g1 = PluginGuildInstallation {
+            id: Uuid::new_v4(),
+            guild_id: "guild-1".to_string(),
+            plugin_id: "pkg-pinned".to_string(),
+            version: "1.0.0".to_string(),
+            enabled: true,
+            config: serde_json::json!({}),
+            installed_at: Utc::now(),
+        };
+        let saved_g1 = store.install_plugin_package(inst_g1).await.unwrap();
+        assert_eq!(saved_g1.version, "1.0.0");
+
+        // 4. Attempting to install unknown version 9.9.9 fails
+        let inst_invalid = PluginGuildInstallation {
+            id: Uuid::new_v4(),
+            guild_id: "guild-1".to_string(),
+            plugin_id: "pkg-pinned".to_string(),
+            version: "9.9.9".to_string(),
+            enabled: true,
+            config: serde_json::json!({}),
+            installed_at: Utc::now(),
+        };
+        assert!(store.install_plugin_package(inst_invalid).await.is_err());
+
+        // 5. Attempting to re-publish version 1.0.0 fails
+        let pkg_v1_dup = PluginMarketplacePackage {
+            id: Uuid::new_v4(),
+            plugin_id: "pkg-pinned".to_string(),
+            name: "Pinned Package".to_string(),
+            version: "1.0.0".to_string(),
+            author: "dev_author".to_string(),
+            sha256_hash: hash_v1.to_string(),
+            manifest: manifest_v1.clone(),
+            is_verified: false,
+            created_at: Utc::now(),
+        };
+        assert!(store.publish_marketplace_package(pkg_v1_dup).await.is_err());
+
+        // 6. Publisher updates package to version 2.0.0
+        let pkg_v2 = PluginMarketplacePackage {
+            id: Uuid::new_v4(),
+            plugin_id: "pkg-pinned".to_string(),
+            name: "Pinned Package Updated".to_string(),
+            version: "2.0.0".to_string(),
+            author: "dev_author".to_string(),
+            sha256_hash: hash_v2.to_string(),
+            manifest: manifest_v2.clone(),
+            is_verified: false,
+            created_at: Utc::now(),
+        };
+        let published_v2 = store.publish_marketplace_package(pkg_v2).await.unwrap();
+        assert_eq!(published_v2.version, "2.0.0");
+
+        // 7. Guild G1's installation STILL points to 1.0.0 (no auto-upgrade)
+        let installed_g1 = store.list_installed_plugins("guild-1").await.unwrap();
+        assert_eq!(installed_g1.len(), 1);
+        assert_eq!(installed_g1[0].plugin_id, "pkg-pinned");
+        assert_eq!(installed_g1[0].version, "1.0.0");
+
+        // 8. Release 1.0.0 is STILL present and untouched
+        let rel_v1_after = store
+            .get_marketplace_release("pkg-pinned", "1.0.0")
+            .await
+            .unwrap()
+            .expect("release 1.0.0 must still exist after 2.0.0 publication");
+        assert_eq!(rel_v1_after.sha256_hash, hash_v1);
+        assert_eq!(rel_v1_after.manifest, manifest_v1);
+
+        // 9. Release 2.0.0 exists
+        let rel_v2 = store
+            .get_marketplace_release("pkg-pinned", "2.0.0")
+            .await
+            .unwrap()
+            .expect("release 2.0.0 must exist");
+        assert_eq!(rel_v2.sha256_hash, hash_v2);
+        assert_eq!(rel_v2.manifest, manifest_v2);
+
+        // 10. Guild G2 installs 2.0.0
+        let inst_g2 = PluginGuildInstallation {
+            id: Uuid::new_v4(),
+            guild_id: "guild-2".to_string(),
+            plugin_id: "pkg-pinned".to_string(),
+            version: "2.0.0".to_string(),
+            enabled: true,
+            config: serde_json::json!({}),
+            installed_at: Utc::now(),
+        };
+        let saved_g2 = store.install_plugin_package(inst_g2).await.unwrap();
+        assert_eq!(saved_g2.version, "2.0.0");
+
+        // 11. Guild G3 can choose to install 1.0.0 even though 2.0.0 is the latest package
+        let inst_g3 = PluginGuildInstallation {
+            id: Uuid::new_v4(),
+            guild_id: "guild-3".to_string(),
+            plugin_id: "pkg-pinned".to_string(),
+            version: "1.0.0".to_string(),
+            enabled: true,
+            config: serde_json::json!({}),
+            installed_at: Utc::now(),
+        };
+        let saved_g3 = store.install_plugin_package(inst_g3).await.unwrap();
+        assert_eq!(saved_g3.version, "1.0.0");
+
+        // 12. list_marketplace_releases returns both releases
+        let all_releases = store.list_marketplace_releases("pkg-pinned").await.unwrap();
+        assert_eq!(all_releases.len(), 2);
+        assert_eq!(all_releases[0].version, "2.0.0");
+        assert_eq!(all_releases[1].version, "1.0.0");
     }
 }
