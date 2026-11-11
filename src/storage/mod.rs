@@ -6645,10 +6645,11 @@ impl Storage {
     pub async fn create_workflow_definition(
         &self,
         wf: WorkflowDefinition,
+        actor_id: Option<&str>,
     ) -> anyhow::Result<WorkflowDefinition> {
         match self {
-            Self::Memory(store) => store.create_workflow_definition(wf),
-            Self::Postgres(store) => store.create_workflow_definition(wf).await,
+            Self::Memory(store) => store.create_workflow_definition(wf, actor_id),
+            Self::Postgres(store) => store.create_workflow_definition(wf, actor_id).await,
         }
     }
 
@@ -11977,170 +11978,201 @@ mod tests {
 
         // 1. Validation: empty name -> error
         let empty_name_res = store
-            .create_workflow_definition(WorkflowDefinition {
-                id: Uuid::new_v4(),
-                guild_id: guild_id.to_string(),
-                name: "   ".to_string(),
-                dag_nodes: serde_json::json!([
-                    { "id": "t1", "node_type": "trigger", "config": {} }
-                ]),
-                dag_edges: serde_json::json!([]),
-                is_active: true,
-                version: 1,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            })
+            .create_workflow_definition(
+                WorkflowDefinition {
+                    id: Uuid::new_v4(),
+                    guild_id: guild_id.to_string(),
+                    name: "   ".to_string(),
+                    dag_nodes: serde_json::json!([
+                        { "id": "t1", "node_type": "trigger", "config": {} }
+                    ]),
+                    dag_edges: serde_json::json!([]),
+                    is_active: true,
+                    version: 1,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                Some("admin_user"),
+            )
             .await;
         assert!(empty_name_res.is_err());
 
         // 2. Validation: name > 120 chars -> error
         let long_name_res = store
-            .create_workflow_definition(WorkflowDefinition {
-                id: Uuid::new_v4(),
-                guild_id: guild_id.to_string(),
-                name: "w".repeat(121),
-                dag_nodes: serde_json::json!([
-                    { "id": "t1", "node_type": "trigger", "config": {} }
-                ]),
-                dag_edges: serde_json::json!([]),
-                is_active: true,
-                version: 1,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            })
+            .create_workflow_definition(
+                WorkflowDefinition {
+                    id: Uuid::new_v4(),
+                    guild_id: guild_id.to_string(),
+                    name: "w".repeat(121),
+                    dag_nodes: serde_json::json!([
+                        { "id": "t1", "node_type": "trigger", "config": {} }
+                    ]),
+                    dag_edges: serde_json::json!([]),
+                    is_active: true,
+                    version: 1,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                Some("admin_user"),
+            )
             .await;
         assert!(long_name_res.is_err());
 
         // 3. Validation: node.id with invalid characters / whitespace -> error
         let invalid_node_id_res = store
-            .create_workflow_definition(WorkflowDefinition {
-                id: Uuid::new_v4(),
-                guild_id: guild_id.to_string(),
-                name: "Invalid Node".to_string(),
-                dag_nodes: serde_json::json!([
-                    { "id": "t1 space", "node_type": "trigger", "config": {} }
-                ]),
-                dag_edges: serde_json::json!([]),
-                is_active: true,
-                version: 1,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            })
+            .create_workflow_definition(
+                WorkflowDefinition {
+                    id: Uuid::new_v4(),
+                    guild_id: guild_id.to_string(),
+                    name: "Invalid Node".to_string(),
+                    dag_nodes: serde_json::json!([
+                        { "id": "t1 space", "node_type": "trigger", "config": {} }
+                    ]),
+                    dag_edges: serde_json::json!([]),
+                    is_active: true,
+                    version: 1,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                Some("admin_user"),
+            )
             .await;
         assert!(invalid_node_id_res.is_err());
 
         // 4. Validation: node.config > 8 KiB -> error
         let huge_config = "x".repeat(8193);
         let huge_config_res = store
-            .create_workflow_definition(WorkflowDefinition {
-                id: Uuid::new_v4(),
-                guild_id: guild_id.to_string(),
-                name: "Huge Config".to_string(),
-                dag_nodes: serde_json::json!([
-                    { "id": "t1", "node_type": "trigger", "config": { "payload": huge_config } }
-                ]),
-                dag_edges: serde_json::json!([]),
-                is_active: true,
-                version: 1,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            })
+            .create_workflow_definition(
+                WorkflowDefinition {
+                    id: Uuid::new_v4(),
+                    guild_id: guild_id.to_string(),
+                    name: "Huge Config".to_string(),
+                    dag_nodes: serde_json::json!([
+                        { "id": "t1", "node_type": "trigger", "config": { "payload": huge_config } }
+                    ]),
+                    dag_edges: serde_json::json!([]),
+                    is_active: true,
+                    version: 1,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                Some("admin_user"),
+            )
             .await;
         assert!(huge_config_res.is_err());
 
         // 5. Validation: cyclic DAG -> error
         let cyclic_res = store
-            .create_workflow_definition(WorkflowDefinition {
-                id: Uuid::new_v4(),
-                guild_id: guild_id.to_string(),
-                name: "Cyclic Workflow".to_string(),
-                dag_nodes: serde_json::json!([
-                    { "id": "a", "node_type": "trigger", "config": {} },
-                    { "id": "b", "node_type": "action", "config": {} }
-                ]),
-                dag_edges: serde_json::json!([
-                    { "from": "a", "to": "b" },
-                    { "from": "b", "to": "a" }
-                ]),
-                is_active: true,
-                version: 1,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            })
+            .create_workflow_definition(
+                WorkflowDefinition {
+                    id: Uuid::new_v4(),
+                    guild_id: guild_id.to_string(),
+                    name: "Cyclic Workflow".to_string(),
+                    dag_nodes: serde_json::json!([
+                        { "id": "a", "node_type": "trigger", "config": {} },
+                        { "id": "b", "node_type": "action", "config": {} }
+                    ]),
+                    dag_edges: serde_json::json!([
+                        { "from": "a", "to": "b" },
+                        { "from": "b", "to": "a" }
+                    ]),
+                    is_active: true,
+                    version: 1,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                Some("admin_user"),
+            )
             .await;
         assert!(cyclic_res.is_err());
+
+        // Verify NO audit events recorded for validation errors
+        let initial_audits = store.list_audit_events(guild_id, 10).await.unwrap();
+        assert!(initial_audits.is_empty());
 
         // 6. Quota count enforcement: set quota to (2, 100_000)
         store.set_workflows_quota_for_test(Some((2, 100_000)));
 
         let wf1 = store
-            .create_workflow_definition(WorkflowDefinition {
-                id: Uuid::new_v4(),
-                guild_id: guild_id.to_string(),
-                name: "  Workflow 1  ".to_string(), // verify whitespace trimming
-                dag_nodes: serde_json::json!([
-                    { "id": "t1", "node_type": "trigger", "config": {} }
-                ]),
-                dag_edges: serde_json::json!([]),
-                is_active: true,
-                version: 1,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            })
+            .create_workflow_definition(
+                WorkflowDefinition {
+                    id: Uuid::new_v4(),
+                    guild_id: guild_id.to_string(),
+                    name: "  Workflow 1  ".to_string(), // verify whitespace trimming
+                    dag_nodes: serde_json::json!([
+                        { "id": "t1", "node_type": "trigger", "config": {} }
+                    ]),
+                    dag_edges: serde_json::json!([]),
+                    is_active: true,
+                    version: 1,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                Some("admin_user"),
+            )
             .await
             .expect("wf1 created");
         assert_eq!(wf1.name, "Workflow 1");
 
         let wf2 = store
-            .create_workflow_definition(WorkflowDefinition {
-                id: Uuid::new_v4(),
-                guild_id: guild_id.to_string(),
-                name: "Workflow 2".to_string(),
-                dag_nodes: serde_json::json!([
-                    { "id": "t1", "node_type": "trigger", "config": {} }
-                ]),
-                dag_edges: serde_json::json!([]),
-                is_active: true,
-                version: 1,
-                created_at: Utc::now() + chrono::Duration::seconds(1),
-                updated_at: Utc::now(),
-            })
+            .create_workflow_definition(
+                WorkflowDefinition {
+                    id: Uuid::new_v4(),
+                    guild_id: guild_id.to_string(),
+                    name: "Workflow 2".to_string(),
+                    dag_nodes: serde_json::json!([
+                        { "id": "t1", "node_type": "trigger", "config": {} }
+                    ]),
+                    dag_edges: serde_json::json!([]),
+                    is_active: true,
+                    version: 1,
+                    created_at: Utc::now() + chrono::Duration::seconds(1),
+                    updated_at: Utc::now(),
+                },
+                Some("admin_user"),
+            )
             .await
             .expect("wf2 created");
 
         // 3rd workflow in guild_id exceeds count quota
         let wf3_res = store
-            .create_workflow_definition(WorkflowDefinition {
-                id: Uuid::new_v4(),
-                guild_id: guild_id.to_string(),
-                name: "Workflow 3".to_string(),
-                dag_nodes: serde_json::json!([
-                    { "id": "t1", "node_type": "trigger", "config": {} }
-                ]),
-                dag_edges: serde_json::json!([]),
-                is_active: true,
-                version: 1,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            })
+            .create_workflow_definition(
+                WorkflowDefinition {
+                    id: Uuid::new_v4(),
+                    guild_id: guild_id.to_string(),
+                    name: "Workflow 3".to_string(),
+                    dag_nodes: serde_json::json!([
+                        { "id": "t1", "node_type": "trigger", "config": {} }
+                    ]),
+                    dag_edges: serde_json::json!([]),
+                    is_active: true,
+                    version: 1,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                Some("admin_user"),
+            )
             .await;
         assert!(wf3_res.is_err());
 
         // Multi-tenant isolation: other_guild_id can still create up to its quota
         let other_wf = store
-            .create_workflow_definition(WorkflowDefinition {
-                id: Uuid::new_v4(),
-                guild_id: other_guild_id.to_string(),
-                name: "Other Guild WF".to_string(),
-                dag_nodes: serde_json::json!([
-                    { "id": "t1", "node_type": "trigger", "config": {} }
-                ]),
-                dag_edges: serde_json::json!([]),
-                is_active: true,
-                version: 1,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            })
+            .create_workflow_definition(
+                WorkflowDefinition {
+                    id: Uuid::new_v4(),
+                    guild_id: other_guild_id.to_string(),
+                    name: "Other Guild WF".to_string(),
+                    dag_nodes: serde_json::json!([
+                        { "id": "t1", "node_type": "trigger", "config": {} }
+                    ]),
+                    dag_edges: serde_json::json!([]),
+                    is_active: true,
+                    version: 1,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                Some("other_admin"),
+            )
             .await
             .expect("other guild wf created");
         assert_eq!(other_wf.guild_id, other_guild_id);
@@ -12151,19 +12183,22 @@ mod tests {
         let base_time = Utc::now();
         for i in 3..=5 {
             let wf = store
-                .create_workflow_definition(WorkflowDefinition {
-                    id: Uuid::new_v4(),
-                    guild_id: guild_id.to_string(),
-                    name: format!("Workflow {i}"),
-                    dag_nodes: serde_json::json!([
-                        { "id": "t1", "node_type": "trigger", "config": {} }
-                    ]),
-                    dag_edges: serde_json::json!([]),
-                    is_active: true,
-                    version: 1,
-                    created_at: base_time + chrono::Duration::seconds(i as i64),
-                    updated_at: Utc::now(),
-                })
+                .create_workflow_definition(
+                    WorkflowDefinition {
+                        id: Uuid::new_v4(),
+                        guild_id: guild_id.to_string(),
+                        name: format!("Workflow {i}"),
+                        dag_nodes: serde_json::json!([
+                            { "id": "t1", "node_type": "trigger", "config": {} }
+                        ]),
+                        dag_edges: serde_json::json!([]),
+                        is_active: true,
+                        version: 1,
+                        created_at: base_time + chrono::Duration::seconds(i as i64),
+                        updated_at: Utc::now(),
+                    },
+                    Some("admin_user"),
+                )
                 .await
                 .unwrap();
             created_ids.push(wf.id);
@@ -12208,19 +12243,22 @@ mod tests {
         // Set quota to (5, 500_000) -> currently 5 exist, adding 6th fails
         store.set_workflows_quota_for_test(Some((5, 500_000)));
         let over_quota = store
-            .create_workflow_definition(WorkflowDefinition {
-                id: Uuid::new_v4(),
-                guild_id: guild_id.to_string(),
-                name: "Workflow 6".to_string(),
-                dag_nodes: serde_json::json!([
-                    { "id": "t1", "node_type": "trigger", "config": {} }
-                ]),
-                dag_edges: serde_json::json!([]),
-                is_active: true,
-                version: 1,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            })
+            .create_workflow_definition(
+                WorkflowDefinition {
+                    id: Uuid::new_v4(),
+                    guild_id: guild_id.to_string(),
+                    name: "Workflow 6".to_string(),
+                    dag_nodes: serde_json::json!([
+                        { "id": "t1", "node_type": "trigger", "config": {} }
+                    ]),
+                    dag_edges: serde_json::json!([]),
+                    is_active: true,
+                    version: 1,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                Some("admin_user"),
+            )
             .await;
         assert!(over_quota.is_err());
 
@@ -12263,23 +12301,77 @@ mod tests {
 
         // Now creating a new workflow succeeds because quota slot was freed!
         let reclaimed = store
-            .create_workflow_definition(WorkflowDefinition {
-                id: Uuid::new_v4(),
-                guild_id: guild_id.to_string(),
-                name: "Workflow Reclaimed".to_string(),
-                dag_nodes: serde_json::json!([
-                    { "id": "t1", "node_type": "trigger", "config": {} }
-                ]),
-                dag_edges: serde_json::json!([]),
-                is_active: true,
-                version: 1,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            })
+            .create_workflow_definition(
+                WorkflowDefinition {
+                    id: Uuid::new_v4(),
+                    guild_id: guild_id.to_string(),
+                    name: "Workflow Reclaimed".to_string(),
+                    dag_nodes: serde_json::json!([
+                        { "id": "t1", "node_type": "trigger", "config": {} }
+                    ]),
+                    dag_edges: serde_json::json!([]),
+                    is_active: true,
+                    version: 1,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                Some("admin_user"),
+            )
             .await;
         assert!(reclaimed.is_ok());
 
-        // 9. Reset quota override
+        // 9. Atomic rollback on audit failure (Issue #397)
+        store.set_workflows_quota_for_test(Some((10, 500_000)));
+        store.inject_audit_failure(true);
+        let audit_fail_wf_id = Uuid::new_v4();
+        let audit_fail_res = store
+            .create_workflow_definition(
+                WorkflowDefinition {
+                    id: audit_fail_wf_id,
+                    guild_id: guild_id.to_string(),
+                    name: "Workflow Audit Fail".to_string(),
+                    dag_nodes: serde_json::json!([
+                        { "id": "t1", "node_type": "trigger", "config": {} }
+                    ]),
+                    dag_edges: serde_json::json!([]),
+                    is_active: true,
+                    version: 1,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                Some("admin_user"),
+            )
+            .await;
+        assert!(audit_fail_res.is_err());
+        assert_eq!(
+            audit_fail_res.unwrap_err().to_string(),
+            "simulated audit failure"
+        );
+        // Workflow MUST NOT exist (atomic fail-closed / rollback)
+        assert!(
+            store
+                .get_workflow_definition(audit_fail_wf_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        store.inject_audit_failure(false);
+
+        // Verify that successful workflows generated exact audit events
+        let audits = store.list_audit_events(guild_id, 50).await.unwrap();
+        let created_audits: Vec<_> = audits
+            .iter()
+            .filter(|a| a.event == "workflow_created")
+            .collect();
+        assert!(!created_audits.is_empty());
+        for a in &created_audits {
+            assert_eq!(a.module_id, "workflow_builder");
+            assert_eq!(a.actor_id.as_deref(), Some("admin_user"));
+            assert!(a.data.get("workflow_id").is_some());
+            assert!(a.data.get("workflow_name").is_some());
+        }
+
+        // 10. Reset quota override
         store.set_workflows_quota_for_test(None);
     }
 }

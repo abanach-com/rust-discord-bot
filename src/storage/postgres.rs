@@ -9047,6 +9047,7 @@ impl PostgresStore {
     pub async fn create_workflow_definition(
         &self,
         mut wf: WorkflowDefinition,
+        actor_id: Option<&str>,
     ) -> anyhow::Result<WorkflowDefinition> {
         let (trimmed_name, def_bytes) =
             validate_workflow_definition_content(&wf.name, &wf.dag_nodes, &wf.dag_edges)?;
@@ -9105,6 +9106,23 @@ impl PostgresStore {
         .bind(wf.created_at)
         .bind(wf.updated_at)
         .fetch_one(&mut *tx)
+        .await?;
+
+        let actor = actor_id.unwrap_or("system");
+        sqlx::query(
+            "INSERT INTO audit_events (guild_id, actor_id, module_id, event, data) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(&row.guild_id)
+        .bind(actor)
+        .bind("workflow_builder")
+        .bind("workflow_created")
+        .bind(serde_json::json!({
+            "workflow_id": row.id,
+            "workflow_name": row.name,
+            "actor_id": actor,
+        }))
+        .execute(&mut *tx)
         .await?;
 
         tx.commit().await?;

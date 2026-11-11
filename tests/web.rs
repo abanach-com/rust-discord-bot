@@ -19376,6 +19376,59 @@ async fn test_workflow_builder_crud_quota_and_pagination_issue_395() {
         .unwrap();
     assert_eq!(get_deleted.status(), reqwest::StatusCode::NOT_FOUND);
 
+    // 6. Issue #397: Failure injection on audit_events causes POST /workflows to fail and roll back
+    web_state.app.storage.inject_audit_failure(true);
+    let audit_fail_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/workflows"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "name": "Audit Fail Rollback WF",
+            "dag_nodes": [{ "id": "t1", "node_type": "trigger", "config": {} }],
+            "dag_edges": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        audit_fail_resp.status(),
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR
+    );
+    web_state.app.storage.inject_audit_failure(false);
+
+    // Verify the rolled-back workflow was NOT saved
+    let list_after_rollback = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/workflows?limit=100"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_after_rollback.status(), reqwest::StatusCode::OK);
+    let page_val: serde_json::Value = list_after_rollback.json().await.unwrap();
+    let items = page_val["items"].as_array().unwrap();
+    assert!(!items.iter().any(|w| w["name"] == "Audit Fail Rollback WF"));
+
+    // Verify successful creation produced workflow_created audit event with correct actor_id
+    let audits = web_state
+        .app
+        .storage
+        .list_audit_events(guild_id, 50)
+        .await
+        .unwrap();
+    let created_audits: Vec<_> = audits
+        .iter()
+        .filter(|a| a.event == "workflow_created")
+        .collect();
+    assert!(!created_audits.is_empty());
+    for a in &created_audits {
+        assert_eq!(a.module_id, "workflow_builder");
+        assert_eq!(a.actor_id.as_deref(), Some(admin_id));
+        assert!(a.data.get("workflow_id").is_some());
+        assert!(a.data.get("workflow_name").is_some());
+    }
+
     // Reset quota override
     web_state.app.storage.set_workflows_quota_for_test(None);
 }

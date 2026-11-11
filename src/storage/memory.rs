@@ -6681,6 +6681,7 @@ impl MemoryStore {
     pub fn create_workflow_definition(
         &self,
         mut wf: WorkflowDefinition,
+        actor_id: Option<&str>,
     ) -> anyhow::Result<WorkflowDefinition> {
         let (trimmed_name, def_bytes) =
             validate_workflow_definition_content(&wf.name, &wf.dag_nodes, &wf.dag_edges)?;
@@ -6723,6 +6724,20 @@ impl MemoryStore {
                 "Guild has reached maximum storage limit of {max_bytes} bytes for workflows (current: {current_bytes}, requested: {def_bytes})"
             )));
         }
+
+        // Atomically record audit before inserting into self.workflows
+        let actor = actor_id.unwrap_or("system");
+        self.record_audit(
+            Some(&wf.guild_id),
+            Some(actor),
+            "workflow_builder",
+            "workflow_created",
+            serde_json::json!({
+                "workflow_id": wf.id,
+                "workflow_name": wf.name,
+                "actor_id": actor,
+            }),
+        )?;
 
         self.workflows.insert(wf.id, wf.clone());
         Ok(wf)

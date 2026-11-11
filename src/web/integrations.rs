@@ -899,10 +899,11 @@ pub async fn create_workflow(
         updated_at: Utc::now(),
     };
 
+    let actor_id = session.user.id.clone();
     let saved = state
         .app
         .storage
-        .create_workflow_definition(wf)
+        .create_workflow_definition(wf, Some(&actor_id))
         .await
         .map_err(|e| {
             if let Some(wf_err) = e.downcast_ref::<WorkflowStorageError>() {
@@ -929,22 +930,6 @@ pub async fn create_workflow(
                 }
             }
         })?;
-
-    let actor_id = session.user.id.clone();
-    let _ = state
-        .app
-        .storage
-        .record_audit(
-            Some(&guild_id),
-            Some(&actor_id),
-            "workflow_builder",
-            "workflow_created",
-            serde_json::json!({
-                "workflow_id": saved.id,
-                "workflow_name": saved.name,
-            }),
-        )
-        .await;
 
     Ok(Json(saved))
 }
