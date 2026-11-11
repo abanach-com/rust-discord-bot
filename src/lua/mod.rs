@@ -2,6 +2,7 @@ pub mod afk;
 pub mod birthdays;
 pub mod economy;
 mod engine;
+pub mod events;
 mod giveaway;
 pub mod install_xml;
 mod model;
@@ -19,6 +20,7 @@ pub use afk::AfkOperation;
 pub use birthdays::BirthdayOperation;
 pub use economy::EconomyOperation;
 pub use engine::{LuaEngine, LuaEngineError, LuaLimits};
+pub use events::EventVoiceQueueOperation;
 pub use giveaway::GiveawayOperation;
 pub use install_xml::{InstallManifest, InstallModuleEntry, InstallXmlError};
 pub use model::{

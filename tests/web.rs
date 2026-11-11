@@ -18406,3 +18406,338 @@ async fn test_scheduled_events_validation_quota_and_pagination_issue_393() {
         .storage
         .set_scheduled_events_quota_for_test(None);
 }
+
+#[tokio::test]
+async fn test_event_voice_queue_config_ready_and_outbox_issue_394() {
+    let (web_state, permissions_cache) = test_web_state().await;
+    let guild_id = "394000000000000099";
+
+    let admin_id = "user_admin_394";
+    let admin_session = "session_admin_394";
+    let admin_csrf = "csrf_admin_394";
+
+    let member_id = "user_member_394";
+    let member_session = "session_member_394";
+    let member_csrf = "csrf_member_394";
+
+    // Seed sessions
+    web_state
+        .app
+        .sessions
+        .save_session(
+            admin_session,
+            DashboardUser {
+                id: admin_id.to_string(),
+                username: "Admin394".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Guild 394".to_string(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_string(),
+            }],
+            admin_csrf.to_string(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    web_state
+        .app
+        .sessions
+        .save_session(
+            member_session,
+            DashboardUser {
+                id: member_id.to_string(),
+                username: "Member394".to_string(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.to_string(),
+                name: "Guild 394".to_string(),
+                icon: None,
+                owner: false,
+                permissions: "0".to_string(),
+            }],
+            member_csrf.to_string(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    permissions_cache.insert(
+        (admin_id.to_string(), guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: true,
+            checked_at: Utc::now(),
+        },
+    );
+    permissions_cache.insert(
+        (member_id.to_string(), guild_id.to_string()),
+        CachedGuildPermission {
+            can_manage: false,
+            checked_at: Utc::now(),
+        },
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = build_router(web_state.clone());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+    let admin_cookie = format!("rusty_discord_bot_session={admin_session}");
+    let member_cookie = format!("rusty_discord_bot_session={member_session}");
+
+    let now = Utc::now();
+
+    // 1. Create a scheduled event
+    let create_resp = client
+        .post(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "title": "Voice Queue Event",
+            "description": "Raid with voice queue and lobby pull",
+            "start_time": (now + Duration::hours(1)).to_rfc3339(),
+            "max_participants": 1,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), reqwest::StatusCode::OK);
+    let created_event: serde_json::Value = create_resp.json().await.unwrap();
+    let event_id = created_event["id"].as_str().unwrap().to_string();
+
+    // 2. GET default voice queue config -> 200 OK (enabled: false, mode: notify_only)
+    let get_vq_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{event_id}/voice-queue"
+        ))
+        .header(COOKIE, &member_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_vq_resp.status(), reqwest::StatusCode::OK);
+    let vq_json: serde_json::Value = get_vq_resp.json().await.unwrap();
+    assert_eq!(vq_json["enabled"], false);
+    assert_eq!(vq_json["mode"], "notify_only");
+
+    // 3. PUT voice queue config without manage permissions (member) -> 403 Forbidden
+    let put_forbidden = client
+        .put(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{event_id}/voice-queue"
+        ))
+        .header(COOKIE, &member_cookie)
+        .header("X-CSRF-Token", member_csrf)
+        .json(&serde_json::json!({
+            "enabled": true,
+            "lobby_channel_id": "111222333",
+            "target_channel_id": "444555666",
+            "mode": "auto_move"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put_forbidden.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // 4. PUT voice queue config with invalid mode -> 400 Bad Request
+    let put_invalid_mode = client
+        .put(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{event_id}/voice-queue"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "enabled": true,
+            "lobby_channel_id": "111222333",
+            "target_channel_id": "444555666",
+            "mode": "invalid_teleport"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put_invalid_mode.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // 5. PUT voice queue config as admin with auto_move -> 200 OK
+    let lobby_ch = "111222333444";
+    let target_ch = "555666777888";
+    let put_ok = client
+        .put(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{event_id}/voice-queue"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "enabled": true,
+            "lobby_channel_id": lobby_ch,
+            "target_channel_id": target_ch,
+            "mode": "auto_move"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put_ok.status(), reqwest::StatusCode::OK);
+    let updated_vq: serde_json::Value = put_ok.json().await.unwrap();
+    assert_eq!(updated_vq["enabled"], true);
+    assert_eq!(updated_vq["lobby_channel_id"], lobby_ch);
+    assert_eq!(updated_vq["target_channel_id"], target_ch);
+    assert_eq!(updated_vq["mode"], "auto_move");
+
+    // 6. Add admin as main roster member, member as reserve roster member
+    let ev_uuid = uuid::Uuid::parse_str(&event_id).unwrap();
+    let r_admin = web_state
+        .app
+        .storage
+        .join_event_roster(ev_uuid, admin_id)
+        .await
+        .unwrap();
+    assert_eq!(r_admin.role_type, "main");
+    let r_member = web_state
+        .app
+        .storage
+        .join_event_roster(ev_uuid, member_id)
+        .await
+        .unwrap();
+    assert_eq!(r_member.role_type, "reserve");
+
+    // 7. Member marks ready via POST /voice-queue/ready
+    // Since member is reserve, ready status updates but NO auto_move outbox job is created
+    let member_ready_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{event_id}/voice-queue/ready"
+        ))
+        .header(COOKIE, &member_cookie)
+        .header("X-CSRF-Token", member_csrf)
+        .json(&serde_json::json!({
+            "consent_auto_move": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(member_ready_resp.status(), reqwest::StatusCode::OK);
+    let member_ready: serde_json::Value = member_ready_resp.json().await.unwrap();
+    assert_eq!(member_ready["ready_status"], "ready");
+    assert_eq!(member_ready["consent_auto_move"], true);
+    assert_eq!(member_ready["generation"], 1);
+
+    // Verify outbox has NO job for reserve member
+    let no_job = web_state
+        .app
+        .storage
+        .claim_event_voice_outbox_job("worker_1", Duration::seconds(30))
+        .await
+        .unwrap();
+    assert!(no_job.is_none());
+
+    // 8. Admin marks ready via POST /voice-queue/ready with consent_auto_move
+    // Since admin is main and mode is auto_move, an auto_move outbox job is generated!
+    let admin_ready_resp = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_id}/events/{event_id}/voice-queue/ready"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .json(&serde_json::json!({
+            "consent_auto_move": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin_ready_resp.status(), reqwest::StatusCode::OK);
+    let admin_ready: serde_json::Value = admin_ready_resp.json().await.unwrap();
+    assert_eq!(admin_ready["ready_status"], "ready");
+    assert_eq!(admin_ready["consent_auto_move"], true);
+
+    // Verify outbox NOW has the auto_move job for admin
+    let claimed_job = web_state
+        .app
+        .storage
+        .claim_event_voice_outbox_job("worker_1", Duration::seconds(30))
+        .await
+        .unwrap();
+    assert!(claimed_job.is_some());
+    let job = claimed_job.unwrap();
+    assert_eq!(job.event_id, ev_uuid);
+    assert_eq!(job.user_id, admin_id);
+    assert_eq!(
+        job.kind,
+        rusty_discord_bot::storage::EVENT_VOICE_JOB_KIND_MOVE_VOICE
+    );
+
+    // Complete job
+    web_state
+        .app
+        .storage
+        .complete_event_voice_outbox_job(job.id, "worker_1")
+        .await
+        .unwrap();
+
+    // 9. GET /voice-queue/roster returns merged entries with ready states
+    let roster_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{event_id}/voice-queue/roster"
+        ))
+        .header(COOKIE, &member_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(roster_resp.status(), reqwest::StatusCode::OK);
+    let roster: Vec<serde_json::Value> = roster_resp.json().await.unwrap();
+    assert_eq!(roster.len(), 2);
+    let admin_entry = roster.iter().find(|e| e["user_id"] == admin_id).unwrap();
+    assert_eq!(admin_entry["role_type"], "main");
+    assert_eq!(admin_entry["ready_status"], "ready");
+    assert_eq!(admin_entry["consent_auto_move"], true);
+
+    let member_entry = roster.iter().find(|e| e["user_id"] == member_id).unwrap();
+    assert_eq!(member_entry["role_type"], "reserve");
+    assert_eq!(member_entry["ready_status"], "ready");
+
+    // 10. Member cancels ready via DELETE /voice-queue/ready -> ready_status reverts to waiting, generation increments
+    let cancel_resp = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/events/{event_id}/voice-queue/ready"
+        ))
+        .header(COOKIE, &member_cookie)
+        .header("X-CSRF-Token", member_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cancel_resp.status(), reqwest::StatusCode::OK);
+    let cancelled_state: serde_json::Value = cancel_resp.json().await.unwrap();
+    assert_eq!(cancelled_state["ready_status"], "waiting");
+    assert_eq!(cancelled_state["generation"], 2);
+
+    // 11. Delete event via DELETE /scheduled-events/{event_id} -> verifies cascade
+    let del_resp = client
+        .delete(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{event_id}"
+        ))
+        .header(COOKIE, &admin_cookie)
+        .header("X-CSRF-Token", admin_csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del_resp.status(), reqwest::StatusCode::OK);
+
+    // Voice queue endpoints now return 404
+    let after_del_resp = client
+        .get(format!(
+            "{base_url}/api/guilds/{guild_id}/scheduled-events/{event_id}/voice-queue"
+        ))
+        .header(COOKIE, &member_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(after_del_resp.status(), reqwest::StatusCode::NOT_FOUND);
+}

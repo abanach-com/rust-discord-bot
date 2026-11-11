@@ -19,7 +19,8 @@ use crate::discord::events::generate_icalendar_event;
 
 use crate::storage::{
     CardCollection, CardTrade, CleanupPlan, CommandPolicyRule, CommunityPoll, CompanionMappingItem,
-    CustomAutomation, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink,
+    CustomAutomation, DynamicVoiceRoom, EVENT_VOICE_MODE_NOTIFY_ONLY, EventRoster,
+    EventVoiceQueueConfig, EventVoiceQueueRosterEntry, FaqEntry, FeedSubscription, GameAccountLink,
     Giveaway, HelpForumConfig, InviteTracking, MAX_COMPANION_MAPPINGS_PER_GUILD,
     ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState, ProgressionSeason,
     ReactionRoleBinding, RecruitmentApplication, RecruitmentReview, RecruitmentTrack,
@@ -2502,6 +2503,236 @@ pub async fn leave_event_roster(
 
         "promoted_reserve_user_id": promoted
 
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateEventVoiceQueueConfigRequest {
+    pub enabled: bool,
+    #[serde(default)]
+    pub lobby_channel_id: Option<String>,
+    #[serde(default)]
+    pub target_channel_id: Option<String>,
+    #[serde(default = "default_voice_queue_mode")]
+    pub mode: String,
+}
+
+fn default_voice_queue_mode() -> String {
+    EVENT_VOICE_MODE_NOTIFY_ONLY.to_string()
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct EventVoiceQueueReadyRequest {
+    #[serde(default)]
+    pub consent_auto_move: Option<bool>,
+}
+
+pub async fn get_event_voice_queue(
+    State(state): State<WebState>,
+    Path((guild_id, event_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<EventVoiceQueueConfig>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
+
+    let _event = state
+        .app
+        .storage
+        .get_scheduled_event(event_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .filter(|ev| ev.guild_id == guild_id)
+        .ok_or_else(|| ApiError::not_found("Scheduled event was not found in this guild."))?;
+
+    let config = state
+        .app
+        .storage
+        .get_event_voice_queue_config(event_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .unwrap_or_else(|| EventVoiceQueueConfig {
+            event_id,
+            guild_id: guild_id.clone(),
+            enabled: false,
+            lobby_channel_id: None,
+            target_channel_id: None,
+            mode: EVENT_VOICE_MODE_NOTIFY_ONLY.to_string(),
+            updated_at: Utc::now(),
+        });
+
+    Ok(Json(config))
+}
+
+pub async fn update_event_voice_queue(
+    State(state): State<WebState>,
+    Path((guild_id, event_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateEventVoiceQueueConfigRequest>,
+) -> Result<Json<EventVoiceQueueConfig>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+
+    let _event = state
+        .app
+        .storage
+        .get_scheduled_event(event_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .filter(|ev| ev.guild_id == guild_id)
+        .ok_or_else(|| ApiError::not_found("Scheduled event was not found in this guild."))?;
+
+    let config = EventVoiceQueueConfig {
+        event_id,
+        guild_id: guild_id.clone(),
+        enabled: payload.enabled,
+        lobby_channel_id: payload
+            .lobby_channel_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        target_channel_id: payload
+            .target_channel_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        mode: payload.mode,
+        updated_at: Utc::now(),
+    };
+
+    let saved = state
+        .app
+        .storage
+        .set_event_voice_queue_config(config)
+        .await
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let _ = state
+        .app
+        .storage
+        .record_audit(
+            Some(&guild_id),
+            Some(&session.user.id),
+            "event_voice_queue",
+            "config_updated",
+            serde_json::json!({
+                "event_id": event_id,
+                "enabled": saved.enabled,
+                "mode": saved.mode,
+                "lobby_channel_id": saved.lobby_channel_id,
+                "target_channel_id": saved.target_channel_id,
+            }),
+        )
+        .await;
+
+    Ok(Json(saved))
+}
+
+pub async fn get_event_voice_queue_roster(
+    State(state): State<WebState>,
+    Path((guild_id, event_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<EventVoiceQueueRosterEntry>>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
+
+    let _event = state
+        .app
+        .storage
+        .get_scheduled_event(event_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .filter(|ev| ev.guild_id == guild_id)
+        .ok_or_else(|| ApiError::not_found("Scheduled event was not found in this guild."))?;
+
+    let entries = state
+        .app
+        .storage
+        .list_event_voice_roster_states(event_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(entries))
+}
+
+pub async fn set_event_voice_member_ready(
+    State(state): State<WebState>,
+    Path((guild_id, event_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+    Json(payload): Json<EventVoiceQueueReadyRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
+
+    let _event = state
+        .app
+        .storage
+        .get_scheduled_event(event_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .filter(|ev| ev.guild_id == guild_id)
+        .ok_or_else(|| ApiError::not_found("Scheduled event was not found in this guild."))?;
+
+    let consent = payload.consent_auto_move.unwrap_or(false);
+    let (m_state, job) = state
+        .app
+        .storage
+        .set_event_voice_member_ready(event_id, &session.user.id, consent)
+        .await
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("Voice queue is not enabled") {
+                ApiError::conflict(msg)
+            } else if msg.contains("not registered in this event roster") {
+                ApiError::bad_request(msg)
+            } else {
+                ApiError::internal(msg)
+            }
+        })?;
+
+    Ok(Json(json!({
+        "event_id": m_state.event_id,
+        "user_id": m_state.user_id,
+        "ready_status": m_state.ready_status,
+        "consent_auto_move": m_state.consent_auto_move,
+        "generation": m_state.generation,
+        "queued": job.is_some(),
+        "job_id": job.as_ref().map(|j| j.id),
+        "job_kind": job.as_ref().map(|j| j.kind.as_str()),
+    })))
+}
+
+pub async fn cancel_event_voice_member_ready(
+    State(state): State<WebState>,
+    Path((guild_id, event_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    verify_csrf(&headers, &session)?;
+    ensure_guild_member_access(&state, &session, &guild_id).await?;
+
+    let _event = state
+        .app
+        .storage
+        .get_scheduled_event(event_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .filter(|ev| ev.guild_id == guild_id)
+        .ok_or_else(|| ApiError::not_found("Scheduled event was not found in this guild."))?;
+
+    let m_state = state
+        .app
+        .storage
+        .cancel_event_voice_member_ready(event_id, &session.user.id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(json!({
+        "event_id": m_state.event_id,
+        "user_id": m_state.user_id,
+        "ready_status": m_state.ready_status,
+        "consent_auto_move": m_state.consent_auto_move,
+        "generation": m_state.generation,
+        "canceled": true,
     })))
 }
 

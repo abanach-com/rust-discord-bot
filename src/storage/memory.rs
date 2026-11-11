@@ -14,27 +14,32 @@ use super::{
     AuditLogEntry, BirthdayRecord, CardCollection, CardTrade, CleanupPlan, CoinTransfer,
     CoinTransferOutcome, CommandPolicyRule, CommunityPoll, CompanionChannelLease,
     CompanionChannelMapping, CompanionMappingItem, CountingGame, CrimeClaimOutcome,
-    CustomAutomation, DailyClaimOutcome, DynamicVoiceRoom, EconomyIdempotencyEntry,
-    EconomyPurchaseRequestRecord, EventRoster, FaqEntry, FeedSubscription, GameAccountLink,
-    GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway, GuildModuleSettings,
-    IntegrationConnection, IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking,
-    KickStreamSubscription, LinkedAccount, MAX_AI_DOCUMENTS_BYTES_PER_GUILD,
-    MAX_AI_DOCUMENTS_PER_GUILD, MAX_COMPANION_MAPPINGS_PER_GUILD, MAX_SCHEDULED_EVENTS_PER_GUILD,
-    McpToolAuthorization, MemberIdentityRecord, MemberProgress, MemberSearchFilter,
-    MemberSearchRow, MemberSnapshot, ModerationAppeal, ModerationExecutionIntent,
-    ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState, ModuleDraftConfig,
-    PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric, ProgressionSeason,
-    QuoteRecord, ReactionRoleBinding, ReactionRoleGrant, RecordCompanionLeaseParams,
-    RedditSubscription, ReleaseReactionRoleGrantOutcome, ReputationGrantOutcome, ScheduledEvent,
-    ScheduledEventsPage, ServerSnapshot, SocialDraftApprovalError, SocialDraftsPage,
-    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StoreItemsPage,
-    StorePurchase, StorePurchasesPage, TagRecord, TelegramBridge, TelegramMessageMapping,
-    TimedRoleGrant, Tournament, TupperError, TupperProfile, TwitchStreamSubscription,
-    UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WORK_JOBS, WorkClaimOutcome,
-    WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription,
-    encode_scheduled_event_cursor, encode_store_purchase_cursor, is_member_after_cursor,
-    level_for_xp, next_birthday_date, parse_member_search_cursor, snowflake_created_at,
-    validate_birthday_date, validate_scheduled_event_content, validate_snowflake,
+    CustomAutomation, DailyClaimOutcome, DynamicVoiceRoom, EVENT_VOICE_JOB_KIND_MOVE_VOICE,
+    EVENT_VOICE_JOB_KIND_NOTIFY_READY, EVENT_VOICE_JOB_STATE_CANCELED, EVENT_VOICE_JOB_STATE_DONE,
+    EVENT_VOICE_JOB_STATE_FAILED, EVENT_VOICE_JOB_STATE_LEASED, EVENT_VOICE_JOB_STATE_PENDING,
+    EVENT_VOICE_MODE_AUTO_MOVE, EVENT_VOICE_READY_STATUS_READY, EVENT_VOICE_READY_STATUS_WAITING,
+    EconomyIdempotencyEntry, EconomyPurchaseRequestRecord, EventRoster, EventVoiceMemberState,
+    EventVoiceOutboxJob, EventVoiceQueueConfig, EventVoiceQueueRosterEntry, FaqEntry,
+    FeedSubscription, GameAccountLink, GamingHubGameStatus, GitHubDevopsMapping,
+    GitLabSubscription, Giveaway, GuildModuleSettings, IntegrationConnection,
+    IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking, KickStreamSubscription,
+    LinkedAccount, MAX_AI_DOCUMENTS_BYTES_PER_GUILD, MAX_AI_DOCUMENTS_PER_GUILD,
+    MAX_COMPANION_MAPPINGS_PER_GUILD, MAX_SCHEDULED_EVENTS_PER_GUILD, McpToolAuthorization,
+    MemberIdentityRecord, MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot,
+    ModerationAppeal, ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings,
+    ModeratorDutyState, ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage,
+    ProgressMetric, ProgressionSeason, QuoteRecord, ReactionRoleBinding, ReactionRoleGrant,
+    RecordCompanionLeaseParams, RedditSubscription, ReleaseReactionRoleGrantOutcome,
+    ReputationGrantOutcome, ScheduledEvent, ScheduledEventsPage, ServerSnapshot,
+    SocialDraftApprovalError, SocialDraftsPage, SocialPublicationDraft, StarboardEntry,
+    SteamLfgPost, StickyMessage, StoreItem, StoreItemsPage, StorePurchase, StorePurchasesPage,
+    TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant, Tournament, TupperError,
+    TupperProfile, TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport,
+    VkSubscription, WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
+    YouTubeChannelSubscription, encode_scheduled_event_cursor, encode_store_purchase_cursor,
+    is_member_after_cursor, level_for_xp, next_birthday_date, parse_member_search_cursor,
+    snowflake_created_at, validate_birthday_date, validate_event_voice_queue_config,
+    validate_scheduled_event_content, validate_snowflake,
 };
 
 type ModuleKey = (String, String);
@@ -108,6 +113,14 @@ pub struct MemoryStore {
     events: Arc<DashMap<Uuid, ScheduledEvent>>,
 
     rosters: Arc<DashMap<Uuid, Vec<EventRoster>>>,
+
+    event_voice_write_lock: Arc<Mutex<()>>,
+
+    event_voice_configs: Arc<DashMap<Uuid, EventVoiceQueueConfig>>,
+
+    event_voice_member_states: Arc<DashMap<(Uuid, String), EventVoiceMemberState>>,
+
+    event_voice_outbox: Arc<Mutex<Vec<EventVoiceOutboxJob>>>,
 
     tournaments: Arc<DashMap<Uuid, Tournament>>,
 
@@ -4737,6 +4750,16 @@ impl MemoryStore {
 
         self.events.remove(&event_id);
         self.rosters.remove(&event_id);
+        self.event_voice_configs.remove(&event_id);
+        self.event_voice_member_states
+            .retain(|k, _| k.0 != event_id);
+        {
+            let mut outbox = self
+                .event_voice_outbox
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            outbox.retain(|j| j.event_id != event_id);
+        }
 
         let _ = self.record_audit(
             Some(guild_id),
@@ -4835,7 +4858,64 @@ impl MemoryStore {
                     reserve.user_id.clone()
                 });
 
-            if promoted.is_some() {
+            if let Some(ref promoted_user) = promoted {
+                if let Some(cfg) = self
+                    .event_voice_configs
+                    .get(&event_id)
+                    .filter(|c| c.enabled)
+                {
+                    let now = Utc::now();
+                    let key = (event_id, promoted_user.clone());
+                    let promoted_gen = self
+                        .event_voice_member_states
+                        .get(&key)
+                        .map(|s| s.generation)
+                        .unwrap_or(1);
+                    if !self.event_voice_member_states.contains_key(&key) {
+                        self.event_voice_member_states.insert(
+                            key,
+                            EventVoiceMemberState {
+                                event_id,
+                                guild_id: cfg.guild_id.clone(),
+                                user_id: promoted_user.clone(),
+                                ready_status: EVENT_VOICE_READY_STATUS_WAITING.to_string(),
+                                consent_auto_move: false,
+                                generation: promoted_gen,
+                                ready_at: None,
+                                updated_at: now,
+                            },
+                        );
+                    }
+
+                    let mut outbox = self
+                        .event_voice_outbox
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    let exists = outbox.iter().any(|j| {
+                        j.event_id == event_id
+                            && j.user_id == *promoted_user
+                            && j.generation == promoted_gen
+                            && j.kind == EVENT_VOICE_JOB_KIND_NOTIFY_READY
+                    });
+                    if !exists {
+                        outbox.push(EventVoiceOutboxJob {
+                            id: Uuid::new_v4(),
+                            event_id,
+                            guild_id: cfg.guild_id.clone(),
+                            user_id: promoted_user.clone(),
+                            kind: EVENT_VOICE_JOB_KIND_NOTIFY_READY.to_string(),
+                            state: EVENT_VOICE_JOB_STATE_PENDING.to_string(),
+                            attempts: 0,
+                            next_attempt_at: now,
+                            lease_owner: None,
+                            lease_until: None,
+                            generation: promoted_gen,
+                            last_error: None,
+                            created_at: now,
+                            updated_at: now,
+                        });
+                    }
+                }
                 return promoted;
             }
         }
@@ -4856,6 +4936,367 @@ impl MemoryStore {
                 .then_with(|| a.user_id.cmp(&b.user_id))
         });
         list
+    }
+
+    pub fn get_event_voice_queue_config(&self, event_id: Uuid) -> Option<EventVoiceQueueConfig> {
+        self.event_voice_configs.get(&event_id).map(|r| r.clone())
+    }
+
+    pub fn set_event_voice_queue_config(
+        &self,
+        config: EventVoiceQueueConfig,
+    ) -> anyhow::Result<EventVoiceQueueConfig> {
+        validate_event_voice_queue_config(&config)?;
+        let _lock = self
+            .event_voice_write_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let event = self
+            .events
+            .get(&config.event_id)
+            .ok_or_else(|| anyhow::anyhow!("Scheduled event not found"))?;
+        anyhow::ensure!(event.guild_id == config.guild_id, "Event guild_id mismatch");
+        let mut cfg = config;
+        cfg.updated_at = Utc::now();
+        self.event_voice_configs.insert(cfg.event_id, cfg.clone());
+        Ok(cfg)
+    }
+
+    pub fn get_event_voice_member_state(
+        &self,
+        event_id: Uuid,
+        user_id: &str,
+    ) -> Option<EventVoiceMemberState> {
+        self.event_voice_member_states
+            .get(&(event_id, user_id.to_string()))
+            .map(|r| r.clone())
+    }
+
+    pub fn set_event_voice_member_ready(
+        &self,
+        event_id: Uuid,
+        user_id: &str,
+        consent_auto_move: bool,
+    ) -> anyhow::Result<(EventVoiceMemberState, Option<EventVoiceOutboxJob>)> {
+        let _lock = self
+            .event_voice_write_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let event = self
+            .events
+            .get(&event_id)
+            .ok_or_else(|| anyhow::anyhow!("Scheduled event not found"))?;
+
+        let config = self
+            .event_voice_configs
+            .get(&event_id)
+            .ok_or_else(|| anyhow::anyhow!("Voice queue is not enabled for this event"))?;
+        anyhow::ensure!(config.enabled, "Voice queue is not enabled for this event");
+
+        let rosters = self
+            .rosters
+            .get(&event_id)
+            .ok_or_else(|| anyhow::anyhow!("User is not registered in this event roster"))?;
+        let user_entry = rosters
+            .iter()
+            .find(|r| r.user_id == user_id)
+            .ok_or_else(|| anyhow::anyhow!("User is not registered in this event roster"))?;
+        let role_type = user_entry.role_type.clone();
+
+        let key = (event_id, user_id.to_string());
+        let now = Utc::now();
+        let current_gen = self
+            .event_voice_member_states
+            .get(&key)
+            .map(|s| s.generation)
+            .unwrap_or(1);
+
+        let state = EventVoiceMemberState {
+            event_id,
+            guild_id: event.guild_id.clone(),
+            user_id: user_id.to_string(),
+            ready_status: EVENT_VOICE_READY_STATUS_READY.to_string(),
+            consent_auto_move,
+            generation: current_gen,
+            ready_at: Some(now),
+            updated_at: now,
+        };
+        self.event_voice_member_states.insert(key, state.clone());
+
+        let mut job = None;
+        if role_type == "main" {
+            let kind = if config.mode == EVENT_VOICE_MODE_AUTO_MOVE && consent_auto_move {
+                EVENT_VOICE_JOB_KIND_MOVE_VOICE
+            } else {
+                EVENT_VOICE_JOB_KIND_NOTIFY_READY
+            };
+
+            let mut outbox = self
+                .event_voice_outbox
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(existing) = outbox.iter().find(|j| {
+                j.event_id == event_id
+                    && j.user_id == user_id
+                    && j.generation == current_gen
+                    && j.kind == kind
+                    && (j.state == EVENT_VOICE_JOB_STATE_PENDING
+                        || j.state == EVENT_VOICE_JOB_STATE_LEASED)
+            }) {
+                job = Some(existing.clone());
+            } else {
+                let new_job = EventVoiceOutboxJob {
+                    id: Uuid::new_v4(),
+                    event_id,
+                    guild_id: event.guild_id.clone(),
+                    user_id: user_id.to_string(),
+                    kind: kind.to_string(),
+                    state: EVENT_VOICE_JOB_STATE_PENDING.to_string(),
+                    attempts: 0,
+                    next_attempt_at: now,
+                    lease_owner: None,
+                    lease_until: None,
+                    generation: current_gen,
+                    last_error: None,
+                    created_at: now,
+                    updated_at: now,
+                };
+                outbox.push(new_job.clone());
+                job = Some(new_job);
+            }
+        }
+
+        Ok((state, job))
+    }
+
+    pub fn cancel_event_voice_member_ready(
+        &self,
+        event_id: Uuid,
+        user_id: &str,
+    ) -> anyhow::Result<EventVoiceMemberState> {
+        let _lock = self
+            .event_voice_write_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let event = self
+            .events
+            .get(&event_id)
+            .ok_or_else(|| anyhow::anyhow!("Scheduled event not found"))?;
+
+        let key = (event_id, user_id.to_string());
+        let next_gen = self
+            .event_voice_member_states
+            .get(&key)
+            .map(|s| s.generation + 1)
+            .unwrap_or(2);
+
+        let now = Utc::now();
+        let state = EventVoiceMemberState {
+            event_id,
+            guild_id: event.guild_id.clone(),
+            user_id: user_id.to_string(),
+            ready_status: EVENT_VOICE_READY_STATUS_WAITING.to_string(),
+            consent_auto_move: false,
+            generation: next_gen,
+            ready_at: None,
+            updated_at: now,
+        };
+        self.event_voice_member_states.insert(key, state.clone());
+
+        let mut outbox = self
+            .event_voice_outbox
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for j in outbox.iter_mut() {
+            if j.event_id == event_id
+                && j.user_id == user_id
+                && (j.state == EVENT_VOICE_JOB_STATE_PENDING
+                    || j.state == EVENT_VOICE_JOB_STATE_LEASED)
+            {
+                j.state = EVENT_VOICE_JOB_STATE_CANCELED.to_string();
+                j.last_error = Some("User canceled ready".to_string());
+                j.updated_at = now;
+            }
+        }
+
+        Ok(state)
+    }
+
+    pub fn list_event_voice_roster_states(
+        &self,
+        event_id: Uuid,
+    ) -> anyhow::Result<Vec<EventVoiceQueueRosterEntry>> {
+        let rosters = self
+            .rosters
+            .get(&event_id)
+            .map(|r| r.clone())
+            .unwrap_or_default();
+        let mut entries = Vec::with_capacity(rosters.len());
+
+        for r in rosters {
+            let m_state = self
+                .event_voice_member_states
+                .get(&(event_id, r.user_id.clone()));
+            let (status, consent, member_gen, ready_at) = if let Some(s) = m_state {
+                (
+                    s.ready_status.clone(),
+                    s.consent_auto_move,
+                    s.generation,
+                    s.ready_at,
+                )
+            } else {
+                (EVENT_VOICE_READY_STATUS_WAITING.to_string(), false, 1, None)
+            };
+
+            entries.push(EventVoiceQueueRosterEntry {
+                event_id,
+                user_id: r.user_id,
+                role_type: r.role_type,
+                position: r.position,
+                joined_at: r.joined_at,
+                ready_status: status,
+                consent_auto_move: consent,
+                generation: member_gen,
+                ready_at,
+            });
+        }
+
+        entries.sort_by(|a, b| {
+            let role_order_a = if a.role_type == "main" { 0 } else { 1 };
+            let role_order_b = if b.role_type == "main" { 0 } else { 1 };
+            role_order_a
+                .cmp(&role_order_b)
+                .then_with(|| a.position.cmp(&b.position))
+                .then_with(|| a.joined_at.cmp(&b.joined_at))
+        });
+
+        Ok(entries)
+    }
+
+    pub fn claim_event_voice_outbox_job(
+        &self,
+        worker_id: &str,
+        lease_duration: chrono::Duration,
+    ) -> anyhow::Result<Option<EventVoiceOutboxJob>> {
+        let _lock = self
+            .event_voice_write_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut outbox = self
+            .event_voice_outbox
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let now = Utc::now();
+
+        let candidate_idx = outbox.iter().position(|j| {
+            (j.state == EVENT_VOICE_JOB_STATE_PENDING && j.next_attempt_at <= now)
+                || (j.state == EVENT_VOICE_JOB_STATE_LEASED
+                    && j.lease_until.is_some_and(|l| l < now))
+        });
+
+        if let Some(idx) = candidate_idx {
+            let job = &mut outbox[idx];
+            job.state = EVENT_VOICE_JOB_STATE_LEASED.to_string();
+            job.lease_owner = Some(worker_id.to_string());
+            job.lease_until = Some(now + lease_duration);
+            job.attempts += 1;
+            job.updated_at = now;
+            Ok(Some(job.clone()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn complete_event_voice_outbox_job(
+        &self,
+        job_id: Uuid,
+        lease_owner: &str,
+    ) -> anyhow::Result<bool> {
+        let _lock = self
+            .event_voice_write_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut outbox = self
+            .event_voice_outbox
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(job) = outbox.iter_mut().find(|j| {
+            j.id == job_id
+                && j.lease_owner.as_deref() == Some(lease_owner)
+                && j.state == EVENT_VOICE_JOB_STATE_LEASED
+        }) {
+            job.state = EVENT_VOICE_JOB_STATE_DONE.to_string();
+            job.updated_at = Utc::now();
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub fn fail_event_voice_outbox_job(
+        &self,
+        job_id: Uuid,
+        lease_owner: &str,
+        error: &str,
+        retry_delay: Option<chrono::Duration>,
+    ) -> anyhow::Result<bool> {
+        let _lock = self
+            .event_voice_write_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut outbox = self
+            .event_voice_outbox
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let now = Utc::now();
+        if let Some(job) = outbox.iter_mut().find(|j| {
+            j.id == job_id
+                && j.lease_owner.as_deref() == Some(lease_owner)
+                && j.state == EVENT_VOICE_JOB_STATE_LEASED
+        }) {
+            if let Some(delay) = retry_delay {
+                job.state = EVENT_VOICE_JOB_STATE_PENDING.to_string();
+                job.next_attempt_at = now + delay;
+                job.lease_owner = None;
+                job.lease_until = None;
+            } else {
+                job.state = EVENT_VOICE_JOB_STATE_FAILED.to_string();
+            }
+            job.last_error = Some(error.to_string());
+            job.updated_at = now;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub fn cancel_event_voice_outbox_job(
+        &self,
+        job_id: Uuid,
+        lease_owner: &str,
+        reason: &str,
+    ) -> anyhow::Result<bool> {
+        let _lock = self
+            .event_voice_write_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut outbox = self
+            .event_voice_outbox
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let now = Utc::now();
+        if let Some(job) = outbox.iter_mut().find(|j| {
+            j.id == job_id
+                && j.lease_owner.as_deref() == Some(lease_owner)
+                && j.state == EVENT_VOICE_JOB_STATE_LEASED
+        }) {
+            job.state = EVENT_VOICE_JOB_STATE_CANCELED.to_string();
+            job.last_error = Some(reason.to_string());
+            job.updated_at = now;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     pub fn create_tournament(&self, guild_id: &str, name: &str, teams: &[String]) -> Tournament {

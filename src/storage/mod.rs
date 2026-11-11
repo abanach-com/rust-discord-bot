@@ -1540,6 +1540,117 @@ pub struct EventRoster {
     pub joined_at: DateTime<Utc>,
 }
 
+pub const EVENT_VOICE_MODE_NOTIFY_ONLY: &str = "notify_only";
+pub const EVENT_VOICE_MODE_AUTO_MOVE: &str = "auto_move";
+
+pub const EVENT_VOICE_READY_STATUS_WAITING: &str = "waiting";
+pub const EVENT_VOICE_READY_STATUS_READY: &str = "ready";
+pub const EVENT_VOICE_READY_STATUS_EXPIRED: &str = "expired";
+
+pub const EVENT_VOICE_JOB_KIND_NOTIFY_READY: &str = "notify_ready";
+pub const EVENT_VOICE_JOB_KIND_MOVE_VOICE: &str = "move_voice";
+
+pub const EVENT_VOICE_JOB_STATE_PENDING: &str = "pending";
+pub const EVENT_VOICE_JOB_STATE_LEASED: &str = "leased";
+pub const EVENT_VOICE_JOB_STATE_DONE: &str = "done";
+pub const EVENT_VOICE_JOB_STATE_FAILED: &str = "failed";
+pub const EVENT_VOICE_JOB_STATE_CANCELED: &str = "canceled";
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct EventVoiceQueueConfig {
+    pub event_id: Uuid,
+    pub guild_id: String,
+    pub enabled: bool,
+    pub lobby_channel_id: Option<String>,
+    pub target_channel_id: Option<String>,
+    pub mode: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl Default for EventVoiceQueueConfig {
+    fn default() -> Self {
+        Self {
+            event_id: Uuid::nil(),
+            guild_id: String::new(),
+            enabled: false,
+            lobby_channel_id: None,
+            target_channel_id: None,
+            mode: EVENT_VOICE_MODE_NOTIFY_ONLY.to_string(),
+            updated_at: Utc::now(),
+        }
+    }
+}
+
+pub fn validate_event_voice_queue_config(config: &EventVoiceQueueConfig) -> anyhow::Result<()> {
+    if config.mode != EVENT_VOICE_MODE_NOTIFY_ONLY && config.mode != EVENT_VOICE_MODE_AUTO_MOVE {
+        anyhow::bail!(
+            "Invalid voice queue mode: {}. Allowed: 'notify_only', 'auto_move'",
+            config.mode
+        );
+    }
+    if config.enabled {
+        let lobby = config.lobby_channel_id.as_deref().unwrap_or("").trim();
+        let target = config.target_channel_id.as_deref().unwrap_or("").trim();
+        if lobby.is_empty() {
+            anyhow::bail!("lobby_channel_id is required when voice queue is enabled");
+        }
+        if target.is_empty() {
+            anyhow::bail!("target_channel_id is required when voice queue is enabled");
+        }
+        validate_snowflake("lobby_channel_id", lobby)?;
+        validate_snowflake("target_channel_id", target)?;
+        if lobby == target {
+            anyhow::bail!(
+                "lobby_channel_id and target_channel_id must be different voice channels"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct EventVoiceMemberState {
+    pub event_id: Uuid,
+    pub guild_id: String,
+    pub user_id: String,
+    pub ready_status: String,
+    pub consent_auto_move: bool,
+    pub generation: i64,
+    pub ready_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EventVoiceQueueRosterEntry {
+    pub event_id: Uuid,
+    pub user_id: String,
+    pub role_type: String,
+    pub position: i32,
+    pub joined_at: DateTime<Utc>,
+    pub ready_status: String,
+    pub consent_auto_move: bool,
+    pub generation: i64,
+    pub ready_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct EventVoiceOutboxJob {
+    pub id: Uuid,
+    pub event_id: Uuid,
+    pub guild_id: String,
+    pub user_id: String,
+    pub kind: String,
+    pub state: String,
+    pub attempts: i32,
+    pub next_attempt_at: DateTime<Utc>,
+    pub lease_owner: Option<String>,
+    pub lease_until: Option<DateTime<Utc>>,
+    pub generation: i64,
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Tournament {
     pub id: Uuid,
@@ -5201,6 +5312,145 @@ impl Storage {
             Self::Memory(store) => Ok(store.get_event_rosters(event_id)),
 
             Self::Postgres(store) => store.get_event_rosters(event_id).await,
+        }
+    }
+
+    pub async fn get_event_voice_queue_config(
+        &self,
+        event_id: Uuid,
+    ) -> anyhow::Result<Option<EventVoiceQueueConfig>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_event_voice_queue_config(event_id)),
+            Self::Postgres(store) => store.get_event_voice_queue_config(event_id).await,
+        }
+    }
+
+    pub async fn set_event_voice_queue_config(
+        &self,
+        config: EventVoiceQueueConfig,
+    ) -> anyhow::Result<EventVoiceQueueConfig> {
+        match self {
+            Self::Memory(store) => store.set_event_voice_queue_config(config),
+            Self::Postgres(store) => store.set_event_voice_queue_config(config).await,
+        }
+    }
+
+    pub async fn get_event_voice_member_state(
+        &self,
+        event_id: Uuid,
+        user_id: &str,
+    ) -> anyhow::Result<Option<EventVoiceMemberState>> {
+        match self {
+            Self::Memory(store) => Ok(store.get_event_voice_member_state(event_id, user_id)),
+            Self::Postgres(store) => store.get_event_voice_member_state(event_id, user_id).await,
+        }
+    }
+
+    pub async fn set_event_voice_member_ready(
+        &self,
+        event_id: Uuid,
+        user_id: &str,
+        consent_auto_move: bool,
+    ) -> anyhow::Result<(EventVoiceMemberState, Option<EventVoiceOutboxJob>)> {
+        match self {
+            Self::Memory(store) => {
+                store.set_event_voice_member_ready(event_id, user_id, consent_auto_move)
+            }
+            Self::Postgres(store) => {
+                store
+                    .set_event_voice_member_ready(event_id, user_id, consent_auto_move)
+                    .await
+            }
+        }
+    }
+
+    pub async fn cancel_event_voice_member_ready(
+        &self,
+        event_id: Uuid,
+        user_id: &str,
+    ) -> anyhow::Result<EventVoiceMemberState> {
+        match self {
+            Self::Memory(store) => store.cancel_event_voice_member_ready(event_id, user_id),
+            Self::Postgres(store) => {
+                store
+                    .cancel_event_voice_member_ready(event_id, user_id)
+                    .await
+            }
+        }
+    }
+
+    pub async fn list_event_voice_roster_states(
+        &self,
+        event_id: Uuid,
+    ) -> anyhow::Result<Vec<EventVoiceQueueRosterEntry>> {
+        match self {
+            Self::Memory(store) => store.list_event_voice_roster_states(event_id),
+            Self::Postgres(store) => store.list_event_voice_roster_states(event_id).await,
+        }
+    }
+
+    pub async fn claim_event_voice_outbox_job(
+        &self,
+        worker_id: &str,
+        lease_duration: chrono::Duration,
+    ) -> anyhow::Result<Option<EventVoiceOutboxJob>> {
+        match self {
+            Self::Memory(store) => store.claim_event_voice_outbox_job(worker_id, lease_duration),
+            Self::Postgres(store) => {
+                store
+                    .claim_event_voice_outbox_job(worker_id, lease_duration)
+                    .await
+            }
+        }
+    }
+
+    pub async fn complete_event_voice_outbox_job(
+        &self,
+        job_id: Uuid,
+        lease_owner: &str,
+    ) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => store.complete_event_voice_outbox_job(job_id, lease_owner),
+            Self::Postgres(store) => {
+                store
+                    .complete_event_voice_outbox_job(job_id, lease_owner)
+                    .await
+            }
+        }
+    }
+
+    pub async fn fail_event_voice_outbox_job(
+        &self,
+        job_id: Uuid,
+        lease_owner: &str,
+        error: &str,
+        retry_delay: Option<chrono::Duration>,
+    ) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => {
+                store.fail_event_voice_outbox_job(job_id, lease_owner, error, retry_delay)
+            }
+            Self::Postgres(store) => {
+                store
+                    .fail_event_voice_outbox_job(job_id, lease_owner, error, retry_delay)
+                    .await
+            }
+        }
+    }
+
+    pub async fn cancel_event_voice_outbox_job(
+        &self,
+        job_id: Uuid,
+        lease_owner: &str,
+        reason: &str,
+    ) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => store.cancel_event_voice_outbox_job(job_id, lease_owner, reason),
+            Self::Postgres(store) => {
+                store
+                    .cancel_event_voice_outbox_job(job_id, lease_owner, reason)
+                    .await
+            }
         }
     }
 
@@ -11095,5 +11345,235 @@ mod tests {
         );
         assert!(serialized.get("has_more").is_some());
         assert!(serialized.get("next_cursor").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_event_voice_queue_config_ready_promotion_and_outbox_issue_394() {
+        let store = Storage::memory();
+        let guild_id = "111111111111111111";
+        let lobby_id = "222222222222222222";
+        let target_id = "333333333333333333";
+
+        // 1. Validation of EventVoiceQueueConfig
+        let invalid_mode = EventVoiceQueueConfig {
+            event_id: Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            enabled: false,
+            lobby_channel_id: None,
+            target_channel_id: None,
+            mode: "invalid_mode".to_string(),
+            updated_at: Utc::now(),
+        };
+        assert!(validate_event_voice_queue_config(&invalid_mode).is_err());
+
+        let missing_channels = EventVoiceQueueConfig {
+            event_id: Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            enabled: true,
+            lobby_channel_id: None,
+            target_channel_id: None,
+            mode: EVENT_VOICE_MODE_NOTIFY_ONLY.to_string(),
+            updated_at: Utc::now(),
+        };
+        assert!(validate_event_voice_queue_config(&missing_channels).is_err());
+
+        let same_channel = EventVoiceQueueConfig {
+            event_id: Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            enabled: true,
+            lobby_channel_id: Some(lobby_id.to_string()),
+            target_channel_id: Some(lobby_id.to_string()),
+            mode: EVENT_VOICE_MODE_NOTIFY_ONLY.to_string(),
+            updated_at: Utc::now(),
+        };
+        assert!(validate_event_voice_queue_config(&same_channel).is_err());
+
+        let valid_cfg = EventVoiceQueueConfig {
+            event_id: Uuid::new_v4(),
+            guild_id: guild_id.to_string(),
+            enabled: true,
+            lobby_channel_id: Some(lobby_id.to_string()),
+            target_channel_id: Some(target_id.to_string()),
+            mode: EVENT_VOICE_MODE_NOTIFY_ONLY.to_string(),
+            updated_at: Utc::now(),
+        };
+        assert!(validate_event_voice_queue_config(&valid_cfg).is_ok());
+
+        // 2. Create scheduled event with capacity = 1
+        let now = Utc::now();
+        let event = store
+            .create_scheduled_event(
+                guild_id,
+                "Voice Raid Night",
+                "Testing voice queue",
+                now + chrono::Duration::hours(2),
+                None,
+                "UTC",
+                Some(1),
+            )
+            .await
+            .unwrap();
+
+        // 3. User A joins as main, User B joins as reserve
+        let user_a = "444444444444444441";
+        let user_b = "444444444444444442";
+        let r_a = store.join_event_roster(event.id, user_a).await.unwrap();
+        assert_eq!(r_a.role_type, "main");
+        let r_b = store.join_event_roster(event.id, user_b).await.unwrap();
+        assert_eq!(r_b.role_type, "reserve");
+
+        // 4. Try setting ready before voice queue is enabled -> must fail
+        let ready_err = store
+            .set_event_voice_member_ready(event.id, user_a, false)
+            .await;
+        assert!(ready_err.is_err());
+
+        // 5. Configure voice queue on the event
+        let mut cfg = valid_cfg;
+        cfg.event_id = event.id;
+        let saved_cfg = store.set_event_voice_queue_config(cfg).await.unwrap();
+        assert!(saved_cfg.enabled);
+
+        // 6. User A confirms ready -> job of kind notify_ready created
+        let (state_a, job_a) = store
+            .set_event_voice_member_ready(event.id, user_a, false)
+            .await
+            .unwrap();
+        assert_eq!(state_a.ready_status, EVENT_VOICE_READY_STATUS_READY);
+        assert_eq!(state_a.generation, 1);
+        assert!(job_a.is_some());
+        let job_a = job_a.unwrap();
+        assert_eq!(job_a.kind, EVENT_VOICE_JOB_KIND_NOTIFY_READY);
+        assert_eq!(job_a.state, EVENT_VOICE_JOB_STATE_PENDING);
+
+        // 7. User B confirms ready -> state is ready, but NO job yet because role is reserve
+        let (state_b, job_b) = store
+            .set_event_voice_member_ready(event.id, user_b, true)
+            .await
+            .unwrap();
+        assert_eq!(state_b.ready_status, EVENT_VOICE_READY_STATUS_READY);
+        assert!(job_b.is_none());
+
+        // 8. Roster view combines roster and voice state
+        let roster_states = store
+            .list_event_voice_roster_states(event.id)
+            .await
+            .unwrap();
+        assert_eq!(roster_states.len(), 2);
+        assert_eq!(roster_states[0].user_id, user_a);
+        assert_eq!(roster_states[0].role_type, "main");
+        assert_eq!(
+            roster_states[0].ready_status,
+            EVENT_VOICE_READY_STATUS_READY
+        );
+        assert_eq!(roster_states[1].user_id, user_b);
+        assert_eq!(roster_states[1].role_type, "reserve");
+
+        // 9. Worker 1 claims job
+        let claimed_1 = store
+            .claim_event_voice_outbox_job("worker_1", chrono::Duration::seconds(30))
+            .await
+            .unwrap();
+        assert!(claimed_1.is_some());
+        let c1 = claimed_1.unwrap();
+        assert_eq!(c1.id, job_a.id);
+        assert_eq!(c1.state, EVENT_VOICE_JOB_STATE_LEASED);
+        assert_eq!(c1.lease_owner.as_deref(), Some("worker_1"));
+
+        // Worker 2 cannot claim the same leased job (mutual exclusion / lease active)
+        let claimed_2 = store
+            .claim_event_voice_outbox_job("worker_2", chrono::Duration::seconds(30))
+            .await
+            .unwrap();
+        assert!(claimed_2.is_none());
+
+        // Worker 1 completes the job
+        let completed = store
+            .complete_event_voice_outbox_job(c1.id, "worker_1")
+            .await
+            .unwrap();
+        assert!(completed);
+
+        // 10. Cancellation: User A cancels ready
+        let canceled_state = store
+            .cancel_event_voice_member_ready(event.id, user_a)
+            .await
+            .unwrap();
+        assert_eq!(
+            canceled_state.ready_status,
+            EVENT_VOICE_READY_STATUS_WAITING
+        );
+        assert_eq!(canceled_state.generation, 2);
+
+        // 11. Promotion: User A leaves roster -> User B promoted to main -> auto-enqueues notify_ready
+        let promoted = store.leave_event_roster(event.id, user_a).await.unwrap();
+        assert_eq!(promoted.as_deref(), Some(user_b));
+
+        let claimed_promotion = store
+            .claim_event_voice_outbox_job("worker_1", chrono::Duration::seconds(30))
+            .await
+            .unwrap();
+        assert!(claimed_promotion.is_some());
+        let cp = claimed_promotion.unwrap();
+        assert_eq!(cp.user_id, user_b);
+        assert_eq!(cp.kind, EVENT_VOICE_JOB_KIND_NOTIFY_READY);
+        assert!(
+            store
+                .complete_event_voice_outbox_job(cp.id, "worker_1")
+                .await
+                .unwrap()
+        );
+
+        // 12. Auto-move mode: switch mode to auto_move, User B reconfirms ready with consent
+        let mut auto_move_cfg = saved_cfg;
+        auto_move_cfg.mode = EVENT_VOICE_MODE_AUTO_MOVE.to_string();
+        store
+            .set_event_voice_queue_config(auto_move_cfg)
+            .await
+            .unwrap();
+
+        let (_state_b_move, job_b_move) = store
+            .set_event_voice_member_ready(event.id, user_b, true)
+            .await
+            .unwrap();
+        assert!(job_b_move.is_some());
+        let jbm = job_b_move.unwrap();
+        assert_eq!(jbm.kind, EVENT_VOICE_JOB_KIND_MOVE_VOICE);
+
+        // 13. Cascading delete removes config, member states, and outbox jobs
+        assert!(
+            store
+                .delete_scheduled_event(guild_id, event.id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .get_event_voice_queue_config(event.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .get_event_voice_member_state(event.id, user_b)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .list_event_voice_roster_states(event.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .claim_event_voice_outbox_job("worker_1", chrono::Duration::seconds(30))
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

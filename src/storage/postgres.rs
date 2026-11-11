@@ -14,28 +14,30 @@ use super::{
     BirthdayRecord, CardCollection, CardTrade, CleanupPlan, CoinTransfer, CoinTransferOutcome,
     CommandPolicyRule, CommunityPoll, CompanionChannelLease, CompanionChannelMapping,
     CompanionMappingItem, CountingGame, CreateAppealOutcome, CrimeClaimOutcome, CustomAutomation,
-    DailyClaimOutcome, DynamicVoiceRoom, EventRoster, FaqEntry, FeedSubscription, GameAccountLink,
-    GamingHubGameStatus, GitHubDevopsMapping, GitLabSubscription, Giveaway, GuildModuleSettings,
-    HelpForumConfig, HelpForumSession, HelpForumStats, IntegrationConnection,
-    IntegrationDeliveryLog, IntegrationWebhookSubscription, InviteTracking, KickStreamSubscription,
-    LinkedAccount, MAX_AI_DOCUMENTS_BYTES_PER_GUILD, MAX_AI_DOCUMENTS_PER_GUILD,
-    MAX_COMPANION_MAPPINGS_PER_GUILD, MAX_SCHEDULED_EVENTS_PER_GUILD, McpToolAuthorization,
-    MemberIdentityRecord, MemberProgress, MemberSearchFilter, MemberSearchRow, MemberSnapshot,
-    ModerationAppeal, ModerationExecutionIntent, ModeratorDutyProfile, ModeratorDutySettings,
-    ModeratorDutyState, ModuleDraftConfig, PluginGuildInstallation, PluginMarketplacePackage,
-    ProgressMetric, ProgressionSeason, QuoteRecord, ReactionRoleBinding, ReactionRoleGrant,
-    RecordCompanionLeaseParams, RecruitmentApplication, RecruitmentReview,
-    RecruitmentRoleFulfillment, RecruitmentTrack, RedditSubscription,
-    ReleaseReactionRoleGrantOutcome, ReputationGrantOutcome, ScheduledEvent, ScheduledEventsPage,
-    ServerSnapshot, SocialDraftApprovalError, SocialDraftsPage, SocialPublicationDraft,
-    StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StoreItemsPage, StorePurchase,
-    StorePurchasesPage, TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant,
-    Tournament, TransitionApplicationParams, TupperError, TupperProfile, TwitchStreamSubscription,
-    UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WORK_JOBS, WorkClaimOutcome,
-    WorkflowDefinition, WorkflowRunExecution, XpAward, YouTubeChannelSubscription,
-    encode_scheduled_event_cursor, encode_store_purchase_cursor, level_for_xp,
-    parse_member_search_cursor, snowflake_created_at, validate_birthday_date,
-    validate_scheduled_event_content, validate_snowflake,
+    DailyClaimOutcome, DynamicVoiceRoom, EVENT_VOICE_JOB_KIND_MOVE_VOICE,
+    EVENT_VOICE_JOB_KIND_NOTIFY_READY, EVENT_VOICE_MODE_AUTO_MOVE, EventRoster,
+    EventVoiceMemberState, EventVoiceOutboxJob, EventVoiceQueueConfig, EventVoiceQueueRosterEntry,
+    FaqEntry, FeedSubscription, GameAccountLink, GamingHubGameStatus, GitHubDevopsMapping,
+    GitLabSubscription, Giveaway, GuildModuleSettings, HelpForumConfig, HelpForumSession,
+    HelpForumStats, IntegrationConnection, IntegrationDeliveryLog, IntegrationWebhookSubscription,
+    InviteTracking, KickStreamSubscription, LinkedAccount, MAX_AI_DOCUMENTS_BYTES_PER_GUILD,
+    MAX_AI_DOCUMENTS_PER_GUILD, MAX_COMPANION_MAPPINGS_PER_GUILD, MAX_SCHEDULED_EVENTS_PER_GUILD,
+    McpToolAuthorization, MemberIdentityRecord, MemberProgress, MemberSearchFilter,
+    MemberSearchRow, MemberSnapshot, ModerationAppeal, ModerationExecutionIntent,
+    ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState, ModuleDraftConfig,
+    PluginGuildInstallation, PluginMarketplacePackage, ProgressMetric, ProgressionSeason,
+    QuoteRecord, ReactionRoleBinding, ReactionRoleGrant, RecordCompanionLeaseParams,
+    RecruitmentApplication, RecruitmentReview, RecruitmentRoleFulfillment, RecruitmentTrack,
+    RedditSubscription, ReleaseReactionRoleGrantOutcome, ReputationGrantOutcome, ScheduledEvent,
+    ScheduledEventsPage, ServerSnapshot, SocialDraftApprovalError, SocialDraftsPage,
+    SocialPublicationDraft, StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StoreItemsPage,
+    StorePurchase, StorePurchasesPage, TagRecord, TelegramBridge, TelegramMessageMapping,
+    TimedRoleGrant, Tournament, TransitionApplicationParams, TupperError, TupperProfile,
+    TwitchStreamSubscription, UpsertMemberSnapshotParams, UserErasureReport, VkSubscription,
+    WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowRunExecution, XpAward,
+    YouTubeChannelSubscription, encode_scheduled_event_cursor, encode_store_purchase_cursor,
+    level_for_xp, parse_member_search_cursor, snowflake_created_at, validate_birthday_date,
+    validate_event_voice_queue_config, validate_scheduled_event_content, validate_snowflake,
 };
 
 pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
@@ -5747,7 +5749,50 @@ impl PostgresStore {
                 .await?;
 
                 if updated.rows_affected() > 0 {
-                    promoted = Some(reserve.user_id);
+                    let promoted_uid = reserve.user_id.clone();
+                    let vq_config: Option<(bool, String, String)> = sqlx::query_as(
+                        "SELECT enabled, guild_id, mode FROM event_voice_queue_configs WHERE event_id = $1",
+                    )
+                    .bind(event_id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+
+                    if let Some((true, guild_id, _mode)) = vq_config {
+                        let member_state: (i64, String, bool) = sqlx::query_as(
+                            r#"
+                            INSERT INTO event_voice_member_states (event_id, guild_id, user_id, ready_status, consent_auto_move, generation)
+                            VALUES ($1, $2, $3, 'waiting', FALSE, 1)
+                            ON CONFLICT (event_id, user_id) DO UPDATE SET updated_at = NOW()
+                            RETURNING generation, ready_status, consent_auto_move
+                            "#,
+                        )
+                        .bind(event_id)
+                        .bind(&guild_id)
+                        .bind(&promoted_uid)
+                        .fetch_one(&mut *tx)
+                        .await?;
+
+                        let (promoted_gen, _status, _consent) = member_state;
+                        let job_id = Uuid::new_v4();
+                        let now = Utc::now();
+                        sqlx::query(
+                            r#"
+                            INSERT INTO event_voice_outbox (id, event_id, guild_id, user_id, kind, state, attempts, next_attempt_at, generation, created_at, updated_at)
+                            VALUES ($1, $2, $3, $4, 'notify_ready', 'pending', 0, $5, $6, $5, $5)
+                            ON CONFLICT (event_id, user_id, generation, kind) DO NOTHING
+                            "#,
+                        )
+                        .bind(job_id)
+                        .bind(event_id)
+                        .bind(&guild_id)
+                        .bind(&promoted_uid)
+                        .bind(now)
+                        .bind(promoted_gen)
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+
+                    promoted = Some(promoted_uid);
                 }
             }
         }
@@ -5771,6 +5816,469 @@ impl PostgresStore {
         .await?;
 
         Ok(rows)
+    }
+
+    pub async fn get_event_voice_queue_config(
+        &self,
+        event_id: Uuid,
+    ) -> anyhow::Result<Option<EventVoiceQueueConfig>> {
+        let row = sqlx::query_as::<_, EventVoiceQueueConfig>(
+            r#"
+            SELECT event_id, guild_id, enabled, lobby_channel_id, target_channel_id, mode, updated_at
+            FROM event_voice_queue_configs
+            WHERE event_id = $1
+            "#,
+        )
+        .bind(event_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn set_event_voice_queue_config(
+        &self,
+        config: EventVoiceQueueConfig,
+    ) -> anyhow::Result<EventVoiceQueueConfig> {
+        validate_event_voice_queue_config(&config)?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(4351, hashtext($1))")
+            .bind(&config.guild_id)
+            .execute(&mut *tx)
+            .await?;
+
+        let event_guild: Option<String> =
+            sqlx::query_scalar("SELECT guild_id FROM scheduled_events WHERE id = $1")
+                .bind(config.event_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+
+        let event_guild = match event_guild {
+            Some(g) => g,
+            None => {
+                let _ = tx.rollback().await;
+                anyhow::bail!("Scheduled event not found");
+            }
+        };
+
+        if event_guild != config.guild_id {
+            let _ = tx.rollback().await;
+            anyhow::bail!("Event guild_id mismatch");
+        }
+
+        let now = Utc::now();
+        let saved = sqlx::query_as::<_, EventVoiceQueueConfig>(
+            r#"
+            INSERT INTO event_voice_queue_configs (event_id, guild_id, enabled, lobby_channel_id, target_channel_id, mode, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (event_id) DO UPDATE SET
+                enabled = EXCLUDED.enabled,
+                lobby_channel_id = EXCLUDED.lobby_channel_id,
+                target_channel_id = EXCLUDED.target_channel_id,
+                mode = EXCLUDED.mode,
+                updated_at = EXCLUDED.updated_at
+            RETURNING event_id, guild_id, enabled, lobby_channel_id, target_channel_id, mode, updated_at
+            "#,
+        )
+        .bind(config.event_id)
+        .bind(&config.guild_id)
+        .bind(config.enabled)
+        .bind(config.lobby_channel_id)
+        .bind(config.target_channel_id)
+        .bind(&config.mode)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(saved)
+    }
+
+    pub async fn get_event_voice_member_state(
+        &self,
+        event_id: Uuid,
+        user_id: &str,
+    ) -> anyhow::Result<Option<EventVoiceMemberState>> {
+        let row = sqlx::query_as::<_, EventVoiceMemberState>(
+            r#"
+            SELECT event_id, guild_id, user_id, ready_status, consent_auto_move, generation, ready_at, updated_at
+            FROM event_voice_member_states
+            WHERE event_id = $1 AND user_id = $2
+            "#,
+        )
+        .bind(event_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn set_event_voice_member_ready(
+        &self,
+        event_id: Uuid,
+        user_id: &str,
+        consent_auto_move: bool,
+    ) -> anyhow::Result<(EventVoiceMemberState, Option<EventVoiceOutboxJob>)> {
+        let mut tx = self.pool.begin().await?;
+
+        let event_guild: Option<String> =
+            sqlx::query_scalar("SELECT guild_id FROM scheduled_events WHERE id = $1")
+                .bind(event_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+
+        let guild_id = match event_guild {
+            Some(g) => g,
+            None => {
+                let _ = tx.rollback().await;
+                anyhow::bail!("Scheduled event not found");
+            }
+        };
+
+        sqlx::query("SELECT pg_advisory_xact_lock(4351, hashtext($1))")
+            .bind(&guild_id)
+            .execute(&mut *tx)
+            .await?;
+
+        let vq_config: Option<(bool, String)> = sqlx::query_as(
+            "SELECT enabled, mode FROM event_voice_queue_configs WHERE event_id = $1",
+        )
+        .bind(event_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let (_enabled, mode) = match vq_config {
+            Some((true, m)) => (true, m),
+            _ => {
+                let _ = tx.rollback().await;
+                anyhow::bail!("Voice queue is not enabled for this event");
+            }
+        };
+
+        let roster_role: Option<String> = sqlx::query_scalar(
+            "SELECT role_type FROM event_rosters WHERE event_id = $1 AND user_id = $2",
+        )
+        .bind(event_id)
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let role_type = match roster_role {
+            Some(r) => r,
+            None => {
+                let _ = tx.rollback().await;
+                anyhow::bail!("User is not registered in this event roster");
+            }
+        };
+
+        let now = Utc::now();
+        let member_state = sqlx::query_as::<_, EventVoiceMemberState>(
+            r#"
+            INSERT INTO event_voice_member_states (event_id, guild_id, user_id, ready_status, consent_auto_move, generation, ready_at, updated_at)
+            VALUES ($1, $2, $3, 'ready', $4, 1, $5, $5)
+            ON CONFLICT (event_id, user_id) DO UPDATE SET
+                ready_status = 'ready',
+                consent_auto_move = EXCLUDED.consent_auto_move,
+                ready_at = EXCLUDED.ready_at,
+                updated_at = EXCLUDED.updated_at
+            RETURNING event_id, guild_id, user_id, ready_status, consent_auto_move, generation, ready_at, updated_at
+            "#,
+        )
+        .bind(event_id)
+        .bind(&guild_id)
+        .bind(user_id)
+        .bind(consent_auto_move)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let mut job = None;
+        if role_type == "main" {
+            let kind = if mode == EVENT_VOICE_MODE_AUTO_MOVE && consent_auto_move {
+                EVENT_VOICE_JOB_KIND_MOVE_VOICE
+            } else {
+                EVENT_VOICE_JOB_KIND_NOTIFY_READY
+            };
+
+            let job_id = Uuid::new_v4();
+            let outbox_job = sqlx::query_as::<_, EventVoiceOutboxJob>(
+                r#"
+                INSERT INTO event_voice_outbox (id, event_id, guild_id, user_id, kind, state, attempts, next_attempt_at, generation, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, 'pending', 0, $6, $7, $6, $6)
+                ON CONFLICT (event_id, user_id, generation, kind) DO UPDATE SET
+                    next_attempt_at = EXCLUDED.next_attempt_at,
+                    updated_at = EXCLUDED.updated_at
+                WHERE event_voice_outbox.state IN ('pending', 'failed')
+                RETURNING id, event_id, guild_id, user_id, kind, state, attempts, next_attempt_at, lease_owner, lease_until, generation, last_error, created_at, updated_at
+                "#,
+            )
+            .bind(job_id)
+            .bind(event_id)
+            .bind(&guild_id)
+            .bind(user_id)
+            .bind(kind)
+            .bind(now)
+            .bind(member_state.generation)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            job = outbox_job;
+        }
+
+        tx.commit().await?;
+        Ok((member_state, job))
+    }
+
+    pub async fn cancel_event_voice_member_ready(
+        &self,
+        event_id: Uuid,
+        user_id: &str,
+    ) -> anyhow::Result<EventVoiceMemberState> {
+        let mut tx = self.pool.begin().await?;
+
+        let event_guild: Option<String> =
+            sqlx::query_scalar("SELECT guild_id FROM scheduled_events WHERE id = $1")
+                .bind(event_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+
+        let guild_id = match event_guild {
+            Some(g) => g,
+            None => {
+                let _ = tx.rollback().await;
+                anyhow::bail!("Scheduled event not found");
+            }
+        };
+
+        sqlx::query("SELECT pg_advisory_xact_lock(4351, hashtext($1))")
+            .bind(&guild_id)
+            .execute(&mut *tx)
+            .await?;
+
+        let now = Utc::now();
+        let state = sqlx::query_as::<_, EventVoiceMemberState>(
+            r#"
+            INSERT INTO event_voice_member_states (event_id, guild_id, user_id, ready_status, consent_auto_move, generation, ready_at, updated_at)
+            VALUES ($1, $2, $3, 'waiting', FALSE, 1, NULL, $4)
+            ON CONFLICT (event_id, user_id) DO UPDATE SET
+                ready_status = 'waiting',
+                consent_auto_move = FALSE,
+                ready_at = NULL,
+                generation = event_voice_member_states.generation + 1,
+                updated_at = EXCLUDED.updated_at
+            RETURNING event_id, guild_id, user_id, ready_status, consent_auto_move, generation, ready_at, updated_at
+            "#,
+        )
+        .bind(event_id)
+        .bind(&guild_id)
+        .bind(user_id)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            UPDATE event_voice_outbox
+            SET state = 'canceled', last_error = 'User canceled ready', updated_at = $3
+            WHERE event_id = $1 AND user_id = $2 AND state IN ('pending', 'leased')
+            "#,
+        )
+        .bind(event_id)
+        .bind(user_id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(state)
+    }
+
+    pub async fn list_event_voice_roster_states(
+        &self,
+        event_id: Uuid,
+    ) -> anyhow::Result<Vec<EventVoiceQueueRosterEntry>> {
+        #[derive(sqlx::FromRow)]
+        struct RosterWithVoiceStateRow {
+            event_id: Uuid,
+            user_id: String,
+            role_type: String,
+            position: i32,
+            joined_at: DateTime<Utc>,
+            ready_status: Option<String>,
+            consent_auto_move: Option<bool>,
+            generation: Option<i64>,
+            ready_at: Option<DateTime<Utc>>,
+        }
+
+        let rows = sqlx::query_as::<_, RosterWithVoiceStateRow>(
+            r#"
+            SELECT
+                r.event_id,
+                r.user_id,
+                r.role_type,
+                r.position,
+                r.joined_at,
+                m.ready_status,
+                m.consent_auto_move,
+                m.generation,
+                m.ready_at
+            FROM event_rosters r
+            LEFT JOIN event_voice_member_states m
+                ON r.event_id = m.event_id AND r.user_id = m.user_id
+            WHERE r.event_id = $1
+            ORDER BY
+                CASE WHEN r.role_type = 'main' THEN 0 ELSE 1 END,
+                r.position ASC,
+                r.joined_at ASC
+            "#,
+        )
+        .bind(event_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let entries = rows
+            .into_iter()
+            .map(|row| EventVoiceQueueRosterEntry {
+                event_id: row.event_id,
+                user_id: row.user_id,
+                role_type: row.role_type,
+                position: row.position,
+                joined_at: row.joined_at,
+                ready_status: row.ready_status.unwrap_or_else(|| "waiting".to_string()),
+                consent_auto_move: row.consent_auto_move.unwrap_or(false),
+                generation: row.generation.unwrap_or(1),
+                ready_at: row.ready_at,
+            })
+            .collect();
+
+        Ok(entries)
+    }
+
+    pub async fn claim_event_voice_outbox_job(
+        &self,
+        worker_id: &str,
+        lease_duration: chrono::Duration,
+    ) -> anyhow::Result<Option<EventVoiceOutboxJob>> {
+        let lease_seconds = lease_duration.num_seconds().max(5);
+        let row = sqlx::query_as::<_, EventVoiceOutboxJob>(
+            r#"
+            WITH next_job AS (
+                SELECT id FROM event_voice_outbox
+                WHERE (state = 'pending' AND next_attempt_at <= NOW())
+                   OR (state = 'leased' AND lease_until < NOW())
+                ORDER BY next_attempt_at ASC, id ASC
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+            )
+            UPDATE event_voice_outbox o
+            SET state = 'leased',
+                lease_until = NOW() + ($2 || ' seconds')::INTERVAL,
+                lease_owner = $1,
+                attempts = attempts + 1,
+                updated_at = NOW()
+            FROM next_job
+            WHERE o.id = next_job.id
+            RETURNING o.id, o.event_id, o.guild_id, o.user_id, o.kind, o.state, o.attempts,
+                      o.next_attempt_at, o.lease_owner, o.lease_until, o.generation, o.last_error,
+                      o.created_at, o.updated_at
+            "#,
+        )
+        .bind(worker_id)
+        .bind(lease_seconds.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    pub async fn complete_event_voice_outbox_job(
+        &self,
+        job_id: Uuid,
+        lease_owner: &str,
+    ) -> anyhow::Result<bool> {
+        let res = sqlx::query(
+            r#"
+            UPDATE event_voice_outbox
+            SET state = 'done', updated_at = NOW()
+            WHERE id = $1 AND lease_owner = $2 AND state = 'leased'
+            "#,
+        )
+        .bind(job_id)
+        .bind(lease_owner)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn fail_event_voice_outbox_job(
+        &self,
+        job_id: Uuid,
+        lease_owner: &str,
+        error: &str,
+        retry_delay: Option<chrono::Duration>,
+    ) -> anyhow::Result<bool> {
+        let res = if let Some(delay) = retry_delay {
+            let delay_seconds = delay.num_seconds().max(1);
+            sqlx::query(
+                r#"
+                UPDATE event_voice_outbox
+                SET state = 'pending',
+                    next_attempt_at = NOW() + ($3 || ' seconds')::INTERVAL,
+                    lease_owner = NULL,
+                    lease_until = NULL,
+                    last_error = $4,
+                    updated_at = NOW()
+                WHERE id = $1 AND lease_owner = $2 AND state = 'leased'
+                "#,
+            )
+            .bind(job_id)
+            .bind(lease_owner)
+            .bind(delay_seconds.to_string())
+            .bind(error)
+            .execute(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                r#"
+                UPDATE event_voice_outbox
+                SET state = 'failed',
+                    last_error = $3,
+                    updated_at = NOW()
+                WHERE id = $1 AND lease_owner = $2 AND state = 'leased'
+                "#,
+            )
+            .bind(job_id)
+            .bind(lease_owner)
+            .bind(error)
+            .execute(&self.pool)
+            .await?
+        };
+
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn cancel_event_voice_outbox_job(
+        &self,
+        job_id: Uuid,
+        lease_owner: &str,
+        reason: &str,
+    ) -> anyhow::Result<bool> {
+        let res = sqlx::query(
+            r#"
+            UPDATE event_voice_outbox
+            SET state = 'canceled',
+                last_error = $3,
+                updated_at = NOW()
+            WHERE id = $1 AND lease_owner = $2 AND state = 'leased'
+            "#,
+        )
+        .bind(job_id)
+        .bind(lease_owner)
+        .bind(reason)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(res.rows_affected() > 0)
     }
 
     pub async fn create_tournament(

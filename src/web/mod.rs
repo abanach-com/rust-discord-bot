@@ -521,6 +521,50 @@ pub fn build_router(state: WebState) -> Router {
             post(features::leave_event_roster),
         )
         .route(
+            "/api/guilds/{guild_id}/scheduled-events/{event_id}/voice-queue",
+            get(features::get_event_voice_queue).put(features::update_event_voice_queue),
+        )
+        .route(
+            "/api/guilds/{guild_id}/events/{event_id}/voice-queue",
+            get(features::get_event_voice_queue).put(features::update_event_voice_queue),
+        )
+        .route(
+            "/api/guilds/{guild_id}/scheduled-events/{event_id}/voice-queue/roster",
+            get(features::get_event_voice_queue_roster),
+        )
+        .route(
+            "/api/guilds/{guild_id}/events/{event_id}/voice-queue/roster",
+            get(features::get_event_voice_queue_roster),
+        )
+        .route(
+            "/api/guilds/{guild_id}/scheduled-events/{event_id}/voice-queue/ready",
+            post(features::set_event_voice_member_ready)
+                .delete(features::cancel_event_voice_member_ready),
+        )
+        .route(
+            "/api/guilds/{guild_id}/events/{event_id}/voice-queue/ready",
+            post(features::set_event_voice_member_ready)
+                .delete(features::cancel_event_voice_member_ready),
+        )
+        .route(
+            "/api/guilds/{guild_id}/scheduled-events/{event_id}/voice-queue/leave",
+            post(features::cancel_event_voice_member_ready)
+                .delete(features::cancel_event_voice_member_ready),
+        )
+        .route(
+            "/api/guilds/{guild_id}/events/{event_id}/voice-queue/leave",
+            post(features::cancel_event_voice_member_ready)
+                .delete(features::cancel_event_voice_member_ready),
+        )
+        .route(
+            "/api/guilds/{guild_id}/scheduled-events/{event_id}/voice-queue/cancel-ready",
+            post(features::cancel_event_voice_member_ready),
+        )
+        .route(
+            "/api/guilds/{guild_id}/events/{event_id}/voice-queue/cancel-ready",
+            post(features::cancel_event_voice_member_ready),
+        )
+        .route(
             "/api/guilds/{guild_id}/tournaments",
             post(features::create_tournament),
         )
