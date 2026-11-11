@@ -187,7 +187,7 @@ The host also exposes global `t`; there is no global `translate`. See [helpers a
 
 ## Sandbox
 
-The host removes `collectgarbage`, `coroutine`, `debug`, `dofile`, `io`, `load`, `loadfile`, `loadstring`, `os`, `package`, `print` and `require`, and limits VM resources. Default budgets are 8 MiB and 500,000 instructions with a hook every 1,000 instructions. These are not an elapsed-time deadline. See [security and errors](lua/security-errors.md) for exact environment settings and failure behavior.
+The host removes `collectgarbage`, `coroutine`, `debug`, `dofile`, `io`, `load`, `loadfile`, `loadstring`, `os`, `package`, `pcall`, `print`, `require`, `warn`, and `xpcall`, and limits VM resources. Standard Lua `print` and `warn` cannot write to host stdout or warning streams; diagnose expected validation errors by returning ephemeral `reply` actions or bounded `audit` actions (`audit` is subject to retention, 64-key / 16 KiB limits, and never include secrets or private user data), or let unexpected runtime failures propagate to Rust as `LuaEngineError::Runtime`. Default budgets are 8 MiB and 500,000 instructions with a hook every 1,000 instructions. These are not an elapsed-time deadline. See [security and errors](lua/security-errors.md) for exact environment settings and failure behavior.
 
 There is no generic filesystem, HTTP, SQL, key-value storage, cross-module call, timer callback or persistent global state. Buttons, modals and autocomplete do not have a complete Lua callback/response path in this snapshot; an existing Rust helper or registration flag does not supply one. See [current support](lua/support-matrix.md#components-modals-and-autocomplete).
 

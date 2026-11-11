@@ -1337,7 +1337,9 @@ fn sandboxed_lua(limits: LuaLimits) -> mlua::Result<Lua> {
         "os",
         "package",
         "pcall",
+        "print",
         "require",
+        "warn",
         "xpcall",
     ] {
         globals.set(denied, Value::Nil)?;
@@ -1901,5 +1903,54 @@ mod tests {
         assert_eq!(engine.manifests().await.len(), 1);
 
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_sandboxed_lua_removes_print_and_warn_issue_402() {
+        let limits = LuaLimits {
+            memory_bytes: 2 * 1024 * 1024,
+            instruction_limit: 100_000,
+            hook_granularity: 100,
+        };
+        let lua = sandboxed_lua(limits).expect("sandbox init");
+
+        let checks: bool = lua
+            .load(
+                r#"
+                return print == nil
+                    and _G.print == nil
+                    and _ENV.print == nil
+                    and warn == nil
+                    and _G.warn == nil
+                    and _ENV.warn == nil
+                    and loadstring == nil
+                "#,
+            )
+            .eval()
+            .expect("eval checks");
+        assert!(
+            checks,
+            "print, warn, and loadstring must be nil in sandboxed Lua"
+        );
+
+        let print_err = lua
+            .load(r#"print("should fail")"#)
+            .exec()
+            .expect_err("calling print in sandboxed Lua must fail");
+        assert!(
+            print_err
+                .to_string()
+                .contains("attempt to call a nil value"),
+            "unexpected print error: {print_err}"
+        );
+
+        let warn_err = lua
+            .load(r#"warn("should fail")"#)
+            .exec()
+            .expect_err("calling warn in sandboxed Lua must fail");
+        assert!(
+            warn_err.to_string().contains("attempt to call a nil value"),
+            "unexpected warn error: {warn_err}"
+        );
     }
 }

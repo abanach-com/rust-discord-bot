@@ -97,6 +97,30 @@ async fn dangerous_lua_globals_are_unavailable() {
     std::fs::write(
         directory.path().join("sandbox.lua"),
         r#"
+        -- Verify globals are absent already at module evaluation / load time
+        assert(print == nil, "print must not be exposed at module load time")
+        assert(warn == nil, "warn must not be exposed at module load time")
+
+        local function assert_denied_globals()
+            assert(collectgarbage == nil)
+            assert(coroutine == nil)
+            assert(debug == nil)
+            assert(dofile == nil)
+            assert(io == nil)
+            assert(load == nil)
+            assert(loadfile == nil)
+            assert(loadstring == nil)
+            assert(os == nil)
+            assert(package == nil)
+            assert(pcall == nil)
+            assert(print == nil, "print must not be exposed to Lua modules")
+            assert(_G.print == nil)
+            assert(require == nil)
+            assert(warn == nil, "warn must not be exposed to Lua modules")
+            assert(_G.warn == nil)
+            assert(xpcall == nil)
+        end
+
         return {
             manifest = {
                 id = "sandbox",
@@ -106,21 +130,15 @@ async fn dangerous_lua_globals_are_unavailable() {
                 category = "test",
                 commands = {
                     { name = "sandbox", description = "Checks denied Lua globals." }
-                }
+                },
+                events = { "message_create" }
             },
             on_command = function()
-                assert(collectgarbage == nil)
-                assert(coroutine == nil)
-                assert(debug == nil)
-                assert(dofile == nil)
-                assert(io == nil)
-                assert(load == nil)
-                assert(loadfile == nil)
-                assert(os == nil)
-                assert(package == nil)
-                assert(pcall == nil)
-                assert(require == nil)
-                assert(xpcall == nil)
+                assert_denied_globals()
+                return {}
+            end,
+            on_event = function()
+                assert_denied_globals()
                 return {}
             end
         }
@@ -129,12 +147,122 @@ async fn dangerous_lua_globals_are_unavailable() {
     .expect("write sandbox test module");
 
     let engine = LuaEngine::load(directory.path(), limits()).expect("module should load");
-    let actions = engine
+    let cmd_actions = engine
         .execute_command("sandbox", "sandbox", context())
         .await
-        .expect("sandbox globals should remain unavailable");
+        .expect("sandbox globals should remain unavailable in on_command");
+    assert!(cmd_actions.is_empty());
 
-    assert!(actions.is_empty());
+    let event_actions = engine
+        .execute_event(
+            "sandbox",
+            "message_create",
+            event_context(Some("100000000000000001")),
+        )
+        .await
+        .expect("sandbox globals should remain unavailable in on_event");
+    assert!(event_actions.is_empty());
+
+    // Calling print or warn at runtime must fail with a controlled LuaEngineError::Runtime
+    let runtime_dir = TempDir::new().expect("runtime temporary directory");
+    std::fs::write(
+        runtime_dir.path().join("stdio_attempt.lua"),
+        r#"
+        return {
+            manifest = {
+                id = "stdio_attempt",
+                name = "Stdio Attempt",
+                version = "1.0.0",
+                description = "Tests that calling print/warn fails at runtime.",
+                category = "test",
+                commands = {
+                    { name = "callprint", description = "Attempts to call print." },
+                    { name = "callwarn", description = "Attempts to call warn." }
+                },
+                events = { "message_create" }
+            },
+            on_command = function(cmd)
+                if cmd == "callprint" then
+                    print("leaked payload")
+                elseif cmd == "callwarn" then
+                    warn("leaked warning")
+                end
+                return {
+                    { type = "reply", content = "unreachable", ephemeral = true }
+                }
+            end,
+            on_event = function()
+                warn("event warning")
+                return {}
+            end
+        }
+        "#,
+    )
+    .expect("write runtime attempt module");
+
+    let runtime_engine = LuaEngine::load(runtime_dir.path(), limits()).expect("load runtime test");
+    let err_print = runtime_engine
+        .execute_command("stdio_attempt", "callprint", context())
+        .await
+        .expect_err("calling print in on_command must fail");
+    assert!(
+        matches!(err_print, LuaEngineError::Runtime { .. }),
+        "expected LuaEngineError::Runtime on print, got {err_print:?}"
+    );
+
+    let err_warn = runtime_engine
+        .execute_command("stdio_attempt", "callwarn", context())
+        .await
+        .expect_err("calling warn in on_command must fail");
+    assert!(
+        matches!(err_warn, LuaEngineError::Runtime { .. }),
+        "expected LuaEngineError::Runtime on warn, got {err_warn:?}"
+    );
+
+    let err_event_warn = runtime_engine
+        .execute_event(
+            "stdio_attempt",
+            "message_create",
+            event_context(Some("100000000000000001")),
+        )
+        .await
+        .expect_err("calling warn in on_event must fail");
+    assert!(
+        matches!(err_event_warn, LuaEngineError::Runtime { .. }),
+        "expected LuaEngineError::Runtime on event warn, got {err_event_warn:?}"
+    );
+
+    // Calling print or warn during top-level module evaluation must fail during load
+    for stmt in [r#"print("init leak")"#, r#"warn("init warn leak")"#] {
+        let init_dir = TempDir::new().expect("init temporary directory");
+        std::fs::write(
+            init_dir.path().join("init_stdio.lua"),
+            format!(
+                r#"
+                {stmt}
+                return {{
+                    manifest = {{
+                        id = "init_stdio",
+                        name = "Init Stdio",
+                        version = "1.0.0",
+                        description = "Top-level stdio check.",
+                        category = "test",
+                        commands = {{}}
+                    }}
+                }}
+                "#
+            ),
+        )
+        .expect("write init stdio module");
+
+        let init_err = LuaEngine::load(init_dir.path(), limits())
+            .err()
+            .expect("top-level print/warn must fail during load");
+        assert!(
+            matches!(init_err, LuaEngineError::Runtime { .. }),
+            "expected LuaEngineError::Runtime on top-level {stmt}, got {init_err:?}"
+        );
+    }
 }
 
 #[test]

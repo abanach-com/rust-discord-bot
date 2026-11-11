@@ -16,18 +16,20 @@ See [the architecture](../ARCHITECTURE.md) and [host services](services.md).
 
 ## Sandbox globals and helpers
 
-[sandboxed_lua](../../src/lua/engine.rs#L656-L775) creates a fresh VM with `StdLib::ALL_SAFE`,
-sets its memory limit, and explicitly replaces **all twelve** of these globals with `nil`:
+[sandboxed_lua](../../src/lua/engine.rs#L1324-L1350) creates a fresh VM with `StdLib::ALL_SAFE`,
+sets its memory limit, and explicitly replaces **all fourteen** of these globals with `nil`:
 
 ```text
-collectgarbage  coroutine  debug  dofile  io  load
-loadfile       os         package  pcall  require  xpcall
+collectgarbage  coroutine  debug     dofile   io       load
+loadfile       os         package   pcall    print    require
+warn           xpcall
 ```
 
 Strings, numbers, tables and ordinary computation remain available. Module loading, dynamic chunk
-loading, shell commands and direct file access are unavailable through those removed globals.
+loading, shell commands, direct file access, and unbounded writes to host stdout or Lua warning streams
+(`print`, `warn`) are unavailable through those removed globals (`loadstring` is likewise absent in Lua 5.4).
 The host exposes no arbitrary HTTP client, database client, Discord client object or generic
-`storage.get`/`storage.set` interface. Persistence is requested through typed host actions.
+`storage.get`/`storage.set` interface. Persistence and diagnostics are requested only through typed host actions.
 
 The registered helper table contains `api_version`, `escape_mentions`, `truncate`, `unix_time`,
 `t` and `translate`. `rustybot` and `zuckerbot` name that table; global `t` aliases its translator.
@@ -35,9 +37,13 @@ These helpers compute values, including the current time; they do not execute da
 Their signatures are documented in [helpers and translations](helpers-i18n.md).
 
 `pcall` and `xpcall` cannot catch an instruction-budget error because those functions are absent.
-Check optional inputs with ordinary conditions and return a useful reply for expected user mistakes.
-Unexpected exceptions propagate to Rust. Source beginning with byte `0x1b` is rejected as bytecode
-at [load time and invocation](../../src/lua/engine.rs#L510-L516); distribute textual Lua source.
+Also `print` and `warn` are disabled (`nil`) to prevent modules from emitting unredacted message payloads or
+flooding host stdout outside controlled action bounds. Diagnose expected validation mistakes by checking optional
+inputs with ordinary conditions and returning an ephemeral `reply` action (or a bounded structured `audit` action
+without secrets or unnecessary private content); allow unexpected runtime exceptions (including `error(...)`)
+to propagate to Rust as `LuaEngineError::Runtime`, which is captured by host error handling and surfaced as an
+ephemeral error response without executing subsequent actions. Source beginning with byte `0x1b` is rejected as bytecode
+at [load time and invocation](../../src/lua/engine.rs#L981-L1060); distribute textual Lua source.
 
 ## Resource budgets
 
