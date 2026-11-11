@@ -520,7 +520,7 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
 | Social Publisher Multi-Platform | Implemented | Cross-platform composer, scheduled release, two-person approval gates (#105) |
 | AI Gateway & Hard Budget | Implemented | Hard token/USD caps per guild with instant cutoff, prompt injection sanitization (#106) |
 | MCP Protocol Client/Server | Implemented | Model Context Protocol tool allowlists, mutating action approval gates (#106) |
-| Plugin Marketplace & Verification | Implemented | Semver manifests, SHA-256 cryptographic check, transactional install/rollback (#107), keyset pagination & lightweight DTO catalog, publisher quotas & O(1) point lookup (#404) |
+| Plugin Marketplace & Verification | Implemented | Semver manifests, SHA-256 cryptographic check, transactional install/rollback (#107), keyset pagination & lightweight DTO catalog, publisher quotas & O(1) point lookup (#404), identity & pagination parity (#406) |
 
 ## 14. Platform & API Hardening (Issues #202, #203, #204, #205, #206)
 
@@ -805,6 +805,10 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Added dedicated transaction-scoped advisory lock on `plugin_id` (`pg_advisory_xact_lock(hashtext('marketplace_pkg_' || $1))`), strictly ordering concurrent publication attempts for the same package slug.
   - Hardened the `ON CONFLICT (plugin_id) DO UPDATE` query: completely removed `author = EXCLUDED.author` from the `SET` clause and added strict atomic filter `WHERE plugin_marketplace_packages.author = EXCLUDED.author AND plugin_marketplace_packages.version <> EXCLUDED.version`.
   - Any conflicting parallel insert by a different author fails the `WHERE` condition, returning no row in `RETURNING *`, falling back to safe conflict inspection and failing closed with HTTP 403 Forbidden without modifying existing package ownership, manifest, or hash.
+- **Marketplace Version Update Identity & Pagination Parity (#406)**:
+  - Eliminated backend parity discrepancy where updating a marketplace package in `MemoryStore` generated a new `id` and `created_at` timestamp, shifting the package's cursor position and dropping it from paginated catalog views.
+  - Preserved the existing package's permanent `id` and initial `created_at` on version updates in `MemoryStore::publish_marketplace_package`, matching PostgreSQL's `ON CONFLICT (plugin_id) DO UPDATE` behavior.
+  - Reset `is_verified` to `false` upon version updates to require re-verification across both backends.
 
 ## Delivery order
 

@@ -7631,29 +7631,35 @@ impl MemoryStore {
             .unwrap_or_else(PoisonError::into_inner)
             .unwrap_or(MAX_MARKETPLACE_PACKAGES_PER_PUBLISHER);
 
-        let existing = self.marketplace_packages.get(&pkg.plugin_id);
-        if let Some(existing_pkg) = existing {
-            if existing_pkg.author != pkg.author {
+        let mut saved = pkg;
+        let existing = self.marketplace_packages.get(&saved.plugin_id);
+        if let Some(existing_pkg) = existing.as_deref() {
+            if existing_pkg.author != saved.author {
                 anyhow::bail!("You cannot modify a package published by another author");
             }
-            if existing_pkg.version == pkg.version {
+            if existing_pkg.version == saved.version {
                 anyhow::bail!("Package version already exists");
             }
+            // Preserve package ID and created_at for backend parity with PostgreSQL ON CONFLICT DO UPDATE (Issue #406)
+            saved.id = existing_pkg.id;
+            saved.created_at = existing_pkg.created_at;
+            saved.is_verified = false;
         } else {
             let author_count = self
                 .marketplace_packages
                 .iter()
-                .filter(|e| e.value().author == pkg.author)
+                .filter(|e| e.value().author == saved.author)
                 .count();
             if author_count >= max_packages {
                 anyhow::bail!("Publisher package quota exceeded (maximum {max_packages} packages)");
             }
         }
+        drop(existing);
 
         self.marketplace_packages
-            .insert(pkg.plugin_id.clone(), pkg.clone());
+            .insert(saved.plugin_id.clone(), saved.clone());
 
-        Ok(pkg)
+        Ok(saved)
     }
 
     pub fn list_marketplace_packages(&self) -> Vec<PluginMarketplacePackage> {

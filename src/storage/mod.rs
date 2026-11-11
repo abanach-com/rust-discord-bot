@@ -13527,4 +13527,88 @@ mod tests {
         // Reset test quota
         store.set_marketplace_quota_for_test(None);
     }
+
+    #[tokio::test]
+    async fn test_marketplace_package_update_preserves_identity_and_pagination_issue_406() {
+        let store = Storage::memory();
+        let valid_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let base_time = Utc::now();
+
+        // 1. Publish pkg-a at t0
+        let orig_id_a = Uuid::new_v4();
+        let time_a = base_time;
+        let pkg_a = PluginMarketplacePackage {
+            id: orig_id_a,
+            plugin_id: "pkg-a".to_string(),
+            name: "Package A".to_string(),
+            version: "1.0.0".to_string(),
+            author: "dev_author".to_string(),
+            sha256_hash: valid_hash.to_string(),
+            manifest: serde_json::json!({"id": "pkg-a", "version": "1.0.0"}),
+            is_verified: true,
+            created_at: time_a,
+        };
+        let res_a = store.publish_marketplace_package(pkg_a).await.unwrap();
+        assert_eq!(res_a.id, orig_id_a);
+        assert_eq!(res_a.created_at, time_a);
+        assert!(res_a.is_verified);
+
+        // 2. Publish pkg-b at t0 + 1s
+        let orig_id_b = Uuid::new_v4();
+        let time_b = base_time + chrono::Duration::seconds(1);
+        let pkg_b = PluginMarketplacePackage {
+            id: orig_id_b,
+            plugin_id: "pkg-b".to_string(),
+            name: "Package B".to_string(),
+            version: "1.0.0".to_string(),
+            author: "dev_author".to_string(),
+            sha256_hash: valid_hash.to_string(),
+            manifest: serde_json::json!({"id": "pkg-b", "version": "1.0.0"}),
+            is_verified: true,
+            created_at: time_b,
+        };
+        let res_b = store.publish_marketplace_package(pkg_b).await.unwrap();
+        assert_eq!(res_b.id, orig_id_b);
+
+        // 3. Page 1 (limit 1) returns pkg-b
+        let page1 = store.list_marketplace_packages_page(1, None).await.unwrap();
+        assert_eq!(page1.packages.len(), 1);
+        assert_eq!(page1.packages[0].plugin_id, "pkg-b");
+        assert!(page1.next_cursor.is_some());
+        let cursor_after_b = page1.next_cursor.unwrap();
+
+        // 4. Update pkg-a to version 2.0.0 with a new UUID and newer timestamp t0 + 2s
+        let new_attempted_id = Uuid::new_v4();
+        let time_update = base_time + chrono::Duration::seconds(2);
+        let pkg_a_v2 = PluginMarketplacePackage {
+            id: new_attempted_id,
+            plugin_id: "pkg-a".to_string(),
+            name: "Package A Updated".to_string(),
+            version: "2.0.0".to_string(),
+            author: "dev_author".to_string(),
+            sha256_hash: valid_hash.to_string(),
+            manifest: serde_json::json!({"id": "pkg-a", "version": "2.0.0"}),
+            is_verified: false,
+            created_at: time_update,
+        };
+        let updated_res = store.publish_marketplace_package(pkg_a_v2).await.unwrap();
+        // ID and created_at MUST be preserved from original pkg-a (parity with PostgreSQL)
+        assert_eq!(updated_res.id, orig_id_a);
+        assert_eq!(updated_res.created_at, time_a);
+        assert_eq!(updated_res.version, "2.0.0");
+        assert_eq!(updated_res.name, "Package A Updated");
+        assert!(!updated_res.is_verified);
+
+        // 5. Page 2 under cursor_after_b MUST STILL return pkg-a! (not lost due to timestamp shift)
+        let page2 = store
+            .list_marketplace_packages_page(1, Some(&cursor_after_b))
+            .await
+            .unwrap();
+        assert_eq!(page2.packages.len(), 1);
+        assert_eq!(page2.packages[0].plugin_id, "pkg-a");
+        assert_eq!(page2.packages[0].version, "2.0.0");
+        assert_eq!(page2.packages[0].id, orig_id_a);
+        assert_eq!(page2.packages[0].created_at, time_a);
+        assert!(page2.next_cursor.is_none());
+    }
 }
