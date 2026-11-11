@@ -9443,3 +9443,264 @@ async fn test_giveaway_web_end_and_reroll_discord_delivery_issue_359() {
 
     shard_manager.shutdown_all().await;
 }
+
+#[tokio::test]
+async fn test_scheduler_forum_media_destination_rejection_issue_388() {
+    use serenity::all::Permissions;
+
+    let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
+    let state = create_test_state().await;
+
+    let guild_id = GuildId::new(100);
+    let manager_id = UserId::new(333333333333333333);
+
+    let baseline_requests = mock.modifying_requests_count.load(Ordering::SeqCst);
+
+    let make_exec_ctx = |channel_id: ChannelId, perms: Permissions| {
+        rusty_discord_bot::discord::scheduler::SchedulerExecutionContext::new(
+            Some(guild_id),
+            Some(channel_id),
+            Some(manager_id),
+            perms,
+            true,
+        )
+    };
+
+    // 1. Direct access check for Forum parent (501)
+    let res_access_forum = rusty_discord_bot::discord::scheduler::ensure_scheduled_delivery_access(
+        &ctx.http,
+        guild_id,
+        manager_id,
+        ChannelId::new(501),
+    )
+    .await;
+    assert!(
+        res_access_forum.is_err(),
+        "Forum channel 501 must be rejected for scheduler delivery"
+    );
+    let err_forum = res_access_forum.unwrap_err().to_string();
+    assert!(
+        err_forum.contains("forum channels do not accept direct messages"),
+        "Unexpected error message: {err_forum}"
+    );
+
+    // 2. Direct access check for Directory channel (503)
+    let res_access_dir = rusty_discord_bot::discord::scheduler::ensure_scheduled_delivery_access(
+        &ctx.http,
+        guild_id,
+        manager_id,
+        ChannelId::new(503),
+    )
+    .await;
+    assert!(
+        res_access_dir.is_err(),
+        "Directory channel 503 must be rejected for scheduler delivery"
+    );
+    let err_dir = res_access_dir.unwrap_err().to_string();
+    assert!(
+        err_dir.contains("media and directory channels cannot be the target of messages"),
+        "Unexpected error message: {err_dir}"
+    );
+
+    // 3. Direct access check for Media parent (502) - fails safely either via Serenity channel deserialization or via ensure_send_message_channel_type
+    let res_access_media = rusty_discord_bot::discord::scheduler::ensure_scheduled_delivery_access(
+        &ctx.http,
+        guild_id,
+        manager_id,
+        ChannelId::new(502),
+    )
+    .await;
+    assert!(
+        res_access_media.is_err(),
+        "Media channel 502 must be rejected for scheduler delivery"
+    );
+
+    // 4. Direct access check for Category channel (401)
+    let res_access_cat = rusty_discord_bot::discord::scheduler::ensure_scheduled_delivery_access(
+        &ctx.http,
+        guild_id,
+        manager_id,
+        ChannelId::new(401),
+    )
+    .await;
+    assert!(
+        res_access_cat.is_err(),
+        "Category channel 401 must be rejected for scheduler delivery"
+    );
+    let err_cat = res_access_cat.unwrap_err().to_string();
+    assert!(
+        err_cat.contains("channel categories cannot be the target of messages"),
+        "Unexpected error message: {err_cat}"
+    );
+
+    // 5. Direct access check for regular text channel (101) succeeds
+    let res_access_text = rusty_discord_bot::discord::scheduler::ensure_scheduled_delivery_access(
+        &ctx.http,
+        guild_id,
+        manager_id,
+        ChannelId::new(101),
+    )
+    .await;
+    assert!(
+        res_access_text.is_ok(),
+        "Text channel 101 must be accepted: {:?}",
+        res_access_text.err()
+    );
+
+    // 6. SchedulerOperation::Create with explicit channel_id = 501 (Forum) is rejected before persistence
+    let op_forum = rusty_discord_bot::lua::SchedulerOperation::Create {
+        when: "15m".to_string(),
+        content: "Scheduled message in forum parent".to_string(),
+        channel_id: Some("501".to_string()),
+        repeat: None,
+        repeat_count: None,
+        mention_creator: false,
+        max_jobs: 10,
+        minimum_delay_seconds: 60,
+        maximum_delay_seconds: 86400,
+    };
+    let res_op_forum = rusty_discord_bot::discord::scheduler::execute(
+        &ctx,
+        &state,
+        "scheduler",
+        make_exec_ctx(ChannelId::new(101), Permissions::MANAGE_GUILD),
+        &op_forum,
+    )
+    .await;
+    assert!(
+        res_op_forum.is_err(),
+        "Scheduler Create targeting forum parent must be rejected"
+    );
+    assert!(
+        res_op_forum
+            .unwrap_err()
+            .to_string()
+            .contains("forum channels do not accept direct messages")
+    );
+
+    // 7. SchedulerOperation::Create with explicit channel_id = 502 (Media) is rejected before persistence
+    let op_media = rusty_discord_bot::lua::SchedulerOperation::Create {
+        when: "15m".to_string(),
+        content: "Scheduled message in media parent".to_string(),
+        channel_id: Some("502".to_string()),
+        repeat: None,
+        repeat_count: None,
+        mention_creator: false,
+        max_jobs: 10,
+        minimum_delay_seconds: 60,
+        maximum_delay_seconds: 86400,
+    };
+    let res_op_media = rusty_discord_bot::discord::scheduler::execute(
+        &ctx,
+        &state,
+        "scheduler",
+        make_exec_ctx(ChannelId::new(101), Permissions::MANAGE_GUILD),
+        &op_media,
+    )
+    .await;
+    assert!(
+        res_op_media.is_err(),
+        "Scheduler Create targeting media parent must be rejected"
+    );
+
+    // 8. SchedulerOperation::Create with explicit channel_id = 401 (Category) is rejected before persistence
+    let op_cat = rusty_discord_bot::lua::SchedulerOperation::Create {
+        when: "15m".to_string(),
+        content: "Scheduled message in category".to_string(),
+        channel_id: Some("401".to_string()),
+        repeat: None,
+        repeat_count: None,
+        mention_creator: false,
+        max_jobs: 10,
+        minimum_delay_seconds: 60,
+        maximum_delay_seconds: 86400,
+    };
+    let res_op_cat = rusty_discord_bot::discord::scheduler::execute(
+        &ctx,
+        &state,
+        "scheduler",
+        make_exec_ctx(ChannelId::new(101), Permissions::MANAGE_GUILD),
+        &op_cat,
+    )
+    .await;
+    assert!(
+        res_op_cat.is_err(),
+        "Scheduler Create targeting category must be rejected"
+    );
+
+    // 9. /remind path (channel_id: None) invoked from inside a Forum parent (channel_id = 501 in execution context)
+    let op_remind_forum = rusty_discord_bot::lua::SchedulerOperation::Create {
+        when: "20m".to_string(),
+        content: "Reminder invoked in forum parent".to_string(),
+        channel_id: None,
+        repeat: None,
+        repeat_count: None,
+        mention_creator: true,
+        max_jobs: 10,
+        minimum_delay_seconds: 60,
+        maximum_delay_seconds: 86400,
+    };
+    let res_remind_forum = rusty_discord_bot::discord::scheduler::execute(
+        &ctx,
+        &state,
+        "scheduler",
+        make_exec_ctx(ChannelId::new(501), Permissions::empty()),
+        &op_remind_forum,
+    )
+    .await;
+    assert!(
+        res_remind_forum.is_err(),
+        "Remind invoked inside forum parent must be rejected"
+    );
+    assert!(
+        res_remind_forum
+            .unwrap_err()
+            .to_string()
+            .contains("forum channels do not accept direct messages")
+    );
+
+    // 10. /remind path (channel_id: None) invoked from inside a Media parent (channel_id = 502 in execution context)
+    let op_remind_media = rusty_discord_bot::lua::SchedulerOperation::Create {
+        when: "20m".to_string(),
+        content: "Reminder invoked in media parent".to_string(),
+        channel_id: None,
+        repeat: None,
+        repeat_count: None,
+        mention_creator: true,
+        max_jobs: 10,
+        minimum_delay_seconds: 60,
+        maximum_delay_seconds: 86400,
+    };
+    let res_remind_media = rusty_discord_bot::discord::scheduler::execute(
+        &ctx,
+        &state,
+        "scheduler",
+        make_exec_ctx(ChannelId::new(502), Permissions::empty()),
+        &op_remind_media,
+    )
+    .await;
+    assert!(
+        res_remind_media.is_err(),
+        "Remind invoked inside media parent must be rejected"
+    );
+
+    // Zero jobs were persisted in the scheduler storage
+    let jobs = state
+        .scheduler
+        .list_jobs("100", "333333333333333333", true, 50)
+        .await
+        .unwrap();
+    assert!(
+        jobs.is_empty(),
+        "0 jobs must be created for rejected channel destinations"
+    );
+
+    // Zero modifying requests (POST messages) were dispatched to Discord
+    assert_eq!(
+        mock.modifying_requests_count.load(Ordering::SeqCst),
+        baseline_requests,
+        "No PUT/POST message requests dispatched during denied scheduler creations"
+    );
+
+    shard_manager.shutdown_all().await;
+}

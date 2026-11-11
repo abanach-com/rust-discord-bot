@@ -1723,24 +1723,7 @@ pub async fn resolve_and_validate_channel(
 
             match purpose {
                 ChannelPurpose::SendMessage => {
-                    if guild_channel.kind == ChannelType::Category {
-                        return Err(anyhow!(
-                            "channel categories cannot be the target of messages"
-                        ));
-                    }
-                    if guild_channel.kind == ChannelType::Forum {
-                        return Err(anyhow!(
-                            "forum channels do not accept direct messages; create a thread or post instead"
-                        ));
-                    }
-                    if matches!(
-                        guild_channel.kind,
-                        ChannelType::Directory | ChannelType::Unknown(16)
-                    ) {
-                        return Err(anyhow!(
-                            "media and directory channels cannot be the target of messages"
-                        ));
-                    }
+                    super::ensure_send_message_channel_type(guild_channel.kind)?;
                 }
 
                 ChannelPurpose::ManageMessages => {

@@ -445,9 +445,7 @@ pub async fn ensure_channel_access_with_context(
         );
     }
 
-    if guild_channel.kind == ChannelType::Category {
-        anyhow::bail!("channel categories cannot be the target of messages");
-    }
+    super::ensure_send_message_channel_type(guild_channel.kind)?;
 
     let is_thread = matches!(
         guild_channel.kind,

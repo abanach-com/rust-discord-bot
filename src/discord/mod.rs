@@ -23,6 +23,25 @@ pub use sticky::{StickyCoordinator, StickyRefresh};
 pub mod tags;
 pub mod tickets;
 
+/// Validates whether a Discord channel type can accept direct text message creation.
+/// Rejects categories, forum parents, media channels, and directories.
+pub fn ensure_send_message_channel_type(kind: serenity::all::ChannelType) -> Result<()> {
+    match kind {
+        serenity::all::ChannelType::Category => {
+            anyhow::bail!("channel categories cannot be the target of messages");
+        }
+        serenity::all::ChannelType::Forum => {
+            anyhow::bail!(
+                "forum channels do not accept direct messages; create a thread or post instead"
+            );
+        }
+        serenity::all::ChannelType::Directory | serenity::all::ChannelType::Unknown(16) => {
+            anyhow::bail!("media and directory channels cannot be the target of messages");
+        }
+        _ => Ok(()),
+    }
+}
+
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -91,4 +110,51 @@ pub async fn run_with_shutdown(
     giveaway_worker.abort();
     client_result?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serenity::all::ChannelType;
+
+    #[test]
+    fn test_ensure_send_message_channel_type_issue_388() {
+        // Allowed channel types for direct message creation
+        assert!(ensure_send_message_channel_type(ChannelType::Text).is_ok());
+        assert!(ensure_send_message_channel_type(ChannelType::Voice).is_ok());
+        assert!(ensure_send_message_channel_type(ChannelType::News).is_ok());
+        assert!(ensure_send_message_channel_type(ChannelType::Stage).is_ok());
+        assert!(ensure_send_message_channel_type(ChannelType::PublicThread).is_ok());
+        assert!(ensure_send_message_channel_type(ChannelType::PrivateThread).is_ok());
+        assert!(ensure_send_message_channel_type(ChannelType::NewsThread).is_ok());
+
+        // Disallowed channel types for direct message creation
+        let err_cat = ensure_send_message_channel_type(ChannelType::Category).unwrap_err();
+        assert!(
+            err_cat
+                .to_string()
+                .contains("channel categories cannot be the target of messages")
+        );
+
+        let err_forum = ensure_send_message_channel_type(ChannelType::Forum).unwrap_err();
+        assert!(
+            err_forum
+                .to_string()
+                .contains("forum channels do not accept direct messages")
+        );
+
+        let err_dir = ensure_send_message_channel_type(ChannelType::Directory).unwrap_err();
+        assert!(
+            err_dir
+                .to_string()
+                .contains("media and directory channels cannot be the target of messages")
+        );
+
+        let err_media = ensure_send_message_channel_type(ChannelType::Unknown(16)).unwrap_err();
+        assert!(
+            err_media
+                .to_string()
+                .contains("media and directory channels cannot be the target of messages")
+        );
+    }
 }
