@@ -10440,9 +10440,15 @@ impl PostgresStore {
 
         let mut tx = self.pool.begin().await?;
 
-        // Transaction-scoped advisory lock per publisher author
+        // 1. Transaction-scoped advisory lock per publisher author (serializes quota check per author)
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext('marketplace_pub_' || $1))")
             .bind(&pkg.author)
+            .execute(&mut *tx)
+            .await?;
+
+        // 2. Transaction-scoped advisory lock per plugin_id (serializes concurrent publish on same plugin_id)
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('marketplace_pkg_' || $1))")
+            .bind(&pkg.plugin_id)
             .execute(&mut *tx)
             .await?;
 
@@ -10478,15 +10484,17 @@ impl PostgresStore {
 
         let row = sqlx::query_as::<_, PluginMarketplacePackage>(
             r#"
-            INSERT INTO plugin_marketplace_packages (id, plugin_id, name, version, author, sha256_hash, manifest, is_verified, created_at)
+            INSERT INTO plugin_marketplace_packages
+                (id, plugin_id, name, version, author, sha256_hash, manifest, is_verified, created_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             ON CONFLICT (plugin_id) DO UPDATE SET
                 name = EXCLUDED.name,
                 version = EXCLUDED.version,
-                author = EXCLUDED.author,
                 sha256_hash = EXCLUDED.sha256_hash,
                 manifest = EXCLUDED.manifest,
-                is_verified = EXCLUDED.is_verified
+                is_verified = false
+            WHERE plugin_marketplace_packages.author = EXCLUDED.author
+              AND plugin_marketplace_packages.version <> EXCLUDED.version
             RETURNING *
             "#,
         )
@@ -10499,8 +10507,30 @@ impl PostgresStore {
         .bind(&pkg.manifest)
         .bind(pkg.is_verified)
         .bind(pkg.created_at)
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
+
+        let Some(row) = row else {
+            // Check why the ON CONFLICT WHERE condition rejected the update
+            let conflict_pkg = sqlx::query_as::<_, PluginMarketplacePackage>(
+                "SELECT * FROM plugin_marketplace_packages WHERE plugin_id = $1",
+            )
+            .bind(&pkg.plugin_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            if let Some(existing) = conflict_pkg {
+                if existing.author != pkg.author {
+                    anyhow::bail!("You cannot modify a package published by another author");
+                }
+                if existing.version == pkg.version {
+                    anyhow::bail!("Package version already exists");
+                }
+            }
+            anyhow::bail!(
+                "Package already exists, is owned by another publisher, or version unchanged"
+            );
+        };
 
         tx.commit().await?;
 

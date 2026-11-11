@@ -277,6 +277,115 @@ async fn test_phase5_audit_fixes_comprehensive_suite() {
         .unwrap();
     assert_eq!(dup_version_resp.status(), reqwest::StatusCode::BAD_REQUEST);
 
+    // Setup session for User B (Issue #117, #404, #405)
+    let session_b_id = "test_phase5_session_token_b";
+    let csrf_b = "test_phase5_csrf_token_b";
+    state
+        .app
+        .sessions
+        .save_session(
+            session_b_id,
+            DashboardUser {
+                id: "user_b".to_string(),
+                username: "UserB".to_string(),
+                global_name: Some("User B".to_string()),
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_b.to_string(),
+                name: "Guild B".to_string(),
+                icon: None,
+                owner: true,
+                permissions: "8".to_string(),
+            }],
+            csrf_b.to_string(),
+            Utc::now() + Duration::hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+    let session_cookie_b = format!("rusty_discord_bot_session={session_b_id}");
+
+    // Attempt by User B to publish a new version of User A's package fails with 403 Forbidden (Issue #117, #405)
+    let user_b_hijack_resp = client
+        .post(format!("{base_url}/api/marketplace/publish"))
+        .header(COOKIE, &session_cookie_b)
+        .header("X-CSRF-Token", csrf_b)
+        .json(&serde_json::json!({
+            "plugin_id": "author_protected_plugin",
+            "name": "Protected Hijacked",
+            "version": "2.0.0",
+            "author": "user_b",
+            "sha256_hash": "hash_v2",
+            "manifest": {"id": "author_protected_plugin", "version": "2.0.0"}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(user_b_hijack_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Verify package in storage remains untampered and still owned by user_a
+    let stored_pkg = state
+        .app
+        .storage
+        .get_marketplace_package("author_protected_plugin")
+        .await
+        .unwrap()
+        .expect("package must exist");
+    assert_eq!(stored_pkg.author, user_a);
+    assert_eq!(stored_pkg.version, "1.0.0");
+
+    // Concurrent first-publication race (Issue #405): User A and User B concurrently publish the same new plugin_id
+    let fut_a = client
+        .post(format!("{base_url}/api/marketplace/publish"))
+        .header(COOKIE, &session_cookie)
+        .header("X-CSRF-Token", csrf_token)
+        .json(&serde_json::json!({
+            "plugin_id": "race_plugin_concurrent",
+            "name": "Plugin by A",
+            "version": "1.0.0",
+            "author": user_a,
+            "sha256_hash": "hash_a",
+            "manifest": {"id": "race_plugin_concurrent", "author": user_a}
+        }))
+        .send();
+
+    let fut_b = client
+        .post(format!("{base_url}/api/marketplace/publish"))
+        .header(COOKIE, &session_cookie_b)
+        .header("X-CSRF-Token", csrf_b)
+        .json(&serde_json::json!({
+            "plugin_id": "race_plugin_concurrent",
+            "name": "Plugin by B",
+            "version": "1.0.0",
+            "author": "user_b",
+            "sha256_hash": "hash_b",
+            "manifest": {"id": "race_plugin_concurrent", "author": "user_b"}
+        }))
+        .send();
+
+    let (res_a, res_b) = tokio::join!(fut_a, fut_b);
+    let (res_a, res_b) = (res_a.unwrap(), res_b.unwrap());
+
+    // Exactly one winner (200 OK) and one loser (403 Forbidden)
+    let (winner_status, loser_status) = if res_a.status() == reqwest::StatusCode::OK {
+        (res_a.status(), res_b.status())
+    } else {
+        (res_b.status(), res_a.status())
+    };
+    assert_eq!(winner_status, reqwest::StatusCode::OK);
+    assert_eq!(loser_status, reqwest::StatusCode::FORBIDDEN);
+
+    // Verify the winning package in storage is intact and not corrupted or overtaken
+    let final_pkg = state
+        .app
+        .storage
+        .get_marketplace_package("race_plugin_concurrent")
+        .await
+        .unwrap()
+        .expect("race package must exist");
+    assert!(final_pkg.author == user_a || final_pkg.author == "user_b");
+
     // ==========================================
     // 5. Issue #120: Card Trade Deadlock & Self-Trade Rejection
     // ==========================================

@@ -800,6 +800,11 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Enforced strict input bounds and size validation across both HTTP and Storage layers (`validate_marketplace_package_input`): `plugin_id` restricted to 1–64 characters matching `[a-z0-9_-]`, `name` 1–120 characters, `version` 1–64 characters without whitespace, `author` 1–64 characters, and serialized `manifest` strictly bounded to 16 KiB (16384 bytes).
   - Protected storage against unbounded catalog growth and publisher flooding: enforced a maximum quota of 100 packages per publisher identity (`MAX_MARKETPLACE_PACKAGES_PER_PUBLISHER`), managed atomically under transaction advisory lock (`pg_advisory_xact_lock`) in PostgreSQL and `marketplace_write_lock` in MemoryStore. Existing package updates do not consume new quota slots, and cross-author overwrite attempts fail closed with 403 Forbidden.
   - Added additive migration `0066_marketplace_packages_pagination_and_quota_indexes.sql` creating keyset pagination index `idx_plugin_marketplace_packages_cursor` on `(created_at DESC, id DESC)` and publisher quota index `idx_plugin_marketplace_packages_author` on `(author)`.
+- **Marketplace First-Publication TOCTOU Race Condition & Ownership Guard (#405)**:
+  - Eliminated parallel hijack vulnerability in PostgreSQL: prevented concurrent first-publication requests from overwriting another publisher's `plugin_id` under `READ COMMITTED`.
+  - Added dedicated transaction-scoped advisory lock on `plugin_id` (`pg_advisory_xact_lock(hashtext('marketplace_pkg_' || $1))`), strictly ordering concurrent publication attempts for the same package slug.
+  - Hardened the `ON CONFLICT (plugin_id) DO UPDATE` query: completely removed `author = EXCLUDED.author` from the `SET` clause and added strict atomic filter `WHERE plugin_marketplace_packages.author = EXCLUDED.author AND plugin_marketplace_packages.version <> EXCLUDED.version`.
+  - Any conflicting parallel insert by a different author fails the `WHERE` condition, returning no row in `RETURNING *`, falling back to safe conflict inspection and failing closed with HTTP 403 Forbidden without modifying existing package ownership, manifest, or hash.
 
 ## Delivery order
 
