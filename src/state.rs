@@ -278,13 +278,43 @@ impl AppState {
                         && attempts < MAX_ATTEMPTS
                     {
                         let backoff = if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                            let retry_after_secs = resp
+                            let retry_header = resp
                                 .headers()
                                 .get(reqwest::header::RETRY_AFTER)
                                 .and_then(|v| v.to_str().ok())
-                                .and_then(|s| s.parse::<f64>().ok())
+                                .and_then(|s| s.trim().parse::<f64>().ok())
+                                .filter(|s| s.is_finite() && *s >= 0.0);
+
+                            let is_global = resp
+                                .headers()
+                                .get("X-RateLimit-Scope")
+                                .and_then(|v| v.to_str().ok())
+                                .map(|s| s.eq_ignore_ascii_case("global"))
+                                .unwrap_or(false);
+
+                            let body_text = resp.text().await.unwrap_or_default();
+                            let retry_after_secs = retry_header
+                                .or_else(|| {
+                                    serde_json::from_str::<serde_json::Value>(&body_text)
+                                        .ok()
+                                        .and_then(|v| v.get("retry_after").and_then(|n| n.as_f64()))
+                                        .filter(|s| s.is_finite() && *s >= 0.0)
+                                })
                                 .unwrap_or(0.5);
-                            std::time::Duration::from_secs_f64(retry_after_secs.min(2.0))
+
+                            let safe_secs = retry_after_secs.max(0.1);
+                            if safe_secs > 120.0 {
+                                anyhow::bail!(
+                                    "Rate limited by Discord API: Retry-After {safe_secs}s exceeds max immediate wait window"
+                                );
+                            }
+                            tracing::warn!(
+                                is_global,
+                                safe_secs,
+                                attempts,
+                                "Discord API rate limit hit in role delivery, backing off"
+                            );
+                            std::time::Duration::from_secs_f64(safe_secs)
                         } else {
                             std::time::Duration::from_millis(100 * (1 << attempts))
                         };
@@ -293,8 +323,16 @@ impl AppState {
                     }
 
                     let error_text = resp.text().await.unwrap_or_default();
+                    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                        anyhow::bail!("Rate limited by Discord API (status 429): {error_text}");
+                    }
+                    if status.is_server_error() {
+                        anyhow::bail!(
+                            "Transient Discord API error (status {status}): {error_text}"
+                        );
+                    }
                     anyhow::bail!(
-                        "Discord API returned status {status} when adding role {role_id} to member {user_id}: {error_text}"
+                        "Permanent Discord API error (status {status}) when adding role {role_id} to member {user_id}: {error_text}"
                     );
                 }
                 Err(err) => {
@@ -308,4 +346,11 @@ impl AppState {
             }
         }
     }
+}
+
+pub fn is_transient_role_delivery_error(err_str: &str) -> bool {
+    err_str.contains("Rate limited")
+        || err_str.contains("429")
+        || err_str.contains("Transient")
+        || err_str.contains("Network error")
 }

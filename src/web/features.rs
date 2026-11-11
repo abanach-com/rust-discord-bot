@@ -1720,12 +1720,15 @@ pub async fn purchase_store_item(
                     }
                     Err(err) => {
                         let err_msg = err.to_string();
+                        let is_transient = crate::state::is_transient_role_delivery_error(&err_msg);
+                        let new_status = if is_transient { "pending" } else { "failed" };
                         tracing::error!(
                             guild_id = %guild_id,
                             user_id = %session.user.id,
                             role_id = %role_id,
                             purchase_id = %purchase.id,
                             error = %err_msg,
+                            new_status = %new_status,
                             "Failed to deliver Discord role for store purchase"
                         );
                         if let Err(e) = state
@@ -1733,7 +1736,7 @@ pub async fn purchase_store_item(
                             .storage
                             .update_store_purchase_fulfillment(
                                 purchase.id,
-                                "failed",
+                                new_status,
                                 Some(&err_msg),
                                 None,
                             )
@@ -1742,10 +1745,10 @@ pub async fn purchase_store_item(
                             tracing::error!(
                                 purchase_id = %purchase.id,
                                 error = %e,
-                                "Failed to update store purchase fulfillment to failed"
+                                "Failed to update store purchase fulfillment to {new_status}"
                             );
                         }
-                        ("failed".to_string(), Some(err_msg))
+                        (new_status.to_string(), Some(err_msg))
                     }
                 },
             }

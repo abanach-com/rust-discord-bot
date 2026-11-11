@@ -330,11 +330,17 @@ pub async fn execute(
                                         }
                                         Err(err) => {
                                             let err_str = err.to_string();
+                                            let is_transient =
+                                                crate::state::is_transient_role_delivery_error(
+                                                    &err_str,
+                                                );
+                                            let new_status =
+                                                if is_transient { "pending" } else { "failed" };
                                             if let Err(e) = state
                                                 .storage
                                                 .update_store_purchase_fulfillment(
                                                     purchase.id,
-                                                    "failed",
+                                                    new_status,
                                                     Some(&err_str),
                                                     None,
                                                 )
@@ -343,10 +349,10 @@ pub async fn execute(
                                                 tracing::error!(
                                                     purchase_id = %purchase.id,
                                                     error = %e,
-                                                    "Failed to persist failed fulfillment status in store_purchases"
+                                                    "Failed to persist {new_status} fulfillment status in store_purchases"
                                                 );
                                             }
-                                            format!("failed: {err_str}")
+                                            format!("{new_status}: {err_str}")
                                         }
                                     }
                                 }
@@ -407,6 +413,8 @@ pub async fn execute(
             let fulfillment_info = if item.role_id.is_some() {
                 if fulfillment_status == "completed" {
                     "\n🎭 Rola została pomyślnie nadana!"
+                } else if fulfillment_status.starts_with("pending") {
+                    "\n⏳ Rola zostanie nadana wkrótce (chwilowe opóźnienie Discord API)."
                 } else {
                     "\n⚠️ Nie udało się nadać roli (sprawdź uprawnienia bota i hierarchię ról)."
                 }

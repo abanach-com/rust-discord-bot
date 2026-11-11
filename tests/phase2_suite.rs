@@ -1607,3 +1607,87 @@ async fn test_offline_mode_false_live_membership_verification() {
         .unwrap();
     assert_eq!(buy_ok.status(), reqwest::StatusCode::OK);
 }
+
+#[tokio::test]
+async fn test_store_role_fulfillment_rate_limiting_retry_after_and_transient_pending_issue_386() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::put};
+
+    let attempts = Arc::new(AtomicU32::new(0));
+    let attempts_clone = attempts.clone();
+
+    // Mock Discord server simulating:
+    // 1st PUT: 429 with Retry-After header = 0.1s
+    // 2nd PUT: 429 with JSON body {"retry_after": 0.1, "global": false}
+    // 3rd PUT: 204 No Content (success)
+    let discord_mock = Router::new().route(
+        "/guilds/{guild_id}/members/{user_id}/roles/{role_id}",
+        put(move || {
+            let attempts = attempts_clone.clone();
+            async move {
+                let call = attempts.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    let mut resp = (StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response();
+                    resp.headers_mut()
+                        .insert(reqwest::header::RETRY_AFTER, "0.1".parse().unwrap());
+                    resp
+                } else if call == 1 {
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        Json(serde_json::json!({ "retry_after": 0.1, "global": false })),
+                    )
+                        .into_response()
+                } else {
+                    StatusCode::NO_CONTENT.into_response()
+                }
+            }
+        }),
+    );
+
+    let discord_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind discord mock");
+    let discord_addr = discord_listener.local_addr().expect("discord mock addr");
+    tokio::spawn(async move {
+        axum::serve(discord_listener, discord_mock).await.unwrap();
+    });
+
+    let mut config = test_config();
+    config.offline_mode = false;
+    config.discord_api_base_url = format!("http://{discord_addr}");
+    let app = AppState::bootstrap(config).await.expect("bootstrap");
+
+    // 1. deliver_store_role retries through 429s (header & JSON) and succeeds on 3rd attempt
+    let guild_id = "100000000000000001";
+    let user_id = "200000000000000002";
+    let role_id = "300000000000000003";
+
+    let delivery_res = app.deliver_store_role(guild_id, user_id, role_id).await;
+    assert!(
+        delivery_res.is_ok(),
+        "deliver_store_role must succeed after handling 429s: {delivery_res:?}"
+    );
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        3,
+        "must have made exactly 3 attempts"
+    );
+
+    // 2. Helper is_transient_role_delivery_error distinguishes transient vs permanent errors
+    assert!(rusty_discord_bot::state::is_transient_role_delivery_error(
+        "Rate limited by Discord API (status 429): ..."
+    ));
+    assert!(rusty_discord_bot::state::is_transient_role_delivery_error(
+        "Transient Discord API error (status 502): ..."
+    ));
+    assert!(rusty_discord_bot::state::is_transient_role_delivery_error(
+        "Network error calling Discord API: ..."
+    ));
+    assert!(!rusty_discord_bot::state::is_transient_role_delivery_error(
+        "Permanent Discord API error (status 403): ..."
+    ));
+    assert!(!rusty_discord_bot::state::is_transient_role_delivery_error(
+        "Permanent Discord API error (status 404): ..."
+    ));
+}
