@@ -48,7 +48,9 @@ async fn test_health_endpoints_metrics_and_graceful_shutdown() {
     let addr = listener.local_addr().unwrap();
     drop(listener);
 
-    let config = test_config(addr);
+    let mut config = test_config(addr);
+    config.discord_token = "nonfunctional.test.token".to_string();
+    config.offline_mode = true;
     let state = AppState::bootstrap(config)
         .await
         .expect("bootstrap should succeed");
@@ -80,15 +82,23 @@ async fn test_health_endpoints_metrics_and_graceful_shutdown() {
     let res = client.get(format!("{base}/healthz")).send().await.unwrap();
     assert_eq!(res.status(), reqwest::StatusCode::OK);
 
-    // Test /health/ready in offline mode (dummy token)
+    // Explicit offline mode must be ready with a non-dummy token and no Gateway.
     let res = client
         .get(format!("{base}/health/ready"))
         .send()
         .await
         .unwrap();
-    assert_eq!(res.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        res.status(),
+        reqwest::StatusCode::OK,
+        "explicit offline mode must be ready without a Gateway connection"
+    );
     let ready_body: serde_json::Value = res.json().await.unwrap();
     assert_eq!(ready_body["status"], "ready");
+    assert_eq!(
+        ready_body["checks"]["discord_gateway"],
+        "ok (offline/dummy mode)"
+    );
     assert_eq!(ready_body["checks"]["storage"], "ok");
     assert_eq!(ready_body["checks"]["lifecycle"], "ok (running)");
     let initial_reqs = ready_body["dashboard_requests_total"]

@@ -213,9 +213,7 @@ pub async fn health_ready(
         checks.insert("lifecycle".to_owned(), json!("ok (running)"));
     }
 
-    let is_offline_mode = state.app.config.discord_token.starts_with("dummy")
-        || state.app.config.discord_token.starts_with("mock");
-    if is_offline_mode {
+    if state.app.config.is_offline_mode() {
         checks.insert(
             "discord_gateway".to_owned(),
             json!("ok (offline/dummy mode)"),
