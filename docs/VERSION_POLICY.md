@@ -36,9 +36,15 @@ To enforce quality gates before merging into `main`, repository settings should 
 
 ## Baseline verified on 2026-09-02
 
+Rust was updated to **1.100.0** on 2026-11-17 after checking the
+[official stable release announcement](https://blog.rust-lang.org/2026/11/12/Rust-1.100.0/)
+and stable channel manifest. The toolchain, minimum Rust version, production
+image, Compose build argument and both CI toolchain installations are synchronized.
+The table below retains the historical baseline for the other components.
+
 | Component | Version/channel |
 | --- | --- |
-| Rust | 1.99.1 |
+| Rust | 1.100.0 (updated 2026-11-17) |
 | Rust edition | 2024 |
 | Discord API | v10 |
 | Serenity | 0.12.5 |

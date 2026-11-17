@@ -17,7 +17,7 @@ concurrency:
 jobs:
   rust:
     name: Format, lint, test and build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     services:
@@ -39,24 +39,31 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
+      - name: Verify CI package failure diagnostics
+        run: bash tests/ci_apt_setup.sh
+
+      - name: Validate dashboard JavaScript
+        run: |
+          node --check web/static/app.js
+          node --test tests/guild_switching.test.js
+
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.99.1
+          toolchain: 1.100.0
           components: rustfmt, clippy
+
+      - name: Check formatting
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo fmt --all -- --check 2>&1 | tee rustfmt.log
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
 
       - name: Install voice build and PostgreSQL dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            build-essential \
-            cmake \
-            libopus-dev \
-            pkg-config \
-            postgresql-client
+        run: bash scripts/install-ci-dependencies.sh
 
       - name: Verify the project tracks the latest stable Rust release
         run: bash scripts/check-latest-rust.sh
@@ -65,12 +72,6 @@ jobs:
         run: |
           cargo check --locked
           git diff --exit-code Cargo.lock
-
-      - name: Check formatting
-        shell: bash
-        run: |
-          set -o pipefail
-          cargo fmt --all -- --check 2>&1 | tee rustfmt.log
 
       - name: Run Clippy
         shell: bash
@@ -106,11 +107,6 @@ jobs:
           set -o pipefail
           cargo test --locked --all-features 2>&1 | tee tests.log
 
-      - name: Validate dashboard JavaScript
-        run: |
-          node --check web/static/app.js
-          node --test tests/guild_switching.test.js
-
       - name: Validate Docker Compose configuration
         shell: bash
         run: |
@@ -131,6 +127,7 @@ jobs:
         with:
           name: rust-diagnostics-${{ github.run_id }}-${{ github.job }}
           path: |
+            apt-install.log
             rustfmt.log
             clippy.log
             tests.log
@@ -174,7 +171,7 @@ jobs:
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.99.1
+          toolchain: 1.100.0
 
       - name: Cache cargo deny
         uses: Swatinem/rust-cache@v2
