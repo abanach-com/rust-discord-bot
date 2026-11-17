@@ -690,12 +690,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_user_locks_pruning_cleans_dead_weak_refs_without_affecting_active_locks() {
-        // Clear any remnants
-        prune_unused_user_locks();
-
         // 1. Create 50 ephemeral locks that are dropped immediately
-        for i in 0..50 {
-            let _ = get_user_lock("guild_ephemeral", &format!("user_{i}"));
+        let ephemeral_keys: Vec<_> = (0..50)
+            .map(|i| ("guild_ephemeral".to_owned(), format!("user_{i}")))
+            .collect();
+        for (guild_id, user_id) in &ephemeral_keys {
+            drop(get_user_lock(guild_id, user_id));
         }
 
         // 2. Create 5 active locks that we retain strong Arc references to
@@ -704,12 +704,18 @@ mod tests {
             held_locks.push(get_user_lock("guild_active", &format!("user_{i}")));
         }
 
-        // Before prune, all 55 entries are in DashMap
-        assert!(user_locks_len() >= 55);
+        let locks = USER_LOCKS.get().expect("user locks have been initialized");
+        for key in &ephemeral_keys {
+            assert!(
+                locks.contains_key(key),
+                "dead lock should remain until pruned"
+            );
+        }
 
-        // Run pruning: only active locks (strong_count > 0) are preserved
-        let pruned = prune_unused_user_locks();
-        assert!(pruned >= 50);
+        prune_unused_user_locks();
+        for key in &ephemeral_keys {
+            assert!(!locks.contains_key(key), "unreferenced lock must be pruned");
+        }
 
         // Active locks must still be valid and match held pointers
         for (i, held) in held_locks.iter().enumerate() {
@@ -724,14 +730,12 @@ mod tests {
         drop(held_locks);
 
         // Pruning now cleans up the remaining 5
-        let _ = prune_unused_user_locks();
-        if let Some(locks) = USER_LOCKS.get() {
-            for i in 0..5 {
-                assert!(
-                    !locks.contains_key(&("guild_active".to_string(), format!("user_{i}"))),
-                    "unreferenced user lock must be pruned from map"
-                );
-            }
+        prune_unused_user_locks();
+        for i in 0..5 {
+            assert!(
+                !locks.contains_key(&("guild_active".to_string(), format!("user_{i}"))),
+                "unreferenced user lock must be pruned from map"
+            );
         }
     }
 
