@@ -8515,6 +8515,21 @@ async fn test_sticky_cooldown_interrupted_by_web_config_mutation_or_deletion_iss
 async fn test_sticky_config_change_and_deletion_not_lost_when_mpsc_queue_full_issue_325() {
     let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
     let state = create_test_state_with_port(mock.port).await;
+    let timeout = std::time::Duration::from_secs(5);
+    let wait_for_delivery = || async {
+        loop {
+            let sticky = state
+                .storage
+                .get_sticky_message("100", "101")
+                .await
+                .expect("read sticky state")
+                .expect("sticky message configured");
+            if sticky.last_bumped_at.is_some() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
 
     // 1. Configure sticky message on channel 101 with long cooldown (3600 seconds)
     state
@@ -8544,7 +8559,9 @@ async fn test_sticky_config_change_and_deletion_not_lost_when_mpsc_queue_full_is
         MessageId::new(8201),
     );
 
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::timeout(timeout, wait_for_delivery())
+        .await
+        .expect("initial delivery should be committed");
     {
         let recorded = mock.recorded_calls.lock().await;
         let posts: Vec<_> = recorded
@@ -8564,7 +8581,9 @@ async fn test_sticky_config_change_and_deletion_not_lost_when_mpsc_queue_full_is
     );
 
     // Wait until worker is deterministically inside cooldown sleep
-    cooldown_notified.await;
+    tokio::time::timeout(timeout, cooldown_notified)
+        .await
+        .expect("worker should enter cooldown after the second trigger");
     assert_eq!(state.sticky_coordinator.active_worker_count(), 1);
 
     // 5. Flood the channel with 70 triggers to completely saturate mpsc buffer (capacity 64)
@@ -8579,7 +8598,6 @@ async fn test_sticky_config_change_and_deletion_not_lost_when_mpsc_queue_full_is
 
     // 6. While mpsc queue is 100% full, admin updates config via web:
     // updates content and sets new config revision while retaining cooldown.
-    let re_entered_cooldown = pause.worker_entered_cooldown.notified();
     state
         .storage
         .set_sticky_message(
@@ -8595,8 +8613,10 @@ async fn test_sticky_config_change_and_deletion_not_lost_when_mpsc_queue_full_is
     // Invalidate channel: watch channel must deliver notification even if mpsc is full
     state.sticky_coordinator.invalidate_channel("100", "101");
 
-    // Worker must wake up immediately without waiting 3600s and re-enter cooldown after delivery
-    re_entered_cooldown.await;
+    // The config write cleared the delivery timestamp. Await its next committed delivery.
+    tokio::time::timeout(timeout, wait_for_delivery())
+        .await
+        .expect("worker should deliver updated sticky during cooldown despite the full queue");
 
     {
         let recorded = mock.recorded_calls.lock().await;
@@ -8617,6 +8637,18 @@ async fn test_sticky_config_change_and_deletion_not_lost_when_mpsc_queue_full_is
     }
 
     // 7. Verify deletion while worker is in cooldown with a fully saturated mpsc queue
+    // The worker may have coalesced all earlier triggers before receiving the config change.
+    let re_entered_cooldown = pause.worker_entered_cooldown.notified();
+    state.sticky_coordinator.enqueue_refresh(
+        ctx.http.clone(),
+        GuildId::new(100),
+        ChannelId::new(101),
+        MessageId::new(8203),
+    );
+    tokio::time::timeout(timeout, re_entered_cooldown)
+        .await
+        .expect("worker should enter cooldown before deleting the sticky");
+
     // Flood mpsc queue again with 70 triggers
     for i in 0..70 {
         state.sticky_coordinator.enqueue_refresh(
