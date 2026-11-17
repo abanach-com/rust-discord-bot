@@ -1995,14 +1995,7 @@ async fn handle_duty_builtin_command(
         .storage
         .get_duty_settings(&guild_id_str)
         .await?
-        .unwrap_or_else(|| crate::duty::ModeratorDutySettings {
-            guild_id: guild_id_str.clone(),
-            staff_role_id: None,
-            on_call_role_id: None,
-            max_override_duration_mins: 1440,
-            fallback_channel_id: None,
-            updated_at: Timestamp::now(),
-        });
+        .unwrap_or_else(|| crate::duty::ModeratorDutySettings::unconfigured(guild_id_str.clone()));
 
     let member_roles: Vec<String> = command
         .member
@@ -2010,9 +2003,11 @@ async fn handle_duty_builtin_command(
         .map(|m| m.roles.iter().map(|r| r.get().to_string()).collect())
         .unwrap_or_default();
 
-    if let Some(ref staff_role) = settings.staff_role_id
-        && !member_roles.contains(staff_role)
-    {
+    let is_staff = settings.staff_role_id.as_deref().is_none_or(|role| {
+        let role = role.trim_start_matches('0');
+        role == guild_id_str || member_roles.iter().any(|member_role| member_role == role)
+    });
+    if !is_staff {
         respond_or_edit(
             ctx,
             command,
@@ -2038,6 +2033,12 @@ async fn handle_duty_builtin_command(
             .unwrap()
         });
 
+    let discord = if state.config.is_offline_mode() {
+        crate::duty::DutyDiscord::Offline(&member_roles)
+    } else {
+        crate::duty::DutyDiscord::Live(&ctx.http)
+    };
+
     let options = options_to_json(&command.data.options);
 
     if options.get("on").is_some() {
@@ -2047,27 +2048,23 @@ async fn handle_duty_builtin_command(
 
         let outcome = crate::duty::reconcile_member_duty_state(crate::duty::ReconcileDutyParams {
             storage: &state.storage,
-            guild_id: &guild_id_str,
-            user_id: &user_id_str,
             settings: &settings,
             profile: &saved,
-            member_roles: &member_roles,
-            bot_highest_role_pos: None,
-            on_call_role_pos: None,
-            is_live_discord: !state.config.discord_token.starts_with("dummy")
-                && state.config.discord_token != "mock"
-                && state.config.discord_token != "offline",
+            discord,
             dry_run: false,
-            http: Some(&ctx.http),
         })
         .await?;
 
-        let status_msg = if outcome.expected_on_call {
+        let status_msg = if let Some(error) = outcome.error {
+            format!("Manual override cleared. On-call role sync failed. {error}")
+        } else if outcome.expected_on_call {
             "🟢 You are now **ON DUTY** (manual override cleared). On-call role is active."
+                .to_owned()
         } else {
             "⚪ Manual override cleared. You are currently outside your scheduled duty hours."
+                .to_owned()
         };
-        respond_or_edit(ctx, command, deferred, responded, status_msg).await?;
+        respond_or_edit(ctx, command, deferred, responded, &status_msg).await?;
         return Ok(());
     }
 
@@ -2092,36 +2089,28 @@ async fn handle_duty_builtin_command(
         profile.override_expires_at = Some(expires_at);
         let saved = state.storage.upsert_duty_profile(profile).await?;
 
-        let _ = crate::duty::reconcile_member_duty_state(crate::duty::ReconcileDutyParams {
+        let outcome = crate::duty::reconcile_member_duty_state(crate::duty::ReconcileDutyParams {
             storage: &state.storage,
-            guild_id: &guild_id_str,
-            user_id: &user_id_str,
             settings: &settings,
             profile: &saved,
-            member_roles: &member_roles,
-            bot_highest_role_pos: None,
-            on_call_role_pos: None,
-            is_live_discord: !state.config.discord_token.starts_with("dummy")
-                && state.config.discord_token != "mock"
-                && state.config.discord_token != "offline",
+            discord,
             dry_run: false,
-            http: Some(&ctx.http),
         })
         .await?;
 
-        let msg = format!(
-            "🔴 You are now **OFF DUTY** (pings-off) for {duration_mins} minutes (until <t:{}:t>).",
+        let mut msg = format!(
+            "🔴 Off-duty override saved for {duration_mins} minutes (until <t:{}:t>).",
             expires_at.as_second()
         );
+        if let Some(error) = outcome.error {
+            msg.push_str(&format!(" On-call role sync failed. {error}"));
+        }
+
         respond_or_edit(ctx, command, deferred, responded, &msg).await?;
         return Ok(());
     }
 
     if options.get("status").is_some() {
-        let is_staff = match settings.staff_role_id {
-            Some(ref sr) => member_roles.contains(sr),
-            None => true,
-        };
         let is_on_call = crate::duty::compute_is_on_call(&profile, Timestamp::now(), is_staff);
 
         let override_info = match (&profile.manual_override, profile.override_expires_at) {
@@ -2162,30 +2151,19 @@ async fn handle_duty_builtin_command(
     {
         profile.recurring_schedule = sqlx::types::Json(crate::duty::RecurringSchedule::default());
         let saved = state.storage.upsert_duty_profile(profile).await?;
-        let _ = crate::duty::reconcile_member_duty_state(crate::duty::ReconcileDutyParams {
+        let outcome = crate::duty::reconcile_member_duty_state(crate::duty::ReconcileDutyParams {
             storage: &state.storage,
-            guild_id: &guild_id_str,
-            user_id: &user_id_str,
             settings: &settings,
             profile: &saved,
-            member_roles: &member_roles,
-            bot_highest_role_pos: None,
-            on_call_role_pos: None,
-            is_live_discord: !state.config.discord_token.starts_with("dummy")
-                && state.config.discord_token != "mock"
-                && state.config.discord_token != "offline",
+            discord,
             dry_run: false,
-            http: Some(&ctx.http),
         })
         .await?;
-        respond_or_edit(
-            ctx,
-            command,
-            deferred,
-            responded,
-            "🗑️ Your recurring duty schedule has been cleared.",
-        )
-        .await?;
+        let mut message = "🗑️ Your recurring duty schedule has been cleared.".to_owned();
+        if let Some(error) = outcome.error {
+            message.push_str(&format!(" On-call role sync failed. {error}"));
+        }
+        respond_or_edit(ctx, command, deferred, responded, &message).await?;
         return Ok(());
     }
 

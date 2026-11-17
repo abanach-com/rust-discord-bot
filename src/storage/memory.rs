@@ -173,6 +173,8 @@ pub struct MemoryStore {
 
     policy_revisions: Arc<DashMap<String, i64>>,
 
+    duty_write_lock: Arc<Mutex<()>>,
+
     duty_settings: Arc<DashMap<String, ModeratorDutySettings>>,
 
     duty_profiles: Arc<DashMap<(String, String), ModeratorDutyProfile>>,
@@ -848,16 +850,21 @@ impl MemoryStore {
         });
         related_erased += before_policy.saturating_sub(self.policy_rules.len());
 
-        let before_duty = self.duty_profiles.len();
-        self.duty_profiles
-            .retain(|(g, u), _| !(g == guild_id && u == user_id));
-        related_erased += before_duty.saturating_sub(self.duty_profiles.len());
-
-        self.duty_states
-            .retain(|(g, u), _| !(g == guild_id && u == user_id));
-
-        self.duty_role_grants
-            .retain(|(g, u, _), _| !(g == guild_id && u == user_id));
+        {
+            let _duty_guard = self.duty_write_guard();
+            if let Some(mut settings) = self.duty_settings.get_mut(guild_id)
+                && settings.role_authorized_by_user_id.as_deref() == Some(user_id)
+            {
+                settings.role_authorized_by_user_id = None;
+                settings.version += 1;
+                settings.updated_at = Timestamp::now();
+                related_erased += 1;
+            }
+            related_erased += usize::from(self.duty_profiles.remove(&key).is_some());
+            self.duty_states.remove(&key);
+            self.duty_role_grants
+                .retain(|(g, u, _), _| !(g == guild_id && u == user_id));
+        }
 
         let before_rec_apps = self.recruitment_applications.len();
         self.recruitment_applications
@@ -4367,27 +4374,65 @@ impl MemoryStore {
         guild_id: &str,
     ) -> anyhow::Result<Option<ModeratorDutySettings>> {
         validate_snowflake("guild_id", guild_id)?;
+        let _guard = self.duty_write_guard();
         Ok(self.duty_settings.get(guild_id).map(|r| r.value().clone()))
+    }
+
+    fn duty_write_guard(&self) -> MutexGuard<'_, ()> {
+        self.duty_write_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     pub fn upsert_duty_settings(
         &self,
-        mut settings: ModeratorDutySettings,
+        settings: ModeratorDutySettings,
     ) -> anyhow::Result<ModeratorDutySettings> {
-        validate_snowflake("guild_id", &settings.guild_id)?;
-        if let Some(ref r_id) = settings.staff_role_id {
-            validate_snowflake("staff_role_id", r_id)?;
+        self.write_duty_settings(settings, super::DutySettingsWrite::Upsert)?
+            .ok_or_else(|| anyhow::anyhow!("unconditional Duty settings write conflicted"))
+    }
+
+    pub fn replace_duty_settings(
+        &self,
+        settings: ModeratorDutySettings,
+        expected_version: Option<i64>,
+    ) -> anyhow::Result<Option<ModeratorDutySettings>> {
+        self.write_duty_settings(
+            settings,
+            super::DutySettingsWrite::Replace(expected_version),
+        )
+    }
+
+    fn write_duty_settings(
+        &self,
+        mut settings: ModeratorDutySettings,
+        write: super::DutySettingsWrite,
+    ) -> anyhow::Result<Option<ModeratorDutySettings>> {
+        super::validate_duty_settings(&settings)?;
+        let _guard = self.duty_write_guard();
+        let previous = self
+            .duty_settings
+            .get(&settings.guild_id)
+            .map(|entry| entry.value().clone());
+        let previous_version = previous.as_ref().map(|entry| entry.version);
+        if let super::DutySettingsWrite::Replace(expected_version) = write
+            && previous_version != expected_version
+        {
+            return Ok(None);
         }
-        if let Some(ref r_id) = settings.on_call_role_id {
-            validate_snowflake("on_call_role_id", r_id)?;
-        }
-        if let Some(ref c_id) = settings.fallback_channel_id {
-            validate_snowflake("fallback_channel_id", c_id)?;
+        settings.version = previous_version
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("Duty settings version exhausted"))?;
+        if let Some(old_role) = previous.and_then(|entry| entry.on_call_role_id)
+            && settings.on_call_role_id.as_deref() != Some(old_role.as_str())
+        {
+            self.queue_duty_role_revocations(&settings.guild_id, None, Some(&old_role));
         }
         settings.updated_at = Timestamp::now();
         self.duty_settings
             .insert(settings.guild_id.clone(), settings.clone());
-        Ok(settings)
+        Ok(Some(settings))
     }
 
     pub fn get_duty_profile(
@@ -4432,23 +4477,27 @@ impl MemoryStore {
     ) -> anyhow::Result<ModeratorDutyProfile> {
         validate_snowflake("guild_id", &profile.guild_id)?;
         validate_snowflake("user_id", &profile.user_id)?;
-        profile.version += 1;
+        let _guard = self.duty_write_guard();
+        let key = (profile.guild_id.clone(), profile.user_id.clone());
+        profile.version = self
+            .duty_profiles
+            .get(&key)
+            .map_or(profile.version, |previous| previous.version)
+            + 1;
         profile.updated_at = Timestamp::now();
-        self.duty_profiles.insert(
-            (profile.guild_id.clone(), profile.user_id.clone()),
-            profile.clone(),
-        );
+        self.duty_profiles.insert(key, profile.clone());
         Ok(profile)
     }
 
     pub fn delete_duty_profile(&self, guild_id: &str, user_id: &str) -> anyhow::Result<bool> {
         validate_snowflake("guild_id", guild_id)?;
         validate_snowflake("user_id", user_id)?;
+        let _guard = self.duty_write_guard();
         let key = (guild_id.to_string(), user_id.to_string());
         let deleted = self.duty_profiles.remove(&key).is_some();
         if deleted {
             self.duty_states.remove(&key);
-            let _ = self.mark_duty_role_grants_for_revocation(guild_id, Some(user_id), None);
+            self.queue_duty_role_revocations(guild_id, Some(user_id), None);
         }
         Ok(deleted)
     }
@@ -4480,17 +4529,33 @@ impl MemoryStore {
 
     pub fn upsert_duty_state(
         &self,
-        mut state: ModeratorDutyState,
+        state: ModeratorDutyState,
     ) -> anyhow::Result<ModeratorDutyState> {
         validate_snowflake("guild_id", &state.guild_id)?;
         validate_snowflake("user_id", &state.user_id)?;
+        let _guard = self.duty_write_guard();
+        Ok(self.write_duty_state(state))
+    }
+
+    pub fn upsert_current_duty_state(
+        &self,
+        profile: &ModeratorDutyProfile,
+        state: ModeratorDutyState,
+    ) {
+        let _guard = self.duty_write_guard();
+        if self.duty_profile_matches(profile) {
+            self.write_duty_state(state);
+        }
+    }
+
+    fn write_duty_state(&self, mut state: ModeratorDutyState) -> ModeratorDutyState {
         state.state_generation += 1;
         state.last_reconciled_at = Some(Timestamp::now());
         self.duty_states.insert(
             (state.guild_id.clone(), state.user_id.clone()),
             state.clone(),
         );
-        Ok(state)
+        state
     }
 
     pub fn get_duty_role_grant(
@@ -4519,15 +4584,18 @@ impl MemoryStore {
         validate_snowflake("guild_id", &grant.guild_id)?;
         validate_snowflake("user_id", &grant.user_id)?;
         validate_snowflake("role_id", &grant.role_id)?;
+        let _guard = self.duty_write_guard();
         grant.updated_at = Timestamp::now();
-        self.duty_role_grants.insert(
-            (
-                grant.guild_id.clone(),
-                grant.user_id.clone(),
-                grant.role_id.clone(),
-            ),
-            grant.clone(),
+        let key = (
+            grant.guild_id.clone(),
+            grant.user_id.clone(),
+            grant.role_id.clone(),
         );
+        if let Some(previous) = self.duty_role_grants.get(&key) {
+            grant.generation = previous.generation + 1;
+            grant.created_at = previous.created_at;
+        }
+        self.duty_role_grants.insert(key, grant.clone());
         Ok(grant)
     }
 
@@ -4541,22 +4609,44 @@ impl MemoryStore {
         validate_snowflake("guild_id", guild_id)?;
         validate_snowflake("user_id", user_id)?;
         validate_snowflake("role_id", role_id)?;
+        let _guard = self.duty_write_guard();
+        self.write_duty_role_grant(guild_id, user_id, role_id, status, None);
+        Ok(())
+    }
 
+    fn write_duty_role_grant(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_id: &str,
+        status: &str,
+        lease_until: Option<Timestamp>,
+    ) -> crate::duty::ModeratorDutyRoleGrant {
         let key = (
             guild_id.to_string(),
             user_id.to_string(),
             role_id.to_string(),
         );
         let now = Timestamp::now();
+        let next_attempt_at = lease_until.unwrap_or(now);
 
         if let Some(mut existing) = self.duty_role_grants.get_mut(&key) {
+            // An earlier DELETE response must not overwrite the intent for a later PUT.
+            if status == "revoked"
+                && matches!(existing.status.as_str(), "active" | "revoke_pending")
+                && existing.next_attempt_at > now
+            {
+                return existing.value().clone();
+            }
             existing.status = status.to_string();
-            if status == "active" {
+            existing.last_error = None;
+            if matches!(status, "active" | "revoke_pending") {
                 existing.attempts = 0;
-                existing.last_error = None;
+                existing.next_attempt_at = next_attempt_at;
             }
             existing.generation += 1;
             existing.updated_at = now;
+            existing.value().clone()
         } else {
             let grant = crate::duty::ModeratorDutyRoleGrant {
                 guild_id: guild_id.to_string(),
@@ -4565,15 +4655,164 @@ impl MemoryStore {
                 status: status.to_string(),
                 attempts: 0,
                 last_error: None,
-                next_attempt_at: now,
+                next_attempt_at,
                 generation: 1,
                 created_at: now,
                 updated_at: now,
             };
-            self.duty_role_grants.insert(key, grant);
+            self.duty_role_grants.insert(key, grant.clone());
+            grant
         }
+    }
 
-        Ok(())
+    pub fn duty_grant_policy_is_current(
+        &self,
+        settings: &ModeratorDutySettings,
+        profile: &ModeratorDutyProfile,
+    ) -> anyhow::Result<bool> {
+        super::duty_policy_role(settings, profile)?;
+        let _guard = self.duty_write_guard();
+        Ok(self.duty_grant_policy_matches(settings, profile))
+    }
+
+    fn duty_grant_policy_matches(
+        &self,
+        settings: &ModeratorDutySettings,
+        profile: &ModeratorDutyProfile,
+    ) -> bool {
+        self.duty_settings
+            .get(&settings.guild_id)
+            .is_some_and(|current| {
+                current.version == settings.version
+                    && current.on_call_role_id == settings.on_call_role_id
+                    && current.role_authorized_by_user_id == settings.role_authorized_by_user_id
+            })
+            && self.duty_profile_matches(profile)
+    }
+
+    fn duty_profile_matches(&self, profile: &ModeratorDutyProfile) -> bool {
+        self.duty_profiles
+            .get(&(profile.guild_id.clone(), profile.user_id.clone()))
+            .is_some_and(|current| {
+                current.version == profile.version && current.updated_at == profile.updated_at
+            })
+    }
+
+    pub fn begin_duty_role_grant(
+        &self,
+        settings: &ModeratorDutySettings,
+        profile: &ModeratorDutyProfile,
+    ) -> anyhow::Result<Option<crate::duty::ModeratorDutyRoleGrant>> {
+        let role_id = super::duty_policy_role(settings, profile)?;
+        let _guard = self.duty_write_guard();
+        if settings.role_authorized_by_user_id.is_none()
+            || !self.duty_grant_policy_matches(settings, profile)
+        {
+            return Ok(None);
+        }
+        let now = Timestamp::now();
+        let key = (
+            settings.guild_id.clone(),
+            profile.user_id.clone(),
+            role_id.to_owned(),
+        );
+        if self.duty_role_grants.get(&key).is_some_and(|grant| {
+            grant.status == "revoke_pending"
+                || grant.status == "active" && grant.next_attempt_at > now
+        }) {
+            return Ok(None);
+        }
+        let lease_until = now + SignedDuration::from_secs(super::DUTY_ROLE_GRANT_LEASE_SECONDS);
+        Ok(Some(self.write_duty_role_grant(
+            &settings.guild_id,
+            &profile.user_id,
+            role_id,
+            "active",
+            Some(lease_until),
+        )))
+    }
+
+    pub fn finish_duty_role_grant(
+        &self,
+        settings: &ModeratorDutySettings,
+        profile: &ModeratorDutyProfile,
+        grant: &crate::duty::ModeratorDutyRoleGrant,
+    ) -> bool {
+        let _guard = self.duty_write_guard();
+        let policy_current = self.duty_grant_policy_matches(settings, profile);
+        let key = (
+            grant.guild_id.clone(),
+            grant.user_id.clone(),
+            grant.role_id.clone(),
+        );
+        let Some(mut current) = self.duty_role_grants.get_mut(&key) else {
+            return false;
+        };
+        if current.status != "active"
+            || current.generation != grant.generation
+            || current.created_at != grant.created_at
+        {
+            return false;
+        }
+        if !policy_current {
+            current.status = "revoke_pending".to_owned();
+        }
+        current.next_attempt_at = Timestamp::now();
+        current.generation += 1;
+        current.updated_at = current.next_attempt_at;
+        policy_current
+    }
+
+    pub fn claim_duty_role_revocation(
+        &self,
+        grant: &crate::duty::ModeratorDutyRoleGrant,
+    ) -> Option<crate::duty::ModeratorDutyRoleGrant> {
+        let _guard = self.duty_write_guard();
+        let key = (
+            grant.guild_id.clone(),
+            grant.user_id.clone(),
+            grant.role_id.clone(),
+        );
+        let now = Timestamp::now();
+        let mut current = self.duty_role_grants.get_mut(&key)?;
+        if current.status != "revoke_pending"
+            || current.generation != grant.generation
+            || current.created_at != grant.created_at
+            || current.next_attempt_at > now
+        {
+            return None;
+        }
+        current.next_attempt_at =
+            now + SignedDuration::from_secs(super::DUTY_ROLE_REVOCATION_LEASE_SECONDS);
+        current.generation += 1;
+        current.updated_at = now;
+        Some(current.value().clone())
+    }
+
+    pub fn complete_duty_role_revocation(
+        &self,
+        grant: crate::duty::ModeratorDutyRoleGrant,
+    ) -> bool {
+        let _guard = self.duty_write_guard();
+        let key = (grant.guild_id, grant.user_id, grant.role_id);
+        let Some(mut current) = self.duty_role_grants.get_mut(&key) else {
+            return false;
+        };
+        let can_complete = current.status == "revoke_pending"
+            || grant.status == "revoked" && matches!(current.status.as_str(), "active" | "failed");
+        if !can_complete
+            || current.generation != grant.generation
+            || current.created_at != grant.created_at
+        {
+            return false;
+        }
+        current.status = grant.status;
+        current.attempts = grant.attempts;
+        current.last_error = grant.last_error;
+        current.next_attempt_at = grant.next_attempt_at;
+        current.generation += 1;
+        current.updated_at = Timestamp::now();
+        true
     }
 
     pub fn mark_duty_role_grants_for_revocation(
@@ -4590,6 +4829,16 @@ impl MemoryStore {
             validate_snowflake("role_id", rid)?;
         }
 
+        let _guard = self.duty_write_guard();
+        Ok(self.queue_duty_role_revocations(guild_id, user_id, role_id))
+    }
+
+    fn queue_duty_role_revocations(
+        &self,
+        guild_id: &str,
+        user_id: Option<&str>,
+        role_id: Option<&str>,
+    ) -> Vec<crate::duty::ModeratorDutyRoleGrant> {
         let now = Timestamp::now();
         let mut updated = Vec::new();
 
@@ -4600,14 +4849,14 @@ impl MemoryStore {
                 && entry.status == "active"
             {
                 entry.status = "revoke_pending".to_string();
-                entry.next_attempt_at = now;
+                entry.next_attempt_at = entry.next_attempt_at.max(now);
                 entry.generation += 1;
                 entry.updated_at = now;
                 updated.push(entry.value().clone());
             }
         }
 
-        Ok(updated)
+        updated
     }
 
     pub fn list_pending_duty_role_revocations(
@@ -4618,6 +4867,7 @@ impl MemoryStore {
             validate_snowflake("guild_id", gid)?;
         }
 
+        let _guard = self.duty_write_guard();
         let now = Timestamp::now();
         let list: Vec<_> = self
             .duty_role_grants

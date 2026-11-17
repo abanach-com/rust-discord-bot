@@ -1986,6 +1986,896 @@ async fn test_moderator_duty_api() {
     assert_eq!(list_p2_json["profiles"].as_array().unwrap().len(), 0);
 }
 
+mod duty_role_authorization {
+    use super::*;
+    use axum::{
+        Json, Router,
+        extract::State,
+        http::{Method, StatusCode, Uri},
+        response::{IntoResponse, Response},
+    };
+    use rusty_discord_bot::{
+        duty::{
+            DutyReconcileOutcome, ModeratorDutyProfile, ModeratorDutyRoleGrant,
+            ModeratorDutySettings, ModeratorDutyState, RecurringSchedule,
+        },
+        storage::Storage,
+    };
+    use serde_json::{Value, json};
+    use std::sync::Mutex;
+    use tokio::{net::TcpListener, sync::Notify, task::JoinHandle};
+
+    const ACTOR: &str = "381000000000000001";
+    const BOT: &str = "381000000000000002";
+    const MEMBER: &str = "381000000000000003";
+    const OWNER: &str = "381000000000000004";
+    const ON_CALL: &str = "381000000000000101";
+    const STAFF: &str = "381000000000000102";
+    const ACTOR_ROLE: &str = "381000000000000103";
+    const BOT_ROLE: &str = "381000000000000104";
+    const REPLACEMENT: &str = "381000000000000105";
+    const MANAGE_GUILD: &str = "32";
+    const MANAGE_GUILD_AND_ROLES: &str = "268435488";
+    const SESSION: &str = "duty_role_authorization";
+    const CSRF: &str = "duty_role_authorization_csrf";
+    const LOCAL_DISCORD_TOKEN: &str = "duty-local-test-token";
+
+    fn role(id: &str, permissions: &str, position: u16) -> Value {
+        json!({
+            "id": id,
+            "name": format!("role_{id}"),
+            "permissions": permissions,
+            "position": position,
+            "managed": false,
+            "color": 0,
+            "colors": { "primary_color": 0 },
+            "hoist": false,
+            "mentionable": false,
+            "flags": 0,
+        })
+    }
+
+    struct Discord {
+        guild_id: String,
+        roles: Vec<Value>,
+        member_roles: Vec<String>,
+        writes: Vec<(Method, String)>,
+        failing_lookup: Option<String>,
+        fail_after_grant: bool,
+        delay_delete_response: Option<(Arc<Notify>, Arc<Notify>)>,
+    }
+
+    impl Discord {
+        fn new(guild_id: &str) -> Self {
+            Self {
+                guild_id: guild_id.to_owned(),
+                roles: vec![
+                    role(guild_id, "0", 0),
+                    role(ON_CALL, "0", 5),
+                    role(STAFF, "1099511627776", 10), // MODERATE_MEMBERS
+                    role(ACTOR_ROLE, MANAGE_GUILD_AND_ROLES, 20),
+                    role(BOT_ROLE, "268435456", 30), // MANAGE_ROLES
+                    role(REPLACEMENT, "0", 6),
+                ],
+                member_roles: vec![STAFF.to_owned()],
+                writes: Vec::new(),
+                failing_lookup: None,
+                fail_after_grant: false,
+                delay_delete_response: None,
+            }
+        }
+
+        fn role_mut(&mut self, id: &str) -> &mut Value {
+            self.roles.iter_mut().find(|role| role["id"] == id).unwrap()
+        }
+
+        fn guild_json(&self) -> Value {
+            json!({
+                "id": self.guild_id,
+                "name": "Duty authorization guild",
+                "owner_id": OWNER,
+                "roles": self.roles,
+                "emojis": [],
+                "features": [],
+                "stickers": [],
+                "verification_level": 0,
+                "default_message_notifications": 0,
+                "explicit_content_filter": 0,
+                "mfa_level": 0,
+                "system_channel_flags": 0,
+                "premium_tier": 0,
+                "preferred_locale": "en-US",
+                "nsfw_level": 0,
+                "premium_progress_bar_enabled": false,
+            })
+        }
+
+        fn member_json(user_id: &str, roles: &[String]) -> Value {
+            json!({
+                "user": { "id": user_id, "username": format!("user_{user_id}"), "bot": user_id == BOT },
+                "roles": roles,
+                "deaf": false,
+                "mute": false,
+                "flags": 0,
+            })
+        }
+    }
+
+    async fn discord_api(
+        State(discord): State<Arc<Mutex<Discord>>>,
+        method: Method,
+        uri: Uri,
+    ) -> Response {
+        let (response, delay) = {
+            let mut discord = discord.lock().unwrap();
+            let response = discord_response(&mut discord, method.clone(), uri);
+            let delay = if method == Method::DELETE && response.status() == StatusCode::NO_CONTENT {
+                discord.delay_delete_response.take()
+            } else {
+                None
+            };
+            (response, delay)
+        };
+        if let Some((applied, release)) = delay {
+            applied.notify_one();
+            release.notified().await;
+        }
+        response
+    }
+
+    fn discord_response(discord: &mut Discord, method: Method, uri: Uri) -> Response {
+        let guild_id = discord.guild_id.clone();
+        let path = uri.path().strip_prefix("/api/v10").unwrap_or(uri.path());
+        if method == Method::GET && discord.failing_lookup.as_deref() == Some(path) {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "code": 0, "message": "Discord unavailable" })),
+            )
+                .into_response();
+        }
+        let path = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
+        let response = match (method.clone(), path.as_slice()) {
+            (Method::GET, ["users", "@me"]) => {
+                Some(json!({ "id": BOT, "username": "duty_bot", "bot": true }))
+            }
+            (Method::GET, ["guilds", guild]) if *guild == guild_id => Some(discord.guild_json()),
+            (Method::GET, ["guilds", guild, "permissions", "member", ACTOR])
+                if *guild == guild_id =>
+            {
+                Some(json!({ "permissions": discord.role_mut(ACTOR_ROLE)["permissions"] }))
+            }
+            (Method::GET, ["guilds", guild, "members", user_id]) if *guild == guild_id => {
+                match *user_id {
+                    ACTOR => Some(Discord::member_json(ACTOR, &[ACTOR_ROLE.to_owned()])),
+                    BOT => Some(Discord::member_json(BOT, &[BOT_ROLE.to_owned()])),
+                    MEMBER => Some(Discord::member_json(MEMBER, &discord.member_roles)),
+                    _ => None,
+                }
+            }
+            (Method::PUT | Method::DELETE, _) => {
+                discord.writes.push((method.clone(), uri.path().to_owned()));
+                if let ["guilds", guild, "members", MEMBER, "roles", role] = path.as_slice()
+                    && *guild == guild_id
+                {
+                    if method == Method::PUT {
+                        discord.member_roles.push((*role).to_owned());
+                        if discord.fail_after_grant {
+                            return (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(json!({ "code": 0, "message": "Grant response failed after applying the role" })),
+                            )
+                                .into_response();
+                        }
+                    } else {
+                        discord.member_roles.retain(|existing| existing != *role);
+                    }
+                    return StatusCode::NO_CONTENT.into_response();
+                }
+                None
+            }
+            _ => None,
+        };
+        match response {
+            Some(value) => Json(value).into_response(),
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "code": 0, "message": "Unknown Discord resource" })),
+            )
+                .into_response(),
+        }
+    }
+
+    struct Fixture {
+        guild_id: String,
+        discord: Arc<Mutex<Discord>>,
+        storage: Storage,
+        discord_url: String,
+        client: reqwest::Client,
+        dashboard_url: String,
+        workers: [JoinHandle<()>; 2],
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            for worker in &self.workers {
+                worker.abort();
+            }
+        }
+    }
+
+    impl Fixture {
+        async fn new(storage: Storage, session_permissions: &str) -> Self {
+            let guild_id = (100_000_000_000_000_000u128
+                + uuid::Uuid::new_v4().as_u128() % 100_000_000_000_000_000)
+                .to_string();
+            let discord = Arc::new(Mutex::new(Discord::new(&guild_id)));
+            let discord_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let discord_address = discord_listener.local_addr().unwrap();
+            let discord_router = Router::new()
+                .fallback(discord_api)
+                .with_state(discord.clone());
+            let discord_task = tokio::spawn(async move {
+                axum::serve(discord_listener, discord_router).await.unwrap();
+            });
+
+            let mut config = test_config();
+            config.discord_token = LOCAL_DISCORD_TOKEN.to_owned();
+            let discord_url = format!("http://{discord_address}");
+            config.discord_api_base_url = discord_url.clone();
+            let mut app = AppState::bootstrap(config).await.unwrap();
+            app.storage = storage.clone();
+            app.sessions
+                .save_session(
+                    SESSION,
+                    DashboardUser {
+                        id: ACTOR.to_owned(),
+                        username: "duty_actor".to_owned(),
+                        global_name: None,
+                        avatar: None,
+                    },
+                    vec![DashboardGuild {
+                        id: guild_id.clone(),
+                        name: "Duty authorization guild".to_owned(),
+                        icon: None,
+                        owner: false,
+                        permissions: session_permissions.to_owned(),
+                    }],
+                    CSRF.to_owned(),
+                    Timestamp::now() + days(1),
+                    None,
+                )
+                .await
+                .unwrap();
+            let dashboard = build_router(WebState::new(
+                app,
+                Arc::new(LoginRateLimiter::new()),
+                Arc::new(DashMap::new()),
+            ));
+            let dashboard_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let dashboard_url = format!("http://{}", dashboard_listener.local_addr().unwrap());
+            let dashboard_task = tokio::spawn(async move {
+                axum::serve(
+                    dashboard_listener,
+                    dashboard.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .await
+                .unwrap();
+            });
+            Self {
+                guild_id,
+                discord,
+                storage,
+                discord_url,
+                client: reqwest::Client::new(),
+                dashboard_url,
+                workers: [discord_task, dashboard_task],
+            }
+        }
+
+        fn request(&self, suffix: &str) -> reqwest::RequestBuilder {
+            self.client.post(format!(
+                "{}/api/guilds/{}/duty/{suffix}",
+                self.dashboard_url, self.guild_id
+            ))
+        }
+
+        fn authenticated_request(&self, suffix: &str) -> reqwest::RequestBuilder {
+            self.request(suffix)
+                .header(COOKIE, format!("rusty_discord_bot_session={SESSION}"))
+                .header("x-csrf-token", CSRF)
+        }
+
+        async fn settings_response(&self, payload: &Value) -> reqwest::Response {
+            self.authenticated_request("settings")
+                .json(payload)
+                .send()
+                .await
+                .unwrap()
+        }
+
+        async fn approve_role(&self) {
+            let response = self
+                .settings_response(&json!({
+                    "staff_role_id": STAFF,
+                    "on_call_role_id": ON_CALL,
+                }))
+                .await;
+            let body = response_json(response, StatusCode::OK).await;
+            assert_eq!(body["settings"]["on_call_role_id"], ON_CALL);
+            assert!(body["settings"].get("role_authorized_by_user_id").is_none());
+            assert_eq!(
+                self.stored_settings()
+                    .await
+                    .unwrap()
+                    .role_authorized_by_user_id
+                    .as_deref(),
+                Some(ACTOR)
+            );
+        }
+
+        async fn stored_settings(&self) -> Option<ModeratorDutySettings> {
+            self.storage
+                .get_duty_settings(&self.guild_id)
+                .await
+                .unwrap()
+        }
+
+        async fn duty_state(&self) -> Option<ModeratorDutyState> {
+            self.storage
+                .get_duty_state(&self.guild_id, MEMBER)
+                .await
+                .unwrap()
+        }
+
+        async fn grant(&self) -> Option<ModeratorDutyRoleGrant> {
+            self.storage
+                .get_duty_role_grant(&self.guild_id, MEMBER, ON_CALL)
+                .await
+                .unwrap()
+        }
+
+        async fn audit_count(&self) -> usize {
+            self.storage
+                .list_audit_events(&self.guild_id, 100)
+                .await
+                .unwrap()
+                .len()
+        }
+
+        async fn assert_no_settings_effects(&self) {
+            assert!(self.stored_settings().await.is_none());
+            assert_eq!(self.audit_count().await, 0);
+            self.assert_writes(&[]);
+        }
+
+        async fn set_shift(&self, on_call: bool) {
+            let mut profile = ModeratorDutyProfile::new(
+                self.guild_id.clone(),
+                MEMBER.to_owned(),
+                "UTC".to_owned(),
+                RecurringSchedule::default(),
+            )
+            .unwrap();
+            profile.manual_override =
+                Some(if on_call { "force_on" } else { "force_off" }.to_owned());
+            self.storage.upsert_duty_profile(profile).await.unwrap();
+        }
+
+        async fn reconcile(&self, dry_run: bool) -> DutyReconcileOutcome {
+            let response = self
+                .authenticated_request(if dry_run {
+                    "reconcile?dry_run=true"
+                } else {
+                    "reconcile"
+                })
+                .send()
+                .await
+                .unwrap();
+            let body = response_json(response, StatusCode::OK).await;
+            assert_eq!(body["count"], 1);
+            assert_eq!(body["dry_run"], dry_run);
+            let outcome: DutyReconcileOutcome =
+                serde_json::from_value(body["outcomes"][0].clone()).unwrap();
+            assert_eq!(outcome.user_id, MEMBER);
+            outcome
+        }
+
+        async fn assert_reconcile_error(&self) {
+            let outcome = self.reconcile(false).await;
+            assert!(!outcome.role_granted);
+            assert!(
+                outcome
+                    .error
+                    .as_deref()
+                    .is_some_and(|reason| !reason.is_empty())
+            );
+            assert_eq!(self.duty_state().await.unwrap().last_error, outcome.error);
+            self.assert_writes(&[]);
+            assert!(self.grant().await.is_none());
+        }
+
+        async fn assert_read_only_reconcile(&self, audit_count: usize) {
+            self.assert_writes(&[]);
+            assert_eq!(self.audit_count().await, audit_count);
+            assert!(self.duty_state().await.is_none());
+            assert!(self.grant().await.is_none());
+        }
+
+        async fn assert_watchdog_reconcile_error(&self) {
+            // The watchdog scans every guild, so give it an isolated MemoryStore fixture.
+            let http = serenity::http::HttpBuilder::new(LOCAL_DISCORD_TOKEN)
+                .proxy(&self.discord_url)
+                .ratelimiter_disabled(true)
+                .build();
+            rusty_discord_bot::duty::reconcile_all_duty_guilds(&self.storage, Some(&http), true)
+                .await
+                .unwrap();
+            let state = self.duty_state().await.unwrap();
+            assert!(state.last_error.is_some_and(|reason| !reason.is_empty()));
+            self.assert_writes(&[]);
+            assert!(self.grant().await.is_none());
+        }
+
+        fn assert_writes(&self, expected: &[Method]) {
+            let path = format!(
+                "/api/v10/guilds/{}/members/{MEMBER}/roles/{ON_CALL}",
+                self.guild_id
+            );
+            let expected = expected
+                .iter()
+                .map(|method| (method.clone(), path.clone()))
+                .collect::<Vec<_>>();
+            assert_eq!(self.discord.lock().unwrap().writes, expected);
+        }
+    }
+
+    async fn response_json(response: reqwest::Response, status: StatusCode) -> Value {
+        let actual = response.status();
+        let body = response.text().await.unwrap();
+        assert_eq!(actual, status, "{body}");
+        serde_json::from_str(&body).unwrap()
+    }
+
+    async fn reject_manage_guild_without_manage_roles(storage: Storage) {
+        let fixture = Fixture::new(storage, MANAGE_GUILD).await;
+        fixture.discord.lock().unwrap().role_mut(ACTOR_ROLE)["permissions"] = json!(MANAGE_GUILD);
+
+        let response = fixture
+            .settings_response(&json!({ "on_call_role_id": ON_CALL }))
+            .await;
+
+        response_json(response, StatusCode::FORBIDDEN).await;
+        fixture.assert_no_settings_effects().await;
+    }
+
+    #[tokio::test]
+    async fn settings_reject_manage_guild_without_manage_roles() {
+        reject_manage_guild_without_manage_roles(Storage::memory()).await;
+    }
+
+    #[tokio::test]
+    async fn settings_require_session_and_csrf() {
+        let fixture = Fixture::new(Storage::memory(), MANAGE_GUILD_AND_ROLES).await;
+        let payload = json!({ "staff_role_id": STAFF, "on_call_role_id": ON_CALL });
+        let response = fixture
+            .request("settings")
+            .json(&payload)
+            .send()
+            .await
+            .unwrap();
+        response_json(response, StatusCode::UNAUTHORIZED).await;
+
+        let response = fixture
+            .request("settings")
+            .header(COOKIE, format!("rusty_discord_bot_session={SESSION}"))
+            .json(&payload)
+            .send()
+            .await
+            .unwrap();
+        response_json(response, StatusCode::FORBIDDEN).await;
+        fixture.assert_no_settings_effects().await;
+    }
+
+    #[tokio::test]
+    async fn settings_require_current_authority_to_replace_or_clear_an_existing_role() {
+        let fixture = Fixture::new(Storage::memory(), MANAGE_GUILD_AND_ROLES).await;
+        fixture.approve_role().await;
+        fixture
+            .storage
+            .record_duty_role_grant(&fixture.guild_id, MEMBER, ON_CALL, "active")
+            .await
+            .unwrap();
+        let original = serde_json::to_value(fixture.stored_settings().await.unwrap()).unwrap();
+        let audit_count = fixture.audit_count().await;
+
+        {
+            let mut discord = fixture.discord.lock().unwrap();
+            discord.member_roles.push(ON_CALL.to_owned());
+            discord.role_mut(ACTOR_ROLE)["permissions"] = json!(MANAGE_GUILD);
+        }
+        for payload in [
+            json!({ "staff_role_id": STAFF, "on_call_role_id": REPLACEMENT }),
+            json!({ "staff_role_id": STAFF }),
+            json!({ "staff_role_id": null, "on_call_role_id": ON_CALL }),
+        ] {
+            response_json(
+                fixture.settings_response(&payload).await,
+                StatusCode::FORBIDDEN,
+            )
+            .await;
+        }
+
+        {
+            let mut discord = fixture.discord.lock().unwrap();
+            discord.role_mut(ACTOR_ROLE)["permissions"] = json!(MANAGE_GUILD_AND_ROLES);
+            discord.role_mut(ON_CALL)["position"] = json!(25);
+        }
+        for payload in [
+            json!({ "staff_role_id": STAFF, "on_call_role_id": REPLACEMENT }),
+            json!({ "staff_role_id": STAFF, "on_call_role_id": null }),
+        ] {
+            response_json(
+                fixture.settings_response(&payload).await,
+                StatusCode::FORBIDDEN,
+            )
+            .await;
+        }
+
+        assert_eq!(
+            serde_json::to_value(fixture.stored_settings().await.unwrap()).unwrap(),
+            original
+        );
+        assert_eq!(fixture.grant().await.unwrap().status, "active");
+        assert!(
+            fixture
+                .storage
+                .list_pending_duty_role_revocations(Some(&fixture.guild_id))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(fixture.audit_count().await, audit_count);
+        fixture.assert_writes(&[]);
+    }
+
+    #[tokio::test]
+    async fn settings_reject_roles_that_cannot_be_safely_assigned() {
+        let fixture = Fixture::new(Storage::memory(), MANAGE_GUILD_AND_ROLES).await;
+        type InvalidRole<'a> = (&'static str, &'a str, fn(&mut Discord));
+        let invalid_roles: [InvalidRole<'_>; 8] = [
+            ("everyone", &fixture.guild_id, |_| {}),
+            ("missing", ON_CALL, |discord| {
+                discord.roles.retain(|role| role["id"] != ON_CALL)
+            }),
+            ("managed", ON_CALL, |discord| {
+                discord.role_mut(ON_CALL)["managed"] = json!(true)
+            }),
+            ("privileged", ON_CALL, |discord| {
+                discord.role_mut(ON_CALL)["permissions"] = json!("8")
+            }),
+            ("actor rank", ON_CALL, |discord| {
+                discord.role_mut(ON_CALL)["position"] = json!(20)
+            }),
+            ("bot rank", ON_CALL, |discord| {
+                discord.role_mut(BOT_ROLE)["position"] = json!(5)
+            }),
+            ("bot permission", ON_CALL, |discord| {
+                discord.role_mut(BOT_ROLE)["permissions"] = json!("0")
+            }),
+            ("missing staff role", ON_CALL, |discord| {
+                discord.roles.retain(|role| role["id"] != STAFF)
+            }),
+        ];
+        for (case, role, change) in invalid_roles {
+            {
+                let mut discord = fixture.discord.lock().unwrap();
+                *discord = Discord::new(&fixture.guild_id);
+                change(&mut discord);
+            }
+            let response = fixture
+                .settings_response(&json!({
+                    "on_call_role_id": role,
+                    "staff_role_id": STAFF,
+                }))
+                .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "{case}: {}",
+                response.text().await.unwrap()
+            );
+            fixture.assert_no_settings_effects().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn settings_fail_closed_on_unavailable_or_invalid_discord_evidence() {
+        let fixture = Fixture::new(Storage::memory(), MANAGE_GUILD_AND_ROLES).await;
+        let payload = json!({ "staff_role_id": STAFF, "on_call_role_id": ON_CALL });
+        for path in [
+            format!("/guilds/{}", fixture.guild_id),
+            format!("/guilds/{}/members/{ACTOR}", fixture.guild_id),
+            format!("/guilds/{}/members/{BOT}", fixture.guild_id),
+            "/users/@me".to_owned(),
+        ] {
+            fixture.discord.lock().unwrap().failing_lookup = Some(path.clone());
+            let response = fixture.settings_response(&payload).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_GATEWAY,
+                "{path}: {}",
+                response.text().await.unwrap()
+            );
+            fixture.assert_no_settings_effects().await;
+        }
+
+        {
+            let mut discord = fixture.discord.lock().unwrap();
+            discord.failing_lookup = None;
+            discord.role_mut(ON_CALL)["permissions"] = json!("invalid");
+        }
+        response_json(
+            fixture.settings_response(&payload).await,
+            StatusCode::BAD_GATEWAY,
+        )
+        .await;
+        fixture.assert_no_settings_effects().await;
+
+        {
+            let mut discord = fixture.discord.lock().unwrap();
+            *discord = Discord::new(&fixture.guild_id);
+            discord.role_mut(ON_CALL)["guild_id"] = json!("381000000000000009");
+        }
+        response_json(
+            fixture.settings_response(&payload).await,
+            StatusCode::BAD_GATEWAY,
+        )
+        .await;
+        fixture.assert_no_settings_effects().await;
+    }
+
+    #[tokio::test]
+    async fn settings_honor_discord_role_id_tiebreak() {
+        let fixture = Fixture::new(Storage::memory(), MANAGE_GUILD_AND_ROLES).await;
+        {
+            let mut discord = fixture.discord.lock().unwrap();
+            discord.role_mut(BOT_ROLE)["position"] = json!(20);
+            discord.role_mut(REPLACEMENT)["position"] = json!(20);
+        }
+        // Both managers' roles have smaller snowflakes at the same position.
+        let response = fixture
+            .settings_response(&json!({ "on_call_role_id": REPLACEMENT }))
+            .await;
+        response_json(response, StatusCode::OK).await;
+        assert_eq!(
+            fixture
+                .stored_settings()
+                .await
+                .unwrap()
+                .on_call_role_id
+                .as_deref(),
+            Some(REPLACEMENT)
+        );
+        fixture.assert_writes(&[]);
+    }
+
+    async fn safe_role_round_trip(storage: Storage) {
+        let fixture = Fixture::new(storage, MANAGE_GUILD_AND_ROLES).await;
+        fixture.approve_role().await;
+        fixture.set_shift(true).await;
+        let audit_count = fixture.audit_count().await;
+
+        let preview = fixture.reconcile(true).await;
+        assert!(preview.expected_on_call && preview.would_grant);
+        assert!(!preview.role_granted && preview.error.is_none());
+        fixture.assert_read_only_reconcile(audit_count).await;
+
+        let first = fixture.reconcile(false).await;
+        assert!(first.role_granted && first.error.is_none());
+        assert!(!fixture.reconcile(false).await.role_granted);
+        fixture.assert_writes(&[Method::PUT]);
+        assert_eq!(fixture.grant().await.unwrap().status, "active");
+
+        fixture.discord.lock().unwrap().role_mut(ACTOR_ROLE)["permissions"] = json!(MANAGE_GUILD);
+        fixture.set_shift(false).await;
+        let ended = fixture.reconcile(false).await;
+        assert!(ended.role_revoked && ended.error.is_none());
+        fixture.assert_writes(&[Method::PUT, Method::DELETE]);
+
+        fixture.discord.lock().unwrap().role_mut(ACTOR_ROLE)["permissions"] =
+            json!(MANAGE_GUILD_AND_ROLES);
+        fixture.set_shift(true).await;
+        assert!(fixture.reconcile(false).await.role_granted);
+        let response = fixture
+            .settings_response(&json!({ "staff_role_id": STAFF }))
+            .await;
+        response_json(response, StatusCode::OK).await;
+        fixture.assert_writes(&[Method::PUT, Method::DELETE, Method::PUT, Method::DELETE]);
+        assert_eq!(fixture.grant().await.unwrap().status, "revoked");
+        assert!(
+            fixture
+                .stored_settings()
+                .await
+                .unwrap()
+                .on_call_role_id
+                .is_none()
+        );
+        fixture
+            .storage
+            .delete_duty_profile(&fixture.guild_id, MEMBER)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconciliation_grants_and_removes_an_authorized_role_once_per_transition() {
+        safe_role_round_trip(Storage::memory()).await;
+    }
+
+    #[tokio::test]
+    async fn role_cleanup_survives_a_failed_response_after_discord_applies_a_grant() {
+        let fixture = Fixture::new(Storage::memory(), MANAGE_GUILD_AND_ROLES).await;
+        fixture.approve_role().await;
+        fixture.set_shift(true).await;
+        fixture.discord.lock().unwrap().fail_after_grant = true;
+
+        let outcome = fixture.reconcile(false).await;
+        assert!(!outcome.role_granted && outcome.error.is_some());
+        assert_eq!(fixture.grant().await.unwrap().status, "active");
+        fixture.assert_writes(&[Method::PUT]);
+        assert!(
+            fixture
+                .discord
+                .lock()
+                .unwrap()
+                .member_roles
+                .iter()
+                .any(|role| role == ON_CALL)
+        );
+
+        let response = fixture
+            .settings_response(&json!({ "staff_role_id": STAFF }))
+            .await;
+        response_json(response, StatusCode::OK).await;
+        fixture.assert_writes(&[Method::PUT, Method::DELETE]);
+        assert_eq!(fixture.grant().await.unwrap().status, "revoked");
+        assert!(
+            fixture
+                .discord
+                .lock()
+                .unwrap()
+                .member_roles
+                .iter()
+                .all(|role| role != ON_CALL)
+        );
+    }
+
+    #[tokio::test]
+    async fn delayed_scheduled_removal_cannot_discard_a_newer_grant() {
+        let fixture = Arc::new(Fixture::new(Storage::memory(), MANAGE_GUILD_AND_ROLES).await);
+        fixture.approve_role().await;
+        fixture.set_shift(true).await;
+        assert!(fixture.reconcile(false).await.role_granted);
+        fixture.set_shift(false).await;
+
+        let applied = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        fixture.discord.lock().unwrap().delay_delete_response =
+            Some((applied.clone(), release.clone()));
+        let removal = tokio::spawn({
+            let fixture = fixture.clone();
+            async move { fixture.reconcile(false).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), applied.notified())
+            .await
+            .expect("Discord must apply the old DELETE before the next grant");
+        fixture.set_shift(true).await;
+        assert!(fixture.reconcile(false).await.role_granted);
+        release.notify_one();
+        assert!(removal.await.unwrap().role_revoked);
+
+        assert_eq!(fixture.grant().await.unwrap().status, "active");
+        assert!(fixture.duty_state().await.unwrap().expected_on_call);
+        let response = fixture
+            .settings_response(&json!({ "staff_role_id": STAFF }))
+            .await;
+        response_json(response, StatusCode::OK).await;
+        fixture.assert_writes(&[Method::PUT, Method::DELETE, Method::PUT, Method::DELETE]);
+        assert_eq!(fixture.grant().await.unwrap().status, "revoked");
+    }
+
+    async fn privileged_role_fixture(storage: Storage) -> Fixture {
+        let fixture = Fixture::new(storage, MANAGE_GUILD_AND_ROLES).await;
+        fixture.approve_role().await;
+        fixture.set_shift(true).await;
+        fixture.discord.lock().unwrap().role_mut(ON_CALL)["permissions"] = json!("8");
+
+        let audit_count = fixture.audit_count().await;
+        let preview = fixture.reconcile(true).await;
+        assert!(preview.error.is_some());
+        assert!(!preview.role_granted && !preview.would_grant);
+        fixture.assert_read_only_reconcile(audit_count).await;
+        fixture
+    }
+
+    #[tokio::test]
+    async fn reconciliation_rejects_an_approved_role_that_becomes_privileged() {
+        let fixture = privileged_role_fixture(Storage::memory()).await;
+        fixture.assert_watchdog_reconcile_error().await;
+        fixture.assert_reconcile_error().await;
+    }
+
+    #[tokio::test]
+    async fn reconciliation_rechecks_the_configuring_actor_and_discord_lookups() {
+        let fixture = Fixture::new(Storage::memory(), MANAGE_GUILD_AND_ROLES).await;
+        fixture.approve_role().await;
+        fixture.set_shift(true).await;
+        fixture.discord.lock().unwrap().role_mut(ACTOR_ROLE)["permissions"] = json!(MANAGE_GUILD);
+        fixture.assert_reconcile_error().await;
+
+        {
+            let mut discord = fixture.discord.lock().unwrap();
+            discord.role_mut(ACTOR_ROLE)["permissions"] = json!(MANAGE_GUILD_AND_ROLES);
+            discord.failing_lookup = Some(format!("/guilds/{}/members/{BOT}", fixture.guild_id));
+        }
+        fixture.assert_reconcile_error().await;
+    }
+
+    #[tokio::test]
+    async fn watchdog_and_manual_reconciliation_reject_legacy_unsafe_roles() {
+        let fixture = Fixture::new(Storage::memory(), MANAGE_GUILD_AND_ROLES).await;
+        let legacy_settings = ModeratorDutySettings {
+            guild_id: fixture.guild_id.clone(),
+            staff_role_id: Some(STAFF.to_owned()),
+            on_call_role_id: Some(ON_CALL.to_owned()),
+            max_override_duration_mins: 1440,
+            fallback_channel_id: None,
+            updated_at: Timestamp::now(),
+            role_authorized_by_user_id: None,
+            version: 0,
+        };
+        fixture
+            .storage
+            .upsert_duty_settings(legacy_settings)
+            .await
+            .unwrap();
+        fixture.set_shift(true).await;
+        fixture.discord.lock().unwrap().role_mut(ON_CALL)["permissions"] = json!("8");
+
+        fixture.assert_watchdog_reconcile_error().await;
+        fixture.assert_reconcile_error().await;
+
+        fixture.discord.lock().unwrap().role_mut(ON_CALL)["permissions"] = json!("0");
+        fixture.assert_reconcile_error().await;
+        fixture.approve_role().await;
+        assert!(fixture.reconcile(false).await.role_granted);
+        fixture.assert_writes(&[Method::PUT]);
+    }
+
+    #[tokio::test]
+    async fn role_authorization_and_reconciliation_with_postgres() {
+        let Some(database_url) = std::env::var("DATABASE_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+        else {
+            eprintln!("SKIPPING PostgreSQL Moderator Duty web tests: DATABASE_URL not set");
+            return;
+        };
+        let storage = Storage::connect(Some(&database_url))
+            .await
+            .expect("connect to test PostgreSQL");
+        reject_manage_guild_without_manage_roles(storage.clone()).await;
+        safe_role_round_trip(storage.clone()).await;
+        let fixture = privileged_role_fixture(storage).await;
+        fixture.assert_reconcile_error().await;
+        fixture
+            .storage
+            .delete_duty_profile(&fixture.guild_id, MEMBER)
+            .await
+            .unwrap();
+    }
+}
+
 #[tokio::test]
 async fn test_moderator_duty_schedule_validation_and_diagnostics_issue_258() {
     let (state, _perms) = test_web_state().await;

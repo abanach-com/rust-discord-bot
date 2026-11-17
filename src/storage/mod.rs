@@ -948,6 +948,47 @@ pub fn validate_snowflake(label: &str, id: &str) -> anyhow::Result<u64> {
     Ok(parsed)
 }
 
+enum DutySettingsWrite {
+    Upsert,
+    Replace(Option<i64>),
+}
+
+const DUTY_ROLE_REVOCATION_LEASE_SECONDS: i64 = 300;
+const DUTY_ROLE_GRANT_LEASE_SECONDS: i64 = 60;
+
+fn validate_duty_settings(settings: &ModeratorDutySettings) -> anyhow::Result<()> {
+    validate_snowflake("guild_id", &settings.guild_id)?;
+    for (label, id) in [
+        ("staff_role_id", &settings.staff_role_id),
+        ("on_call_role_id", &settings.on_call_role_id),
+        ("fallback_channel_id", &settings.fallback_channel_id),
+        (
+            "role_authorized_by_user_id",
+            &settings.role_authorized_by_user_id,
+        ),
+    ] {
+        if let Some(id) = id {
+            validate_snowflake(label, id)?;
+        }
+    }
+    Ok(())
+}
+
+fn duty_policy_role<'a>(
+    settings: &'a ModeratorDutySettings,
+    profile: &ModeratorDutyProfile,
+) -> anyhow::Result<&'a str> {
+    anyhow::ensure!(settings.guild_id == profile.guild_id, "Duty guild mismatch");
+    let role_id = settings
+        .on_call_role_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("Duty policy has no on-call role"))?;
+    validate_snowflake("guild_id", &settings.guild_id)?;
+    validate_snowflake("user_id", &profile.user_id)?;
+    validate_snowflake("role_id", role_id)?;
+    Ok(role_id)
+}
+
 pub fn validate_birthday_date(month: i16, day: i16) -> anyhow::Result<()> {
     if !(1..=12).contains(&month) {
         anyhow::bail!("Miesiąc musi być z zakresu od 1 do 12");
@@ -4755,6 +4796,23 @@ impl Storage {
         }
     }
 
+    /// Replaces the observed settings and queues grants for an outgoing role together.
+    /// A missing expected version requires an absent row. A missing result indicates a conflict.
+    pub async fn replace_duty_settings(
+        &self,
+        settings: ModeratorDutySettings,
+        expected_version: Option<i64>,
+    ) -> anyhow::Result<Option<ModeratorDutySettings>> {
+        match self {
+            Self::Memory(store) => store.replace_duty_settings(settings, expected_version),
+            Self::Postgres(store) => {
+                store
+                    .replace_duty_settings(settings, expected_version)
+                    .await
+            }
+        }
+    }
+
     pub async fn get_duty_profile(
         &self,
         guild_id: &str,
@@ -4831,6 +4889,25 @@ impl Storage {
         }
     }
 
+    /// Persists a reconciliation outcome only for the profile that was reconciled.
+    pub async fn upsert_current_duty_state(
+        &self,
+        profile: &ModeratorDutyProfile,
+        state: ModeratorDutyState,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            profile.guild_id == state.guild_id && profile.user_id == state.user_id,
+            "Duty state does not match the profile"
+        );
+        match self {
+            Self::Memory(store) => {
+                store.upsert_current_duty_state(profile, state);
+                Ok(())
+            }
+            Self::Postgres(store) => store.upsert_current_duty_state(profile, state).await,
+        }
+    }
+
     pub async fn get_duty_role_grant(
         &self,
         guild_id: &str,
@@ -4867,6 +4944,78 @@ impl Storage {
                     .record_duty_role_grant(guild_id, user_id, role_id, status)
                     .await
             }
+        }
+    }
+
+    pub async fn duty_grant_policy_is_current(
+        &self,
+        settings: &ModeratorDutySettings,
+        profile: &ModeratorDutyProfile,
+    ) -> anyhow::Result<bool> {
+        match self {
+            Self::Memory(store) => store.duty_grant_policy_is_current(settings, profile),
+            Self::Postgres(store) => store.duty_grant_policy_is_current(settings, profile).await,
+        }
+    }
+
+    /// Records possible ownership before a Discord PUT and leases it against concurrent cleanup.
+    pub async fn begin_duty_role_grant(
+        &self,
+        settings: &ModeratorDutySettings,
+        profile: &ModeratorDutyProfile,
+    ) -> anyhow::Result<Option<ModeratorDutyRoleGrant>> {
+        match self {
+            Self::Memory(store) => store.begin_duty_role_grant(settings, profile),
+            Self::Postgres(store) => store.begin_duty_role_grant(settings, profile).await,
+        }
+    }
+
+    /// Releases the owned grant lease. A stale policy or profile queues the grant for cleanup.
+    pub async fn finish_duty_role_grant(
+        &self,
+        settings: &ModeratorDutySettings,
+        profile: &ModeratorDutyProfile,
+        grant: &ModeratorDutyRoleGrant,
+    ) -> anyhow::Result<bool> {
+        let role_id = duty_policy_role(settings, profile)?;
+        anyhow::ensure!(
+            grant.guild_id == settings.guild_id
+                && grant.user_id == profile.user_id
+                && grant.role_id == role_id,
+            "Duty grant lease does not match the policy and profile"
+        );
+        match self {
+            Self::Memory(store) => Ok(store.finish_duty_role_grant(settings, profile, grant)),
+            Self::Postgres(store) => store.finish_duty_role_grant(settings, profile, grant).await,
+        }
+    }
+
+    /// Leases a pending revocation and returns the new generation used to complete it.
+    pub async fn claim_duty_role_revocation(
+        &self,
+        grant: &ModeratorDutyRoleGrant,
+    ) -> anyhow::Result<Option<ModeratorDutyRoleGrant>> {
+        match self {
+            Self::Memory(store) => Ok(store.claim_duty_role_revocation(grant)),
+            Self::Postgres(store) => store.claim_duty_role_revocation(grant).await,
+        }
+    }
+
+    /// Updates only the same grant generation observed before the Discord DELETE.
+    pub async fn complete_duty_role_revocation(
+        &self,
+        grant: ModeratorDutyRoleGrant,
+    ) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            matches!(
+                grant.status.as_str(),
+                "revoke_pending" | "revoked" | "failed"
+            ),
+            "invalid Duty role revocation status"
+        );
+        match self {
+            Self::Memory(store) => Ok(store.complete_duty_role_revocation(grant)),
+            Self::Postgres(store) => store.complete_duty_role_revocation(grant).await,
         }
     }
 
@@ -9583,6 +9732,8 @@ mod tests {
             max_override_duration_mins: 720,
             fallback_channel_id: Some("600000000000000001".to_string()),
             updated_at: Timestamp::now(),
+            role_authorized_by_user_id: None,
+            version: 0,
         };
         let saved_settings = store.upsert_duty_settings(settings).await.unwrap();
         assert_eq!(saved_settings.max_override_duration_mins, 720);
