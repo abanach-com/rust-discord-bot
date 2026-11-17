@@ -3850,7 +3850,7 @@ async fn test_postgres_integration_suite() {
     let fault_guild_create = format!("pg_fault_guild_create_{}", Uuid::new_v4().simple());
     let fault_guild_approve = format!("pg_fault_guild_approve_{}", Uuid::new_v4().simple());
 
-    sqlx::query(
+    sqlx::raw_sql(
         r#"
         CREATE OR REPLACE FUNCTION fail_audit_for_fault_test() RETURNS trigger AS $$
         BEGIN
@@ -3944,7 +3944,7 @@ async fn test_postgres_integration_suite() {
     );
 
     // Clean up fault injection trigger
-    sqlx::query(
+    sqlx::raw_sql(
         r#"
         DROP TRIGGER IF EXISTS trg_fail_audit_for_fault_test ON audit_events;
         DROP FUNCTION IF EXISTS fail_audit_for_fault_test();
