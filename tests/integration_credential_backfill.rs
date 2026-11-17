@@ -315,12 +315,13 @@ async fn postgres_bootstrap_encrypts_legacy_credentials_before_returning() {
         .await
         .unwrap();
         assert!(unsupported_unchanged, "startup must preserve unsupported envelopes");
-        let error = state
+        let Err(error) = state
             .storage
             .get_vk_subscription(OTHER_GUILD, "unsupported")
             .await
-            .err()
-            .expect("reading an unsupported envelope must fail");
+        else {
+            panic!("reading an unsupported envelope must fail");
+        };
         assert!(error.to_string().contains("unsupported integration credential envelope"));
 
         let new_id = Uuid::new_v4();
