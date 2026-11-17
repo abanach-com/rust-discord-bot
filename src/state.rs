@@ -124,8 +124,16 @@ impl AppState {
                 .await?;
             crate::storage::run_safe_migrations(&pool).await?;
 
+            let postgres = crate::storage::PostgresStore::with_credential_crypto(
+                pool.clone(),
+                credential_crypto,
+            );
+            postgres
+                .backfill_integration_credentials_on_startup()
+                .await?;
+
             (
-                Storage::postgres_with_crypto(pool.clone(), credential_crypto),
+                Storage::Postgres(postgres),
                 SchedulerStore::postgres(pool.clone()),
                 TicketStore::postgres_with_crypto(pool.clone(), transcript_crypto),
                 ModerationCaseStore::postgres(pool.clone()),

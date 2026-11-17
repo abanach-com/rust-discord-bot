@@ -3021,6 +3021,198 @@ async fn test_webhook_dedupe_and_delivery_logs_retention_and_pagination_issue_34
 }
 
 #[tokio::test]
+async fn test_telegram_bridge_http_persists_encrypted_credentials_issue_349() {
+    let Some(database_url) = std::env::var("DATABASE_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+    else {
+        eprintln!("SKIPPING PostgreSQL Telegram credential HTTP test: DATABASE_URL not set");
+        return;
+    };
+    let config = Config {
+        database_url: Some(database_url),
+        offline_mode: true,
+        ticket_transcripts_disabled: true,
+        integration_credential_key: Some("42".repeat(32)),
+        integration_credential_active_key_id: "telegram-http-test".to_owned(),
+        ..test_config()
+    };
+    let state = WebState::new(
+        AppState::bootstrap(config)
+            .await
+            .expect("bootstrap PostgreSQL"),
+        Arc::new(LoginRateLimiter::new()),
+        Arc::new(DashMap::new()),
+    );
+    let Storage::Postgres(store) = &state.app.storage else {
+        panic!("expected PostgreSQL storage");
+    };
+    let guild_id = (Uuid::new_v4().as_u128() as u64).max(1).to_string();
+    let channel_id = "111222333444555666";
+    let session_id = Uuid::new_v4().to_string();
+    let csrf_token = Uuid::new_v4().to_string();
+    state
+        .app
+        .sessions
+        .save_session(
+            &session_id,
+            DashboardUser {
+                id: "999000000000000001".to_owned(),
+                username: "Bridge test manager".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![DashboardGuild {
+                id: guild_id.clone(),
+                name: "Bridge test guild".to_owned(),
+                icon: None,
+                owner: false,
+                permissions: "32".to_owned(),
+            }],
+            csrf_token.clone(),
+            Timestamp::now() + SignedDuration::from_hours(1),
+            None,
+        )
+        .await
+        .expect("seed manager session");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = build_router(state.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let client = reqwest::Client::new();
+    let cookie = format!("rusty_discord_bot_session={session_id}");
+    let telegram_url = format!("http://{addr}/api/guilds/{guild_id}/telegram");
+    let bridge_url = format!("{telegram_url}/bridge");
+
+    let denied = client
+        .post(&bridge_url)
+        .header(COOKIE, &cookie)
+        .json(&serde_json::json!({
+            "telegram_chat_id": "-1000000000000",
+            "discord_channel_id": channel_id,
+            "secret_token": "synthetic-telegram-unauthorized"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), reqwest::StatusCode::FORBIDDEN);
+    assert!(
+        state
+            .app
+            .storage
+            .get_telegram_bridge(&guild_id, channel_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let mut original_identity = None;
+    for (chat_id, fixture) in [
+        ("-1001234567890", "synthetic-telegram-http-create"),
+        ("-1001234567891", "synthetic-telegram-http-update"),
+    ] {
+        let response = client
+            .post(&bridge_url)
+            .header(COOKIE, &cookie)
+            .header("X-CSRF-Token", &csrf_token)
+            .json(&serde_json::json!({
+                "telegram_chat_id": chat_id,
+                "discord_channel_id": channel_id,
+                "secret_token": fixture
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let summary: serde_json::Value = response.json().await.unwrap();
+        let rendered = summary.to_string();
+        assert!(
+            summary.get("secret_token").is_none()
+                && !rendered.contains(fixture)
+                && !rendered.contains("enc:v1:"),
+            "POST must redact the Telegram credential"
+        );
+        assert_eq!(summary["telegram_chat_id"], chat_id);
+        assert_eq!(summary["secret_configured"], true);
+        let id: Uuid = serde_json::from_value(summary["id"].clone()).expect("bridge UUID");
+        let created_at = summary["created_at"].as_str().expect("creation time");
+        let identity = original_identity.get_or_insert_with(|| (id, created_at.to_owned()));
+        assert_eq!(id, identity.0);
+        assert_eq!(created_at, identity.1);
+
+        let stored: String =
+            sqlx::query_scalar("SELECT secret_token FROM telegram_bridges WHERE id = $1")
+                .bind(id)
+                .fetch_one(store.pool())
+                .await
+                .expect("read raw Telegram credential");
+        assert!(
+            stored.starts_with("enc:v1:telegram-http-test:") && !stored.contains(fixture),
+            "authorized Telegram POST must persist ciphertext under the configured key"
+        );
+        let bridge = state
+            .app
+            .storage
+            .get_telegram_bridge(&guild_id, channel_id)
+            .await
+            .unwrap()
+            .expect("trusted bridge lookup");
+        assert!(
+            bridge.secret_token == fixture,
+            "trusted lookup must decrypt the credential"
+        );
+        let listed = state
+            .app
+            .storage
+            .list_telegram_bridges(&guild_id)
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(
+            listed[0].secret_token == fixture,
+            "trusted listing must decrypt the credential"
+        );
+    }
+
+    let response = client
+        .get(format!("{telegram_url}/bridges"))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let summaries: Vec<serde_json::Value> = response.json().await.unwrap();
+    assert_eq!(summaries.len(), 1);
+    let summary = &summaries[0];
+    let rendered = summary.to_string();
+    assert!(
+        summary.get("secret_token").is_none()
+            && !rendered.contains("synthetic-telegram-http-")
+            && !rendered.contains("enc:v1:"),
+        "GET must redact the Telegram credential"
+    );
+    assert_eq!(summary["secret_configured"], true);
+
+    let (bridge_id, _) = original_identity.unwrap();
+    assert!(
+        state
+            .app
+            .storage
+            .delete_telegram_bridge(bridge_id)
+            .await
+            .unwrap()
+    );
+    state
+        .app
+        .sessions
+        .delete_session(&session_id)
+        .await
+        .unwrap();
+    server.abort();
+}
+
+#[tokio::test]
 async fn test_integration_credentials_encryption_at_rest_and_tamper_resistance_issue_349() {
     use rusty_discord_bot::integrations::CredentialCrypto;
 

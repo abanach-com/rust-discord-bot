@@ -208,10 +208,34 @@ The bot enforces strict application-layer AES-256-GCM encryption at rest with se
 ### Startup Preflight & Upgrade Contract
 When `DATABASE_URL` is set, `AppState::bootstrap` executes a strict fail-fast preflight:
 1. Validates presence and 64-hex format of `TRANSCRIPT_ENCRYPTION_KEY` (or `TRANSCRIPT_KEYRING`), unless `TICKET_TRANSCRIPTS_DISABLED=true`.
-2. Validates presence and 64-hex format of `INTEGRATION_CREDENTIAL_KEY` (or `INTEGRATION_CREDENTIAL_KEYRING`), unless `INTEGRATION_CREDENTIALS_DISABLED=true`.
+2. Validates the supplied `INTEGRATION_CREDENTIAL_KEY` or `INTEGRATION_CREDENTIAL_KEYRING`. `INTEGRATION_CREDENTIALS_DISABLED=true` permits startup without a key.
 3. If an encryption secret is missing or malformed, startup immediately aborts prior to opening database connections or executing migrations.
 
-**Upgrade Requirement**: Operators upgrading an existing deployment to version `0.1.0+` (or migrations `>= 0056`) MUST generate a dedicated 32-byte key via `openssl rand -hex 32` and set `INTEGRATION_CREDENTIAL_KEY` in their `.env` file before pulling the new container image or restarting the service. Transparent migration of existing unencrypted rows is performed automatically during backfill. Plaintext storage fallbacks are rejected fail-closed.
+Before upgrading a PostgreSQL deployment, configure a persistent integration
+key. For a deployment without an existing key, generate a dedicated 32-byte key
+with `openssl rand -hex 32` and set `INTEGRATION_CREDENTIAL_KEY`. Keep all existing
+keys when upgrading a deployment that already uses a keyring.
+
+With a key configured, startup encrypts legacy credentials after SQL migrations
+and before the services start. Each transaction updates up to 100 rows per
+credential table. Completed batches survive a restart. Startup logs row counts
+and leaves all reserved `enc:` values untouched. The five tables are integration
+connections, webhook subscriptions, Telegram bridges, GitLab subscriptions, and
+VK subscriptions. PostgreSQL credential writes require a key. Trusted reads
+reject unsupported envelopes, missing keys, and invalid ciphertext. Replace
+any legacy credential that uses the reserved prefix through the integration's
+configuration.
+
+Stop older application writers before starting the upgraded version so that
+backfilled rows stay encrypted. Older backups, physical snapshots, and WAL
+archives can contain plaintext and need the corresponding access and retention
+controls.
+
+For key rotation, first distribute a keyring containing both keys to every
+instance, then switch `INTEGRATION_CREDENTIAL_ACTIVE_KEY_ID` to the new key ID.
+Keep the old key available while any stored credential uses it. New writes and
+the plaintext backfill use the active key. Existing encrypted values retain
+their original key ID until the credentials are written again.
 
 
 ## Logging and privacy

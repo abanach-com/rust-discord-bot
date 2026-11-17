@@ -7582,20 +7582,88 @@ impl PostgresStore {
 
     // ==========================================
 
+    fn require_credential_crypto(&self) -> anyhow::Result<&crate::integrations::CredentialCrypto> {
+        self.credential_crypto.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "integration credential encryption key is required for PostgreSQL storage"
+            )
+        })
+    }
+
+    async fn begin_integration_credential_write(
+        &self,
+        entity: &str,
+        natural_key: &[&str],
+    ) -> anyhow::Result<Transaction<'static, Postgres>> {
+        // At READ COMMITTED the row lookup sees writes by the preceding lock holder.
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
+            .await?;
+        // A row lock cannot serialize first writes when the natural key has no row yet.
+        let lock_key = serde_json::json!([entity, natural_key]).to_string();
+        sqlx::query("SELECT pg_advisory_xact_lock(4354, hashtext($1))")
+            .bind(lock_key)
+            .execute(&mut *tx)
+            .await?;
+        Ok(tx)
+    }
+
+    fn decrypt_integration_credential(
+        &self,
+        guild_id: &str,
+        entity: &str,
+        id: Uuid,
+        field: &str,
+        stored: &mut String,
+    ) -> anyhow::Result<()> {
+        if let Some(crypto) = self.credential_crypto.as_deref() {
+            *stored = crypto.decrypt_field(guild_id, entity, &id.to_string(), field, stored)?;
+        } else if crate::integrations::CredentialCrypto::is_any_envelope(stored) {
+            anyhow::bail!("cannot decrypt {entity}.{field}: credential crypto not configured");
+        }
+        Ok(())
+    }
+
+    fn decrypt_integration_connection(
+        &self,
+        conn: &mut IntegrationConnection,
+    ) -> anyhow::Result<()> {
+        if let Some(token) = &mut conn.access_token {
+            self.decrypt_integration_credential(
+                &conn.guild_id,
+                "integration_connection",
+                conn.id,
+                "access_token",
+                token,
+            )?;
+        }
+        if let Some(token) = &mut conn.refresh_token {
+            self.decrypt_integration_credential(
+                &conn.guild_id,
+                "integration_connection",
+                conn.id,
+                "refresh_token",
+                token,
+            )?;
+        }
+        Ok(())
+    }
+
     pub async fn upsert_integration_connection(
         &self,
         conn: IntegrationConnection,
     ) -> anyhow::Result<IntegrationConnection> {
-        let crypto = self.credential_crypto.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "integration credential encryption key is required for PostgreSQL storage"
+        let crypto = self.require_credential_crypto()?;
+        let mut tx = self
+            .begin_integration_credential_write(
+                "integration_connection",
+                &[&conn.guild_id, &conn.provider],
             )
-        })?;
-
-        let mut tx = self.pool.begin().await?;
+            .await?;
 
         let existing_id: Option<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM integration_connections WHERE guild_id = $1 AND provider = $2 FOR UPDATE",
+            "SELECT id FROM integration_connections WHERE guild_id = $1 AND provider = $2 ORDER BY created_at, id LIMIT 1 FOR UPDATE",
         )
         .bind(&conn.guild_id)
         .bind(&conn.provider)
@@ -7604,29 +7672,21 @@ impl PostgresStore {
 
         let target_id = existing_id.unwrap_or(conn.id);
 
-        let enc_access_token = if let Some(ref token) = conn.access_token {
-            Some(crypto.encrypt_field(
-                &conn.guild_id,
-                "integration_connection",
-                &target_id.to_string(),
-                "access_token",
-                token,
-            )?)
-        } else {
-            None
-        };
-
-        let enc_refresh_token = if let Some(ref token) = conn.refresh_token {
-            Some(crypto.encrypt_field(
-                &conn.guild_id,
-                "integration_connection",
-                &target_id.to_string(),
-                "refresh_token",
-                token,
-            )?)
-        } else {
-            None
-        };
+        let record_id = target_id.to_string();
+        let enc_access_token = crypto.encrypt_opt(
+            &conn.guild_id,
+            "integration_connection",
+            &record_id,
+            "access_token",
+            conn.access_token.as_deref(),
+        )?;
+        let enc_refresh_token = crypto.encrypt_opt(
+            &conn.guild_id,
+            "integration_connection",
+            &record_id,
+            "refresh_token",
+            conn.refresh_token.as_deref(),
+        )?;
 
         let mut row = sqlx::query_as::<_, IntegrationConnection>(
             r#"
@@ -7641,6 +7701,8 @@ impl PostgresStore {
                 metadata = EXCLUDED.metadata,
                 enabled = EXCLUDED.enabled,
                 updated_at = EXCLUDED.updated_at
+            WHERE integration_connections.guild_id = EXCLUDED.guild_id
+              AND integration_connections.provider = EXCLUDED.provider
             RETURNING *
             "#
         )
@@ -7656,30 +7718,12 @@ impl PostgresStore {
         .bind(conn.enabled)
         .bind(conn.created_at)
         .bind(conn.updated_at)
-        .fetch_one(&mut *tx)
-        .await?;
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("integration connection ID belongs to another connection"))?;
 
+        self.decrypt_integration_connection(&mut row)?;
         tx.commit().await?;
-
-        if let Some(ref enc) = row.access_token {
-            row.access_token = Some(crypto.decrypt_field(
-                &row.guild_id,
-                "integration_connection",
-                &row.id.to_string(),
-                "access_token",
-                enc,
-            )?);
-        }
-        if let Some(ref enc) = row.refresh_token {
-            row.refresh_token = Some(crypto.decrypt_field(
-                &row.guild_id,
-                "integration_connection",
-                &row.id.to_string(),
-                "refresh_token",
-                enc,
-            )?);
-        }
-
         Ok(row)
     }
 
@@ -7689,7 +7733,7 @@ impl PostgresStore {
         provider: &str,
     ) -> anyhow::Result<Option<IntegrationConnection>> {
         let row_opt = sqlx::query_as::<_, IntegrationConnection>(
-            "SELECT * FROM integration_connections WHERE guild_id = $1 AND provider = $2",
+            "SELECT * FROM integration_connections WHERE guild_id = $1 AND provider = $2 ORDER BY created_at, id LIMIT 1",
         )
         .bind(guild_id)
         .bind(provider)
@@ -7700,42 +7744,7 @@ impl PostgresStore {
             return Ok(None);
         };
 
-        if let Some(ref crypto) = self.credential_crypto {
-            if let Some(ref enc) = row.access_token {
-                row.access_token = Some(crypto.decrypt_field(
-                    &row.guild_id,
-                    "integration_connection",
-                    &row.id.to_string(),
-                    "access_token",
-                    enc,
-                )?);
-            }
-            if let Some(ref enc) = row.refresh_token {
-                row.refresh_token = Some(crypto.decrypt_field(
-                    &row.guild_id,
-                    "integration_connection",
-                    &row.id.to_string(),
-                    "refresh_token",
-                    enc,
-                )?);
-            }
-        } else {
-            if let Some(ref enc) = row.access_token
-                && crate::integrations::CredentialCrypto::is_any_envelope(enc)
-            {
-                anyhow::bail!(
-                    "cannot decrypt connection access_token: credential crypto not configured"
-                );
-            }
-            if let Some(ref enc) = row.refresh_token
-                && crate::integrations::CredentialCrypto::is_any_envelope(enc)
-            {
-                anyhow::bail!(
-                    "cannot decrypt connection refresh_token: credential crypto not configured"
-                );
-            }
-        }
-
+        self.decrypt_integration_connection(&mut row)?;
         Ok(Some(row))
     }
 
@@ -7751,41 +7760,7 @@ impl PostgresStore {
         .await?;
 
         for row in &mut rows {
-            if let Some(ref crypto) = self.credential_crypto {
-                if let Some(ref enc) = row.access_token {
-                    row.access_token = Some(crypto.decrypt_field(
-                        &row.guild_id,
-                        "integration_connection",
-                        &row.id.to_string(),
-                        "access_token",
-                        enc,
-                    )?);
-                }
-                if let Some(ref enc) = row.refresh_token {
-                    row.refresh_token = Some(crypto.decrypt_field(
-                        &row.guild_id,
-                        "integration_connection",
-                        &row.id.to_string(),
-                        "refresh_token",
-                        enc,
-                    )?);
-                }
-            } else {
-                if let Some(ref enc) = row.access_token
-                    && crate::integrations::CredentialCrypto::is_any_envelope(enc)
-                {
-                    anyhow::bail!(
-                        "cannot decrypt connection access_token: credential crypto not configured"
-                    );
-                }
-                if let Some(ref enc) = row.refresh_token
-                    && crate::integrations::CredentialCrypto::is_any_envelope(enc)
-                {
-                    anyhow::bail!(
-                        "cannot decrypt connection refresh_token: credential crypto not configured"
-                    );
-                }
-            }
+            self.decrypt_integration_connection(row)?;
         }
 
         Ok(rows)
@@ -7813,13 +7788,13 @@ impl PostgresStore {
         &self,
         sub: IntegrationWebhookSubscription,
     ) -> anyhow::Result<IntegrationWebhookSubscription> {
-        let crypto = self.credential_crypto.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "integration credential encryption key is required for PostgreSQL storage"
+        let crypto = self.require_credential_crypto()?;
+        let mut tx = self
+            .begin_integration_credential_write(
+                "integration_webhook_subscription",
+                &[&sub.guild_id, &sub.provider, &sub.external_id],
             )
-        })?;
-
-        let mut tx = self.pool.begin().await?;
+            .await?;
 
         let existing_id: Option<Uuid> = sqlx::query_scalar(
             "SELECT id FROM integration_webhook_subscriptions WHERE guild_id = $1 AND provider = $2 AND external_id = $3 FOR UPDATE"
@@ -7831,17 +7806,13 @@ impl PostgresStore {
         .await?;
 
         let target_id = existing_id.unwrap_or(sub.id);
-        let encrypted_secret = if let Some(ref cleartext) = sub.secret_token {
-            Some(crypto.encrypt_field(
-                &sub.guild_id,
-                "integration_webhook_subscription",
-                &target_id.to_string(),
-                "secret_token",
-                cleartext,
-            )?)
-        } else {
-            None
-        };
+        let encrypted_secret = crypto.encrypt_opt(
+            &sub.guild_id,
+            "integration_webhook_subscription",
+            &target_id.to_string(),
+            "secret_token",
+            sub.secret_token.as_deref(),
+        )?;
 
         let mut row = sqlx::query_as::<_, IntegrationWebhookSubscription>(
             r#"
@@ -7852,6 +7823,7 @@ impl PostgresStore {
                 target_channel_id = EXCLUDED.target_channel_id,
                 config = EXCLUDED.config,
                 active = EXCLUDED.active
+            WHERE integration_webhook_subscriptions.id = EXCLUDED.id
             RETURNING *
             "#
         )
@@ -7867,18 +7839,16 @@ impl PostgresStore {
         .fetch_one(&mut *tx)
         .await?;
 
-        tx.commit().await?;
-
-        if let Some(ref enc) = row.secret_token {
-            row.secret_token = Some(crypto.decrypt_field(
+        if let Some(token) = &mut row.secret_token {
+            self.decrypt_integration_credential(
                 &row.guild_id,
                 "integration_webhook_subscription",
-                &row.id.to_string(),
+                row.id,
                 "secret_token",
-                enc,
-            )?);
+                token,
+            )?;
         }
-
+        tx.commit().await?;
         Ok(row)
     }
 
@@ -7905,20 +7875,14 @@ impl PostgresStore {
         };
 
         for row in &mut rows {
-            if let Some(ref enc) = row.secret_token {
-                if let Some(ref crypto) = self.credential_crypto {
-                    row.secret_token = Some(crypto.decrypt_field(
-                        &row.guild_id,
-                        "integration_webhook_subscription",
-                        &row.id.to_string(),
-                        "secret_token",
-                        enc,
-                    )?);
-                } else if crate::integrations::CredentialCrypto::is_any_envelope(enc) {
-                    anyhow::bail!(
-                        "cannot decrypt webhook subscription secret_token: credential crypto not configured"
-                    );
-                }
+            if let Some(token) = &mut row.secret_token {
+                self.decrypt_integration_credential(
+                    &row.guild_id,
+                    "integration_webhook_subscription",
+                    row.id,
+                    "secret_token",
+                    token,
+                )?;
             }
         }
 
@@ -8155,6 +8119,35 @@ impl PostgresStore {
         &self,
         batch_size: usize,
     ) -> anyhow::Result<usize> {
+        self.encrypt_legacy_integration_credentials(batch_size, true)
+            .await
+    }
+
+    pub(crate) async fn backfill_integration_credentials_on_startup(&self) -> anyhow::Result<()> {
+        if self.credential_crypto.is_none() {
+            return Ok(());
+        }
+
+        let mut total = 0;
+        loop {
+            // Leave reserved envelopes untouched. Invalid values fail closed on read
+            // without making startup depend on the credentials of any one guild.
+            let migrated = self
+                .encrypt_legacy_integration_credentials(100, false)
+                .await?;
+            if migrated == 0 {
+                return Ok(());
+            }
+            total += migrated;
+            tracing::info!(migrated, total, "Encrypted legacy integration credentials");
+        }
+    }
+
+    async fn encrypt_legacy_integration_credentials(
+        &self,
+        batch_size: usize,
+        reject_unsupported_envelopes: bool,
+    ) -> anyhow::Result<usize> {
         let Some(ref crypto) = self.credential_crypto else {
             anyhow::bail!(
                 "cannot backfill integration credentials: no credential encryption keys configured"
@@ -8165,26 +8158,28 @@ impl PostgresStore {
         let mut total_migrated = 0usize;
         let mut tx = self.pool.begin().await?;
 
-        // Preflight validation across all 5 tables: fail-closed if any record contains an
-        // unsupported/future envelope version (e.g. 'enc:v2:...') to prevent double-encryption.
-        let has_unsupported: bool = sqlx::query_scalar(
-            r#"
-            SELECT (
-                EXISTS(SELECT 1 FROM telegram_bridges WHERE secret_token LIKE 'enc:%' AND secret_token NOT LIKE 'enc:v1:%')
-                OR EXISTS(SELECT 1 FROM integration_webhook_subscriptions WHERE secret_token LIKE 'enc:%' AND secret_token NOT LIKE 'enc:v1:%')
-                OR EXISTS(SELECT 1 FROM integration_connections WHERE (access_token LIKE 'enc:%' AND access_token NOT LIKE 'enc:v1:%') OR (refresh_token LIKE 'enc:%' AND refresh_token NOT LIKE 'enc:v1:%'))
-                OR EXISTS(SELECT 1 FROM gitlab_subscriptions WHERE secret_token LIKE 'enc:%' AND secret_token NOT LIKE 'enc:v1:%')
-                OR EXISTS(SELECT 1 FROM vk_subscriptions WHERE secret_key LIKE 'enc:%' AND secret_key NOT LIKE 'enc:v1:%')
+        if reject_unsupported_envelopes {
+            // Preflight validation across all 5 tables: fail-closed if any record contains an
+            // unsupported/future envelope version (e.g. 'enc:v2:...') to prevent double-encryption.
+            let has_unsupported: bool = sqlx::query_scalar(
+                r#"
+                SELECT (
+                    EXISTS(SELECT 1 FROM telegram_bridges WHERE secret_token LIKE 'enc:%' AND secret_token NOT LIKE 'enc:v1:%')
+                    OR EXISTS(SELECT 1 FROM integration_webhook_subscriptions WHERE secret_token LIKE 'enc:%' AND secret_token NOT LIKE 'enc:v1:%')
+                    OR EXISTS(SELECT 1 FROM integration_connections WHERE (access_token LIKE 'enc:%' AND access_token NOT LIKE 'enc:v1:%') OR (refresh_token LIKE 'enc:%' AND refresh_token NOT LIKE 'enc:v1:%'))
+                    OR EXISTS(SELECT 1 FROM gitlab_subscriptions WHERE secret_token LIKE 'enc:%' AND secret_token NOT LIKE 'enc:v1:%')
+                    OR EXISTS(SELECT 1 FROM vk_subscriptions WHERE secret_key LIKE 'enc:%' AND secret_key NOT LIKE 'enc:v1:%')
+                )
+                "#,
             )
-            "#,
-        )
-        .fetch_one(&mut *tx)
-        .await?;
+            .fetch_one(&mut *tx)
+            .await?;
 
-        if has_unsupported {
-            anyhow::bail!(
-                "unsupported integration credential envelope version detected in storage; cannot backfill"
-            );
+            if has_unsupported {
+                anyhow::bail!(
+                    "unsupported integration credential envelope version detected in storage; cannot backfill"
+                );
+            }
         }
 
         // 1. telegram_bridges
@@ -8199,7 +8194,7 @@ impl PostgresStore {
             SELECT id, guild_id, secret_token
             FROM telegram_bridges
             WHERE secret_token NOT LIKE 'enc:%'
-            ORDER BY created_at ASC
+            ORDER BY created_at, id
             LIMIT $1
             FOR UPDATE
             "#,
@@ -8236,7 +8231,7 @@ impl PostgresStore {
             SELECT id, guild_id, secret_token
             FROM integration_webhook_subscriptions
             WHERE secret_token IS NOT NULL AND secret_token NOT LIKE 'enc:%'
-            ORDER BY created_at ASC
+            ORDER BY created_at, id
             LIMIT $1
             FOR UPDATE
             "#,
@@ -8277,7 +8272,7 @@ impl PostgresStore {
             FROM integration_connections
             WHERE (access_token IS NOT NULL AND access_token NOT LIKE 'enc:%')
                OR (refresh_token IS NOT NULL AND refresh_token NOT LIKE 'enc:%')
-            ORDER BY created_at ASC
+            ORDER BY created_at, id
             LIMIT $1
             FOR UPDATE
             "#,
@@ -8342,7 +8337,7 @@ impl PostgresStore {
             SELECT id, guild_id, secret_token
             FROM gitlab_subscriptions
             WHERE secret_token NOT LIKE 'enc:%'
-            ORDER BY created_at ASC
+            ORDER BY created_at, id
             LIMIT $1
             FOR UPDATE
             "#,
@@ -8379,7 +8374,7 @@ impl PostgresStore {
             SELECT id, guild_id, secret_key
             FROM vk_subscriptions
             WHERE secret_key NOT LIKE 'enc:%'
-            ORDER BY created_at ASC
+            ORDER BY created_at, id
             LIMIT $1
             FOR UPDATE
             "#,
@@ -8995,7 +8990,31 @@ impl PostgresStore {
 
         bridge: TelegramBridge,
     ) -> anyhow::Result<TelegramBridge> {
-        let row = sqlx::query_as::<_, TelegramBridge>(
+        let crypto = self.require_credential_crypto()?;
+        let mut tx = self
+            .begin_integration_credential_write(
+                "telegram_bridge",
+                &[&bridge.guild_id, &bridge.discord_channel_id],
+            )
+            .await?;
+
+        let existing_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM telegram_bridges WHERE guild_id = $1 AND discord_channel_id = $2 FOR UPDATE",
+        )
+        .bind(&bridge.guild_id)
+        .bind(&bridge.discord_channel_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let target_id = existing_id.unwrap_or(bridge.id);
+        let encrypted_secret = crypto.encrypt_field(
+            &bridge.guild_id,
+            "telegram_bridge",
+            &target_id.to_string(),
+            "secret_token",
+            &bridge.secret_token,
+        )?;
+
+        let mut row = sqlx::query_as::<_, TelegramBridge>(
 
             r#"
 
@@ -9010,6 +9029,7 @@ impl PostgresStore {
                 secret_token = EXCLUDED.secret_token,
 
                 paused = EXCLUDED.paused
+            WHERE telegram_bridges.id = EXCLUDED.id
 
             RETURNING *
 
@@ -9017,7 +9037,7 @@ impl PostgresStore {
 
         )
 
-        .bind(bridge.id)
+        .bind(target_id)
 
         .bind(&bridge.guild_id)
 
@@ -9025,16 +9045,24 @@ impl PostgresStore {
 
         .bind(&bridge.discord_channel_id)
 
-        .bind(&bridge.secret_token)
+        .bind(encrypted_secret)
 
         .bind(bridge.paused)
 
         .bind(bridge.created_at)
 
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
 
         .await?;
 
+        self.decrypt_integration_credential(
+            &row.guild_id,
+            "telegram_bridge",
+            row.id,
+            "secret_token",
+            &mut row.secret_token,
+        )?;
+        tx.commit().await?;
         Ok(row)
     }
 
@@ -9053,7 +9081,17 @@ impl PostgresStore {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row)
+        let Some(mut row) = row else {
+            return Ok(None);
+        };
+        self.decrypt_integration_credential(
+            &row.guild_id,
+            "telegram_bridge",
+            row.id,
+            "secret_token",
+            &mut row.secret_token,
+        )?;
+        Ok(Some(row))
     }
 
     pub async fn list_telegram_bridges(
@@ -9061,13 +9099,22 @@ impl PostgresStore {
 
         guild_id: &str,
     ) -> anyhow::Result<Vec<TelegramBridge>> {
-        let rows = sqlx::query_as::<_, TelegramBridge>(
+        let mut rows = sqlx::query_as::<_, TelegramBridge>(
             "SELECT * FROM telegram_bridges WHERE guild_id = $1",
         )
         .bind(guild_id)
         .fetch_all(&self.pool)
         .await?;
 
+        for row in &mut rows {
+            self.decrypt_integration_credential(
+                &row.guild_id,
+                "telegram_bridge",
+                row.id,
+                "secret_token",
+                &mut row.secret_token,
+            )?;
+        }
         Ok(rows)
     }
 
@@ -9435,7 +9482,32 @@ impl PostgresStore {
 
         sub: GitLabSubscription,
     ) -> anyhow::Result<GitLabSubscription> {
-        let row = sqlx::query_as::<_, GitLabSubscription>(
+        let crypto = self.require_credential_crypto()?;
+        let mut tx = self
+            .begin_integration_credential_write(
+                "gitlab_subscription",
+                &[&sub.guild_id, &sub.host, &sub.project_id],
+            )
+            .await?;
+
+        let existing_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM gitlab_subscriptions WHERE guild_id = $1 AND host = $2 AND project_id = $3 FOR UPDATE",
+        )
+        .bind(&sub.guild_id)
+        .bind(&sub.host)
+        .bind(&sub.project_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let target_id = existing_id.unwrap_or(sub.id);
+        let encrypted_secret = crypto.encrypt_field(
+            &sub.guild_id,
+            "gitlab_subscription",
+            &target_id.to_string(),
+            "secret_token",
+            &sub.secret_token,
+        )?;
+
+        let mut row = sqlx::query_as::<_, GitLabSubscription>(
 
             r#"
 
@@ -9450,6 +9522,7 @@ impl PostgresStore {
                 secret_token = EXCLUDED.secret_token,
 
                 discord_channel_id = EXCLUDED.discord_channel_id
+            WHERE gitlab_subscriptions.id = EXCLUDED.id
 
             RETURNING *
 
@@ -9457,7 +9530,7 @@ impl PostgresStore {
 
         )
 
-        .bind(sub.id)
+        .bind(target_id)
 
         .bind(&sub.guild_id)
 
@@ -9467,16 +9540,24 @@ impl PostgresStore {
 
         .bind(&sub.project_path)
 
-        .bind(&sub.secret_token)
+        .bind(encrypted_secret)
 
         .bind(&sub.discord_channel_id)
 
         .bind(sub.created_at)
 
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
 
         .await?;
 
+        self.decrypt_integration_credential(
+            &row.guild_id,
+            "gitlab_subscription",
+            row.id,
+            "secret_token",
+            &mut row.secret_token,
+        )?;
+        tx.commit().await?;
         Ok(row)
     }
 
@@ -9505,7 +9586,17 @@ impl PostgresStore {
 
         .await?;
 
-        Ok(row)
+        let Some(mut row) = row else {
+            return Ok(None);
+        };
+        self.decrypt_integration_credential(
+            &row.guild_id,
+            "gitlab_subscription",
+            row.id,
+            "secret_token",
+            &mut row.secret_token,
+        )?;
+        Ok(Some(row))
     }
 
     // Agent 13 (#102): VK Integration
@@ -9515,7 +9606,28 @@ impl PostgresStore {
 
         sub: VkSubscription,
     ) -> anyhow::Result<VkSubscription> {
-        let row = sqlx::query_as::<_, VkSubscription>(
+        let crypto = self.require_credential_crypto()?;
+        let mut tx = self
+            .begin_integration_credential_write("vk_subscription", &[&sub.guild_id, &sub.group_id])
+            .await?;
+
+        let existing_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM vk_subscriptions WHERE guild_id = $1 AND group_id = $2 FOR UPDATE",
+        )
+        .bind(&sub.guild_id)
+        .bind(&sub.group_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let target_id = existing_id.unwrap_or(sub.id);
+        let encrypted_secret = crypto.encrypt_field(
+            &sub.guild_id,
+            "vk_subscription",
+            &target_id.to_string(),
+            "secret_key",
+            &sub.secret_key,
+        )?;
+
+        let mut row = sqlx::query_as::<_, VkSubscription>(
 
             r#"
 
@@ -9530,6 +9642,7 @@ impl PostgresStore {
                 secret_key = EXCLUDED.secret_key,
 
                 discord_channel_id = EXCLUDED.discord_channel_id
+            WHERE vk_subscriptions.id = EXCLUDED.id
 
             RETURNING *
 
@@ -9537,7 +9650,7 @@ impl PostgresStore {
 
         )
 
-        .bind(sub.id)
+        .bind(target_id)
 
         .bind(&sub.guild_id)
 
@@ -9545,16 +9658,24 @@ impl PostgresStore {
 
         .bind(&sub.confirmation_code)
 
-        .bind(&sub.secret_key)
+        .bind(encrypted_secret)
 
         .bind(&sub.discord_channel_id)
 
         .bind(sub.created_at)
 
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
 
         .await?;
 
+        self.decrypt_integration_credential(
+            &row.guild_id,
+            "vk_subscription",
+            row.id,
+            "secret_key",
+            &mut row.secret_key,
+        )?;
+        tx.commit().await?;
         Ok(row)
     }
 
@@ -9573,7 +9694,17 @@ impl PostgresStore {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row)
+        let Some(mut row) = row else {
+            return Ok(None);
+        };
+        self.decrypt_integration_credential(
+            &row.guild_id,
+            "vk_subscription",
+            row.id,
+            "secret_key",
+            &mut row.secret_key,
+        )?;
+        Ok(Some(row))
     }
 
     // Agent 14 (#103): Reddit

@@ -4,6 +4,7 @@ use jiff::{SignedDuration, civil::date};
 use jiff_sqlx::ToSqlx;
 use rusty_discord_bot::{
     datetime::{Timestamp, days},
+    integrations::CredentialCrypto,
     moderation_cases::{CaseKind, CaseSeverity, CreateCase, ModerationCaseStore},
     scheduler::{
         CreateJobOutcome, JobMutation, JobMutationOutcome, NewScheduledJob, SchedulerStore,
@@ -3923,7 +3924,11 @@ async fn test_postgres_integration_suite() {
     // 24. Telegram Bridge foreign key and ON DELETE CASCADE (#330)
     let tg_guild = "666000000000000001";
     let tg_channel = "666000000000000002";
-    let tg_bridge = store
+    let credential_store = PostgresStore::with_credential_crypto(
+        store.pool().clone(),
+        Some(Arc::new(CredentialCrypto::generate_ephemeral())),
+    );
+    let tg_bridge = credential_store
         .create_telegram_bridge(rusty_discord_bot::storage::TelegramBridge {
             id: uuid::Uuid::new_v4(),
             guild_id: tg_guild.to_string(),

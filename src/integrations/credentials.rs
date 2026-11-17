@@ -160,7 +160,7 @@ impl CredentialCrypto {
                 .split_once(':')
                 .or_else(|| entry.split_once('='))
                 .ok_or_else(|| {
-                    anyhow!("invalid integration keyring entry '{entry}': expected format 'id:hex_key' or 'id=hex_key'")
+                    anyhow!("invalid integration keyring entry: expected format 'id:hex_key' or 'id=hex_key'")
                 })?;
             let id = id.trim();
             Self::validate_key_id(id)?;
@@ -275,15 +275,14 @@ impl CredentialCrypto {
         let nonce_hex = parts[1];
         let ciphertext_hex = parts[2];
 
-        let key = self
-            .keys
-            .get(key_id)
-            .ok_or_else(|| anyhow!("integration credential key '{key_id}' not found in keyring"))?;
+        let key = self.keys.get(key_id).ok_or_else(|| {
+            anyhow!("integration credential envelope key is missing from the configured keyring")
+        })?;
         let cipher = Aes256Gcm::new_from_slice(key)
             .map_err(|e| anyhow!("invalid integration credential key: {e}"))?;
 
-        let nonce_bytes =
-            hex::decode(nonce_hex).map_err(|e| anyhow!("invalid nonce hex encoding: {e}"))?;
+        let nonce_bytes = hex::decode(nonce_hex)
+            .map_err(|_| anyhow!("invalid integration credential nonce hex encoding"))?;
         if nonce_bytes.len() != 12 {
             bail!(
                 "invalid nonce length: expected 12 bytes, got {}",
@@ -293,7 +292,7 @@ impl CredentialCrypto {
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         let ciphertext_bytes = hex::decode(ciphertext_hex)
-            .map_err(|e| anyhow!("invalid ciphertext hex encoding: {e}"))?;
+            .map_err(|_| anyhow!("invalid integration credential ciphertext hex encoding"))?;
 
         let aad = Self::aad(guild_id, entity_type, record_id, field_name);
         let gcm_payload = Payload {
@@ -306,7 +305,7 @@ impl CredentialCrypto {
         })?;
 
         String::from_utf8(decrypted_bytes)
-            .map_err(|e| anyhow!("decrypted credential is not valid utf-8: {e}"))
+            .map_err(|_| anyhow!("decrypted integration credential is not valid utf-8"))
     }
 
     /// Helper for optional string encryption.
