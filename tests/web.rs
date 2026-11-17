@@ -13983,6 +13983,24 @@ async fn test_recruitment_privilege_escalation_and_self_accept_guard_suite() {
 
 #[tokio::test]
 async fn test_recruitment_review_role_authorization_and_approval_policy_suite() {
+    assert_recruitment_review_role_authorization_and_approval_policy(None).await;
+}
+
+#[tokio::test]
+async fn test_recruitment_review_role_authorization_and_approval_policy_postgres() {
+    let Some(database_url) = std::env::var("DATABASE_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+    else {
+        eprintln!("SKIPPING PostgreSQL Recruitment authorization test: DATABASE_URL not set");
+        return;
+    };
+    assert_recruitment_review_role_authorization_and_approval_policy(Some(database_url)).await;
+}
+
+async fn assert_recruitment_review_role_authorization_and_approval_policy(
+    database_url: Option<String>,
+) {
     use axum::Json;
     use axum::extract::Path;
     use axum::response::IntoResponse;
@@ -13990,7 +14008,9 @@ async fn test_recruitment_review_role_authorization_and_approval_policy_suite() 
     use reqwest::header::COOKIE;
     use rusty_discord_bot::storage::RecruitmentReview;
 
-    let guild_a = "100000000000000001";
+    let guild_a = (uuid::Uuid::new_v4().as_u128() as u64).to_string();
+    let guild_a = guild_a.as_str();
+    let guild_b = "100000000000000002";
     let owner_id = "999000000000000000";
     let admin_id = "111111111111111111";
     let role_reviewer_id = "222222222222222222";
@@ -13998,6 +14018,15 @@ async fn test_recruitment_review_role_authorization_and_approval_policy_suite() 
     let lost_role_user_id = "555555555555555555";
     let other_member_id = "777777777777777777";
 
+    #[derive(Clone, Copy)]
+    enum ManagerRoles {
+        Unassigned,
+        Assigned,
+        Unavailable,
+    }
+
+    let manager_roles = Arc::new(std::sync::Mutex::new(ManagerRoles::Unassigned));
+    let mock_manager_roles = Arc::clone(&manager_roles);
     let discord_mock_app = axum::Router::new()
         .route(
             "/users/@me",
@@ -14090,35 +14119,45 @@ async fn test_recruitment_review_role_authorization_and_approval_policy_suite() 
         )
         .route(
             "/guilds/{guild_id}/members/{user_id}",
-            get(|Path((_gid, user_id)): Path<(String, String)>| async move {
-                if user_id == "222222222222222222" {
-                    Json(serde_json::json!({
-                        "user": { "id": user_id },
-                        "roles": ["2001"],
-                        "permissions": "0"
-                    }))
-                    .into_response()
-                } else if user_id == "111111111111111111" {
-                    Json(serde_json::json!({
-                        "user": { "id": user_id },
-                        "roles": [],
-                        "permissions": "32"
-                    }))
-                    .into_response()
-                } else if user_id == "999000000000000000" {
-                    Json(serde_json::json!({
-                        "user": { "id": user_id },
-                        "roles": [],
-                        "permissions": "8"
-                    }))
-                    .into_response()
-                } else {
-                    Json(serde_json::json!({
-                        "user": { "id": user_id },
-                        "roles": [],
-                        "permissions": "0"
-                    }))
-                    .into_response()
+            get(move |Path((_gid, user_id)): Path<(String, String)>| {
+                let manager_roles = *mock_manager_roles.lock().unwrap();
+                async move {
+                    if user_id == "222222222222222222" {
+                        Json(serde_json::json!({
+                            "user": { "id": user_id },
+                            "roles": ["2001"],
+                            "permissions": "0"
+                        }))
+                        .into_response()
+                    } else if user_id == "111111111111111111" {
+                        let roles = match manager_roles {
+                            ManagerRoles::Unassigned => vec![],
+                            ManagerRoles::Assigned => vec!["2001"],
+                            ManagerRoles::Unavailable => {
+                                return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+                            }
+                        };
+                        Json(serde_json::json!({
+                            "user": { "id": user_id },
+                            "roles": roles,
+                            "permissions": "32"
+                        }))
+                        .into_response()
+                    } else if user_id == "999000000000000000" {
+                        Json(serde_json::json!({
+                            "user": { "id": user_id },
+                            "roles": [],
+                            "permissions": "8"
+                        }))
+                        .into_response()
+                    } else {
+                        Json(serde_json::json!({
+                            "user": { "id": user_id },
+                            "roles": [],
+                            "permissions": "0"
+                        }))
+                        .into_response()
+                    }
                 }
             }),
         );
@@ -14134,6 +14173,9 @@ async fn test_recruitment_review_role_authorization_and_approval_policy_suite() 
     });
 
     let mut config = test_config();
+    config.database_url = database_url;
+    config.ticket_transcripts_disabled = true;
+    config.integration_credentials_disabled = true;
     config.discord_token = "live_bot_token_review_role_secret".to_string();
     config.offline_mode = false;
     config.discord_api_base_url = format!("http://{discord_addr}");
@@ -14219,29 +14261,22 @@ async fn test_recruitment_review_role_authorization_and_approval_policy_suite() 
                     global_name: None,
                     avatar: None,
                 },
-                vec![DashboardGuild {
-                    id: guild_a.to_owned(),
-                    name: "Guild A".to_owned(),
-                    icon: None,
-                    owner: is_owner,
-                    permissions: perms.to_owned(),
-                }],
+                [guild_a, guild_b]
+                    .into_iter()
+                    .map(|guild_id| DashboardGuild {
+                        id: guild_id.to_owned(),
+                        name: guild_id.to_owned(),
+                        icon: None,
+                        owner: is_owner,
+                        permissions: perms.to_owned(),
+                    })
+                    .collect(),
                 csrf.to_owned(),
                 Timestamp::now() + SignedDuration::from_hours(2),
                 None,
             )
             .await
             .unwrap();
-
-        if perms != "0" {
-            web_state.permissions_cache.insert(
-                (uid.to_owned(), guild_a.to_owned()),
-                CachedGuildPermission {
-                    can_manage: true,
-                    checked_at: Timestamp::now(),
-                },
-            );
-        }
     }
 
     let cookie_admin = format!("rusty_discord_bot_session={admin_session}");
@@ -14306,7 +14341,118 @@ async fn test_recruitment_review_role_authorization_and_approval_policy_suite() 
     assert_eq!(track_resp.status(), reqwest::StatusCode::OK);
     let track_body: serde_json::Value = track_resp.json().await.unwrap();
     let track_id_str = track_body["track"]["id"].as_str().unwrap();
-    let _track_id = uuid::Uuid::parse_str(track_id_str).unwrap();
+    let track_id = uuid::Uuid::parse_str(track_id_str).unwrap();
+
+    // A manager without the track role can apply and see only their candidate view.
+    let manager_application: serde_json::Value = client
+        .post(format!(
+            "{base_url}/api/guilds/{guild_a}/recruitment/tracks/moderator/apply"
+        ))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_csrf)
+        .json(&serde_json::json!({ "answers": [] }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let manager_application_id =
+        uuid::Uuid::parse_str(manager_application["application"]["id"].as_str().unwrap()).unwrap();
+    let manager_detail_url = format!(
+        "{base_url}/api/guilds/{guild_a}/recruitment/applications/{manager_application_id}"
+    );
+    let private_note = "synthetic private recruitment note";
+    client
+        .post(format!("{manager_detail_url}/review"))
+        .header(COOKIE, &cookie_rev)
+        .header("x-csrf-token", role_reviewer_csrf)
+        .json(&serde_json::json!({ "recommendation": "approve", "note": private_note }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let own_view: serde_json::Value = client
+        .get(&manager_detail_url)
+        .header(COOKIE, &cookie_admin)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(own_view["application"].get("reviews").is_none());
+
+    let transition = |url: &str, cookie: &str, csrf: &str, version: i64, status: &str| {
+        client
+            .post(format!("{url}/transition"))
+            .header(COOKIE, cookie)
+            .header("x-csrf-token", csrf)
+            .json(&serde_json::json!({
+                "expected_version": version,
+                "new_status": status,
+                "new_stage": status,
+            }))
+    };
+    let storage = &web_state.app.storage;
+    for status in [
+        "rejected",
+        "screening",
+        "interview",
+        "accepted",
+        "withdrawn",
+        "expired",
+        "draft",
+        "submitted",
+    ] {
+        let denied = transition(&manager_detail_url, &cookie_admin, admin_csrf, 1, status)
+            .send()
+            .await
+            .unwrap();
+        let denied_status = denied.status();
+        let denied_body = denied.text().await.unwrap();
+        let persisted = storage
+            .get_recruitment_application(guild_a, manager_application_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            denied_status,
+            reqwest::StatusCode::FORBIDDEN,
+            "transition to {status}: private note returned: {}, reviewer ID returned: {}, stored status: {}, version: {}",
+            denied_body.contains(private_note),
+            denied_body.contains(role_reviewer_id),
+            persisted.status,
+            persisted.version
+        );
+        assert!(!denied_body.contains(private_note));
+        assert!(!denied_body.contains(role_reviewer_id));
+        assert_eq!(persisted.status, "submitted");
+        assert_eq!(persisted.version, 1);
+    }
+    assert!(
+        storage
+            .list_audit_events(guild_a, 100)
+            .await
+            .unwrap()
+            .iter()
+            .all(|event| event.event != "application_transitioned")
+    );
+
+    // Configure an assignable target through storage to exercise the decision outbox.
+    let mut track = storage
+        .get_recruitment_track(guild_a, track_id)
+        .await
+        .unwrap()
+        .unwrap();
+    track.target_role_id = Some("2001".to_owned());
+    track.config.auto_role_on_accept = true;
+    storage.upsert_recruitment_track(track).await.unwrap();
 
     // 3. Kandydat składa aplikację
     let apply_resp = client
@@ -14398,21 +14544,20 @@ async fn test_recruitment_review_role_authorization_and_approval_policy_suite() 
         .unwrap();
     assert_eq!(rev_resp.status(), reqwest::StatusCode::OK);
 
+    let candidate_detail_url =
+        format!("{base_url}/api/guilds/{guild_a}/recruitment/applications/{app_id}");
+
     // 8. Próba akceptacji przy 1 approvalu (wymagane 2) -> 400 Bad Request
-    let trans_fail_resp = client
-        .post(format!(
-            "{base_url}/api/guilds/{guild_a}/recruitment/applications/{app_id}/transition"
-        ))
-        .header(COOKIE, &cookie_admin)
-        .header("x-csrf-token", admin_csrf)
-        .json(&serde_json::json!({
-            "new_status": "accepted",
-            "new_stage": "accepted",
-            "expected_version": 1
-        }))
-        .send()
-        .await
-        .unwrap();
+    let trans_fail_resp = transition(
+        &candidate_detail_url,
+        &cookie_owner,
+        owner_csrf,
+        1,
+        "accepted",
+    )
+    .send()
+    .await
+    .unwrap();
     assert_eq!(trans_fail_resp.status(), reqwest::StatusCode::BAD_REQUEST);
     let trans_fail_body: serde_json::Value = trans_fail_resp.json().await.unwrap();
     assert!(
@@ -14442,20 +14587,16 @@ async fn test_recruitment_review_role_authorization_and_approval_policy_suite() 
         .unwrap();
 
     // Próba akceptacji ponownie: nieuprawniony głos nie może się liczyć!
-    let trans_fail_again = client
-        .post(format!(
-            "{base_url}/api/guilds/{guild_a}/recruitment/applications/{app_id}/transition"
-        ))
-        .header(COOKIE, &cookie_admin)
-        .header("x-csrf-token", admin_csrf)
-        .json(&serde_json::json!({
-            "new_status": "accepted",
-            "new_stage": "accepted",
-            "expected_version": 1
-        }))
-        .send()
-        .await
-        .unwrap();
+    let trans_fail_again = transition(
+        &candidate_detail_url,
+        &cookie_owner,
+        owner_csrf,
+        1,
+        "accepted",
+    )
+    .send()
+    .await
+    .unwrap();
     assert_eq!(trans_fail_again.status(), reqwest::StatusCode::BAD_REQUEST);
 
     // 10. Właściciel gildii (owner_id) dodaje approval (posiada owner override)
@@ -14475,20 +14616,16 @@ async fn test_recruitment_review_role_authorization_and_approval_policy_suite() 
     assert_eq!(owner_rev_resp.status(), reqwest::StatusCode::OK);
 
     // 11. Teraz mamy 2 uprawnione approve (role_reviewer + owner). Akceptacja musi się powieść!
-    let trans_success = client
-        .post(format!(
-            "{base_url}/api/guilds/{guild_a}/recruitment/applications/{app_id}/transition"
-        ))
-        .header(COOKIE, &cookie_admin)
-        .header("x-csrf-token", admin_csrf)
-        .json(&serde_json::json!({
-            "new_status": "accepted",
-            "new_stage": "accepted",
-            "expected_version": 1
-        }))
-        .send()
-        .await
-        .unwrap();
+    let trans_success = transition(
+        &candidate_detail_url,
+        &cookie_owner,
+        owner_csrf,
+        1,
+        "accepted",
+    )
+    .send()
+    .await
+    .unwrap();
     assert_eq!(trans_success.status(), reqwest::StatusCode::OK);
     let app_accepted = web_state
         .app
@@ -14514,6 +14651,189 @@ async fn test_recruitment_review_role_authorization_and_approval_policy_suite() 
         .as_array()
         .unwrap();
     assert!(reviews_arr.len() >= 2);
+
+    let cross_guild_url =
+        format!("{base_url}/api/guilds/{guild_b}/recruitment/applications/{app_id}");
+    for (url, cookie, csrf, version, decision, expected) in [
+        (
+            &cross_guild_url,
+            &cookie_owner,
+            owner_csrf,
+            2,
+            "rejected",
+            reqwest::StatusCode::NOT_FOUND,
+        ),
+        (
+            &candidate_detail_url,
+            &cookie_owner,
+            "invalid-csrf",
+            2,
+            "rejected",
+            reqwest::StatusCode::FORBIDDEN,
+        ),
+        (
+            &candidate_detail_url,
+            &cookie_rev,
+            role_reviewer_csrf,
+            2,
+            "rejected",
+            reqwest::StatusCode::FORBIDDEN,
+        ),
+        (
+            &candidate_detail_url,
+            &cookie_admin,
+            admin_csrf,
+            2,
+            "rejected",
+            reqwest::StatusCode::FORBIDDEN,
+        ),
+        (
+            &candidate_detail_url,
+            &cookie_owner,
+            owner_csrf,
+            1,
+            "accepted",
+            reqwest::StatusCode::CONFLICT,
+        ),
+    ] {
+        let response = transition(url, cookie, csrf, version, decision)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        assert_eq!(
+            storage
+                .get_role_fulfillment(app_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "pending"
+        );
+    }
+    let still_accepted = storage
+        .get_recruitment_application(guild_a, app_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (still_accepted.status.as_str(), still_accepted.version),
+        ("accepted", 2)
+    );
+
+    // Role assignment and revocation apply to the same logged-in manager.
+    *manager_roles.lock().unwrap() = ManagerRoles::Assigned;
+    let self_accept = transition(
+        &manager_detail_url,
+        &cookie_admin,
+        admin_csrf,
+        1,
+        "accepted",
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(self_accept.status(), reqwest::StatusCode::FORBIDDEN);
+    assert!(
+        self_accept
+            .text()
+            .await
+            .unwrap()
+            .contains("cannot accept your own")
+    );
+    assert!(
+        storage
+            .get_role_fulfillment(manager_application_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let updated: serde_json::Value = transition(
+        &candidate_detail_url,
+        &cookie_admin,
+        admin_csrf,
+        2,
+        "rejected",
+    )
+    .send()
+    .await
+    .unwrap()
+    .error_for_status()
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(updated["application"]["status"], "rejected");
+    assert_eq!(updated["application"]["version"], 3);
+    assert!(
+        updated["application"]["reviews"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|review| {
+                review["reviewer_user_id"] == role_reviewer_id
+                    && review["note"] == "reviewer approved"
+            })
+    );
+    assert_eq!(
+        storage
+            .get_role_fulfillment(app_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "cancelled"
+    );
+
+    for (roles, expected_error) in [
+        (ManagerRoles::Unassigned, "not assigned to review"),
+        (
+            ManagerRoles::Unavailable,
+            "Member roles could not be verified",
+        ),
+    ] {
+        *manager_roles.lock().unwrap() = roles;
+        let response = transition(
+            &candidate_detail_url,
+            &cookie_admin,
+            admin_csrf,
+            3,
+            "screening",
+        )
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+        let body = response.text().await.unwrap();
+        assert!(body.contains(expected_error), "{body}");
+        assert!(!body.contains("reviewer approved"));
+    }
+    let still_rejected = storage
+        .get_recruitment_application(guild_a, app_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (still_rejected.status.as_str(), still_rejected.version),
+        ("rejected", 3)
+    );
+
+    *manager_roles.lock().unwrap() = ManagerRoles::Unassigned;
+    let withdrawn: serde_json::Value = client
+        .post(format!("{manager_detail_url}/withdraw"))
+        .header(COOKIE, &cookie_admin)
+        .header("x-csrf-token", admin_csrf)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(withdrawn["application"]["status"], "withdrawn");
+    assert!(withdrawn["application"].get("reviews").is_none());
 
     // 13. Kompatybilność wsteczna: track z pustym review_role_ids=[] dopuszcza review i akceptację od admina
     let legacy_track_payload = serde_json::json!({
@@ -15639,7 +15959,7 @@ async fn test_recruitment_n_plus_one_avoidance_and_approval_threshold_suite() {
         "Acceptance must stop after satisfying final_approvals (<= 2 fetches), but performed {m_trans_calls}"
     );
 
-    // Short-circuit test: When approved count < final_approvals, 0 Discord REST calls should occur
+    // Short-circuit test: Approval evaluation makes no Discord calls below the threshold.
     let short_app = RecruitmentApplication {
         id: uuid::Uuid::new_v4(),
         guild_id: guild_id.to_string(),
@@ -15699,8 +16019,8 @@ async fn test_recruitment_n_plus_one_avoidance_and_approval_threshold_suite() {
         .await
         .unwrap();
     assert_eq!(short_resp.status(), reqwest::StatusCode::BAD_REQUEST);
-    // Short-circuit prevented ANY REST calls!
-    assert_eq!(guild_get_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+    // Only the actor's guild-owner check runs; approval evaluation makes no Discord calls.
+    assert_eq!(guild_get_count.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(
         member_get_count.load(std::sync::atomic::Ordering::SeqCst),
         0

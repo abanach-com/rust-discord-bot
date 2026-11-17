@@ -6352,6 +6352,8 @@ pub async fn transition_recruitment_application(
         .map_err(|e| ApiError::internal(e.to_string()))?
         .ok_or_else(|| ApiError::not_found("Associated recruitment track not found"))?;
 
+    ensure_recruitment_reviewer_access(&state, &session, &guild_id, &track).await?;
+
     if ![
         "draft",
         "submitted",
