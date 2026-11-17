@@ -815,6 +815,7 @@ No AI model may autonomously ban users without an explicit, reviewable guild pol
   - Added additive migration `0067_marketplace_immutable_releases.sql` establishing foreign key `fk_plugin_guild_installations_release` from `plugin_guild_installations(plugin_id, version)` to `plugin_marketplace_releases(plugin_id, version)` with `ON DELETE RESTRICT`, preventing broken references.
   - Ensured publishing new versions is strictly append-only: duplicate versions are rejected across HTTP and Storage layers, and guild installations remain pinned to their selected version without unintended automatic upgrades.
   - Added dedicated release discovery endpoints `GET /api/marketplace/packages/{plugin_id}/releases` and `GET /api/marketplace/packages/{plugin_id}/releases/{version}` enabling provenance and manifest auditing for any pinned installation.
+  - The startup migrator preserves older installations with missing releases in a quarantine when applying `0067`. Guild administrators can inspect the saved settings and original enabled state through `GET /api/guilds/{guild_id}/marketplace/unresolved`. Quarantined entries are inactive. See the [upgrade and recovery procedure](DEVELOPMENT.md#upgrading-marketplace-installations-past-migration-0067).
 
 ## Delivery order
 

@@ -946,6 +946,10 @@ pub fn build_router(state: WebState) -> Router {
             get(integrations::list_installed_guild_plugins),
         )
         .route(
+            "/api/guilds/{guild_id}/marketplace/unresolved",
+            get(integrations::list_unresolved_guild_plugin_installations),
+        )
+        .route(
             "/api/guilds/{guild_id}/reaction-roles",
             get(features::list_reaction_roles).post(features::create_reaction_role),
         )
