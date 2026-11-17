@@ -762,11 +762,12 @@ async fn test_security_privacy_workflow_suite() {
     // =========================================================================
 
     // Create an event with max_participants = 2
+    let roster_start = Utc::now() + Duration::hours(1);
     let roster_event = json!({
         "title": "2-Player Tournament",
         "description": "Strict 2-player capacity",
-        "start_time": "2026-12-01T19:00:00Z",
-        "end_time": "2026-12-01T21:00:00Z",
+        "start_time": roster_start,
+        "end_time": roster_start + Duration::hours(2),
         "timezone": "UTC",
         "max_participants": 2
     });
