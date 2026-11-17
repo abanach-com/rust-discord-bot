@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use crate::datetime::Timestamp;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -24,7 +24,7 @@ pub struct Session {
     pub guilds: Vec<DashboardGuild>,
     pub csrf_token: String,
     #[serde(skip)]
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
     #[serde(skip)]
     pub access_token: Option<String>,
 }
@@ -36,9 +36,9 @@ pub struct StoredSession {
     pub user_data: serde_json::Value,
     pub guilds_data: serde_json::Value,
     pub csrf_token: String,
-    pub expires_at: DateTime<Utc>,
-    pub created_at: DateTime<Utc>,
-    pub last_seen_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
+    pub created_at: Timestamp,
+    pub last_seen_at: Timestamp,
 }
 
 pub fn hash_session_id(session_id: &str) -> String {

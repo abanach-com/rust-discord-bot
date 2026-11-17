@@ -1,4 +1,5 @@
-use chrono::{DateTime, Utc};
+use crate::datetime::Timestamp;
+use jiff::SignedDuration;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -88,8 +89,8 @@ pub struct RecruitmentTrack {
     pub target_role_id: Option<String>,
     pub config: sqlx::types::Json<RecruitmentTrackConfig>,
     pub version: i64,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -103,9 +104,9 @@ pub struct RecruitmentApplication {
     pub submitted_answers: sqlx::types::Json<Vec<SubmittedAnswer>>,
     pub current_stage: String,
     pub version: i64,
-    pub submitted_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub decided_at: Option<DateTime<Utc>>,
+    pub submitted_at: Timestamp,
+    pub updated_at: Timestamp,
+    pub decided_at: Option<Timestamp>,
     pub decision_reason: Option<String>,
     pub decided_by: Option<String>,
 }
@@ -118,8 +119,8 @@ pub struct RecruitmentReview {
     pub reviewer_user_id: String,
     pub recommendation: String,
     pub note: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -131,9 +132,9 @@ pub struct RecruitmentRoleFulfillment {
     pub status: String,
     pub attempts: i32,
     pub last_error: Option<String>,
-    pub next_attempt_at: DateTime<Utc>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub next_attempt_at: Timestamp,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 /// Candidate-facing view strictly stripped of staff-only notes, reviewer identity, and internal reviews.
@@ -146,9 +147,9 @@ pub struct CandidateApplicationView {
     pub status: String,
     pub current_stage: String,
     pub submitted_answers: Vec<SubmittedAnswer>,
-    pub submitted_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub decided_at: Option<DateTime<Utc>>,
+    pub submitted_at: Timestamp,
+    pub updated_at: Timestamp,
+    pub decided_at: Option<Timestamp>,
     pub decision_reason: Option<String>,
 }
 
@@ -164,9 +165,9 @@ pub struct StaffApplicationView {
     pub current_stage: String,
     pub submitted_answers: Vec<SubmittedAnswer>,
     pub version: i64,
-    pub submitted_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub decided_at: Option<DateTime<Utc>>,
+    pub submitted_at: Timestamp,
+    pub updated_at: Timestamp,
+    pub decided_at: Option<Timestamp>,
     pub decision_reason: Option<String>,
     pub decided_by: Option<String>,
     pub reviews: Vec<RecruitmentReview>,
@@ -344,7 +345,7 @@ pub async fn process_recruitment_role_fulfillments(
                 // Aplikacja zmieniła status (np. została odrzucona/wycofana)
                 item.status = "cancelled".to_string();
                 item.last_error = Some(format!("Application status changed to '{}'", app.status));
-                item.updated_at = Utc::now();
+                item.updated_at = Timestamp::now();
                 storage.upsert_role_fulfillment(item).await?;
                 continue;
             }
@@ -352,7 +353,7 @@ pub async fn process_recruitment_role_fulfillments(
                 // Aplikacja została usunięta
                 item.status = "cancelled".to_string();
                 item.last_error = Some("Application no longer exists".to_string());
-                item.updated_at = Utc::now();
+                item.updated_at = Timestamp::now();
                 storage.upsert_role_fulfillment(item).await?;
                 continue;
             }
@@ -360,7 +361,7 @@ pub async fn process_recruitment_role_fulfillments(
 
         processed += 1;
         item.attempts += 1;
-        item.updated_at = Utc::now();
+        item.updated_at = Timestamp::now();
 
         let g_res = item
             .guild_id
@@ -406,7 +407,7 @@ pub async fn process_recruitment_role_fulfillments(
                         } else {
                             let backoff_secs = 2u64.pow(item.attempts.min(6) as u32) * 5;
                             item.next_attempt_at =
-                                Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
+                                Timestamp::now() + SignedDuration::from_secs(backoff_secs as i64);
                         }
                         storage.upsert_role_fulfillment(item).await?;
                         continue;
@@ -429,7 +430,7 @@ pub async fn process_recruitment_role_fulfillments(
                         } else {
                             let backoff_secs = 2u64.pow(item.attempts.min(6) as u32) * 5;
                             item.next_attempt_at =
-                                Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
+                                Timestamp::now() + SignedDuration::from_secs(backoff_secs as i64);
                         }
                     }
                 }
@@ -511,8 +512,8 @@ mod tests {
             submitted_answers: sqlx::types::Json(vec![]),
             current_stage: "screening".to_string(),
             version: 1,
-            submitted_at: Utc::now(),
-            updated_at: Utc::now(),
+            submitted_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
             decided_at: None,
             decision_reason: None,
             decided_by: Some("staff_admin".to_string()),
@@ -537,8 +538,8 @@ mod tests {
                 reviewer_user_id: "rev_1".to_string(),
                 recommendation: "approve".to_string(),
                 note: Some("Looks good".to_string()),
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
+                created_at: Timestamp::now(),
+                updated_at: Timestamp::now(),
             },
             RecruitmentReview {
                 id: Uuid::new_v4(),
@@ -547,8 +548,8 @@ mod tests {
                 reviewer_user_id: "rev_1".to_string(), // Duplicate reviewer ID
                 recommendation: "approve".to_string(),
                 note: Some("Updated note".to_string()),
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
+                created_at: Timestamp::now(),
+                updated_at: Timestamp::now(),
             },
             RecruitmentReview {
                 id: Uuid::new_v4(),
@@ -557,8 +558,8 @@ mod tests {
                 reviewer_user_id: "rev_2".to_string(),
                 recommendation: "approve".to_string(),
                 note: None,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
+                created_at: Timestamp::now(),
+                updated_at: Timestamp::now(),
             },
             RecruitmentReview {
                 id: Uuid::new_v4(),
@@ -567,8 +568,8 @@ mod tests {
                 reviewer_user_id: "rev_3".to_string(),
                 recommendation: "reject".to_string(),
                 note: None,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
+                created_at: Timestamp::now(),
+                updated_at: Timestamp::now(),
             },
         ];
 

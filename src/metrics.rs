@@ -1,9 +1,9 @@
-use chrono::{DateTime, Utc};
+use crate::datetime::Timestamp;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug)]
 pub struct Metrics {
-    pub process_start_time: DateTime<Utc>,
+    pub process_start_time: Timestamp,
     pub discord_events_total: AtomicU64,
     pub lua_commands_total: AtomicU64,
     pub lua_command_errors_total: AtomicU64,
@@ -27,7 +27,7 @@ pub struct Metrics {
 impl Default for Metrics {
     fn default() -> Self {
         Self {
-            process_start_time: Utc::now(),
+            process_start_time: Timestamp::now(),
             discord_events_total: AtomicU64::new(0),
             lua_commands_total: AtomicU64::new(0),
             lua_command_errors_total: AtomicU64::new(0),
@@ -57,7 +57,9 @@ impl Metrics {
     }
 
     pub fn uptime_seconds(&self) -> i64 {
-        (Utc::now() - self.process_start_time).num_seconds().max(0)
+        (Timestamp::now() - self.process_start_time)
+            .as_secs()
+            .max(0)
     }
 
     pub fn render_prometheus(

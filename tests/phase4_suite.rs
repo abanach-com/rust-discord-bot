@@ -1,7 +1,8 @@
+use jiff::SignedDuration;
+use rusty_discord_bot::datetime::{Timestamp, days};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
 use dashmap::DashMap;
 use reqwest::header::COOKIE;
 use uuid::Uuid;
@@ -130,7 +131,7 @@ async fn test_phase4_integrations_and_extensibility_suite() {
             user,
             guilds.clone(),
             csrf_token.to_owned(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -154,7 +155,7 @@ async fn test_phase4_integrations_and_extensibility_suite() {
             approver_user,
             guilds,
             approver_csrf_token.to_owned(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -296,8 +297,8 @@ async fn test_phase4_integrations_and_extensibility_suite() {
         scopes: serde_json::json!(["read"]),
         metadata: serde_json::json!({}),
         enabled: true,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     let conn2 = IntegrationConnection {
         id: Uuid::new_v4(),
@@ -310,8 +311,8 @@ async fn test_phase4_integrations_and_extensibility_suite() {
         scopes: serde_json::json!(["read"]),
         metadata: serde_json::json!({}),
         enabled: true,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     state
         .app
@@ -374,7 +375,7 @@ async fn test_phase4_integrations_and_extensibility_suite() {
         provider: "twitch".to_string(),
         provider_subject: "twitch_streamer_42".to_string(),
         attributes: serde_json::json!({}),
-        verified_at: Utc::now(),
+        verified_at: Timestamp::now(),
         synced_role_id: None,
     };
     let hijack_res = state.app.storage.link_account(hijack_link).await;
@@ -779,7 +780,7 @@ async fn test_phase4_integrations_and_extensibility_suite() {
         title: "Staff Secret Playbook".to_string(),
         content: "Only accessible to users with staff channel permission".to_string(),
         source_type: "manual".to_string(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     state.app.storage.create_ai_document(doc).await.unwrap();
 
@@ -1039,7 +1040,7 @@ async fn test_ai_knowledge_search_security_and_performance_issue_244() {
         title: "100% discount deal".to_string(),
         content: "Get everything free".to_string(),
         source_type: "faq".to_string(),
-        created_at: Utc::now() - Duration::minutes(10),
+        created_at: Timestamp::now() - SignedDuration::from_mins(10),
     };
     let doc_regular = AiKnowledgeDocument {
         id: Uuid::new_v4(),
@@ -1048,7 +1049,7 @@ async fn test_ai_knowledge_search_security_and_performance_issue_244() {
         title: "Regular discount deal".to_string(),
         content: "Save ten dollars".to_string(),
         source_type: "faq".to_string(),
-        created_at: Utc::now() - Duration::minutes(9),
+        created_at: Timestamp::now() - SignedDuration::from_mins(9),
     };
     let doc_underscore = AiKnowledgeDocument {
         id: Uuid::new_v4(),
@@ -1057,7 +1058,7 @@ async fn test_ai_knowledge_search_security_and_performance_issue_244() {
         title: "snake_case_identifier doc".to_string(),
         content: "Config file path".to_string(),
         source_type: "manual".to_string(),
-        created_at: Utc::now() - Duration::minutes(8),
+        created_at: Timestamp::now() - SignedDuration::from_mins(8),
     };
     let doc_backslash = AiKnowledgeDocument {
         id: Uuid::new_v4(),
@@ -1066,7 +1067,7 @@ async fn test_ai_knowledge_search_security_and_performance_issue_244() {
         title: "Windows\\System32 path doc".to_string(),
         content: "System folder".to_string(),
         source_type: "manual".to_string(),
-        created_at: Utc::now() - Duration::minutes(7),
+        created_at: Timestamp::now() - SignedDuration::from_mins(7),
     };
 
     state
@@ -1150,7 +1151,7 @@ async fn test_ai_knowledge_search_security_and_performance_issue_244() {
             title: format!("Paged Article #{i:02}"),
             content: "Unique content for pagination check".to_string(),
             source_type: "paged".to_string(),
-            created_at: Utc::now() + Duration::seconds(i),
+            created_at: Timestamp::now() + SignedDuration::from_secs(i),
         };
         state
             .app
@@ -1201,7 +1202,7 @@ async fn test_ai_knowledge_search_security_and_performance_issue_244() {
             title: format!("VIP Confidential Doc #{i:03}"),
             content: "Super confidential executive strategy search_target".to_string(),
             source_type: "confidential".to_string(),
-            created_at: Utc::now() + Duration::seconds(100 + i),
+            created_at: Timestamp::now() + SignedDuration::from_secs(100 + i),
         };
         state
             .app
@@ -1217,7 +1218,7 @@ async fn test_ai_knowledge_search_security_and_performance_issue_244() {
         title: "Publicly Visible Strategy Doc".to_string(),
         content: "General information strategy search_target".to_string(),
         source_type: "public".to_string(),
-        created_at: Utc::now() + Duration::seconds(999),
+        created_at: Timestamp::now() + SignedDuration::from_secs(999),
     };
     state.app.storage.create_ai_document(pub_doc).await.unwrap();
 
@@ -1248,7 +1249,7 @@ async fn test_ai_knowledge_search_security_and_performance_issue_244() {
         title: "Corrupted ACL Doc".to_string(),
         content: "Malformed ACL must deny access search_malformed".to_string(),
         source_type: "corrupted".to_string(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     state
         .app
@@ -1282,7 +1283,7 @@ async fn test_ai_knowledge_search_security_and_performance_issue_244() {
         title: "Other Guild Public Doc".to_string(),
         content: "Should never leak to guild_id search_isolation_leak".to_string(),
         source_type: "public".to_string(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     state
         .app
@@ -1326,7 +1327,7 @@ async fn test_ai_knowledge_search_security_and_performance_issue_244() {
             user,
             guilds,
             csrf_token.to_owned(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -1451,7 +1452,7 @@ async fn test_telegram_bridge_upsert_deduplication_and_identity_stability_issue_
                 permissions: "32".to_string(), // MANAGE_GUILD
             }],
             csrf_token.to_string(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -1461,7 +1462,7 @@ async fn test_telegram_bridge_upsert_deduplication_and_identity_stability_issue_
         (user_id.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -1572,7 +1573,7 @@ async fn test_telegram_bridge_upsert_deduplication_and_identity_stability_issue_
         telegram_message_id: "tg_msg_101".to_string(),
         discord_message_id: "dc_msg_202".to_string(),
         direction: "telegram_to_discord".to_string(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     web_state
         .app
@@ -1605,7 +1606,7 @@ async fn test_telegram_bridge_upsert_deduplication_and_identity_stability_issue_
                 discord_channel_id: cid,
                 secret_token: format!("token_{i}"),
                 paused: false,
-                created_at: Utc::now(),
+                created_at: Timestamp::now(),
             };
             storage.create_telegram_bridge(bridge).await.unwrap();
         }));
@@ -1679,7 +1680,7 @@ async fn test_telegram_bridge_mapping_fk_and_cascade_lifecycle_issue_330() {
         telegram_message_id: "orphan_tg_1".to_string(),
         discord_message_id: "orphan_dc_1".to_string(),
         direction: "telegram_to_discord".to_string(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     let orphan_res = storage
         .record_telegram_message_mapping(orphan_mapping)
@@ -1708,7 +1709,7 @@ async fn test_telegram_bridge_mapping_fk_and_cascade_lifecycle_issue_330() {
             discord_channel_id: channel_a.to_string(),
             secret_token: "secret_a".to_string(),
             paused: false,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -1723,7 +1724,7 @@ async fn test_telegram_bridge_mapping_fk_and_cascade_lifecycle_issue_330() {
             discord_channel_id: channel_b.to_string(),
             secret_token: "secret_b".to_string(),
             paused: false,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -1735,7 +1736,7 @@ async fn test_telegram_bridge_mapping_fk_and_cascade_lifecycle_issue_330() {
         telegram_message_id: "tg_a1".to_string(),
         discord_message_id: "dc_a1".to_string(),
         direction: "telegram_to_discord".to_string(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     let mapping_a2 = rusty_discord_bot::storage::TelegramMessageMapping {
         id: Uuid::new_v4(),
@@ -1743,7 +1744,7 @@ async fn test_telegram_bridge_mapping_fk_and_cascade_lifecycle_issue_330() {
         telegram_message_id: "tg_a2".to_string(),
         discord_message_id: "dc_a2".to_string(),
         direction: "discord_to_telegram".to_string(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     let mapping_b1 = rusty_discord_bot::storage::TelegramMessageMapping {
         id: Uuid::new_v4(),
@@ -1751,7 +1752,7 @@ async fn test_telegram_bridge_mapping_fk_and_cascade_lifecycle_issue_330() {
         telegram_message_id: "tg_b1".to_string(),
         discord_message_id: "dc_b1".to_string(),
         direction: "telegram_to_discord".to_string(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
 
     storage
@@ -1843,7 +1844,7 @@ async fn test_telegram_bridge_mapping_fk_and_cascade_lifecycle_issue_330() {
                 discord_channel_id: race_channel.clone(),
                 secret_token: format!("race_tok_{i}"),
                 paused: false,
-                created_at: Utc::now(),
+                created_at: Timestamp::now(),
             })
             .await
             .unwrap();
@@ -1861,7 +1862,7 @@ async fn test_telegram_bridge_mapping_fk_and_cascade_lifecycle_issue_330() {
                 telegram_message_id: format!("tg_race_{i}"),
                 discord_message_id: format!("dc_race_{i}"),
                 direction: "telegram_to_discord".to_string(),
-                created_at: Utc::now(),
+                created_at: Timestamp::now(),
             };
             storage_record
                 .record_telegram_message_mapping(mapping)
@@ -2169,7 +2170,7 @@ async fn test_github_thread_mapping_and_telegram_bridge_tenant_isolation_issues_
         (user_admin_id.to_string(), guild_a.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
     let state = WebState::new(app, Arc::new(LoginRateLimiter::new()), permissions_cache);
@@ -2198,7 +2199,7 @@ async fn test_github_thread_mapping_and_telegram_bridge_tenant_isolation_issues_
             user,
             guilds,
             csrf_token.to_string(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -2762,7 +2763,7 @@ async fn test_webhook_dedupe_and_delivery_logs_retention_and_pagination_issue_34
             owner: true,
             permissions: "8".to_string(), // ADMINISTRATOR
         }],
-        expires_at: Utc::now() + Duration::hours(2),
+        expires_at: Timestamp::now() + SignedDuration::from_hours(2),
         access_token: None,
         csrf_token: csrf_token.to_string(),
     };
@@ -2783,8 +2784,8 @@ async fn test_webhook_dedupe_and_delivery_logs_retention_and_pagination_issue_34
     let session_cookie = format!("rusty_discord_bot_session={session_id}");
 
     // 1. Test event dedupe retention & pruning
-    let now = Utc::now();
-    let old_timestamp = now - Duration::days(45);
+    let now = Timestamp::now();
+    let old_timestamp = now - days(45);
 
     // Record old event with backdated timestamp and fresh event directly in storage
     state
@@ -2801,7 +2802,7 @@ async fn test_webhook_dedupe_and_delivery_logs_retention_and_pagination_issue_34
         .unwrap();
 
     // Pruning with 30-day cutoff
-    let dedupe_cutoff = now - Duration::days(30);
+    let dedupe_cutoff = now - days(30);
     let pruned_dedupes = state
         .app
         .storage
@@ -2852,7 +2853,7 @@ async fn test_webhook_dedupe_and_delivery_logs_retention_and_pagination_issue_34
             status: "delivered".to_string(),
             error_message: None,
             payload_summary: serde_json::json!({"action": "old_test"}),
-            created_at: now - Duration::days(120),
+            created_at: now - days(120),
         })
         .await
         .unwrap();
@@ -2873,7 +2874,7 @@ async fn test_webhook_dedupe_and_delivery_logs_retention_and_pagination_issue_34
         .await
         .unwrap();
 
-    let logs_cutoff = now - Duration::days(90);
+    let logs_cutoff = now - days(90);
     let pruned_logs = state
         .app
         .storage
@@ -2885,7 +2886,7 @@ async fn test_webhook_dedupe_and_delivery_logs_retention_and_pagination_issue_34
     // 3. Test list_delivery_logs pagination, ordering and tenant isolation
     // Populate 70 logs for guild_a and 5 logs for guild_b
     for i in 0..70 {
-        let ts = now - Duration::seconds(100 - i);
+        let ts = now - SignedDuration::from_secs(100 - i);
         state
             .app
             .storage
@@ -3004,8 +3005,8 @@ async fn test_webhook_dedupe_and_delivery_logs_retention_and_pagination_issue_34
         state.app.storage.clone(),
         shutdown_rx,
         std::time::Duration::from_millis(50),
-        chrono::Duration::days(30),
-        chrono::Duration::days(90),
+        days(30),
+        days(90),
     ));
 
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -3053,7 +3054,7 @@ async fn test_integration_credentials_encryption_at_rest_and_tamper_resistance_i
             owner: true,
             permissions: "8".to_string(), // ADMINISTRATOR
         }],
-        expires_at: Utc::now() + Duration::hours(2),
+        expires_at: Timestamp::now() + SignedDuration::from_hours(2),
         access_token: None,
         csrf_token: csrf_token.to_string(),
     };
@@ -3380,7 +3381,7 @@ async fn test_social_draft_discovery_queue_pagination_and_security_issue_390() {
                 permissions: "8".to_string(),
             }],
             admin_csrf.to_string(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -3406,7 +3407,7 @@ async fn test_social_draft_discovery_queue_pagination_and_security_issue_390() {
                 permissions: "0".to_string(), // no manage permissions
             }],
             member_no_manage_csrf.to_string(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -3432,7 +3433,7 @@ async fn test_social_draft_discovery_queue_pagination_and_security_issue_390() {
                 permissions: "8".to_string(),
             }],
             foreign_admin_csrf.to_string(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -3443,7 +3444,7 @@ async fn test_social_draft_discovery_queue_pagination_and_security_issue_390() {
         (member_no_manage_id.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: false,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
     // Seed permission cache for admin so ensure_guild_access succeeds with 200
@@ -3451,7 +3452,7 @@ async fn test_social_draft_discovery_queue_pagination_and_security_issue_390() {
         (admin_id.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -3536,7 +3537,7 @@ async fn test_social_draft_discovery_queue_pagination_and_security_issue_390() {
     );
 
     // 4. Create 5 drafts for keyset pagination test
-    let now = Utc::now();
+    let now = Timestamp::now();
     for i in 0..5 {
         let draft = rusty_discord_bot::storage::SocialPublicationDraft {
             id: uuid::Uuid::new_v4(),
@@ -3548,7 +3549,7 @@ async fn test_social_draft_discovery_queue_pagination_and_security_issue_390() {
             scheduled_at: None,
             approved_by: None,
             status: "draft".to_string(),
-            created_at: now + chrono::Duration::seconds(i * 10),
+            created_at: now + SignedDuration::from_secs(i * 10),
         };
         state.app.storage.create_social_draft(draft).await.unwrap();
     }
@@ -3803,7 +3804,7 @@ async fn test_social_drafts_reject_and_quota_release_single_admin_issue_392() {
                 permissions: "8".to_string(),
             }],
             admin_csrf.to_string(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -3828,7 +3829,7 @@ async fn test_social_drafts_reject_and_quota_release_single_admin_issue_392() {
                 permissions: "8".to_string(),
             }],
             admin2_csrf.to_string(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -3853,7 +3854,7 @@ async fn test_social_drafts_reject_and_quota_release_single_admin_issue_392() {
                 permissions: "0".to_string(),
             }],
             member_no_manage_csrf.to_string(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -3878,7 +3879,7 @@ async fn test_social_drafts_reject_and_quota_release_single_admin_issue_392() {
                 permissions: "8".to_string(),
             }],
             foreign_admin_csrf.to_string(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -3888,28 +3889,28 @@ async fn test_social_drafts_reject_and_quota_release_single_admin_issue_392() {
         (admin_id.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
     permissions_cache.insert(
         (admin2_id.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
     permissions_cache.insert(
         (member_no_manage_id.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: false,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
     permissions_cache.insert(
         (foreign_admin_id.to_string(), foreign_guild_id.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -4215,7 +4216,7 @@ async fn test_steam_lfg_validation_normalization_and_isolation_issue_403() {
                 permissions: "0".to_string(),
             }],
             csrf_a.to_string(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -4243,7 +4244,7 @@ async fn test_steam_lfg_validation_normalization_and_isolation_issue_403() {
                 permissions: "0".to_string(),
             }],
             csrf_b.to_string(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -4534,7 +4535,7 @@ async fn test_marketplace_http_keyset_pagination_and_tamper_isolation_issue_404(
     let base_url = format!("http://{addr}");
 
     let valid_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-    let base_time = Utc::now();
+    let base_time = Timestamp::now();
 
     // Populate 5 packages directly via storage
     for i in 1..=5 {
@@ -4547,7 +4548,7 @@ async fn test_marketplace_http_keyset_pagination_and_tamper_isolation_issue_404(
             sha256_hash: valid_hash.to_string(),
             manifest: serde_json::json!({"id": format!("plugin-http-page-{:02}", i)}),
             is_verified: false,
-            created_at: base_time + chrono::Duration::seconds(i as i64),
+            created_at: base_time + SignedDuration::from_secs(i as i64),
         };
         state
             .app
@@ -4663,7 +4664,7 @@ async fn test_marketplace_immutable_releases_and_version_pinning_http_issue_407(
             user,
             guilds,
             csrf_token.to_string(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await

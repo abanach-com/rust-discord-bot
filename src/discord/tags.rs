@@ -1,5 +1,5 @@
+use crate::datetime::Timestamp;
 use anyhow::{Context as _, Result, anyhow, ensure};
-use chrono::Utc;
 use serenity::{
     all::{ChannelId, GuildId, Permissions, UserId},
     client::Context,
@@ -111,8 +111,8 @@ pub async fn execute_tag_action(
                 name: norm.clone(),
                 content: content.clone(),
                 author_id: actor_id_str.clone().unwrap_or_else(|| "0".to_string()),
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
+                created_at: Timestamp::now(),
+                updated_at: Timestamp::now(),
             };
 
             state

@@ -1,4 +1,5 @@
-use chrono::{DateTime, Duration, Utc};
+use crate::datetime::Timestamp;
+use jiff::SignedDuration;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
 use super::model::{DashboardGuild, DashboardUser, Session, hash_session_id};
@@ -8,8 +9,8 @@ struct SessionRow {
     user_data: serde_json::Value,
     guilds_data: serde_json::Value,
     csrf_token: String,
-    expires_at: DateTime<Utc>,
-    last_seen_at: DateTime<Utc>,
+    expires_at: Timestamp,
+    last_seen_at: Timestamp,
 }
 
 #[derive(Clone)]
@@ -38,7 +39,7 @@ impl PostgresSessionStore {
         user: DashboardUser,
         guilds: Vec<DashboardGuild>,
         csrf_token: String,
-        expires_at: DateTime<Utc>,
+        expires_at: Timestamp,
         _access_token: Option<String>,
     ) -> anyhow::Result<()> {
         let hash = hash_session_id(session_id);
@@ -90,7 +91,7 @@ impl PostgresSessionStore {
             return Ok(None);
         };
 
-        if row.expires_at <= Utc::now() {
+        if row.expires_at <= Timestamp::now() {
             let _ = self.delete_session(session_id).await;
             return Ok(None);
         }
@@ -101,7 +102,7 @@ impl PostgresSessionStore {
         // Throttle activity updates to at most once every 60 seconds.
         // The SQL UPDATE re-verifies the 60-second threshold atomically to prevent
         // multiple concurrent requests on the same session from competing for row locks.
-        if row.last_seen_at <= Utc::now() - Duration::seconds(60)
+        if row.last_seen_at <= Timestamp::now() - SignedDuration::from_secs(60)
             && let Err(error) = sqlx::query(
                 r#"
                 UPDATE dashboard_sessions
@@ -129,9 +130,9 @@ impl PostgresSessionStore {
     pub async fn get_stored_session_last_seen(
         &self,
         session_id: &str,
-    ) -> anyhow::Result<Option<DateTime<Utc>>> {
+    ) -> anyhow::Result<Option<Timestamp>> {
         let hash = hash_session_id(session_id);
-        let record = sqlx::query_scalar::<_, DateTime<Utc>>(
+        let record = sqlx::query_scalar::<_, Timestamp>(
             "SELECT last_seen_at FROM dashboard_sessions WHERE session_hash = $1",
         )
         .bind(hash)
@@ -171,7 +172,7 @@ impl PostgresSessionStore {
     }
 
     pub async fn consume_oauth_state(&self, state: &str) -> anyhow::Result<bool> {
-        let row = sqlx::query_scalar::<_, DateTime<Utc>>(
+        let row = sqlx::query_scalar::<_, Timestamp>(
             r#"
             DELETE FROM dashboard_oauth_states
             WHERE state_token = $1
@@ -183,7 +184,7 @@ impl PostgresSessionStore {
         .await?;
 
         if let Some(created_at) = row {
-            let valid = Utc::now() - created_at <= Duration::minutes(10);
+            let valid = Timestamp::now() - created_at <= SignedDuration::from_mins(10);
             return Ok(valid);
         }
         Ok(false)

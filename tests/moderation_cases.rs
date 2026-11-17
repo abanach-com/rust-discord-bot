@@ -1,9 +1,10 @@
-use chrono::{Duration, Utc};
+use jiff::SignedDuration;
+use rusty_discord_bot::datetime::{Timestamp, days};
 use rusty_discord_bot::moderation_cases::{
     CaseFilter, CaseKind, CaseSeverity, CaseStatus, CreateCase, ModerationCaseStore, UpdateCase,
 };
 
-fn warning(now: chrono::DateTime<Utc>) -> CreateCase {
+fn warning(now: Timestamp) -> CreateCase {
     CreateCase {
         guild_id: 10,
         subject_user_id: 20,
@@ -14,14 +15,14 @@ fn warning(now: chrono::DateTime<Utc>) -> CreateCase {
         reason: "Repeated harassment after a moderator request".to_owned(),
         source_module: "moderation".to_owned(),
         visible_to_subject: true,
-        expires_at: Some(now + Duration::days(30)),
+        expires_at: Some(now + days(30)),
     }
 }
 
 #[tokio::test]
 async fn complete_case_lifecycle_is_versioned_and_audited() {
     let store = ModerationCaseStore::memory();
-    let now = Utc::now();
+    let now = Timestamp::now();
     let created = store.create_case(warning(now), now).await.unwrap();
     assert_eq!(created.case_number, 1);
     assert_eq!(created.version, 1);
@@ -97,7 +98,7 @@ async fn complete_case_lifecycle_is_versioned_and_audited() {
 #[tokio::test]
 async fn self_service_filter_never_exposes_staff_only_records() {
     let store = ModerationCaseStore::memory();
-    let now = Utc::now();
+    let now = Timestamp::now();
     store.create_case(warning(now), now).await.unwrap();
     let mut private = warning(now);
     private.kind = CaseKind::StaffNote;
@@ -125,9 +126,9 @@ async fn self_service_filter_never_exposes_staff_only_records() {
 #[tokio::test]
 async fn expired_cases_stop_contributing_to_active_stats() {
     let store = ModerationCaseStore::memory();
-    let now = Utc::now();
+    let now = Timestamp::now();
     let created = store.create_case(warning(now), now).await.unwrap();
-    let later = now + Duration::days(31);
+    let later = now + days(31);
     let stats = store.stats(10, None, later).await.unwrap();
     assert_eq!(stats.total_cases, 1);
     assert_eq!(stats.active_cases, 0);
@@ -354,7 +355,7 @@ async fn lua_moderation_module_emits_valid_case_actions() {
 #[tokio::test]
 async fn softban_case_lifecycle_and_kind_serialization() {
     let store = ModerationCaseStore::memory();
-    let now = Utc::now();
+    let now = Timestamp::now();
     let created = store
         .create_case(
             CreateCase {
@@ -389,7 +390,7 @@ async fn moderation_case_store_connect_and_audit_logging() {
     use rusty_discord_bot::storage::Storage;
 
     let store = ModerationCaseStore::connect(None).await.unwrap();
-    let now = Utc::now();
+    let now = Timestamp::now();
     let created = store.create_case(warning(now), now).await.unwrap();
     assert_eq!(created.case_number, 1);
 
@@ -421,7 +422,7 @@ async fn softban_two_phase_intent_and_failure_resilience() {
     let intent_id = Uuid::new_v4();
     let guild_id = "100000000000000001";
     let user_id = "200000000000000002";
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     // 1. Initial 2-phase intent created prior to Discord ban API call (#50)
     let intent = ModerationExecutionIntent {
@@ -542,7 +543,7 @@ async fn softban_two_phase_intent_and_failure_resilience() {
 #[tokio::test]
 async fn moderation_case_store_rejects_version_conflicts() {
     let store = ModerationCaseStore::memory();
-    let now = Utc::now();
+    let now = Timestamp::now();
     let created = store.create_case(warning(now), now).await.unwrap();
     assert_eq!(created.version, 1);
 
@@ -649,7 +650,7 @@ async fn moderation_api_strictly_validates_expected_version_and_guards_concurren
         .expect("bootstrap should succeed");
 
     // Pre-populate a test case for guild 10
-    let now = Utc::now();
+    let now = Timestamp::now();
     let created = state
         .moderation_cases
         .create_case(warning(now), now)
@@ -681,7 +682,7 @@ async fn moderation_api_strictly_validates_expected_version_and_guards_concurren
             user,
             guilds,
             csrf_token.to_string(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -876,7 +877,7 @@ async fn case_view_and_list_chunk_long_notes_and_evidence_to_stay_within_discord
     use rusty_discord_bot::discord::executor::chunk_discord_text;
 
     let store = ModerationCaseStore::memory();
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     // 1. Create a case with extensive documentation (many long notes and evidence items)
     let created = store.create_case(warning(now), now).await.unwrap();

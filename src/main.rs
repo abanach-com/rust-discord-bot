@@ -1,4 +1,6 @@
 use anyhow::Result;
+use jiff::SignedDuration;
+use rusty_discord_bot::datetime::days;
 use rusty_discord_bot::{AppState, config::Config};
 use tracing_subscriber::EnvFilter;
 
@@ -58,7 +60,7 @@ async fn main() -> Result<()> {
             Some(state.metrics.clone()),
             economy_janitor_shutdown_rx,
             std::time::Duration::from_secs(3600),
-            chrono::Duration::hours(24),
+            SignedDuration::from_hours(24),
         ));
     let ai_metering_retention_days = std::env::var("AI_METERING_RETENTION_DAYS")
         .ok()
@@ -70,7 +72,7 @@ async fn main() -> Result<()> {
             Some(state.metrics.clone()),
             ai_metering_janitor_shutdown_rx,
             std::time::Duration::from_secs(3600),
-            chrono::Duration::days(ai_metering_retention_days),
+            days(ai_metering_retention_days),
         ),
     );
     let integrations_janitor_handle = tokio::spawn(
@@ -78,8 +80,8 @@ async fn main() -> Result<()> {
             state.storage.clone(),
             integrations_janitor_shutdown_rx,
             std::time::Duration::from_secs(3600),
-            chrono::Duration::days(30),
-            chrono::Duration::days(90),
+            days(30),
+            days(90),
         ),
     );
     let duty_handle = tokio::spawn(rusty_discord_bot::duty::run_moderator_duty_reconciler_loop(

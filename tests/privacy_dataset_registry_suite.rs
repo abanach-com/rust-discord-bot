@@ -1,3 +1,5 @@
+use jiff::SignedDuration;
+use rusty_discord_bot::datetime::Timestamp;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -184,7 +186,7 @@ async fn test_privacy_dataset_registry_http_workflow() {
                 permissions: "8".to_string(), // Administrator
             }],
             csrf_token.to_string(),
-            chrono::Utc::now() + chrono::Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -194,7 +196,7 @@ async fn test_privacy_dataset_registry_http_workflow() {
         (user_id.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: chrono::Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -223,7 +225,7 @@ async fn test_privacy_dataset_registry_http_workflow() {
             guild_id: guild_id.to_string(),
             user_id: user_id.to_string(),
             reason: "AFK for dataset registry test".to_string(),
-            set_at: chrono::Utc::now(),
+            set_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -244,7 +246,7 @@ async fn test_privacy_dataset_registry_http_workflow() {
             user_id: user_id.to_string(),
             month: 7,
             day: 15,
-            updated_at: chrono::Utc::now(),
+            updated_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -258,7 +260,7 @@ async fn test_privacy_dataset_registry_http_workflow() {
             added_by: user_id.to_string(),
             author_id: user_id.to_string(),
             body: "Registry test quote".to_string(),
-            created_at: chrono::Utc::now(),
+            created_at: Timestamp::now(),
         })
         .await
         .unwrap();

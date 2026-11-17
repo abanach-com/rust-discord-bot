@@ -1,3 +1,5 @@
+use jiff::SignedDuration;
+use rusty_discord_bot::datetime::Timestamp;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -109,7 +111,7 @@ async fn test_client_ai_usage_recording_forbidden_and_does_not_mutate_budget() {
                 permissions: "8".to_string(),
             }],
             csrf_token.to_string(),
-            chrono::Utc::now() + chrono::Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -119,7 +121,7 @@ async fn test_client_ai_usage_recording_forbidden_and_does_not_mutate_budget() {
         (user_id.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: chrono::Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -136,7 +138,7 @@ async fn test_client_ai_usage_recording_forbidden_and_does_not_mutate_budget() {
             title: "Rules".to_string(),
             content: "Be respectful and friendly.".to_string(),
             source_type: "manual".to_string(),
-            created_at: chrono::Utc::now(),
+            created_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -240,7 +242,7 @@ async fn test_authoritative_metering_idempotency_and_quota_halt() {
                 },
             ],
             csrf_token.to_string(),
-            chrono::Utc::now() + chrono::Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -250,14 +252,14 @@ async fn test_authoritative_metering_idempotency_and_quota_halt() {
         (user_id.to_string(), guild_a.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: chrono::Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
     perms_cache.insert(
         (user_id.to_string(), guild_b.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: chrono::Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -580,7 +582,7 @@ async fn test_ai_metering_events_retention_pruning_and_ttl_semantics() {
     assert_eq!(b2_dup.used_tokens, 1000);
 
     // 3. Past cutoff prunes nothing
-    let past_cutoff = chrono::Utc::now() - chrono::Duration::hours(2);
+    let past_cutoff = Timestamp::now() - SignedDuration::from_hours(2);
     let pruned_none = state
         .app
         .storage
@@ -590,7 +592,7 @@ async fn test_ai_metering_events_retention_pruning_and_ttl_semantics() {
     assert_eq!(pruned_none, 0);
 
     // 4. Chunked pruning with future cutoff and limit = 1
-    let future_cutoff = chrono::Utc::now() + chrono::Duration::hours(1);
+    let future_cutoff = Timestamp::now() + SignedDuration::from_hours(1);
     let pruned_chunk = state
         .app
         .storage
@@ -649,7 +651,7 @@ async fn test_ai_metering_concurrent_recording_and_pruning() {
     let pruner = tokio::spawn(async move {
         for _ in 0..10 {
             let _ = storage_pruner
-                .prune_ai_metering_events(chrono::Utc::now() + chrono::Duration::hours(1), 5)
+                .prune_ai_metering_events(Timestamp::now() + SignedDuration::from_hours(1), 5)
                 .await;
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         }

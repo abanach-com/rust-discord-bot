@@ -1,8 +1,8 @@
+use crate::datetime::Timestamp;
 mod memory;
 mod model;
 mod postgres;
 
-use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 pub use memory::MemoryModerationCaseStore;
@@ -49,7 +49,7 @@ impl ModerationCaseStore {
     pub async fn create_case(
         &self,
         input: CreateCase,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<ModerationCase, CaseError> {
         match self {
             Self::Memory(store) => store.create_case(input, now).await,
@@ -61,7 +61,7 @@ impl ModerationCaseStore {
         &self,
         guild_id: u64,
         case_number: i64,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<CaseDetails, CaseError> {
         match self {
             Self::Memory(store) => store.get_case(guild_id, case_number, now).await,
@@ -73,7 +73,7 @@ impl ModerationCaseStore {
         &self,
         guild_id: u64,
         filter: CaseFilter,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<Vec<ModerationCase>, CaseError> {
         match self {
             Self::Memory(store) => store.list_cases(guild_id, filter, now).await,
@@ -86,7 +86,7 @@ impl ModerationCaseStore {
         guild_id: u64,
         limit: usize,
         offset: usize,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<(Vec<ModerationCase>, u64), CaseError> {
         match self {
             Self::Memory(store) => store.list_cases_page(guild_id, limit, offset, now).await,
@@ -98,7 +98,7 @@ impl ModerationCaseStore {
         &self,
         guild_id: u64,
         subject_user_id: u64,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<Vec<ModerationCase>, CaseError> {
         match self {
             Self::Memory(store) => {
@@ -128,7 +128,7 @@ impl ModerationCaseStore {
         actor_user_id: u64,
         expected_version: i64,
         update: UpdateCase,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<ModerationCase, CaseError> {
         match self {
             Self::Memory(store) => {
@@ -166,7 +166,7 @@ impl ModerationCaseStore {
         author_user_id: u64,
         body: String,
         visible_to_subject: bool,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<CaseNote, CaseError> {
         match self {
             Self::Memory(store) => {
@@ -204,7 +204,7 @@ impl ModerationCaseStore {
         author_user_id: u64,
         label: String,
         value: String,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<CaseEvidence, CaseError> {
         match self {
             Self::Memory(store) => {
@@ -228,7 +228,7 @@ impl ModerationCaseStore {
         actor_user_id: u64,
         expected_version: i64,
         reason: String,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<ModerationCase, CaseError> {
         match self {
             Self::Memory(store) => {
@@ -265,7 +265,7 @@ impl ModerationCaseStore {
         case_number: i64,
         actor_user_id: u64,
         expected_version: i64,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<ModerationCase, CaseError> {
         match self {
             Self::Memory(store) => {
@@ -285,7 +285,7 @@ impl ModerationCaseStore {
         &self,
         guild_id: u64,
         actor_user_id: Option<u64>,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<ModeratorStats, CaseError> {
         match self {
             Self::Memory(store) => store.stats(guild_id, actor_user_id, now).await,

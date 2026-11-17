@@ -1,6 +1,7 @@
+use jiff::SignedDuration;
+use rusty_discord_bot::datetime::Timestamp;
 use std::path::PathBuf;
 
-use chrono::{Duration, Utc};
 use rusty_discord_bot::{
     lua::{LuaAction, LuaEngine, LuaExecutionContext, LuaLimits, SchedulerOperation},
     scheduler::{
@@ -43,7 +44,7 @@ fn lua_context(options: serde_json::Value) -> LuaExecutionContext {
     }
 }
 
-fn new_job(run_at: chrono::DateTime<Utc>) -> NewScheduledJob {
+fn new_job(run_at: Timestamp) -> NewScheduledJob {
     NewScheduledJob {
         guild_id: "100000000000000001".to_owned(),
         module_id: "scheduler".to_owned(),
@@ -111,7 +112,7 @@ async fn lua_reminder_emits_a_valid_scheduler_action() {
 #[tokio::test]
 async fn per_user_pending_job_limit_is_enforced() {
     let store = SchedulerStore::memory();
-    let first = new_job(Utc::now() + Duration::minutes(5));
+    let first = new_job(Timestamp::now() + SignedDuration::from_mins(5));
     created_job(&store, first.clone(), 1).await;
 
     let outcome = store
@@ -127,11 +128,11 @@ async fn per_user_pending_job_limit_is_enforced() {
 #[tokio::test]
 async fn lease_prevents_two_workers_from_claiming_the_same_job() {
     let store = SchedulerStore::memory();
-    let now = Utc::now();
-    let created = created_job(&store, new_job(now - Duration::seconds(1)), 10).await;
+    let now = Timestamp::now();
+    let created = created_job(&store, new_job(now - SignedDuration::from_secs(1)), 10).await;
 
     let first = store
-        .claim_due("worker-a", now, now - Duration::seconds(60), 25)
+        .claim_due("worker-a", now, now - SignedDuration::from_secs(60), 25)
         .await
         .expect("first claim should succeed");
     assert_eq!(first.len(), 1);
@@ -139,7 +140,7 @@ async fn lease_prevents_two_workers_from_claiming_the_same_job() {
     assert_eq!(first[0].status, STATUS_PROCESSING);
 
     let second = store
-        .claim_due("worker-b", now, now - Duration::seconds(60), 25)
+        .claim_due("worker-b", now, now - SignedDuration::from_secs(60), 25)
         .await
         .expect("second claim should succeed");
     assert!(second.is_empty());
@@ -148,14 +149,14 @@ async fn lease_prevents_two_workers_from_claiming_the_same_job() {
 #[tokio::test]
 async fn finite_recurring_job_reschedules_then_completes() {
     let store = SchedulerStore::memory();
-    let now = Utc::now();
-    let mut recurring = new_job(now - Duration::seconds(1));
+    let now = Timestamp::now();
+    let mut recurring = new_job(now - SignedDuration::from_secs(1));
     recurring.repeat_every_seconds = Some(60);
     recurring.remaining_runs = Some(2);
     let created = created_job(&store, recurring, 10).await;
 
     let first_claim = store
-        .claim_due("worker-a", now, now - Duration::seconds(60), 1)
+        .claim_due("worker-a", now, now - SignedDuration::from_secs(60), 1)
         .await
         .expect("claim should succeed");
     assert_eq!(first_claim.len(), 1);
@@ -167,12 +168,12 @@ async fn finite_recurring_job_reschedules_then_completes() {
     assert_eq!(after_first.status, STATUS_ACTIVE);
     assert_eq!(after_first.remaining_runs, Some(1));
 
-    let second_now = after_first.run_at + Duration::seconds(1);
+    let second_now = after_first.run_at + SignedDuration::from_secs(1);
     let second_claim = store
         .claim_due(
             "worker-a",
             second_now,
-            second_now - Duration::seconds(60),
+            second_now - SignedDuration::from_secs(60),
             1,
         )
         .await
@@ -190,7 +191,12 @@ async fn finite_recurring_job_reschedules_then_completes() {
 #[tokio::test]
 async fn non_owner_cannot_modify_another_users_job() {
     let store = SchedulerStore::memory();
-    let created = created_job(&store, new_job(Utc::now() + Duration::minutes(5)), 10).await;
+    let created = created_job(
+        &store,
+        new_job(Timestamp::now() + SignedDuration::from_mins(5)),
+        10,
+    )
+    .await;
 
     let denied = store
         .mutate_job(
@@ -220,12 +226,12 @@ async fn non_owner_cannot_modify_another_users_job() {
 #[tokio::test]
 async fn lease_renewal_prevents_reclaim_during_long_processing() {
     let store = SchedulerStore::memory();
-    let now = Utc::now();
-    let created = created_job(&store, new_job(now - Duration::seconds(1)), 10).await;
+    let now = Timestamp::now();
+    let created = created_job(&store, new_job(now - SignedDuration::from_secs(1)), 10).await;
 
     // Worker A claims the job at T=0
     let claimed = store
-        .claim_due("worker-a", now, now - Duration::seconds(60), 1)
+        .claim_due("worker-a", now, now - SignedDuration::from_secs(60), 1)
         .await
         .expect("worker-a claim should succeed");
     assert_eq!(claimed.len(), 1);
@@ -234,7 +240,7 @@ async fn lease_renewal_prevents_reclaim_during_long_processing() {
     // Processing takes 75 seconds total.
     // At T=35 seconds, worker-a renews the lease heartbeat
     let renewed = store
-        .renew_lease(&created.id, "worker-a", now + Duration::seconds(35))
+        .renew_lease(&created.id, "worker-a", now + SignedDuration::from_secs(35))
         .await
         .expect("renew_lease should succeed");
     assert!(renewed, "lease renewal by worker-a should return true");
@@ -242,9 +248,14 @@ async fn lease_renewal_prevents_reclaim_during_long_processing() {
     // At T=65 seconds (> 60s from initial claim), worker-b polls for due/stale jobs.
     // Stale threshold is (T=65) - 60s = T=5s.
     // Because locked_at is T=35s >= T=5s, worker-b CANNOT steal the job.
-    let stale_before = (now + Duration::seconds(65)) - Duration::seconds(60);
+    let stale_before = (now + SignedDuration::from_secs(65)) - SignedDuration::from_secs(60);
     let worker_b_claim = store
-        .claim_due("worker-b", now + Duration::seconds(65), stale_before, 10)
+        .claim_due(
+            "worker-b",
+            now + SignedDuration::from_secs(65),
+            stale_before,
+            10,
+        )
         .await
         .expect("worker-b claim should succeed");
     assert!(
@@ -254,7 +265,7 @@ async fn lease_renewal_prevents_reclaim_during_long_processing() {
 
     // At T=75 seconds, worker-a completes delivery and marks the job succeeded
     let completed = store
-        .mark_succeeded(&created.id, "worker-a", now + Duration::seconds(75))
+        .mark_succeeded(&created.id, "worker-a", now + SignedDuration::from_secs(75))
         .await
         .expect("mark_succeeded should succeed")
         .expect("worker-a should still own the lease");
@@ -265,21 +276,26 @@ async fn lease_renewal_prevents_reclaim_during_long_processing() {
 #[tokio::test]
 async fn worker_termination_allows_lease_recovery_after_expiry() {
     let store = SchedulerStore::memory();
-    let now = Utc::now();
-    let created = created_job(&store, new_job(now - Duration::seconds(1)), 10).await;
+    let now = Timestamp::now();
+    let created = created_job(&store, new_job(now - SignedDuration::from_secs(1)), 10).await;
 
     // Worker A claims the job at T=0 and abruptly terminates (does not renew or complete)
     let claimed = store
-        .claim_due("worker-a", now, now - Duration::seconds(60), 1)
+        .claim_due("worker-a", now, now - SignedDuration::from_secs(60), 1)
         .await
         .expect("worker-a claim should succeed");
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].attempts, 1);
 
     // At T=65 seconds (> 60s lease window), worker-b polls for stale jobs
-    let stale_before = (now + Duration::seconds(65)) - Duration::seconds(60);
+    let stale_before = (now + SignedDuration::from_secs(65)) - SignedDuration::from_secs(60);
     let recovered = store
-        .claim_due("worker-b", now + Duration::seconds(65), stale_before, 10)
+        .claim_due(
+            "worker-b",
+            now + SignedDuration::from_secs(65),
+            stale_before,
+            10,
+        )
         .await
         .expect("worker-b claim should succeed");
     assert_eq!(recovered.len(), 1);
@@ -289,7 +305,7 @@ async fn worker_termination_allows_lease_recovery_after_expiry() {
 
     // Worker B completes the job
     let completed = store
-        .mark_succeeded(&created.id, "worker-b", now + Duration::seconds(66))
+        .mark_succeeded(&created.id, "worker-b", now + SignedDuration::from_secs(66))
         .await
         .expect("mark_succeeded should succeed")
         .expect("worker-b owns the recovered lease");
@@ -299,8 +315,8 @@ async fn worker_termination_allows_lease_recovery_after_expiry() {
 #[tokio::test]
 async fn renew_lease_rejects_unauthorized_worker_or_inactive_job() {
     let store = SchedulerStore::memory();
-    let now = Utc::now();
-    let created = created_job(&store, new_job(now - Duration::seconds(1)), 10).await;
+    let now = Timestamp::now();
+    let created = created_job(&store, new_job(now - SignedDuration::from_secs(1)), 10).await;
 
     // Job is still active, not processing: cannot renew
     let renewed_before_claim = store
@@ -311,26 +327,26 @@ async fn renew_lease_rejects_unauthorized_worker_or_inactive_job() {
 
     // Worker A claims the job
     let _ = store
-        .claim_due("worker-a", now, now - Duration::seconds(60), 1)
+        .claim_due("worker-a", now, now - SignedDuration::from_secs(60), 1)
         .await
         .expect("claim should succeed");
 
     // Worker B tries to renew worker A's lease: rejected
     let foreign_renewal = store
-        .renew_lease(&created.id, "worker-b", now + Duration::seconds(10))
+        .renew_lease(&created.id, "worker-b", now + SignedDuration::from_secs(10))
         .await
         .expect("renew_lease call should succeed");
     assert!(!foreign_renewal);
 
     // Worker A completes the job
     let _ = store
-        .mark_succeeded(&created.id, "worker-a", now + Duration::seconds(20))
+        .mark_succeeded(&created.id, "worker-a", now + SignedDuration::from_secs(20))
         .await
         .expect("mark_succeeded should succeed");
 
     // Worker A tries to renew completed job: rejected
     let completed_renewal = store
-        .renew_lease(&created.id, "worker-a", now + Duration::seconds(30))
+        .renew_lease(&created.id, "worker-a", now + SignedDuration::from_secs(30))
         .await
         .expect("renew_lease call should succeed");
     assert!(!completed_renewal);
@@ -339,21 +355,21 @@ async fn renew_lease_rejects_unauthorized_worker_or_inactive_job() {
 #[tokio::test]
 async fn expired_lease_with_exhausted_attempts_marks_job_failed_and_frees_quota() {
     let store = SchedulerStore::memory();
-    let now = Utc::now();
-    let mut job = new_job(now - Duration::seconds(1));
+    let now = Timestamp::now();
+    let mut job = new_job(now - SignedDuration::from_secs(1));
     job.max_attempts = 1;
     let created = created_job(&store, job, 1).await;
 
     // Worker A claims the job (attempt 1 of 1)
     let claimed = store
-        .claim_due("worker-a", now, now - Duration::seconds(60), 1)
+        .claim_due("worker-a", now, now - SignedDuration::from_secs(60), 1)
         .await
         .expect("claim should succeed");
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].attempts, 1);
 
     // User cannot create a second job because limit is 1 and job is in processing
-    let mut job2 = new_job(now + Duration::seconds(100));
+    let mut job2 = new_job(now + SignedDuration::from_secs(100));
     job2.max_attempts = 1;
     let outcome = store
         .create_job(job2.clone(), 1)
@@ -362,10 +378,15 @@ async fn expired_lease_with_exhausted_attempts_marks_job_failed_and_frees_quota(
     assert!(matches!(outcome, CreateJobOutcome::LimitReached { .. }));
 
     // Time passes past lease (65s > 60s lease window)
-    let stale_before = (now + Duration::seconds(65)) - Duration::seconds(60);
+    let stale_before = (now + SignedDuration::from_secs(65)) - SignedDuration::from_secs(60);
     // Worker B calls claim_due
     let claimed_b = store
-        .claim_due("worker-b", now + Duration::seconds(65), stale_before, 10)
+        .claim_due(
+            "worker-b",
+            now + SignedDuration::from_secs(65),
+            stale_before,
+            10,
+        )
         .await
         .expect("claim_due should succeed");
     assert!(
@@ -399,31 +420,31 @@ async fn expired_lease_with_exhausted_attempts_marks_job_failed_and_frees_quota(
 #[tokio::test]
 async fn multi_guild_polling_is_not_blocked_by_expired_job_in_another_guild() {
     let store = SchedulerStore::memory();
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     // Guild 1: Job that is processing and will expire with exhausted attempts
-    let mut guild1_job = new_job(now - Duration::seconds(10));
+    let mut guild1_job = new_job(now - SignedDuration::from_secs(10));
     guild1_job.guild_id = "guild-100".to_owned();
     guild1_job.max_attempts = 1;
     let created_g1 = created_job(&store, guild1_job, 10).await;
 
     // Worker claims Guild 1 job at T=0
     let claimed_g1 = store
-        .claim_due("worker-1", now, now - Duration::seconds(60), 1)
+        .claim_due("worker-1", now, now - SignedDuration::from_secs(60), 1)
         .await
         .expect("worker-1 claim should succeed");
     assert_eq!(claimed_g1.len(), 1);
     assert_eq!(claimed_g1[0].id, created_g1.id);
 
     // Guild 2: Job that is due
-    let mut guild2_job = new_job(now - Duration::seconds(5));
+    let mut guild2_job = new_job(now - SignedDuration::from_secs(5));
     guild2_job.guild_id = "guild-200".to_owned();
     guild2_job.creator_user_id = "user-200".to_owned();
     let created_g2 = created_job(&store, guild2_job, 10).await;
 
     // Time passes past lease threshold (65s > 60s)
-    let claim_time = now + Duration::seconds(65);
-    let stale_before = claim_time - Duration::seconds(60);
+    let claim_time = now + SignedDuration::from_secs(65);
+    let stale_before = claim_time - SignedDuration::from_secs(60);
 
     // Worker polls for due jobs across guilds
     let claimed = store
@@ -443,12 +464,12 @@ async fn multi_guild_polling_is_not_blocked_by_expired_job_in_another_guild() {
 #[tokio::test]
 async fn completed_jobs_with_completed_at_are_not_claimable_or_resurrected() {
     let store = SchedulerStore::memory();
-    let now = Utc::now();
-    let created = created_job(&store, new_job(now - Duration::seconds(10)), 10).await;
+    let now = Timestamp::now();
+    let created = created_job(&store, new_job(now - SignedDuration::from_secs(10)), 10).await;
 
     // Claim and complete the job
     let claimed = store
-        .claim_due("worker-1", now, now - Duration::seconds(60), 1)
+        .claim_due("worker-1", now, now - SignedDuration::from_secs(60), 1)
         .await
         .expect("claim should succeed");
     assert_eq!(claimed.len(), 1);
@@ -462,8 +483,8 @@ async fn completed_jobs_with_completed_at_are_not_claimable_or_resurrected() {
     assert!(completed.completed_at.is_some());
 
     // Advance time further into the future
-    let future_now = now + Duration::minutes(30);
-    let stale_before = future_now - Duration::seconds(60);
+    let future_now = now + SignedDuration::from_mins(30);
+    let stale_before = future_now - SignedDuration::from_secs(60);
 
     // Ensure completed job is not claimable
     assert!(!completed.is_claimable(future_now, stale_before));
@@ -485,16 +506,16 @@ async fn completed_jobs_with_completed_at_are_not_claimable_or_resurrected() {
 async fn test_scheduler_finalize_expired_leases_metrics_and_quota_freeing() {
     let metrics = std::sync::Arc::new(rusty_discord_bot::metrics::Metrics::new());
     let store = SchedulerStore::memory().with_metrics(metrics.clone());
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     // Create a job with max_attempts = 1 and max user jobs limit = 1
-    let mut job = new_job(now - Duration::seconds(10));
+    let mut job = new_job(now - SignedDuration::from_secs(10));
     job.max_attempts = 1;
     let created = created_job(&store, job.clone(), 1).await;
 
     // Worker claims the job at T=0
     let claimed = store
-        .claim_due("worker-1", now, now - Duration::seconds(60), 1)
+        .claim_due("worker-1", now, now - SignedDuration::from_secs(60), 1)
         .await
         .expect("claim should succeed");
     assert_eq!(claimed.len(), 1);
@@ -502,7 +523,7 @@ async fn test_scheduler_finalize_expired_leases_metrics_and_quota_freeing() {
     assert_eq!(claimed[0].status, STATUS_PROCESSING);
 
     // While in processing state, quota limit is reached (pending count = 1 >= max_jobs = 1)
-    let second_job = new_job(now - Duration::seconds(5));
+    let second_job = new_job(now - SignedDuration::from_secs(5));
     let outcome = store
         .create_job(second_job.clone(), 1)
         .await
@@ -513,8 +534,8 @@ async fn test_scheduler_finalize_expired_leases_metrics_and_quota_freeing() {
     ));
 
     // Advance time past lease window (70s > 60s)
-    let claim_time = now + Duration::seconds(70);
-    let stale_before = claim_time - Duration::seconds(60);
+    let claim_time = now + SignedDuration::from_secs(70);
+    let stale_before = claim_time - SignedDuration::from_secs(60);
 
     // Finalize expired leases
     let terminalized = store
@@ -560,24 +581,24 @@ async fn test_scheduler_finalize_expired_leases_metrics_and_quota_freeing() {
 async fn test_scheduler_expired_lease_with_remaining_attempts_is_not_terminalized() {
     let metrics = std::sync::Arc::new(rusty_discord_bot::metrics::Metrics::new());
     let store = SchedulerStore::memory().with_metrics(metrics.clone());
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     // Create a job with max_attempts = 3
-    let mut job = new_job(now - Duration::seconds(10));
+    let mut job = new_job(now - SignedDuration::from_secs(10));
     job.max_attempts = 3;
     let created = created_job(&store, job, 10).await;
 
     // Worker claims attempt 1
     let claimed = store
-        .claim_due("worker-1", now, now - Duration::seconds(60), 1)
+        .claim_due("worker-1", now, now - SignedDuration::from_secs(60), 1)
         .await
         .expect("claim should succeed");
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].attempts, 1);
 
     // Lease expires (locked_at < stale_before), but attempts (1) < max_attempts (3)
-    let claim_time = now + Duration::seconds(70);
-    let stale_before = claim_time - Duration::seconds(60);
+    let claim_time = now + SignedDuration::from_secs(70);
+    let stale_before = claim_time - SignedDuration::from_secs(60);
 
     let terminalized = store
         .finalize_expired_leases(claim_time, stale_before)
@@ -616,7 +637,7 @@ async fn test_scheduler_job_creation_and_mutation_audit_atomicity_issue_353() {
         creator_user_id: user_id.to_string(),
         content: "Audit atomicity reminder".to_string(),
         mention_creator: true,
-        run_at: Utc::now() + Duration::hours(1),
+        run_at: Timestamp::now() + SignedDuration::from_hours(1),
         repeat_every_seconds: None,
         remaining_runs: Some(1),
         max_attempts: 5,

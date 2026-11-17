@@ -3,11 +3,12 @@ use axum::{
     extract::{Path, Query, State},
     http::HeaderMap,
 };
-use chrono::{DateTime, Utc};
+use jiff::SignedDuration;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::datetime::Timestamp;
 use crate::integrations::{
     oauth::OAuthManager,
     providers::build_default_provider_registry,
@@ -44,13 +45,13 @@ pub struct IntegrationConnectionSummary {
     pub guild_id: String,
     pub provider: String,
     pub provider_account_id: Option<String>,
-    pub token_expires_at: Option<DateTime<Utc>>,
+    pub token_expires_at: Option<Timestamp>,
     pub scopes: Value,
     pub metadata: Value,
     pub enabled: bool,
     pub connected: bool,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 impl From<IntegrationConnection> for IntegrationConnectionSummary {
@@ -211,13 +212,9 @@ pub async fn list_delivery_logs(
         .get("limit")
         .and_then(|s| s.parse::<usize>().ok())
         .map(|l| l.clamp(1, 100));
-    let before_created_at = params.get("before_created_at").and_then(|s| {
-        let normalized = s.replace(' ', "+");
-        chrono::DateTime::parse_from_rfc3339(&normalized)
-            .map(|dt| dt.with_timezone(&chrono::Utc))
-            .or_else(|_| s.parse::<chrono::DateTime<chrono::Utc>>())
-            .ok()
-    });
+    let before_created_at = params
+        .get("before_created_at")
+        .and_then(|value| parse_delivery_log_timestamp(value));
     let before_id = params
         .get("before_id")
         .and_then(|s| s.parse::<uuid::Uuid>().ok());
@@ -230,6 +227,14 @@ pub async fn list_delivery_logs(
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(Json(logs))
+}
+
+fn parse_delivery_log_timestamp(value: &str) -> Option<Timestamp> {
+    // Query decoding turns an unescaped '+' in a UTC offset into a space.
+    let normalized = value.replace(' ', "+");
+    Timestamp::parse_rfc3339(&normalized)
+        .or_else(|_| value.parse())
+        .ok()
 }
 
 // Inbound Webhook Gateway Handler
@@ -413,7 +418,7 @@ pub async fn handle_inbound_webhook(
         status: "delivered".to_string(),
         error_message: None,
         payload_summary: json!({"event_id": event_id}),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     state
         .app
@@ -460,7 +465,7 @@ pub async fn link_identity(
         provider: payload.provider,
         provider_subject: payload.provider_subject,
         attributes: payload.attributes,
-        verified_at: Utc::now(),
+        verified_at: Timestamp::now(),
         synced_role_id: payload.synced_role_id,
     };
 
@@ -576,8 +581,8 @@ pub async fn create_steam_lfg(
         description: normalized.description,
         max_players: payload.max_players.clamp(2, 64),
         current_players: json!([session.user.id]),
-        expires_at: Utc::now() + chrono::Duration::minutes(ttl),
-        created_at: Utc::now(),
+        expires_at: Timestamp::now() + SignedDuration::from_mins(ttl),
+        created_at: Timestamp::now(),
     };
 
     let saved = state
@@ -697,7 +702,7 @@ pub async fn map_github_thread(
         issue_or_pr_number: payload.issue_or_pr_number,
         discord_thread_id: payload.discord_thread_id,
         last_status: "opened".to_string(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
 
     let saved = state
@@ -722,7 +727,7 @@ pub struct TelegramBridgeSummary {
     pub discord_channel_id: String,
     pub secret_configured: bool,
     pub paused: bool,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 impl From<TelegramBridge> for TelegramBridgeSummary {
@@ -768,7 +773,7 @@ pub async fn create_telegram_bridge(
         discord_channel_id: payload.discord_channel_id,
         secret_token: payload.secret_token,
         paused: false,
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
 
     let saved = state
@@ -916,8 +921,8 @@ pub async fn create_workflow(
         dag_edges: payload.dag_edges,
         is_active: true,
         version: 1,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
 
     let actor_id = session.user.id.clone();
@@ -1027,7 +1032,7 @@ pub async fn list_game_statuses(
 pub async fn get_poe_leagues(Path(version): Path<String>) -> Result<Json<Value>, ApiError> {
     let catalog = crate::integrations::providers::gaming_hub::global_poe_catalog();
     let res = catalog
-        .get_leagues(&version, Utc::now())
+        .get_leagues(&version, Timestamp::now())
         .map_err(ApiError::bad_request)?;
     Ok(Json(
         serde_json::to_value(res).map_err(|e| ApiError::internal(e.to_string()))?,
@@ -1114,7 +1119,7 @@ pub struct CreateSocialDraftRequest {
     #[serde(default)]
     pub media_urls: Vec<String>,
     pub targets: Vec<String>,
-    pub scheduled_at: Option<chrono::DateTime<Utc>>,
+    pub scheduled_at: Option<Timestamp>,
 }
 
 pub async fn create_social_draft(
@@ -1202,7 +1207,7 @@ pub async fn create_social_draft(
         scheduled_at: payload.scheduled_at,
         approved_by: None,
         status: "draft".to_string(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
 
     let saved = match state.app.storage.create_social_draft(draft).await {
@@ -1418,7 +1423,7 @@ pub async fn add_ai_knowledge_doc(
         title: title.to_string(),
         content: content.to_string(),
         source_type: source_type.to_string(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
 
     let saved = state
@@ -1720,7 +1725,7 @@ pub async fn publish_marketplace_package(
         sha256_hash: payload.sha256_hash,
         manifest: payload.manifest,
         is_verified: false, // Default to unverified until trusted review (Issue #117)
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
 
     // Pre-validate in HTTP layer before storage
@@ -1791,7 +1796,7 @@ pub async fn install_guild_plugin(
         version: payload.version,
         enabled: true,
         config: payload.config,
-        installed_at: Utc::now(),
+        installed_at: Timestamp::now(),
     };
 
     let saved = state
@@ -1827,4 +1832,33 @@ pub async fn list_installed_guild_plugins(
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(Json(list))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::datetime::Timestamp;
+
+    use super::parse_delivery_log_timestamp;
+
+    #[test]
+    fn parses_delivery_log_cursor_timestamp_formats() {
+        let expected = Timestamp::parse_rfc3339("2026-09-03T12:00:00.123400Z").unwrap();
+        for value in [
+            "2026-09-03T14:00:00.123400+02:00",
+            "2026-09-03T14:00:00.123400 02:00",
+            "2026-09-03 14:00:00.123400+0200",
+            "2026-09-03 12:00:00.123400 UTC",
+        ] {
+            assert_eq!(
+                parse_delivery_log_timestamp(value),
+                Some(expected),
+                "{value}"
+            );
+        }
+        assert_eq!(parse_delivery_log_timestamp("2026-09-03T12:00:00"), None);
+        assert_eq!(
+            parse_delivery_log_timestamp("2026-09-03T14:00:00+0:2:0:0"),
+            None
+        );
+    }
 }

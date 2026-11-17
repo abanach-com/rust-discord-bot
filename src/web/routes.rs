@@ -1,3 +1,5 @@
+use crate::datetime::Timestamp;
+use jiff::SignedDuration;
 use std::convert::Infallible;
 use std::sync::atomic::Ordering;
 
@@ -10,7 +12,6 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
     },
 };
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio_stream::wrappers::ReceiverStream;
@@ -159,7 +160,7 @@ pub struct ModuleView {
     enabled: bool,
     config: Value,
     configured: bool,
-    updated_at: Option<DateTime<Utc>>,
+    updated_at: Option<Timestamp>,
 }
 
 #[derive(Deserialize)]
@@ -706,7 +707,7 @@ pub async fn guild_cases(
     let (items, total) = state
         .app
         .moderation_cases
-        .list_cases_page(guild_u64, limit, offset, Utc::now())
+        .list_cases_page(guild_u64, limit, offset, Timestamp::now())
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
 
@@ -734,7 +735,7 @@ pub async fn guild_case_details(
     let details = state
         .app
         .moderation_cases
-        .get_case(guild_u64, case_number, Utc::now())
+        .get_case(guild_u64, case_number, Timestamp::now())
         .await
         .map_err(ApiError::from)?;
 
@@ -830,7 +831,7 @@ pub async fn add_guild_case_note(
         .parse::<u64>()
         .map_err(|_| ApiError::bad_request("Invalid user ID."))?;
 
-    let now = Utc::now();
+    let now = Timestamp::now();
     let note = state
         .app
         .moderation_cases
@@ -915,7 +916,7 @@ pub async fn void_guild_case(
         .parse::<u64>()
         .map_err(|_| ApiError::bad_request("Invalid user ID."))?;
 
-    let now = Utc::now();
+    let now = Timestamp::now();
     if payload.expected_version <= 0 {
         return Err(ApiError::bad_request(
             "Positive expected_version is required for concurrency control.",
@@ -1000,7 +1001,7 @@ pub async fn update_guild_case(
         .parse::<u64>()
         .map_err(|_| ApiError::bad_request("Invalid user ID."))?;
 
-    let now = Utc::now();
+    let now = Timestamp::now();
     if payload.expected_version <= 0 {
         return Err(ApiError::bad_request(
             "Positive expected_version is required for concurrency control.",
@@ -1263,7 +1264,7 @@ pub async fn get_setup_wizard(
 #[derive(Clone, Debug)]
 struct CachedBotPerms {
     permissions: Option<serenity::all::Permissions>,
-    checked_at: DateTime<Utc>,
+    checked_at: Timestamp,
     #[allow(dead_code)]
     status_code: StatusCode,
     error_reason: Option<String>,
@@ -1379,9 +1380,9 @@ async fn fetch_bot_permissions(
     state: &WebState,
     guild_id: &str,
 ) -> Result<serenity::all::Permissions, String> {
-    let now = Utc::now();
+    let now = Timestamp::now();
     if let Some(cached) = BOT_DIAGNOSTICS_PERMS_CACHE.get(guild_id)
-        && now - cached.checked_at < chrono::Duration::seconds(30)
+        && now - cached.checked_at < SignedDuration::from_secs(30)
     {
         if let Some(perms) = cached.permissions {
             return Ok(perms);
@@ -1626,7 +1627,7 @@ pub async fn get_guild_diagnostics(
     let manifests = state.app.scripts.manifests().await;
     let mut module_checks = Vec::new();
     let bot_hierarchy_ok = true;
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     for m in &manifests {
         let settings = state
@@ -2015,7 +2016,7 @@ pub async fn export_user_privacy_data(
         state
             .app
             .moderation_cases
-            .list_all_subject_cases(g, u, Utc::now())
+            .list_all_subject_cases(g, u, Timestamp::now())
             .await
             .map_err(|e| ApiError::internal(e.to_string()))?
     } else {
@@ -2070,7 +2071,7 @@ pub async fn export_user_privacy_data(
     Ok(Json(json!({
         "user_id": user_id,
         "guild_id": guild_id,
-        "exported_at": Utc::now(),
+        "exported_at": Timestamp::now(),
         "progression": profile,
         "moderation_cases": cases,
         "quotes": quotes,
@@ -2143,7 +2144,7 @@ pub async fn submit_moderation_appeal(
     let details = state
         .app
         .moderation_cases
-        .get_case(parsed_guild, case_number, Utc::now())
+        .get_case(parsed_guild, case_number, Timestamp::now())
         .await
         .map_err(ApiError::from)?;
     let case = details.case;
@@ -2163,8 +2164,8 @@ pub async fn submit_moderation_appeal(
         reason: reason.to_string(),
         evidence_url: payload.evidence_url,
         staff_notes: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
 
     let outcome = state

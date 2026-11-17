@@ -1,3 +1,7 @@
+use crate::datetime::Timestamp;
+#[cfg(test)]
+use crate::datetime::days;
+use jiff::SignedDuration;
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 
 use axum::{
@@ -9,7 +13,6 @@ use axum::{
     },
     response::{IntoResponse, Redirect, Response},
 };
-use chrono::{DateTime, Duration, Utc};
 use dashmap::DashMap;
 use serde::Deserialize;
 use serenity::all::Permissions;
@@ -36,12 +39,12 @@ pub const GUILD_PERMISSIONS_CACHE_TTL_SECONDS: i64 = 60;
 #[derive(Clone, Debug)]
 pub struct CachedGuildPermission {
     pub can_manage: bool,
-    pub checked_at: DateTime<Utc>,
+    pub checked_at: Timestamp,
 }
 
 #[derive(Debug)]
 pub struct LoginRateLimiter {
-    per_ip: DashMap<String, (DateTime<Utc>, u32)>,
+    per_ip: DashMap<String, (Timestamp, u32)>,
     global: AtomicU32,
     global_window_start: AtomicI64,
     global_lock: std::sync::Mutex<()>,
@@ -52,7 +55,7 @@ impl Default for LoginRateLimiter {
         Self {
             per_ip: DashMap::new(),
             global: AtomicU32::new(0),
-            global_window_start: AtomicI64::new(Utc::now().timestamp()),
+            global_window_start: AtomicI64::new(Timestamp::now().as_second()),
             global_lock: std::sync::Mutex::new(()),
         }
     }
@@ -65,14 +68,14 @@ impl LoginRateLimiter {
     }
 
     pub fn check_and_record(&self, ip: &str) -> Result<(), ApiError> {
-        let now = Utc::now();
-        let now_ts = now.timestamp();
+        let now = Timestamp::now();
+        let now_ts = now.as_second();
 
         // 1. Evaluate per-IP limit first without consuming global accepted-login slots
         {
             let mut entry = self.per_ip.entry(ip.to_owned()).or_insert_with(|| (now, 0));
             let (ip_window_start, count) = entry.value_mut();
-            if now - *ip_window_start >= Duration::seconds(60) {
+            if now - *ip_window_start >= SignedDuration::from_secs(60) {
                 *ip_window_start = now;
                 *count = 1;
             } else {
@@ -110,7 +113,7 @@ impl LoginRateLimiter {
     }
 
     pub fn cleanup_old_windows(&self) {
-        let cutoff = Utc::now() - Duration::seconds(120);
+        let cutoff = Timestamp::now() - SignedDuration::from_secs(120);
         self.per_ip.retain(|_, (timestamp, _)| *timestamp > cutoff);
     }
 }
@@ -290,7 +293,11 @@ pub async fn callback(
 
     let session_id = Uuid::new_v4().to_string();
     let csrf_token = Uuid::new_v4().to_string();
-    let expires_at = Utc::now() + Duration::seconds(state.app.config.session_ttl_seconds);
+    let expires_at = Timestamp::now()
+        .checked_add(SignedDuration::from_secs(
+            state.app.config.session_ttl_seconds,
+        ))
+        .map_err(|_| ApiError::internal("dashboard session expiry is out of range"))?;
 
     state
         .app
@@ -403,10 +410,10 @@ pub async fn ensure_guild_access(
     }
 
     let cache_key = (session.user.id.clone(), guild_id.to_owned());
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     if let Some(entry) = state.permissions_cache.get(&cache_key)
-        && now - entry.checked_at < Duration::seconds(GUILD_PERMISSIONS_CACHE_TTL_SECONDS)
+        && now - entry.checked_at < SignedDuration::from_secs(GUILD_PERMISSIONS_CACHE_TTL_SECONDS)
     {
         if entry.can_manage {
             return Ok(());
@@ -447,9 +454,9 @@ pub async fn ensure_guild_member_access(
 
     // 2. If user is in session guilds and has manage rights (or manage rights already cached), they are definitely a member
     let cache_key = (session.user.id.clone(), guild_id.to_owned());
-    let now = Utc::now();
+    let now = Timestamp::now();
     if let Some(entry) = state.permissions_cache.get(&cache_key)
-        && now - entry.checked_at < Duration::seconds(GUILD_PERMISSIONS_CACHE_TTL_SECONDS)
+        && now - entry.checked_at < SignedDuration::from_secs(GUILD_PERMISSIONS_CACHE_TTL_SECONDS)
         && entry.can_manage
     {
         return Ok(());
@@ -507,18 +514,17 @@ pub struct CachedChannelScope {
     pub parent_id: Option<String>,
 }
 
-static CHANNEL_SCOPE_CACHE: std::sync::LazyLock<
-    DashMap<String, (CachedChannelScope, DateTime<Utc>)>,
-> = std::sync::LazyLock::new(DashMap::new);
+static CHANNEL_SCOPE_CACHE: std::sync::LazyLock<DashMap<String, (CachedChannelScope, Timestamp)>> =
+    std::sync::LazyLock::new(DashMap::new);
 
 async fn fetch_cached_channel_scope(
     state: &WebState,
     channel_id: &str,
 ) -> Result<CachedChannelScope, ApiError> {
     let base_url = &state.app.config.discord_api_base_url;
-    let now = Utc::now();
+    let now = Timestamp::now();
     if let Some(entry) = CHANNEL_SCOPE_CACHE.get(channel_id)
-        && now - entry.1 < Duration::seconds(15)
+        && now - entry.1 < SignedDuration::from_secs(15)
     {
         return Ok(entry.0.clone());
     }
@@ -926,15 +932,15 @@ pub async fn cleanup_stale_records(state: &WebState) -> (usize, usize, usize) {
         .unwrap_or(0);
     state.login_rate_limiter.cleanup_old_windows();
 
-    let now = Utc::now();
+    let now = Timestamp::now();
     let before_perms = state.permissions_cache.len();
-    let perms_cutoff = Duration::seconds(GUILD_PERMISSIONS_CACHE_TTL_SECONDS * 2);
+    let perms_cutoff = SignedDuration::from_secs(GUILD_PERMISSIONS_CACHE_TTL_SECONDS * 2);
     state
         .permissions_cache
         .retain(|_, entry| now - entry.checked_at <= perms_cutoff);
     let perms_removed = before_perms.saturating_sub(state.permissions_cache.len());
 
-    let scope_cutoff = Duration::seconds(30);
+    let scope_cutoff = SignedDuration::from_secs(30);
     CHANNEL_SCOPE_CACHE.retain(|_, (_, checked_at)| now - *checked_at <= scope_cutoff);
 
     (
@@ -946,13 +952,13 @@ pub async fn cleanup_stale_records(state: &WebState) -> (usize, usize, usize) {
 
 #[cfg(test)]
 pub fn cleanup_stale_data(
-    oauth_states: &DashMap<String, DateTime<Utc>>,
+    oauth_states: &DashMap<String, Timestamp>,
     sessions: &DashMap<String, Session>,
     limiter: &LoginRateLimiter,
     permissions_cache: &DashMap<(String, String), CachedGuildPermission>,
 ) -> (usize, usize, usize) {
-    let now = Utc::now();
-    let max_state_age = Duration::minutes(10);
+    let now = Timestamp::now();
+    let max_state_age = SignedDuration::from_mins(10);
 
     let before_states = oauth_states.len();
     oauth_states.retain(|_, created_at| now - *created_at <= max_state_age);
@@ -965,7 +971,7 @@ pub fn cleanup_stale_data(
     limiter.cleanup_old_windows();
 
     let before_perms = permissions_cache.len();
-    let perms_cutoff = Duration::seconds(GUILD_PERMISSIONS_CACHE_TTL_SECONDS * 2);
+    let perms_cutoff = SignedDuration::from_secs(GUILD_PERMISSIONS_CACHE_TTL_SECONDS * 2);
     permissions_cache.retain(|_, entry| now - entry.checked_at <= perms_cutoff);
     let perms_removed = before_perms.saturating_sub(permissions_cache.len());
 
@@ -1183,8 +1189,11 @@ mod tests {
         let oauth_states = DashMap::new();
         let limiter = LoginRateLimiter::new();
 
-        oauth_states.insert("active_state".to_owned(), Utc::now());
-        oauth_states.insert("stale_state".to_owned(), Utc::now() - Duration::minutes(15));
+        oauth_states.insert("active_state".to_owned(), Timestamp::now());
+        oauth_states.insert(
+            "stale_state".to_owned(),
+            Timestamp::now() - SignedDuration::from_mins(15),
+        );
 
         let user = DashboardUser {
             id: "123".to_owned(),
@@ -1199,7 +1208,7 @@ mod tests {
                 user: user.clone(),
                 guilds: vec![],
                 csrf_token: "csrf1".to_owned(),
-                expires_at: Utc::now() + Duration::hours(1),
+                expires_at: Timestamp::now() + SignedDuration::from_hours(1),
                 access_token: None,
             },
         );
@@ -1210,7 +1219,7 @@ mod tests {
                 user,
                 guilds: vec![],
                 csrf_token: "csrf2".to_owned(),
-                expires_at: Utc::now() - Duration::minutes(1),
+                expires_at: Timestamp::now() - SignedDuration::from_mins(1),
                 access_token: None,
             },
         );
@@ -1220,7 +1229,7 @@ mod tests {
             ("123".to_owned(), "guild_stale".to_owned()),
             CachedGuildPermission {
                 can_manage: true,
-                checked_at: Utc::now() - Duration::minutes(10),
+                checked_at: Timestamp::now() - SignedDuration::from_mins(10),
             },
         );
 
@@ -1263,7 +1272,7 @@ mod tests {
                 permissions: "32".to_owned(), // MANAGE_GUILD
             }],
             csrf_token: "csrf_token".to_owned(),
-            expires_at: Utc::now() + Duration::days(7),
+            expires_at: Timestamp::now() + days(7),
             access_token: Some("mock_oauth_token".to_owned()),
         };
 
@@ -1293,7 +1302,7 @@ mod tests {
             ("user_42".to_owned(), "guild_1".to_owned()),
             CachedGuildPermission {
                 can_manage: true,
-                checked_at: Utc::now() - Duration::seconds(65),
+                checked_at: Timestamp::now() - SignedDuration::from_secs(65),
             },
         );
 

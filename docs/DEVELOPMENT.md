@@ -2,7 +2,7 @@
 
 ## Toolchain
 
-The repository pins Rust 1.99.1 through `rust-toolchain.toml`. CI verifies that this exact version matches Rust's official stable channel before compiling the project.
+The repository pins Rust 1.100.0 through `rust-toolchain.toml`. CI verifies that this exact version matches Rust's official stable channel before compiling the project.
 
 System packages commonly required on Debian/Ubuntu:
 
@@ -60,6 +60,12 @@ docker build --tag zuckerbot:local .
 ```
 
 CI runs the same Rust checks and builds the production container independently.
+
+The Rust job uses GitHub's Ubuntu 24.04 image. A failed package setup preserves
+`apt-install.log` in the Rust diagnostics artifact, including the runner image,
+APT source hosts and bounded DNS checks. Formatting and dashboard checks run
+before package installation. Run `bash tests/ci_apt_setup.sh` on Ubuntu to
+rehearse an interrupted index refresh without changing installed packages.
 
 ## Adding a Lua module
 

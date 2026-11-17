@@ -1,5 +1,5 @@
+use crate::datetime::Timestamp;
 use anyhow::{Context as _, Result, anyhow, ensure};
-use chrono::Utc;
 use serenity::all::{ChannelId, GuildId, Permissions, UserId};
 use serenity::client::Context;
 use uuid::Uuid;
@@ -74,7 +74,7 @@ pub async fn execute_quote_action(
                 added_by: actor_id_str.clone(),
                 author_id: author_id.clone(),
                 body: trimmed.to_string(),
-                created_at: Utc::now(),
+                created_at: Timestamp::now(),
             };
 
             let saved = match state.storage.create_quote(quote).await {

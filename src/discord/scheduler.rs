@@ -1,3 +1,4 @@
+use crate::datetime::Timestamp;
 use anyhow::{Context as _, Result, anyhow};
 
 use serenity::{
@@ -121,7 +122,7 @@ pub async fn execute(
 
             maximum_delay_seconds,
         } => {
-            let now = chrono::Utc::now();
+            let now = Timestamp::now();
 
             let run_at =
                 parse_schedule_time(when, now, *minimum_delay_seconds, *maximum_delay_seconds)
@@ -192,8 +193,8 @@ pub async fn execute(
                     "✅ Created task `{}`.\nChannel: <#{}>\nExecution: <t:{}:F> (<t:{}:R>)\nMode: {}",
                     job.id,
                     job.channel_id,
-                    job.run_at.timestamp(),
-                    job.run_at.timestamp(),
+                    job.run_at.as_second(),
+                    job.run_at.as_second(),
                     recurrence_description(&job),
                 ))),
 
@@ -604,7 +605,7 @@ fn format_job_list(jobs: &[ScheduledJob], include_owner: bool) -> String {
             "• `{}` · **{}** · <t:{}:R> · <#{}>{owner}\n  `{}` · {}",
             job.short_id(),
             status_label(&job.status),
-            job.run_at.timestamp(),
+            job.run_at.as_second(),
             job.channel_id,
             job.id,
             preview,

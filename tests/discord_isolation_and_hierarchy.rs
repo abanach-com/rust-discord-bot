@@ -14,9 +14,11 @@ use axum::{
     routing::{any, get},
 };
 
+use jiff::{SignedDuration, civil::date};
 use rusty_discord_bot::{
     AppState,
     config::Config,
+    datetime::Timestamp,
     discord::{
         Handler,
         economy::{self, EconomyExecutionContext},
@@ -1850,8 +1852,8 @@ async fn test_action_policy_denial_blocks_executor_without_discord_http_call() {
         enabled: true,
         version: 1,
         created_by: "test_admin".to_string(),
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     state
         .storage
@@ -2502,8 +2504,8 @@ async fn test_tag_mutation_from_event_and_untrusted_module_strictly_denied() {
                 name: "legit_tag".to_string(),
                 content: "official content".to_string(),
                 author_id: "admin_1".to_string(),
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
+                created_at: Timestamp::now(),
+                updated_at: Timestamp::now(),
             },
         )
         .await
@@ -2564,7 +2566,7 @@ async fn test_giveaway_worker_cross_guild_channel_blocked_and_quarantined() {
             foreign_channel,
             "Cross-Guild Nitro",
             1,
-            chrono::Utc::now() - chrono::Duration::minutes(5),
+            Timestamp::now() - SignedDuration::from_mins(5),
             Some("111111111111111111"),
         )
         .await
@@ -2587,7 +2589,7 @@ async fn test_giveaway_worker_cross_guild_channel_blocked_and_quarantined() {
             category_channel,
             "Category Gift",
             1,
-            chrono::Utc::now() - chrono::Duration::minutes(5),
+            Timestamp::now() - SignedDuration::from_mins(5),
             Some("111111111111111111"),
         )
         .await
@@ -2609,7 +2611,7 @@ async fn test_giveaway_worker_cross_guild_channel_blocked_and_quarantined() {
             legitimate_channel,
             "Legit Server Prize",
             1,
-            chrono::Utc::now() - chrono::Duration::minutes(5),
+            Timestamp::now() - SignedDuration::from_mins(5),
             Some("111111111111111111"),
         )
         .await
@@ -2738,7 +2740,7 @@ async fn test_reaction_roles_storage_crud_and_guild_isolation() {
 
     // 1. Create binding in Guild A
     let original_id_a = uuid::Uuid::new_v4();
-    let original_created_at_a = chrono::Utc::now();
+    let original_created_at_a = Timestamp::now();
     let binding_a = rusty_discord_bot::storage::ReactionRoleBinding {
         id: original_id_a,
         guild_id: guild_a.to_string(),
@@ -2781,7 +2783,7 @@ async fn test_reaction_roles_storage_crud_and_guild_isolation() {
         emoji_key: emoji.to_string(),
         role_id: role_b.to_string(),
         created_by: Some("admin_b".to_string()),
-        created_at: chrono::Utc::now(),
+        created_at: Timestamp::now(),
     };
     state
         .storage
@@ -2815,7 +2817,7 @@ async fn test_reaction_roles_storage_crud_and_guild_isolation() {
         emoji_key: emoji.to_string(),
         role_id: "1005".to_string(),
         created_by: Some("admin_a".to_string()),
-        created_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        created_at: Timestamp::now() + SignedDuration::from_hours(1),
     };
     state
         .storage
@@ -2858,7 +2860,7 @@ async fn test_reaction_roles_storage_crud_and_guild_isolation() {
         emoji_key: canonical.clone(),
         role_id: "1002".to_string(),
         created_by: Some("admin_a".to_string()),
-        created_at: chrono::Utc::now(),
+        created_at: Timestamp::now(),
     };
     state
         .storage
@@ -3130,7 +3132,7 @@ async fn test_reaction_roles_gateway_reaction_events() {
         emoji_key: "🎉".to_string(),
         role_id: "1002".to_string(),
         created_by: Some("admin".to_string()),
-        created_at: chrono::Utc::now(),
+        created_at: Timestamp::now(),
     };
     state
         .storage
@@ -3316,7 +3318,6 @@ async fn test_reaction_roles_gateway_reaction_events() {
 
 #[tokio::test]
 async fn test_reaction_roles_provenance_and_shared_grants_lifecycle_suite() {
-    use chrono::Utc;
     use rusty_discord_bot::storage::ReactionRoleBinding;
     use uuid::Uuid;
 
@@ -3349,7 +3350,7 @@ async fn test_reaction_roles_provenance_and_shared_grants_lifecycle_suite() {
             emoji_key: "🎉".to_string(),
             role_id: "1002".to_string(),
             created_by: Some("admin".to_string()),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -3365,7 +3366,7 @@ async fn test_reaction_roles_provenance_and_shared_grants_lifecycle_suite() {
             emoji_key: "✅".to_string(),
             role_id: "1002".to_string(),
             created_by: Some("admin".to_string()),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -5531,7 +5532,7 @@ async fn test_birthdays_storage_and_execution_lifecycle_suite() {
             user_id: user_leap.to_string(),
             month: 2,
             day: 29,
-            updated_at: chrono::Utc::now(),
+            updated_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -5543,7 +5544,7 @@ async fn test_birthdays_storage_and_execution_lifecycle_suite() {
             user_id: user_march.to_string(),
             month: 3,
             day: 1,
-            updated_at: chrono::Utc::now(),
+            updated_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -5555,7 +5556,7 @@ async fn test_birthdays_storage_and_execution_lifecycle_suite() {
             user_id: user_feb28.to_string(),
             month: 2,
             day: 28,
-            updated_at: chrono::Utc::now(),
+            updated_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -5565,7 +5566,7 @@ async fn test_birthdays_storage_and_execution_lifecycle_suite() {
     // Next 01.03 is 2027-03-01
     // Next 29.02 is 2028-02-29
     // Ordering MUST be: 28.02, then 01.03, then 29.02.
-    let frozen_2026 = chrono::NaiveDate::from_ymd_opt(2026, 11, 8).unwrap();
+    let frozen_2026 = date(2026, 11, 8);
     let up_at_2026 = state
         .storage
         .list_upcoming_birthdays_at(leap_guild, 3, frozen_2026)
@@ -5590,7 +5591,7 @@ async fn test_birthdays_storage_and_execution_lifecycle_suite() {
     // Next 29.02 is 2028-02-29
     // Next 01.03 is 2028-03-01
     // Ordering MUST be: 28.02, then 29.02, then 01.03.
-    let frozen_2028_feb28 = chrono::NaiveDate::from_ymd_opt(2028, 2, 28).unwrap();
+    let frozen_2028_feb28 = date(2028, 2, 28);
     let up_at_2028 = state
         .storage
         .list_upcoming_birthdays_at(leap_guild, 3, frozen_2028_feb28)
@@ -5605,7 +5606,7 @@ async fn test_birthdays_storage_and_execution_lifecycle_suite() {
     // Next 28.02 is 2029-02-28
     // Next 29.02 is 2032-02-29
     // Ordering MUST be: 01.03, then 28.02, then 29.02.
-    let frozen_2028_mar01 = chrono::NaiveDate::from_ymd_opt(2028, 3, 1).unwrap();
+    let frozen_2028_mar01 = date(2028, 3, 1);
     let up_after_leap = state
         .storage
         .list_upcoming_birthdays_at(leap_guild, 3, frozen_2028_mar01)
@@ -5616,7 +5617,7 @@ async fn test_birthdays_storage_and_execution_lifecycle_suite() {
     assert_eq!(up_after_leap[2].user_id, user_leap);
 
     // Century boundary check: 2097-01-01 -> 2100 is NOT a leap year, next is 2104-02-29
-    let frozen_2097 = chrono::NaiveDate::from_ymd_opt(2097, 1, 1).unwrap();
+    let frozen_2097 = date(2097, 1, 1);
     let up_century = state
         .storage
         .list_upcoming_birthdays_at(leap_guild, 3, frozen_2097)
@@ -5631,7 +5632,6 @@ async fn test_birthdays_storage_and_execution_lifecycle_suite() {
 
 #[tokio::test]
 async fn test_quotes_and_birthdays_privacy_erasure_and_export_suite() {
-    use chrono::Utc;
     use rusty_discord_bot::storage::{BirthdayRecord, QuoteRecord};
     use uuid::Uuid;
 
@@ -5653,7 +5653,7 @@ async fn test_quotes_and_birthdays_privacy_erasure_and_export_suite() {
             added_by: user_u.to_string(),
             author_id: user_v.to_string(),
             body: "Quote 1 by V, added by U".to_string(),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -5667,7 +5667,7 @@ async fn test_quotes_and_birthdays_privacy_erasure_and_export_suite() {
             added_by: user_v.to_string(),
             author_id: user_u.to_string(),
             body: "Quote 2 by U, added by V".to_string(),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -5681,7 +5681,7 @@ async fn test_quotes_and_birthdays_privacy_erasure_and_export_suite() {
             added_by: user_v.to_string(),
             author_id: user_v.to_string(),
             body: "Quote 3 unrelated to U".to_string(),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -5695,7 +5695,7 @@ async fn test_quotes_and_birthdays_privacy_erasure_and_export_suite() {
             added_by: user_u.to_string(),
             author_id: user_u.to_string(),
             body: "Quote 4 in Guild B".to_string(),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -5708,7 +5708,7 @@ async fn test_quotes_and_birthdays_privacy_erasure_and_export_suite() {
             user_id: user_u.to_string(),
             month: 7,
             day: 10,
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -5720,7 +5720,7 @@ async fn test_quotes_and_birthdays_privacy_erasure_and_export_suite() {
             user_id: user_v.to_string(),
             month: 8,
             day: 20,
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -5732,7 +5732,7 @@ async fn test_quotes_and_birthdays_privacy_erasure_and_export_suite() {
             user_id: user_u.to_string(),
             month: 7,
             day: 10,
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -6838,7 +6838,7 @@ async fn test_web_broadcast_destination_channel_authorization_suite() {
         permissions: "32".to_owned(), // MANAGE_GUILD
     }];
     let csrf_token = "valid_csrf_token_broadcast";
-    let expires_at = chrono::Utc::now() + chrono::Duration::hours(24);
+    let expires_at = Timestamp::now() + SignedDuration::from_hours(24);
     web_state
         .app
         .sessions
@@ -7057,7 +7057,7 @@ async fn test_web_broadcast_destination_channel_authorization_suite() {
         owner: true,
         permissions: "8".to_owned(), // ADMINISTRATOR
     }];
-    let expires_at_admin = chrono::Utc::now() + chrono::Duration::hours(24);
+    let expires_at_admin = Timestamp::now() + SignedDuration::from_hours(24);
     web_state
         .app
         .sessions
@@ -7321,7 +7321,7 @@ async fn test_sticky_messages_end_to_end_delivery_and_anti_recursion() {
     );
 
     // Step D: Message after cooldown expires triggers refresh and deletes old message
-    let past_time = chrono::Utc::now() - chrono::Duration::seconds(15);
+    let past_time = Timestamp::now() - SignedDuration::from_secs(15);
     let cur_sticky = state
         .storage
         .get_sticky_message("100", "101")
@@ -7783,7 +7783,7 @@ async fn test_sticky_optimistic_concurrency_cas_and_aba_memory_store_issue_319()
             "100",
             "101",
             "stale_msg_a",
-            chrono::Utc::now(),
+            Timestamp::now(),
             cfg_a.generation,
             cfg_a.config_revision,
         )
@@ -7812,7 +7812,7 @@ async fn test_sticky_optimistic_concurrency_cas_and_aba_memory_store_issue_319()
             "100",
             "101",
             "msg_b_101",
-            chrono::Utc::now(),
+            Timestamp::now(),
             cfg_b.generation,
             cfg_b.config_revision,
         )
@@ -7849,7 +7849,7 @@ async fn test_sticky_optimistic_concurrency_cas_and_aba_memory_store_issue_319()
             "100",
             "101",
             "ghost_b_msg",
-            chrono::Utc::now(),
+            Timestamp::now(),
             cfg_b.generation,
             cfg_b.config_revision,
         )
@@ -8515,6 +8515,21 @@ async fn test_sticky_cooldown_interrupted_by_web_config_mutation_or_deletion_iss
 async fn test_sticky_config_change_and_deletion_not_lost_when_mpsc_queue_full_issue_325() {
     let (ctx, mock, shard_manager) = start_mock_discord_environment().await;
     let state = create_test_state_with_port(mock.port).await;
+    let timeout = std::time::Duration::from_secs(5);
+    let wait_for_delivery = || async {
+        loop {
+            let sticky = state
+                .storage
+                .get_sticky_message("100", "101")
+                .await
+                .expect("read sticky state")
+                .expect("sticky message configured");
+            if sticky.last_bumped_at.is_some() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
 
     // 1. Configure sticky message on channel 101 with long cooldown (3600 seconds)
     state
@@ -8544,7 +8559,9 @@ async fn test_sticky_config_change_and_deletion_not_lost_when_mpsc_queue_full_is
         MessageId::new(8201),
     );
 
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::timeout(timeout, wait_for_delivery())
+        .await
+        .expect("initial delivery should be committed");
     {
         let recorded = mock.recorded_calls.lock().await;
         let posts: Vec<_> = recorded
@@ -8564,7 +8581,9 @@ async fn test_sticky_config_change_and_deletion_not_lost_when_mpsc_queue_full_is
     );
 
     // Wait until worker is deterministically inside cooldown sleep
-    cooldown_notified.await;
+    tokio::time::timeout(timeout, cooldown_notified)
+        .await
+        .expect("worker should enter cooldown after the second trigger");
     assert_eq!(state.sticky_coordinator.active_worker_count(), 1);
 
     // 5. Flood the channel with 70 triggers to completely saturate mpsc buffer (capacity 64)
@@ -8579,7 +8598,6 @@ async fn test_sticky_config_change_and_deletion_not_lost_when_mpsc_queue_full_is
 
     // 6. While mpsc queue is 100% full, admin updates config via web:
     // updates content and sets new config revision while retaining cooldown.
-    let re_entered_cooldown = pause.worker_entered_cooldown.notified();
     state
         .storage
         .set_sticky_message(
@@ -8595,8 +8613,10 @@ async fn test_sticky_config_change_and_deletion_not_lost_when_mpsc_queue_full_is
     // Invalidate channel: watch channel must deliver notification even if mpsc is full
     state.sticky_coordinator.invalidate_channel("100", "101");
 
-    // Worker must wake up immediately without waiting 3600s and re-enter cooldown after delivery
-    re_entered_cooldown.await;
+    // The config write cleared the delivery timestamp. Await its next committed delivery.
+    tokio::time::timeout(timeout, wait_for_delivery())
+        .await
+        .expect("worker should deliver updated sticky during cooldown despite the full queue");
 
     {
         let recorded = mock.recorded_calls.lock().await;
@@ -8617,6 +8637,18 @@ async fn test_sticky_config_change_and_deletion_not_lost_when_mpsc_queue_full_is
     }
 
     // 7. Verify deletion while worker is in cooldown with a fully saturated mpsc queue
+    // The worker may have coalesced all earlier triggers before receiving the config change.
+    let re_entered_cooldown = pause.worker_entered_cooldown.notified();
+    state.sticky_coordinator.enqueue_refresh(
+        ctx.http.clone(),
+        GuildId::new(100),
+        ChannelId::new(101),
+        MessageId::new(8203),
+    );
+    tokio::time::timeout(timeout, re_entered_cooldown)
+        .await
+        .expect("worker should enter cooldown before deleting the sticky");
+
     // Flood mpsc queue again with 70 triggers
     for i in 0..70 {
         state.sticky_coordinator.enqueue_refresh(
@@ -9248,7 +9280,7 @@ async fn test_giveaway_web_end_and_reroll_discord_delivery_issue_359() {
                 permissions: "8".to_string(),
             }],
             csrf_token.to_string(),
-            chrono::Utc::now() + chrono::Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -9263,7 +9295,7 @@ async fn test_giveaway_web_end_and_reroll_discord_delivery_issue_359() {
             "101",
             "Discord Nitro 1 Month",
             1,
-            chrono::Utc::now() + chrono::Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
         )
         .await
         .unwrap();
@@ -9341,7 +9373,7 @@ async fn test_giveaway_web_end_and_reroll_discord_delivery_issue_359() {
             "101",
             "Active Prize",
             1,
-            chrono::Utc::now() + chrono::Duration::hours(5),
+            Timestamp::now() + SignedDuration::from_hours(5),
         )
         .await
         .unwrap();
@@ -9403,7 +9435,7 @@ async fn test_giveaway_web_end_and_reroll_discord_delivery_issue_359() {
             "201", // Channel 201 is in guild 200
             "Cross Guild Hack",
             1,
-            chrono::Utc::now() + chrono::Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
         )
         .await
         .unwrap();

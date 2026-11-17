@@ -1,6 +1,6 @@
+use crate::datetime::{Timestamp, days};
 use std::{fmt, str::FromStr};
 
-use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -241,13 +241,13 @@ pub struct ModerationCase {
     pub reason: String,
     pub source_module: String,
     pub visible_to_subject: bool,
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<Timestamp>,
     #[serde(with = "opt_snowflake_string", default)]
     pub voided_by_user_id: Option<u64>,
     pub void_reason: Option<String>,
-    pub voided_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub voided_at: Option<Timestamp>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
     pub version: i64,
 }
 
@@ -259,7 +259,7 @@ pub struct CaseNote {
     pub author_user_id: u64,
     pub body: String,
     pub visible_to_subject: bool,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -270,7 +270,7 @@ pub struct CaseEvidence {
     pub author_user_id: u64,
     pub label: String,
     pub value: String,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -281,7 +281,7 @@ pub struct CaseEvent {
     pub actor_user_id: u64,
     pub event_type: String,
     pub payload: serde_json::Value,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -318,11 +318,11 @@ pub struct CreateCase {
     pub reason: String,
     pub source_module: String,
     pub visible_to_subject: bool,
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<Timestamp>,
 }
 
 impl CreateCase {
-    pub fn validate(&self, now: DateTime<Utc>) -> Result<(), CaseError> {
+    pub fn validate(&self, now: Timestamp) -> Result<(), CaseError> {
         validate_snowflake(self.guild_id, "guild_id")?;
         validate_snowflake(self.subject_user_id, "subject_user_id")?;
         validate_snowflake(self.actor_user_id, "actor_user_id")?;
@@ -345,12 +345,12 @@ pub struct UpdateCase {
     pub severity: Option<CaseSeverity>,
     pub points: Option<i32>,
     pub visible_to_subject: Option<bool>,
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<Timestamp>,
     pub clear_expiry: bool,
 }
 
 impl UpdateCase {
-    pub fn validate(&self, now: DateTime<Utc>) -> Result<(), CaseError> {
+    pub fn validate(&self, now: Timestamp) -> Result<(), CaseError> {
         if let Some(reason) = &self.reason {
             validate_text(reason, "reason", 1, MAX_REASON_LENGTH)?;
         }
@@ -447,14 +447,14 @@ fn validate_points(points: i32) -> Result<(), CaseError> {
     Ok(())
 }
 
-fn validate_expiry(expires_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Result<(), CaseError> {
+fn validate_expiry(expires_at: Option<Timestamp>, now: Timestamp) -> Result<(), CaseError> {
     if let Some(expires_at) = expires_at {
         if expires_at <= now {
             return Err(CaseError::Validation(
                 "expires_at must be in the future".to_owned(),
             ));
         }
-        if expires_at > now + Duration::days(MAX_EXPIRY_DAYS) {
+        if expires_at > now + days(MAX_EXPIRY_DAYS) {
             return Err(CaseError::Validation(format!(
                 "expires_at cannot be more than {MAX_EXPIRY_DAYS} days in the future"
             )));
@@ -481,7 +481,6 @@ fn validate_text(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use uuid::Uuid;
 
     #[test]
@@ -503,8 +502,8 @@ mod tests {
             voided_by_user_id: Some(5555666677778888999),
             void_reason: None,
             voided_at: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
             version: 1,
         };
 
@@ -520,7 +519,7 @@ mod tests {
             author_user_id: 9876543210987654321,
             body: "Internal note".to_string(),
             visible_to_subject: false,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
         let note_json = serde_json::to_string(&note).expect("note should serialize");
         assert!(note_json.contains(r#""author_user_id":"9876543210987654321""#));
@@ -544,8 +543,8 @@ mod tests {
             "reason": "Test",
             "source_module": "moderation",
             "visible_to_subject": true,
-            "created_at": Utc::now(),
-            "updated_at": Utc::now(),
+            "created_at": Timestamp::now(),
+            "updated_at": Timestamp::now(),
             "version": 1
         });
         let from_numbers: ModerationCase = serde_json::from_value(legacy_json)

@@ -450,7 +450,7 @@ pub async fn execute(
                         "🎁 You claimed **{reward}** coins.\nBalance: **{}**\nStreak: **{} days**\nNext daily: <t:{}:R>",
                         profile.coins,
                         profile.daily_streak,
-                        next_claim_at.timestamp(),
+                        next_claim_at.as_second(),
                     )))
                 }
                 DailyClaimOutcome::Cooldown {
@@ -458,7 +458,7 @@ pub async fn execute(
                     next_claim_at,
                 } => Ok(Some(format!(
                     "Daily is not yet available. Next reward: <t:{}:R>.\nCurrent balance: **{}** coins.",
-                    next_claim_at.timestamp(),
+                    next_claim_at.as_second(),
                     profile.coins,
                 ))),
             }
@@ -530,12 +530,12 @@ pub async fn execute(
                     Ok(Some(format!(
                         "💚 Added **{amount}** reputation to <@{user_id}>. Total reputation: **{}**.\nNext reputation grant: <t:{}:R>.",
                         profile.reputation,
-                        next_available_at.timestamp(),
+                        next_available_at.as_second(),
                     )))
                 }
                 ReputationGrantOutcome::Cooldown { next_available_at } => Ok(Some(format!(
                     "You can give reputation again <t:{}:R>.",
-                    next_available_at.timestamp(),
+                    next_available_at.as_second(),
                 ))),
                 ReputationGrantOutcome::SameAccount => {
                     Ok(Some("You cannot give reputation to yourself.".to_owned()))

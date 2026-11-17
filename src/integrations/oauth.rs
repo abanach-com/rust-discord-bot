@@ -1,4 +1,5 @@
-use chrono::{DateTime, Utc};
+use crate::datetime::Timestamp;
+use jiff::SignedDuration;
 
 use dashmap::DashMap;
 
@@ -83,7 +84,7 @@ pub struct PendingOAuthSession {
 
     pub code_verifier: String,
 
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
 }
 
 #[derive(Default)]
@@ -119,7 +120,7 @@ impl OAuthManager {
 
         let nonce = Uuid::new_v4().to_string();
 
-        let expires_at = Utc::now() + chrono::Duration::seconds(ttl_seconds);
+        let expires_at = Timestamp::now() + SignedDuration::from_secs(ttl_seconds);
 
         let session = PendingOAuthSession {
             state: state.clone(),
@@ -153,7 +154,7 @@ impl OAuthManager {
             IntegrationError::AuthenticationFailed("Invalid or expired OAuth state".to_string())
         })?;
 
-        if Utc::now() > session.expires_at {
+        if Timestamp::now() > session.expires_at {
             return Err(IntegrationError::AuthenticationFailed(
                 "OAuth session expired".to_string(),
             ));

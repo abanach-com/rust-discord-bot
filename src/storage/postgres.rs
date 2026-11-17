@@ -1,7 +1,9 @@
+use crate::datetime::{Timestamp, days};
+use jiff::SignedDuration;
+use jiff::civil::Date;
+use jiff_sqlx::ToSqlx;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-
-use chrono::{DateTime, Duration, Utc};
 
 use serde_json::Value;
 
@@ -469,11 +471,7 @@ impl PostgresStore {
         Ok(count.0 as u64)
     }
 
-    pub async fn prune_audit_events(
-        &self,
-        cutoff: DateTime<Utc>,
-        limit: usize,
-    ) -> anyhow::Result<u64> {
+    pub async fn prune_audit_events(&self, cutoff: Timestamp, limit: usize) -> anyhow::Result<u64> {
         let limit = limit.clamp(1, 5000) as i64;
         let res = sqlx::query(
             r#"
@@ -741,7 +739,7 @@ impl PostgresStore {
             progression_erased: deleted_progress > 0,
             related_records_erased: related_erased,
             retained_records,
-            erased_at: Utc::now(),
+            erased_at: Timestamp::now(),
         })
     }
 
@@ -762,14 +760,15 @@ impl PostgresStore {
 
         let mut profile = lock_profile(&mut transaction, guild_id, user_id).await?;
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let previous_level = profile.level;
 
         profile.messages = profile.messages.saturating_add(1);
 
         let eligible = profile.last_xp_at.as_ref().is_none_or(|last_award| {
-            now.signed_duration_since(*last_award) >= Duration::seconds(i64::from(cooldown_seconds))
+            now.duration_since(*last_award)
+                >= SignedDuration::from_secs(i64::from(cooldown_seconds))
         });
 
         let awarded = if eligible { amount.max(0) } else { 0 };
@@ -816,10 +815,10 @@ impl PostgresStore {
 
         let mut profile = lock_profile(&mut transaction, guild_id, user_id).await?;
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         if let Some(last_claim) = profile.last_daily_at {
-            let next_claim_at = last_claim + Duration::hours(24);
+            let next_claim_at = last_claim + SignedDuration::from_hours(24);
 
             if now < next_claim_at {
                 transaction.commit().await?;
@@ -831,7 +830,7 @@ impl PostgresStore {
                 });
             }
 
-            profile.daily_streak = if now <= last_claim + Duration::hours(48) {
+            profile.daily_streak = if now <= last_claim + SignedDuration::from_hours(48) {
                 profile.daily_streak.saturating_add(1).max(1)
             } else {
                 1
@@ -864,7 +863,7 @@ impl PostgresStore {
 
             reward,
 
-            next_claim_at: now + Duration::hours(24),
+            next_claim_at: now + SignedDuration::from_hours(24),
         })
     }
 
@@ -919,9 +918,9 @@ impl PostgresStore {
 
         ensure_profile(&mut transaction, guild_id, user_id).await?;
         let mut profile = lock_profile(&mut transaction, guild_id, user_id).await?;
-        let now = Utc::now();
+        let now = Timestamp::now();
 
-        let last_action_row: Option<(DateTime<Utc>,)> = sqlx::query_as(
+        let last_action_row: Option<(Timestamp,)> = sqlx::query_as(
             "SELECT last_action_at FROM economy_cooldowns WHERE guild_id = $1 AND user_id = $2 AND action_type = 'work' FOR UPDATE"
         )
         .bind(guild_id)
@@ -930,7 +929,7 @@ impl PostgresStore {
         .await?;
 
         if let Some((last_action_at,)) = last_action_row {
-            let next_claim_at = last_action_at + Duration::seconds(cooldown_seconds as i64);
+            let next_claim_at = last_action_at + SignedDuration::from_secs(cooldown_seconds as i64);
             if now < next_claim_at {
                 transaction.commit().await?;
                 return Ok(WorkClaimOutcome::Cooldown {
@@ -956,7 +955,7 @@ impl PostgresStore {
         profile.updated_at = now;
         write_profile(&mut transaction, &profile).await?;
 
-        let next_claim_at = now + Duration::seconds(cooldown_seconds as i64);
+        let next_claim_at = now + SignedDuration::from_secs(cooldown_seconds as i64);
         sqlx::query(
             r#"
             INSERT INTO economy_cooldowns (guild_id, user_id, action_type, last_action_at)
@@ -1060,9 +1059,9 @@ impl PostgresStore {
 
         ensure_profile(&mut transaction, guild_id, user_id).await?;
         let mut profile = lock_profile(&mut transaction, guild_id, user_id).await?;
-        let now = Utc::now();
+        let now = Timestamp::now();
 
-        let last_action_row: Option<(DateTime<Utc>,)> = sqlx::query_as(
+        let last_action_row: Option<(Timestamp,)> = sqlx::query_as(
             "SELECT last_action_at FROM economy_cooldowns WHERE guild_id = $1 AND user_id = $2 AND action_type = 'crime' FOR UPDATE"
         )
         .bind(guild_id)
@@ -1071,7 +1070,7 @@ impl PostgresStore {
         .await?;
 
         if let Some((last_action_at,)) = last_action_row {
-            let next_claim_at = last_action_at + Duration::seconds(cooldown_seconds as i64);
+            let next_claim_at = last_action_at + SignedDuration::from_secs(cooldown_seconds as i64);
             if now < next_claim_at {
                 transaction.commit().await?;
                 return Ok(CrimeClaimOutcome::Cooldown {
@@ -1085,7 +1084,7 @@ impl PostgresStore {
             .unwrap_or_else(Self::generate_random_unit_float)
             .clamp(0.0, 1.0);
         let success = r <= success_rate;
-        let next_claim_at = now + Duration::seconds(cooldown_seconds as i64);
+        let next_claim_at = now + SignedDuration::from_secs(cooldown_seconds as i64);
 
         let outcome = if success {
             let span = (max_payout - min_payout).max(0);
@@ -1208,7 +1207,7 @@ impl PostgresStore {
             return Ok(CoinTransferOutcome::InsufficientFunds { balance });
         }
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         sender.coins -= amount;
 
@@ -1300,7 +1299,7 @@ impl PostgresStore {
         .execute(&mut *transaction)
         .await?;
 
-        let last_given_at = sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+        let last_given_at = sqlx::query_scalar::<_, Option<Timestamp>>(
             r#"
 
             SELECT last_given_at
@@ -1318,10 +1317,11 @@ impl PostgresStore {
         .fetch_one(&mut *transaction)
         .await?;
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         if let Some(last_given_at) = last_given_at {
-            let next_available_at = last_given_at + Duration::seconds(i64::from(cooldown_seconds));
+            let next_available_at =
+                last_given_at + SignedDuration::from_secs(i64::from(cooldown_seconds));
 
             if now < next_available_at {
                 transaction.commit().await?;
@@ -1365,7 +1365,7 @@ impl PostgresStore {
 
             amount,
 
-            next_available_at: now + Duration::seconds(i64::from(cooldown_seconds)),
+            next_available_at: now + SignedDuration::from_secs(i64::from(cooldown_seconds)),
         })
     }
 
@@ -1391,7 +1391,7 @@ impl PostgresStore {
 
         profile.level = level_for_xp(profile.xp);
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         profile.updated_at = now;
 
@@ -1473,7 +1473,7 @@ impl PostgresStore {
 
         profile.level = level_for_xp(profile.xp);
 
-        profile.updated_at = Utc::now();
+        profile.updated_at = Timestamp::now();
 
         write_profile(&mut transaction, &profile).await?;
 
@@ -1943,7 +1943,7 @@ impl PostgresStore {
 
         role_id: &str,
 
-        expires_at: DateTime<Utc>,
+        expires_at: Timestamp,
     ) -> anyhow::Result<Uuid> {
         let id = Uuid::new_v4();
 
@@ -2079,7 +2079,7 @@ impl PostgresStore {
     ) -> anyhow::Result<ServerSnapshot> {
         let id = Uuid::new_v4();
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let rec = sqlx::query_as::<_, ServerSnapshot>(
             r#"
@@ -2183,7 +2183,7 @@ impl PostgresStore {
     ) -> anyhow::Result<CustomAutomation> {
         let id = Uuid::new_v4();
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let rec = sqlx::query_as::<_, CustomAutomation>(
 
@@ -2304,7 +2304,7 @@ impl PostgresStore {
 
         cooldown_seconds: i32,
     ) -> anyhow::Result<StickyMessage> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let new_revision = Uuid::new_v4();
 
         let rec = sqlx::query_as::<_, StickyMessage>(
@@ -2346,7 +2346,7 @@ impl PostgresStore {
         guild_id: &str,
         channel_id: &str,
         posted_message_id: &str,
-        bumped_at: DateTime<Utc>,
+        bumped_at: Timestamp,
         expected_generation: i64,
         expected_revision: Uuid,
     ) -> anyhow::Result<Option<StickyMessage>> {
@@ -2405,7 +2405,7 @@ impl PostgresStore {
 
         is_anonymous: bool,
 
-        expires_at: DateTime<Utc>,
+        expires_at: Timestamp,
     ) -> anyhow::Result<CommunityPoll> {
         super::validate_poll_input(question, options)?;
 
@@ -2417,7 +2417,7 @@ impl PostgresStore {
 
         let tallies_json = serde_json::json!(tallies);
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let rec = sqlx::query_as::<_, CommunityPoll>(
 
@@ -2525,7 +2525,7 @@ impl PostgresStore {
             None => return Ok(None),
         };
 
-        if Utc::now() >= poll.expires_at {
+        if Timestamp::now() >= poll.expires_at {
             anyhow::bail!("Poll has expired");
         }
 
@@ -2632,7 +2632,7 @@ impl PostgresStore {
 
         winners_count: i32,
 
-        expires_at: DateTime<Utc>,
+        expires_at: Timestamp,
     ) -> anyhow::Result<Giveaway> {
         self.create_giveaway_with_id(
             Uuid::new_v4(),
@@ -2654,12 +2654,12 @@ impl PostgresStore {
         channel_id: &str,
         prize: &str,
         winners_count: i32,
-        expires_at: DateTime<Utc>,
+        expires_at: Timestamp,
         created_by_user_id: Option<&str>,
     ) -> anyhow::Result<Giveaway> {
         let empty_json = serde_json::json!([]);
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let rec = sqlx::query_as::<_, Giveaway>(
 
@@ -2750,7 +2750,7 @@ impl PostgresStore {
         .await?;
 
         let mut ga = match ga {
-            Some(g) if !g.ended && chrono::Utc::now() < g.expires_at => g,
+            Some(g) if !g.ended && Timestamp::now() < g.expires_at => g,
 
             _ => return Ok(false),
         };
@@ -3568,7 +3568,7 @@ impl PostgresStore {
         guild_id: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<BirthdayRecord>> {
-        self.list_upcoming_birthdays_at(guild_id, limit, Utc::now().date_naive())
+        self.list_upcoming_birthdays_at(guild_id, limit, Timestamp::now().date())
             .await
     }
 
@@ -3576,11 +3576,10 @@ impl PostgresStore {
         &self,
         guild_id: &str,
         limit: usize,
-        today: chrono::NaiveDate,
+        today: Date,
     ) -> anyhow::Result<Vec<BirthdayRecord>> {
         validate_snowflake("guild_id", guild_id)?;
         let limit_i64 = limit.clamp(1, 100) as i64;
-        use chrono::Datelike;
         let today_year = today.year();
 
         let rows = sqlx::query_as::<_, BirthdayRecord>(
@@ -3618,8 +3617,8 @@ impl PostgresStore {
             "#,
         )
         .bind(guild_id)
-        .bind(today_year)
-        .bind(today)
+        .bind(i32::from(today_year))
+        .bind(today.to_sqlx())
         .bind(limit_i64)
         .fetch_all(&self.pool)
         .await?;
@@ -3723,7 +3722,7 @@ impl PostgresStore {
 
         reaction_count: i32,
     ) -> anyhow::Result<StarboardEntry> {
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let rec = sqlx::query_as::<_, StarboardEntry>(
 
@@ -3817,7 +3816,7 @@ impl PostgresStore {
         &self,
         guild_id: &str,
         limit: usize,
-        cursor: Option<(&DateTime<Utc>, &Uuid)>,
+        cursor: Option<(&Timestamp, &Uuid)>,
     ) -> anyhow::Result<StoreItemsPage> {
         let fetch_limit = (limit as i64).saturating_add(1);
 
@@ -3995,7 +3994,7 @@ impl PostgresStore {
 
         let id = Uuid::new_v4();
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let rec = sqlx::query_as::<_, StoreItem>(
             r#"
@@ -4132,7 +4131,7 @@ impl PostgresStore {
 
         profile.coins -= item.price;
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         profile.updated_at = now;
 
         write_profile(&mut tx, &profile).await?;
@@ -4227,7 +4226,7 @@ impl PostgresStore {
         guild_id: &str,
         user_id: Option<&str>,
         limit: usize,
-        cursor: Option<(&DateTime<Utc>, &Uuid)>,
+        cursor: Option<(&Timestamp, &Uuid)>,
     ) -> anyhow::Result<StorePurchasesPage> {
         let fetch_limit = (limit.saturating_add(1)) as i64;
         let cursor_time = cursor.map(|(t, _)| *t);
@@ -4315,8 +4314,8 @@ impl PostgresStore {
     }
 
     pub async fn claim_store_role_delivery(&self, purchase_id: Uuid) -> anyhow::Result<bool> {
-        let now = Utc::now();
-        let lease_until = now + chrono::Duration::seconds(60);
+        let now = Timestamp::now();
+        let lease_until = now + SignedDuration::from_secs(60);
 
         let res = sqlx::query(
             r#"
@@ -4345,7 +4344,7 @@ impl PostgresStore {
         purchase_id: Uuid,
         status: &str,
         failure_reason: Option<&str>,
-        fulfilled_at: Option<DateTime<Utc>>,
+        fulfilled_at: Option<Timestamp>,
     ) -> anyhow::Result<()> {
         sqlx::query(
             r#"
@@ -4366,7 +4365,7 @@ impl PostgresStore {
 
     pub async fn prune_economy_purchase_requests(
         &self,
-        cutoff: DateTime<Utc>,
+        cutoff: Timestamp,
         limit: usize,
     ) -> anyhow::Result<u64> {
         let chunk_limit = (limit as i64).clamp(1, 5000);
@@ -4404,7 +4403,7 @@ impl PostgresStore {
 
     pub async fn prune_economy_idempotency(
         &self,
-        cutoff: DateTime<Utc>,
+        cutoff: Timestamp,
         limit: usize,
     ) -> anyhow::Result<u64> {
         let chunk_limit = (limit as i64).clamp(1, 5000);
@@ -4468,8 +4467,8 @@ impl PostgresStore {
         } else {
             90
         };
-        let now = Utc::now();
-        let expires_at = now + Duration::days(retention);
+        let now = Timestamp::now();
+        let expires_at = now + days(retention);
         let id = Uuid::new_v4();
 
         let rec = sqlx::query_as::<_, MemberIdentityRecord>(
@@ -4557,7 +4556,7 @@ impl PostgresStore {
         let account_created_at = snowflake_created_at(u_num);
         let roles_json =
             serde_json::to_value(params.role_ids).unwrap_or_else(|_| serde_json::json!([]));
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let rec = sqlx::query_as::<_, MemberSnapshot>(
             r#"
@@ -4619,7 +4618,7 @@ impl PostgresStore {
         let (cursor_joined_at, cursor_user_id) = if let Some(ref cur) = filter.cursor {
             if let Some((parsed_joined, parsed_user)) = parse_member_search_cursor(cur) {
                 if parsed_joined.is_none() && cur.chars().all(|c| c.is_ascii_digit()) {
-                    let row_opt: Option<(Option<DateTime<Utc>>,)> = sqlx::query_as(
+                    let row_opt: Option<(Option<Timestamp>,)> = sqlx::query_as(
                         "SELECT joined_at FROM member_snapshots WHERE guild_id = $1 AND user_id = $2",
                     )
                     .bind(guild_id)
@@ -4645,8 +4644,8 @@ impl PostgresStore {
             global_name: Option<String>,
             nickname: Option<String>,
             role_ids: serde_json::Value,
-            joined_at: Option<DateTime<Utc>>,
-            account_created_at: Option<DateTime<Utc>>,
+            joined_at: Option<Timestamp>,
+            account_created_at: Option<Timestamp>,
             moderation_case_count: i64,
             xp: Option<i64>,
             level: Option<i32>,
@@ -4763,8 +4762,8 @@ impl PostgresStore {
         validate_snowflake("actor_user_id", actor_user_id)?;
 
         let id = Uuid::new_v4();
-        let now = Utc::now();
-        let expires_at = now + chrono::Duration::seconds(ttl_seconds);
+        let now = Timestamp::now();
+        let expires_at = now + SignedDuration::from_secs(ttl_seconds);
         let msg_json = serde_json::to_value(message_ids)?;
 
         let plan = sqlx::query_as::<_, CleanupPlan>(
@@ -4818,7 +4817,7 @@ impl PostgresStore {
         validate_snowflake("guild_id", guild_id)?;
         validate_snowflake("actor_user_id", actor_user_id)?;
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         let plan = sqlx::query_as::<_, CleanupPlan>(
             r#"
             UPDATE cleanup_plans
@@ -4931,7 +4930,7 @@ impl PostgresStore {
             );
         }
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut saved = Vec::new();
 
         for item in items {
@@ -5047,7 +5046,7 @@ impl PostgresStore {
         validate_snowflake("text_channel_id", params.text_channel_id)?;
         validate_snowflake("user_id", params.user_id)?;
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         let lease = sqlx::query_as::<_, CompanionChannelLease>(
             r#"
             INSERT INTO companion_channel_leases (
@@ -5124,7 +5123,7 @@ impl PostgresStore {
         validate_snowflake("text_channel_id", text_channel_id)?;
         validate_snowflake("user_id", user_id)?;
 
-        let next_retry = Utc::now() + Duration::seconds(30);
+        let next_retry = Timestamp::now() + SignedDuration::from_secs(30);
         sqlx::query(
             r#"
             UPDATE companion_channel_leases
@@ -5315,7 +5314,7 @@ impl PostgresStore {
 
         let id = Uuid::new_v4();
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let rec = sqlx::query_as::<_, ProgressionSeason>(
 
@@ -5360,9 +5359,9 @@ impl PostgresStore {
 
         description: &str,
 
-        start_time: DateTime<Utc>,
+        start_time: Timestamp,
 
-        end_time: Option<DateTime<Utc>>,
+        end_time: Option<Timestamp>,
 
         timezone: &str,
 
@@ -5398,7 +5397,7 @@ impl PostgresStore {
 
         let id = Uuid::new_v4();
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let rec = sqlx::query_as::<_, ScheduledEvent>(
             r#"
@@ -5442,7 +5441,7 @@ impl PostgresStore {
         &self,
         guild_id: &str,
         limit: usize,
-        cursor: Option<(&DateTime<Utc>, &Uuid)>,
+        cursor: Option<(&Timestamp, &Uuid)>,
     ) -> anyhow::Result<ScheduledEventsPage> {
         let fetch_limit = (limit as i64) + 1;
         let mut rows = match cursor {
@@ -5577,7 +5576,7 @@ impl PostgresStore {
     ) -> anyhow::Result<EventRoster> {
         let mut tx = self.pool.begin().await?;
 
-        let (capacity, start_time, end_time): (Option<i32>, DateTime<Utc>, Option<DateTime<Utc>>) =
+        let (capacity, start_time, end_time): (Option<i32>, Timestamp, Option<Timestamp>) =
             match sqlx::query_as(
                 "SELECT max_participants, start_time, end_time FROM scheduled_events WHERE id = $1",
             )
@@ -5592,8 +5591,9 @@ impl PostgresStore {
                 }
             };
 
-        let deadline = end_time.unwrap_or(start_time + chrono::Duration::hours(1));
-        if Utc::now() >= deadline {
+        let deadline =
+            end_time.unwrap_or_else(|| start_time.saturating_add(SignedDuration::from_hours(1)));
+        if Timestamp::now() >= deadline {
             let _ = tx.rollback().await;
             anyhow::bail!("Event registration is closed");
         }
@@ -5652,7 +5652,7 @@ impl PostgresStore {
 
         let position = i32::try_from(next_position)?;
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let rec = sqlx::query_as::<_, EventRoster>(
             r#"
@@ -5781,7 +5781,7 @@ impl PostgresStore {
 
                         let (promoted_gen, _status, _consent) = member_state;
                         let job_id = Uuid::new_v4();
-                        let now = Utc::now();
+                        let now = Timestamp::now();
                         sqlx::query(
                             r#"
                             INSERT INTO event_voice_outbox (id, event_id, guild_id, user_id, kind, state, attempts, next_attempt_at, generation, created_at, updated_at)
@@ -5873,7 +5873,7 @@ impl PostgresStore {
             anyhow::bail!("Event guild_id mismatch");
         }
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         let saved = sqlx::query_as::<_, EventVoiceQueueConfig>(
             r#"
             INSERT INTO event_voice_queue_configs (event_id, guild_id, enabled, lobby_channel_id, target_channel_id, mode, updated_at)
@@ -5998,7 +5998,7 @@ impl PostgresStore {
             }
         };
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         let member_state = sqlx::query_as::<_, EventVoiceMemberState>(
             r#"
             INSERT INTO event_voice_member_states (event_id, guild_id, user_id, ready_status, consent_auto_move, generation, ready_at, updated_at)
@@ -6103,7 +6103,7 @@ impl PostgresStore {
             .execute(&mut *tx)
             .await?;
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         let state = sqlx::query_as::<_, EventVoiceMemberState>(
             r#"
             INSERT INTO event_voice_member_states (event_id, guild_id, user_id, ready_status, consent_auto_move, generation, ready_at, updated_at)
@@ -6151,11 +6151,11 @@ impl PostgresStore {
             user_id: String,
             role_type: String,
             position: i32,
-            joined_at: DateTime<Utc>,
+            joined_at: Timestamp,
             ready_status: Option<String>,
             consent_auto_move: Option<bool>,
             generation: Option<i64>,
-            ready_at: Option<DateTime<Utc>>,
+            ready_at: Option<Timestamp>,
         }
 
         let rows = sqlx::query_as::<_, RosterWithVoiceStateRow>(
@@ -6205,9 +6205,9 @@ impl PostgresStore {
     pub async fn claim_event_voice_outbox_job(
         &self,
         worker_id: &str,
-        lease_duration: chrono::Duration,
+        lease_duration: SignedDuration,
     ) -> anyhow::Result<Option<EventVoiceOutboxJob>> {
-        let lease_seconds = lease_duration.num_seconds().max(5);
+        let lease_seconds = lease_duration.as_secs().max(5);
         let row = sqlx::query_as::<_, EventVoiceOutboxJob>(
             r#"
             WITH next_job AS (
@@ -6264,10 +6264,10 @@ impl PostgresStore {
         job_id: Uuid,
         lease_owner: &str,
         error: &str,
-        retry_delay: Option<chrono::Duration>,
+        retry_delay: Option<SignedDuration>,
     ) -> anyhow::Result<bool> {
         let res = if let Some(delay) = retry_delay {
-            let delay_seconds = delay.num_seconds().max(1);
+            let delay_seconds = delay.as_secs().max(1);
             sqlx::query(
                 r#"
                 UPDATE event_voice_outbox
@@ -6369,7 +6369,7 @@ impl PostgresStore {
 
         });
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let rec = sqlx::query_as::<_, Tournament>(
             r#"
@@ -6450,7 +6450,7 @@ impl PostgresStore {
 
         campaign_tag: Option<&str>,
     ) -> anyhow::Result<InviteTracking> {
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let rec = sqlx::query_as::<_, InviteTracking>(
 
@@ -6515,7 +6515,7 @@ impl PostgresStore {
 
         owner_id: &str,
     ) -> anyhow::Result<DynamicVoiceRoom> {
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let rec = sqlx::query_as::<_, DynamicVoiceRoom>(
 
@@ -6552,7 +6552,11 @@ impl PostgresStore {
         channel_id: &str,
         is_empty: bool,
     ) -> anyhow::Result<bool> {
-        let empty_since = if is_empty { Some(Utc::now()) } else { None };
+        let empty_since = if is_empty {
+            Some(Timestamp::now())
+        } else {
+            None
+        };
         let res = sqlx::query("UPDATE dynamic_voice_rooms SET empty_since = $2 WHERE channel_id = $1 AND guild_id = $3")
             .bind(channel_id)
             .bind(empty_since)
@@ -6567,7 +6571,7 @@ impl PostgresStore {
 
         threshold_seconds: i64,
     ) -> anyhow::Result<Vec<DynamicVoiceRoom>> {
-        let cutoff = Utc::now() - Duration::seconds(threshold_seconds);
+        let cutoff = Timestamp::now() - SignedDuration::from_secs(threshold_seconds);
 
         let rows = sqlx::query_as::<_, DynamicVoiceRoom>(
             r#"
@@ -6601,7 +6605,7 @@ impl PostgresStore {
         guild_id: &str,
         threshold_seconds: i64,
     ) -> anyhow::Result<Vec<String>> {
-        let cutoff = Utc::now() - Duration::seconds(threshold_seconds);
+        let cutoff = Timestamp::now() - SignedDuration::from_secs(threshold_seconds);
         let rows = sqlx::query_scalar::<_, String>(
             r#"
             DELETE FROM dynamic_voice_rooms
@@ -6635,7 +6639,7 @@ impl PostgresStore {
     pub async fn set_dynamic_voice_empty_since(
         &self,
         channel_id: &str,
-        empty_since: Option<DateTime<Utc>>,
+        empty_since: Option<Timestamp>,
     ) -> anyhow::Result<bool> {
         let res =
             sqlx::query("UPDATE dynamic_voice_rooms SET empty_since = $1 WHERE channel_id = $2")
@@ -6659,7 +6663,7 @@ impl PostgresStore {
     ) -> anyhow::Result<FeedSubscription> {
         let id = Uuid::new_v4();
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let rec = sqlx::query_as::<_, FeedSubscription>(
 
@@ -6729,7 +6733,7 @@ impl PostgresStore {
 
         watermark: &str,
     ) -> anyhow::Result<()> {
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         sqlx::query(
             "UPDATE feed_subscriptions SET watermark = $2, last_polled_at = $3 WHERE id = $1",
@@ -6760,7 +6764,7 @@ impl PostgresStore {
 
         let verified = code.is_none();
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let rec = sqlx::query_as::<_, GameAccountLink>(
 
@@ -7058,7 +7062,7 @@ impl PostgresStore {
     ) -> anyhow::Result<CardCollection> {
         let id = Uuid::new_v4();
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let rec = sqlx::query_as::<_, CardCollection>(
 
@@ -7145,7 +7149,7 @@ impl PostgresStore {
 
         let id = Uuid::new_v4();
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let rec = sqlx::query_as::<_, CardTrade>(
 
@@ -7280,7 +7284,7 @@ impl PostgresStore {
 
         sqlx::query("UPDATE card_trades SET status = 'accepted', updated_at = $2 WHERE id = $1")
             .bind(trade_id)
-            .bind(Utc::now())
+            .bind(Timestamp::now())
             .execute(&mut *tx)
             .await?;
 
@@ -7304,7 +7308,7 @@ impl PostgresStore {
     ) -> Result<TupperProfile, TupperError> {
         let id = Uuid::new_v4();
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let rec = sqlx::query_as::<_, TupperProfile>(
 
@@ -7397,7 +7401,7 @@ impl PostgresStore {
     ) -> anyhow::Result<FaqEntry> {
         let id = Uuid::new_v4();
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let aliases_json = serde_json::json!(aliases);
 
@@ -7885,7 +7889,7 @@ impl PostgresStore {
         &self,
         provider: &str,
         event_id: &str,
-        processed_at: DateTime<Utc>,
+        processed_at: Timestamp,
     ) -> anyhow::Result<()> {
         sqlx::query(
             "INSERT INTO integration_event_dedupes (provider, event_id, processed_at) VALUES ($1, $2, $3) ON CONFLICT (provider, event_id) DO UPDATE SET processed_at = EXCLUDED.processed_at"
@@ -7946,7 +7950,7 @@ impl PostgresStore {
         guild_id: &str,
         provider: Option<&str>,
         limit: Option<usize>,
-        before_created_at: Option<DateTime<Utc>>,
+        before_created_at: Option<Timestamp>,
         before_id: Option<Uuid>,
     ) -> anyhow::Result<Vec<IntegrationDeliveryLog>> {
         let max_results = limit.unwrap_or(50).clamp(1, 100) as i64;
@@ -8022,7 +8026,7 @@ impl PostgresStore {
 
     pub async fn prune_event_dedupes(
         &self,
-        before: DateTime<Utc>,
+        before: Timestamp,
         limit: usize,
     ) -> anyhow::Result<u64> {
         let max_delete = limit.clamp(1, 5000) as i64;
@@ -8049,7 +8053,7 @@ impl PostgresStore {
 
     pub async fn prune_delivery_logs(
         &self,
-        before: DateTime<Utc>,
+        before: Timestamp,
         limit: usize,
     ) -> anyhow::Result<u64> {
         let max_delete = limit.clamp(1, 5000) as i64;
@@ -8552,7 +8556,7 @@ impl PostgresStore {
         Ok(count.0 as usize)
     }
 
-    pub async fn prune_steam_lfg_posts(&self, cutoff: DateTime<Utc>) -> anyhow::Result<u64> {
+    pub async fn prune_steam_lfg_posts(&self, cutoff: Timestamp) -> anyhow::Result<u64> {
         let deleted = sqlx::query("DELETE FROM steam_lfg_posts WHERE expires_at <= $1")
             .bind(cutoff)
             .execute(&self.pool)
@@ -8581,7 +8585,7 @@ impl PostgresStore {
         .await?
         .ok_or_else(|| anyhow::anyhow!("LFG listing not found"))?;
 
-        if post.expires_at <= Utc::now() {
+        if post.expires_at <= Timestamp::now() {
             anyhow::bail!("LFG listing has expired");
         }
 
@@ -9726,7 +9730,7 @@ impl PostgresStore {
         guild_id: &str,
         status: Option<&str>,
         limit: usize,
-        cursor: Option<(&DateTime<Utc>, &Uuid)>,
+        cursor: Option<(&Timestamp, &Uuid)>,
     ) -> anyhow::Result<SocialDraftsPage> {
         let limit = limit.clamp(1, 100);
         let fetch_limit = (limit as i64) + 1;
@@ -10058,14 +10062,14 @@ impl PostgresStore {
 
         // Periodic reset check (#125)
 
-        if Utc::now() >= budget.reset_at {
+        if Timestamp::now() >= budget.reset_at {
             budget.used_tokens = 0;
 
             budget.used_usd = 0.0;
 
             budget.is_halted = false;
 
-            budget.reset_at = Utc::now() + chrono::Duration::days(30);
+            budget.reset_at = Timestamp::now() + days(30);
         }
 
         if budget.is_halted {
@@ -10140,7 +10144,7 @@ impl PostgresStore {
         .bind(request_id)
         .bind(tokens)
         .bind(usd)
-        .bind(Utc::now())
+        .bind(Timestamp::now())
         .execute(&mut *tx)
         .await?;
 
@@ -10167,11 +10171,11 @@ impl PostgresStore {
         .fetch_one(&mut *tx)
         .await?;
 
-        if Utc::now() >= budget.reset_at {
+        if Timestamp::now() >= budget.reset_at {
             budget.used_tokens = 0;
             budget.used_usd = 0.0;
             budget.is_halted = false;
-            budget.reset_at = Utc::now() + chrono::Duration::days(30);
+            budget.reset_at = Timestamp::now() + days(30);
         }
 
         if budget.is_halted {
@@ -10205,7 +10209,7 @@ impl PostgresStore {
 
     pub async fn prune_ai_metering_events(
         &self,
-        cutoff: DateTime<Utc>,
+        cutoff: Timestamp,
         limit: usize,
     ) -> anyhow::Result<u64> {
         let chunk_limit = (limit as i64).clamp(1, 5000);
@@ -10808,7 +10812,7 @@ impl PostgresStore {
         }
 
         let mut tx = self.pool.begin().await?;
-        let now = Utc::now();
+        let now = Timestamp::now();
         let saved = sqlx::query_as::<_, CommandPolicyRule>(
             r#"
             INSERT INTO command_policy_rules (
@@ -11040,7 +11044,7 @@ impl PostgresStore {
             .await?;
 
         // 5. Insert new rules
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut inserted = Vec::with_capacity(rules.len());
         for rule in rules {
             let saved = sqlx::query_as::<_, CommandPolicyRule>(
@@ -12624,7 +12628,7 @@ impl PostgresStore {
                 "#,
             )
             .bind(&item.guild_id)
-            .bind(item.usage_date)
+            .bind(item.usage_date.to_sqlx())
             .bind(&item.asset_kind)
             .bind(&item.asset_id)
             .bind(item.usage_count)
@@ -12675,10 +12679,10 @@ impl PostgresStore {
     ) -> anyhow::Result<crate::asset_analytics::AssetUsageSummary> {
         validate_snowflake("guild_id", guild_id)?;
 
-        let now = Utc::now();
-        let today = now.date_naive();
-        let seven_days_ago = today - chrono::Duration::days(6);
-        let thirty_days_ago = today - chrono::Duration::days(29);
+        let now = Timestamp::now();
+        let today = now.date();
+        let seven_days_ago = today - jiff::Span::new().days(6);
+        let thirty_days_ago = today - jiff::Span::new().days(29);
         let kind_str = kind.map(|k| k.as_str().to_string());
 
         let aggregates = sqlx::query_as::<_, crate::asset_analytics::AssetUsageAggregate>(
@@ -12706,9 +12710,9 @@ impl PostgresStore {
         )
         .bind(guild_id)
         .bind(kind_str.as_deref())
-        .bind(seven_days_ago)
-        .bind(thirty_days_ago)
-        .bind(today)
+        .bind(seven_days_ago.to_sqlx())
+        .bind(thirty_days_ago.to_sqlx())
+        .bind(today.to_sqlx())
         .bind(period)
         .fetch_all(&self.pool)
         .await?;
@@ -12840,8 +12844,10 @@ impl PostgresStore {
             validate_snowflake("guild_id", gid)?;
         }
 
-        let cutoff =
-            chrono::Utc::now().date_naive() - chrono::Duration::days(older_than_days as i64);
+        let cutoff = Timestamp::now()
+            .date()
+            .checked_sub(days(i64::from(older_than_days)))
+            .unwrap_or(Date::MIN);
 
         let result = sqlx::query(
             r#"
@@ -12851,7 +12857,7 @@ impl PostgresStore {
             "#,
         )
         .bind(guild_id)
-        .bind(cutoff)
+        .bind(cutoff.to_sqlx())
         .execute(&self.pool)
         .await?;
 

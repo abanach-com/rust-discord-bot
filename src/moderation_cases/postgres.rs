@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use crate::datetime::Timestamp;
 use serde_json::json;
 use sqlx::{
     PgPool, Postgres, Row, Transaction,
@@ -35,7 +35,7 @@ impl PostgresModerationCaseStore {
     pub async fn create_case(
         &self,
         input: CreateCase,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<ModerationCase, CaseError> {
         input.validate(now)?;
         let mut transaction = self.pool.begin().await?;
@@ -105,7 +105,7 @@ impl PostgresModerationCaseStore {
         &self,
         guild_id: u64,
         case_number: i64,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<CaseDetails, CaseError> {
         self.expire_due(guild_id, now).await?;
         let moderation_case = self.fetch_case(guild_id, case_number).await?;
@@ -148,7 +148,7 @@ impl PostgresModerationCaseStore {
         &self,
         guild_id: u64,
         filter: CaseFilter,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<Vec<ModerationCase>, CaseError> {
         filter.validate()?;
         self.expire_due(guild_id, now).await?;
@@ -183,7 +183,7 @@ impl PostgresModerationCaseStore {
         guild_id: u64,
         limit: usize,
         offset: usize,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<(Vec<ModerationCase>, u64), CaseError> {
         self.expire_due(guild_id, now).await?;
         let guild_str = guild_id.to_string();
@@ -221,7 +221,7 @@ impl PostgresModerationCaseStore {
         &self,
         guild_id: u64,
         subject_user_id: u64,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<Vec<ModerationCase>, CaseError> {
         self.expire_due(guild_id, now).await?;
         let mut all_cases = Vec::new();
@@ -274,7 +274,7 @@ impl PostgresModerationCaseStore {
         actor_user_id: u64,
         expected_version: i64,
         update: UpdateCase,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<ModerationCase, CaseError> {
         update.validate(now)?;
         if update.is_empty() {
@@ -364,7 +364,7 @@ impl PostgresModerationCaseStore {
         author_user_id: u64,
         body: String,
         visible_to_subject: bool,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<CaseNote, CaseError> {
         validate_note(&body)?;
         let mut transaction = self.pool.begin().await?;
@@ -409,7 +409,7 @@ impl PostgresModerationCaseStore {
         author_user_id: u64,
         label: String,
         value: String,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<CaseEvidence, CaseError> {
         validate_evidence(&label, &value)?;
         let mut transaction = self.pool.begin().await?;
@@ -454,7 +454,7 @@ impl PostgresModerationCaseStore {
         actor_user_id: u64,
         expected_version: i64,
         reason: String,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<ModerationCase, CaseError> {
         validate_void_reason(&reason)?;
         let mut transaction = self.pool.begin().await?;
@@ -525,7 +525,7 @@ impl PostgresModerationCaseStore {
         case_number: i64,
         actor_user_id: u64,
         expected_version: i64,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<ModerationCase, CaseError> {
         let mut transaction = self.pool.begin().await?;
         let row = sqlx::query(
@@ -587,7 +587,7 @@ impl PostgresModerationCaseStore {
         &self,
         guild_id: u64,
         actor_user_id: Option<u64>,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<ModeratorStats, CaseError> {
         self.expire_due(guild_id, now).await?;
         let row = sqlx::query(
@@ -641,7 +641,7 @@ impl PostgresModerationCaseStore {
         map_case(&row)
     }
 
-    async fn expire_due(&self, guild_id: u64, now: DateTime<Utc>) -> Result<(), CaseError> {
+    async fn expire_due(&self, guild_id: u64, now: Timestamp) -> Result<(), CaseError> {
         let mut transaction = self.pool.begin().await?;
         let rows = sqlx::query(
             r#"
@@ -699,7 +699,7 @@ async fn insert_event(
     actor_user_id: u64,
     event_type: &str,
     payload: serde_json::Value,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<(), CaseError> {
     sqlx::query(
         r#"

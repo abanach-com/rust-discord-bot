@@ -1,5 +1,6 @@
+use crate::datetime::Timestamp;
 use anyhow::{Result, anyhow};
-use chrono::{Duration, Utc};
+use jiff::SignedDuration;
 use serenity::{
     all::{ChannelId, GuildId, Permissions, UserId},
     builder::EditMember,
@@ -66,7 +67,7 @@ pub async fn execute(
     let actor_id = execution
         .actor_id
         .ok_or_else(|| anyhow!("this operation requires user context"))?;
-    let now = Utc::now();
+    let now = Timestamp::now();
     let is_mod = is_moderator(execution.actor_permissions);
 
     match operation {
@@ -159,7 +160,8 @@ pub async fn execute(
                 _ => CaseSeverity::Medium,
             };
 
-            let expires_at = duration_seconds.map(|secs| now + Duration::seconds(secs as i64));
+            let expires_at =
+                duration_seconds.map(|secs| now + SignedDuration::from_secs(secs as i64));
 
             // Execute underlying Discord action if applicable with proper error propagation
             if case_kind == CaseKind::Timeout {
@@ -169,7 +171,7 @@ pub async fn execute(
                             "timeout duration must be between 1 and 2419200 seconds (28 days)"
                         ));
                     }
-                    let until = (now + Duration::seconds(*secs as i64)).to_rfc3339();
+                    let until = (now + SignedDuration::from_secs(*secs as i64)).to_rfc3339();
                     guild_id
                         .edit_member(
                             &ctx.http,
@@ -202,8 +204,8 @@ pub async fn execute(
                     step: "pending".to_string(),
                     reason: Some(reason.clone()),
                     error: None,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
+                    created_at: Timestamp::now(),
+                    updated_at: Timestamp::now(),
                 };
                 let _ = state.storage.record_moderation_intent(&intent).await;
 
@@ -643,7 +645,8 @@ pub async fn execute(
                 _ => CaseSeverity::Medium,
             });
 
-            let expires_at = duration_seconds.map(|secs| now + Duration::seconds(secs as i64));
+            let expires_at =
+                duration_seconds.map(|secs| now + SignedDuration::from_secs(secs as i64));
 
             let update = UpdateCase {
                 reason: reason.clone(),

@@ -1,6 +1,7 @@
+use jiff::SignedDuration;
+use rusty_discord_bot::datetime::{Timestamp, days};
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
 use dashmap::DashMap;
 use reqwest::header::COOKIE;
 use rusty_discord_bot::{
@@ -91,7 +92,7 @@ async fn test_ensure_guild_access_lifecycle_cache_and_revocation() {
             permissions: "32".to_owned(), // MANAGE_GUILD
         }],
         csrf_token: "csrf_abc".to_owned(),
-        expires_at: Utc::now() + Duration::days(1),
+        expires_at: Timestamp::now() + days(1),
         access_token: None,
     };
 
@@ -136,7 +137,7 @@ async fn test_ensure_guild_access_lifecycle_cache_and_revocation() {
         ("user_100".to_owned(), "guild_allow".to_owned()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now() - Duration::seconds(70),
+            checked_at: Timestamp::now() - SignedDuration::from_secs(70),
         },
     );
 
@@ -187,7 +188,7 @@ async fn test_ensure_guild_access_owner_and_administrator_bits() {
             permissions: "0".to_owned(),
         }],
         csrf_token: "csrf_owner".to_owned(),
-        expires_at: Utc::now() + Duration::days(1),
+        expires_at: Timestamp::now() + days(1),
         access_token: None,
     };
     assert!(
@@ -212,7 +213,7 @@ async fn test_ensure_guild_access_owner_and_administrator_bits() {
             permissions: "8".to_owned(), // ADMINISTRATOR
         }],
         csrf_token: "csrf_admin".to_owned(),
-        expires_at: Utc::now() + Duration::days(1),
+        expires_at: Timestamp::now() + days(1),
         access_token: None,
     };
     assert!(
@@ -231,7 +232,7 @@ async fn test_cleanup_stale_permissions_cache() {
         ("u1".to_owned(), "g1".to_owned()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now() - Duration::seconds(30),
+            checked_at: Timestamp::now() - SignedDuration::from_secs(30),
         },
     );
 
@@ -240,7 +241,7 @@ async fn test_cleanup_stale_permissions_cache() {
         ("u2".to_owned(), "g2".to_owned()),
         CachedGuildPermission {
             can_manage: false,
-            checked_at: Utc::now() - Duration::seconds(150),
+            checked_at: Timestamp::now() - SignedDuration::from_secs(150),
         },
     );
 
@@ -293,7 +294,7 @@ async fn test_http_api_guild_endpoints_enforce_permissions_and_revalidation() {
             user,
             guilds,
             "csrf_token_test".to_owned(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -334,7 +335,7 @@ async fn test_http_api_guild_endpoints_enforce_permissions_and_revalidation() {
         ("2001".to_owned(), "guild_web_1".to_owned()),
         CachedGuildPermission {
             can_manage: false,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -390,7 +391,7 @@ async fn test_phase1_governance_and_defense_suite() {
             user,
             guilds,
             "csrf_phase1_token".to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             Some("token_123".to_owned()),
         )
         .await
@@ -737,7 +738,7 @@ async fn test_member_intelligence_api_endpoints_permissions_and_search() {
             user,
             guilds,
             "csrf_token_intel".to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -748,7 +749,7 @@ async fn test_member_intelligence_api_endpoints_permissions_and_search() {
     let session_cookie = format!("rusty_discord_bot_session={session_id}");
 
     // Seed snapshots and identity history
-    let joined = Utc::now() - Duration::days(10);
+    let joined = Timestamp::now() - days(10);
     state
         .app
         .storage
@@ -910,7 +911,7 @@ async fn test_cleanup_preview_and_confirm_endpoints_and_isolation() {
                 permissions: "8".to_owned(),
             }],
             csrf_token.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -1009,7 +1010,7 @@ async fn test_voice_companion_channels_api() {
                 permissions: "8".to_owned(),
             }],
             csrf_token.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -1367,7 +1368,7 @@ async fn test_command_policies_api() {
                 },
             ],
             csrf_token.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -1614,8 +1615,8 @@ async fn test_command_policies_api() {
                 "enabled": true,
                 "version": 1,
                 "created_by": admin_user_id,
-                "created_at": Utc::now().to_rfc3339(),
-                "updated_at": Utc::now().to_rfc3339(),
+                "created_at": Timestamp::now().to_rfc3339(),
+                "updated_at": Timestamp::now().to_rfc3339(),
             }]
         }))
         .send()
@@ -1642,8 +1643,8 @@ async fn test_command_policies_api() {
                 "enabled": true,
                 "version": 1,
                 "created_by": admin_user_id,
-                "created_at": Utc::now().to_rfc3339(),
-                "updated_at": Utc::now().to_rfc3339(),
+                "created_at": Timestamp::now().to_rfc3339(),
+                "updated_at": Timestamp::now().to_rfc3339(),
             }]
         }))
         .send()
@@ -1719,7 +1720,7 @@ async fn test_moderator_duty_api() {
                 permissions: "8".to_owned(),
             }],
             csrf_token.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -2027,7 +2028,7 @@ async fn test_moderator_duty_schedule_validation_and_diagnostics_issue_258() {
                 permissions: "8".to_owned(),
             }],
             csrf_token.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -2207,7 +2208,7 @@ async fn test_moderator_duty_schedule_validation_and_diagnostics_issue_258() {
         manual_override: None,
         override_expires_at: None,
         version: 0,
-        updated_at: Utc::now(),
+        updated_at: Timestamp::now(),
     };
     state
         .app
@@ -2297,7 +2298,7 @@ async fn test_staff_recruitment_pipeline_full_lifecycle() {
                 permissions: "8".to_owned(),
             }],
             csrf_token.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -2324,7 +2325,7 @@ async fn test_staff_recruitment_pipeline_full_lifecycle() {
                 permissions: "8".to_owned(),
             }],
             csrf_token.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -2351,7 +2352,7 @@ async fn test_staff_recruitment_pipeline_full_lifecycle() {
                 permissions: "0".to_owned(),
             }],
             csrf_token.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -2733,7 +2734,7 @@ async fn test_help_forum_lifecycle_and_api() {
                 permissions: "8".to_owned(),
             }],
             csrf_token.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -2760,7 +2761,7 @@ async fn test_help_forum_lifecycle_and_api() {
                 permissions: "0".to_owned(),
             }],
             csrf_token.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -2787,7 +2788,7 @@ async fn test_help_forum_lifecycle_and_api() {
                 permissions: "0".to_owned(),
             }],
             csrf_token.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -2837,8 +2838,8 @@ async fn test_help_forum_lifecycle_and_api() {
         thread_id: thread_id.to_string(),
         owner_user_id: author_user_id.to_string(),
         status: "open".to_string(),
-        opened_at: Utc::now() - Duration::minutes(10),
-        last_activity_at: Utc::now() - Duration::minutes(10),
+        opened_at: Timestamp::now() - SignedDuration::from_mins(10),
+        last_activity_at: Timestamp::now() - SignedDuration::from_mins(10),
         first_helper_response_at: None,
         closed_at: None,
         closing_reason: None,
@@ -2929,8 +2930,8 @@ async fn test_help_forum_lifecycle_and_api() {
         thread_id: idle_thread_id.to_string(),
         owner_user_id: author_user_id.to_string(),
         status: "open".to_string(),
-        opened_at: Utc::now() - Duration::hours(5),
-        last_activity_at: Utc::now() - Duration::hours(2), // 2 hours idle, threshold is 60 mins
+        opened_at: Timestamp::now() - SignedDuration::from_hours(5),
+        last_activity_at: Timestamp::now() - SignedDuration::from_hours(2), // 2 hours idle, threshold is 60 mins
         first_helper_response_at: None,
         closed_at: None,
         closing_reason: None,
@@ -3028,7 +3029,7 @@ async fn test_recruitment_security_and_concurrency_fixes() {
                 permissions: "8".to_owned(),
             }],
             csrf.to_owned(),
-            Utc::now() + Duration::hours(24),
+            Timestamp::now() + SignedDuration::from_hours(24),
             None,
         )
         .await
@@ -3053,7 +3054,7 @@ async fn test_recruitment_security_and_concurrency_fixes() {
                 permissions: "0".to_owned(),
             }],
             csrf.to_owned(),
-            Utc::now() + Duration::hours(24),
+            Timestamp::now() + SignedDuration::from_hours(24),
             None,
         )
         .await
@@ -3078,7 +3079,7 @@ async fn test_recruitment_security_and_concurrency_fixes() {
                 permissions: "8".to_owned(),
             }],
             csrf.to_owned(),
-            Utc::now() + Duration::hours(24),
+            Timestamp::now() + SignedDuration::from_hours(24),
             None,
         )
         .await
@@ -3260,9 +3261,9 @@ async fn test_recruitment_security_and_concurrency_fixes() {
             status: "pending".to_string(),
             attempts: 0,
             last_error: None,
-            next_attempt_at: Utc::now(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            next_attempt_at: Timestamp::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -3342,7 +3343,7 @@ async fn test_asset_analytics_api_and_isolation() {
                 permissions: "8".to_owned(),
             }],
             csrf_token.to_owned(),
-            Utc::now() + Duration::hours(24),
+            Timestamp::now() + SignedDuration::from_hours(24),
             None,
         )
         .await
@@ -3555,7 +3556,7 @@ async fn test_help_forum_hardening_and_lifecycle() {
                 permissions: "8".to_owned(),
             }],
             csrf_token.to_owned(),
-            Utc::now() + Duration::hours(24),
+            Timestamp::now() + SignedDuration::from_hours(24),
             None,
         )
         .await
@@ -3622,8 +3623,8 @@ async fn test_help_forum_hardening_and_lifecycle() {
         thread_id: thread_id.to_string(),
         owner_user_id: user_id.to_string(),
         status: "needs_tag".to_string(),
-        opened_at: Utc::now() - Duration::hours(2),
-        last_activity_at: Utc::now() - Duration::hours(2),
+        opened_at: Timestamp::now() - SignedDuration::from_hours(2),
+        last_activity_at: Timestamp::now() - SignedDuration::from_hours(2),
         first_helper_response_at: None,
         closed_at: None,
         closing_reason: None,
@@ -3684,8 +3685,8 @@ async fn test_help_forum_hardening_and_lifecycle() {
         thread_id: idle_thread.to_string(),
         owner_user_id: user_id.to_string(),
         status: "open".to_string(),
-        opened_at: Utc::now() - Duration::hours(5),
-        last_activity_at: Utc::now() - Duration::hours(3), // idle > 60 mins
+        opened_at: Timestamp::now() - SignedDuration::from_hours(5),
+        last_activity_at: Timestamp::now() - SignedDuration::from_hours(3), // idle > 60 mins
         first_helper_response_at: None,
         closed_at: None,
         closing_reason: None,
@@ -3759,7 +3760,7 @@ async fn test_giveaways_member_access_and_admin_boundary() {
             "channel_123",
             "Discord Nitro",
             1,
-            Utc::now() + Duration::days(7),
+            Timestamp::now() + days(7),
         )
         .await
         .expect("create test giveaway");
@@ -3788,7 +3789,7 @@ async fn test_giveaways_member_access_and_admin_boundary() {
             member_user,
             member_guilds,
             "csrf_member_123".to_owned(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -3892,7 +3893,7 @@ async fn test_giveaways_member_access_and_admin_boundary() {
             "channel_123",
             "Expired Nitro",
             1,
-            Utc::now() - Duration::minutes(5),
+            Timestamp::now() - SignedDuration::from_mins(5),
         )
         .await
         .expect("create expired giveaway");
@@ -3967,7 +3968,7 @@ async fn test_guild_events_stream_security_and_reauth_on_revoke() {
             user,
             guilds,
             "csrf_stream_token".to_owned(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -3978,7 +3979,7 @@ async fn test_guild_events_stream_security_and_reauth_on_revoke() {
         (user_id.to_owned(), guild_id.to_owned()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -4036,7 +4037,7 @@ async fn test_guild_events_stream_security_and_reauth_on_revoke() {
         (user_id.to_owned(), guild_id.to_owned()),
         CachedGuildPermission {
             can_manage: false,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -4105,7 +4106,7 @@ async fn test_guild_events_stream_task_cancellation_on_client_drop() {
             user,
             guilds,
             "csrf_stream_drop_token".to_owned(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -4115,7 +4116,7 @@ async fn test_guild_events_stream_task_cancellation_on_client_drop() {
         (user_id.to_owned(), guild_id.to_owned()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -4198,8 +4199,8 @@ async fn test_scheduled_events_member_access_and_admin_boundary() {
             guild_id,
             "Community Game Night",
             "Board games and fun",
-            Utc::now() + Duration::days(1),
-            Some(Utc::now() + Duration::days(1) + Duration::hours(2)),
+            Timestamp::now() + days(1),
+            Some(Timestamp::now() + days(1) + SignedDuration::from_hours(2)),
             "UTC",
             Some(10),
         )
@@ -4213,7 +4214,7 @@ async fn test_scheduled_events_member_access_and_admin_boundary() {
             other_guild_id,
             "Other Guild Meeting",
             "Secret admin meeting",
-            Utc::now() + Duration::days(2),
+            Timestamp::now() + days(2),
             None,
             "UTC",
             Some(5),
@@ -4246,7 +4247,7 @@ async fn test_scheduled_events_member_access_and_admin_boundary() {
             member_user,
             member_guilds,
             member_csrf.to_owned(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -4277,7 +4278,7 @@ async fn test_scheduled_events_member_access_and_admin_boundary() {
             non_member_user,
             non_member_guilds,
             non_member_csrf.to_owned(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -4340,7 +4341,7 @@ async fn test_scheduled_events_member_access_and_admin_boundary() {
         .json(&serde_json::json!({
             "title": "Unauthorized Event",
             "description": "I have no admin rights",
-            "start_time": Utc::now() + Duration::days(3),
+            "start_time": Timestamp::now() + days(3),
             "timezone": "UTC"
         }))
         .send()
@@ -4514,8 +4515,8 @@ async fn test_scheduled_events_live_mode_discord_verification() {
             guild_id,
             "Live Guild Event",
             "Testing live verification",
-            Utc::now() + Duration::days(1),
-            Some(Utc::now() + Duration::days(1) + Duration::hours(1)),
+            Timestamp::now() + days(1),
+            Some(Timestamp::now() + days(1) + SignedDuration::from_hours(1)),
             "UTC",
             Some(20),
         )
@@ -4542,7 +4543,7 @@ async fn test_scheduled_events_live_mode_discord_verification() {
                 permissions: "0".to_string(),
             }],
             csrf_token.to_string(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -4648,7 +4649,7 @@ async fn test_ensure_guild_member_access_rejects_session_missing_guild_even_with
         (user_id.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -4668,7 +4669,7 @@ async fn test_ensure_guild_member_access_rejects_session_missing_guild_even_with
             },
             vec![], // guilds list is empty!
             csrf_token.to_string(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -4702,7 +4703,7 @@ async fn test_ensure_guild_member_access_rejects_session_missing_guild_even_with
             guild_id,
             "Secret Guild Event",
             "Should not be visible without guild in session",
-            Utc::now() + Duration::days(1),
+            Timestamp::now() + days(1),
             None,
             "UTC",
             Some(10),
@@ -4765,7 +4766,7 @@ async fn test_scheduled_events_rsvp_point_lookup_and_tenant_isolation() {
                 guild_id,
                 &format!("Event #{idx}"),
                 "Description",
-                Utc::now() + Duration::days(idx + 1),
+                Timestamp::now() + days(idx + 1),
                 None,
                 "UTC",
                 Some(15),
@@ -4786,7 +4787,7 @@ async fn test_scheduled_events_rsvp_point_lookup_and_tenant_isolation() {
             other_guild_id,
             "Other Guild Event",
             "Other",
-            Utc::now() + Duration::days(5),
+            Timestamp::now() + days(5),
             None,
             "UTC",
             Some(10),
@@ -4818,7 +4819,7 @@ async fn test_scheduled_events_rsvp_point_lookup_and_tenant_isolation() {
                 permissions: "0".to_string(),
             }],
             csrf_token.to_string(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -4925,7 +4926,7 @@ async fn test_recruitment_cooldown_checks_latest_rejection_decision() {
                 permissions: "0".to_owned(),
             }],
             csrf.to_owned(),
-            Utc::now() + Duration::hours(24),
+            Timestamp::now() + SignedDuration::from_hours(24),
             None,
         )
         .await
@@ -4958,8 +4959,8 @@ async fn test_recruitment_cooldown_checks_latest_rejection_decision() {
             ..Default::default()
         }),
         version: 1,
-        created_at: Utc::now() - Duration::days(50),
-        updated_at: Utc::now() - Duration::days(50),
+        created_at: Timestamp::now() - days(50),
+        updated_at: Timestamp::now() - days(50),
     };
     state
         .app
@@ -4968,7 +4969,7 @@ async fn test_recruitment_cooldown_checks_latest_rejection_decision() {
         .await
         .unwrap();
 
-    // Application A: submitted 40 days ago, rejected 1 day ago (decided_at = Utc::now() - 1 day -> inside cooldown)
+    // Application A: submitted 40 days ago, rejected 1 day ago (decided_at = Timestamp::now() - 1 day -> inside cooldown)
     let app_a = rusty_discord_bot::recruitment::RecruitmentApplication {
         id: uuid::Uuid::new_v4(),
         guild_id: guild_id.to_string(),
@@ -4984,9 +4985,9 @@ async fn test_recruitment_cooldown_checks_latest_rejection_decision() {
         ]),
         current_stage: "screening".to_string(),
         version: 2,
-        submitted_at: Utc::now() - Duration::days(40),
-        updated_at: Utc::now() - Duration::days(1),
-        decided_at: Some(Utc::now() - Duration::days(1)),
+        submitted_at: Timestamp::now() - days(40),
+        updated_at: Timestamp::now() - days(1),
+        decided_at: Some(Timestamp::now() - days(1)),
         decision_reason: Some("Not enough experience".to_string()),
         decided_by: Some("admin_1".to_string()),
     };
@@ -4997,7 +4998,7 @@ async fn test_recruitment_cooldown_checks_latest_rejection_decision() {
         .await
         .unwrap();
 
-    // Application B: submitted 30 days ago, rejected 10 days ago (decided_at = Utc::now() - 10 days -> outside cooldown)
+    // Application B: submitted 30 days ago, rejected 10 days ago (decided_at = Timestamp::now() - 10 days -> outside cooldown)
     let app_b = rusty_discord_bot::recruitment::RecruitmentApplication {
         id: uuid::Uuid::new_v4(),
         guild_id: guild_id.to_string(),
@@ -5013,9 +5014,9 @@ async fn test_recruitment_cooldown_checks_latest_rejection_decision() {
         ]),
         current_stage: "screening".to_string(),
         version: 2,
-        submitted_at: Utc::now() - Duration::days(30),
-        updated_at: Utc::now() - Duration::days(10),
-        decided_at: Some(Utc::now() - Duration::days(10)),
+        submitted_at: Timestamp::now() - days(30),
+        updated_at: Timestamp::now() - days(10),
+        decided_at: Some(Timestamp::now() - days(10)),
         decision_reason: Some("Earlier rejection".to_string()),
         decided_by: Some("admin_1".to_string()),
     };
@@ -5042,8 +5043,8 @@ async fn test_recruitment_cooldown_checks_latest_rejection_decision() {
         ]),
         current_stage: "screening".to_string(),
         version: 1,
-        submitted_at: Utc::now() - Duration::days(60),
-        updated_at: Utc::now() - Duration::days(60),
+        submitted_at: Timestamp::now() - days(60),
+        updated_at: Timestamp::now() - days(60),
         decided_at: None,
         decision_reason: None,
         decided_by: None,
@@ -5081,8 +5082,8 @@ async fn test_recruitment_cooldown_checks_latest_rejection_decision() {
 
     // 2. Now simulate that Application A's rejection happened 5 days ago (> 3 days cooldown)
     let mut app_a_older = app_a;
-    app_a_older.decided_at = Some(Utc::now() - Duration::days(5));
-    app_a_older.updated_at = Utc::now() - Duration::days(5);
+    app_a_older.decided_at = Some(Timestamp::now() - days(5));
+    app_a_older.updated_at = Timestamp::now() - days(5);
     state
         .app
         .storage
@@ -5156,7 +5157,7 @@ async fn test_asset_analytics_manual_flush_csrf_and_guild_isolation() {
                 permissions: "32".to_owned(), // MANAGE_GUILD
             }],
             csrf_token.to_owned(),
-            Utc::now() + Duration::hours(24),
+            Timestamp::now() + SignedDuration::from_hours(24),
             None,
         )
         .await
@@ -5310,8 +5311,8 @@ async fn test_help_forum_session_close_requires_active_membership_for_owner() {
         thread_id: thread_id.to_string(),
         owner_user_id: former_member_user_id.to_string(),
         status: "open".to_string(),
-        opened_at: Utc::now() - Duration::hours(3),
-        last_activity_at: Utc::now() - Duration::hours(1),
+        opened_at: Timestamp::now() - SignedDuration::from_hours(3),
+        last_activity_at: Timestamp::now() - SignedDuration::from_hours(1),
         first_helper_response_at: None,
         closed_at: None,
         closing_reason: None,
@@ -5340,7 +5341,7 @@ async fn test_help_forum_session_close_requires_active_membership_for_owner() {
             },
             vec![], // session has NO guilds (or different guilds)
             former_csrf.to_owned(),
-            Utc::now() + Duration::hours(24),
+            Timestamp::now() + SignedDuration::from_hours(24),
             None,
         )
         .await
@@ -5396,7 +5397,7 @@ async fn test_help_forum_session_close_requires_active_membership_for_owner() {
                 permissions: "0".to_owned(),
             }],
             other_csrf.to_owned(),
-            Utc::now() + Duration::hours(24),
+            Timestamp::now() + SignedDuration::from_hours(24),
             None,
         )
         .await
@@ -5442,7 +5443,7 @@ async fn test_help_forum_session_close_requires_active_membership_for_owner() {
                 permissions: "0".to_owned(), // regular member, not admin
             }],
             active_owner_csrf.to_owned(),
-            Utc::now() + Duration::hours(24),
+            Timestamp::now() + SignedDuration::from_hours(24),
             None,
         )
         .await
@@ -5534,7 +5535,7 @@ async fn test_moderation_appeal_cross_guild_tenant_isolation() {
                 permissions: "32".to_owned(), // MANAGE_GUILD
             }],
             csrf_a.to_owned(),
-            Utc::now() + Duration::hours(24),
+            Timestamp::now() + SignedDuration::from_hours(24),
             None,
         )
         .await
@@ -5560,7 +5561,7 @@ async fn test_moderation_appeal_cross_guild_tenant_isolation() {
                 permissions: "32".to_owned(), // MANAGE_GUILD
             }],
             csrf_b.to_owned(),
-            Utc::now() + Duration::hours(24),
+            Timestamp::now() + SignedDuration::from_hours(24),
             None,
         )
         .await
@@ -5576,8 +5577,8 @@ async fn test_moderation_appeal_cross_guild_tenant_isolation() {
         reason: "Unfair ban appeal".to_string(),
         evidence_url: None,
         staff_notes: None,
-        created_at: Utc::now() - Duration::hours(5),
-        updated_at: Utc::now() - Duration::hours(5),
+        created_at: Timestamp::now() - SignedDuration::from_hours(5),
+        updated_at: Timestamp::now() - SignedDuration::from_hours(5),
     };
     state.app.storage.create_appeal(&appeal_b).await.unwrap();
 
@@ -5678,8 +5679,8 @@ async fn test_moderation_appeal_duplicate_prevention_issue_345() {
         reason: "Initial appeal".to_string(),
         evidence_url: None,
         staff_notes: None,
-        created_at: Utc::now() - Duration::hours(1),
-        updated_at: Utc::now() - Duration::hours(1),
+        created_at: Timestamp::now() - SignedDuration::from_hours(1),
+        updated_at: Timestamp::now() - SignedDuration::from_hours(1),
     };
 
     let outcome1 = state.app.storage.create_appeal(&appeal1).await.unwrap();
@@ -5698,8 +5699,8 @@ async fn test_moderation_appeal_duplicate_prevention_issue_345() {
         reason: "Spam duplicate appeal".to_string(),
         evidence_url: None,
         staff_notes: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
 
     let outcome2 = state.app.storage.create_appeal(&appeal2).await.unwrap();
@@ -5728,8 +5729,8 @@ async fn test_moderation_appeal_duplicate_prevention_issue_345() {
         reason: "Appeal for another case".to_string(),
         evidence_url: None,
         staff_notes: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     let outcome_other = state
         .app
@@ -5760,8 +5761,8 @@ async fn test_moderation_appeal_duplicate_prevention_issue_345() {
         reason: "Second appeal after denial".to_string(),
         evidence_url: None,
         staff_notes: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     let outcome3 = state.app.storage.create_appeal(&appeal3).await.unwrap();
     assert_eq!(
@@ -5796,8 +5797,8 @@ async fn test_moderation_appeal_concurrent_create_and_decide_deadlock_free_issue
         reason: "Initial appeal for concurrent testing".to_string(),
         evidence_url: None,
         staff_notes: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     state
         .app
@@ -5824,8 +5825,8 @@ async fn test_moderation_appeal_concurrent_create_and_decide_deadlock_free_issue
                 reason: format!("Concurrent appeal {i}"),
                 evidence_url: None,
                 staff_notes: None,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
+                created_at: Timestamp::now(),
+                updated_at: Timestamp::now(),
             };
             storage.create_appeal(&appeal).await.unwrap()
         }));
@@ -6025,7 +6026,7 @@ async fn test_diagnostics_discord_permissions_and_failure_states() {
                 },
             ],
             csrf.to_owned(),
-            Utc::now() + Duration::hours(24),
+            Timestamp::now() + SignedDuration::from_hours(24),
             None,
         )
         .await
@@ -6132,7 +6133,7 @@ async fn test_polls_member_access_and_admin_boundary() {
             "What feature should we build next?",
             &["Music Bot".to_string(), "Economy System".to_string()],
             false,
-            Utc::now() + Duration::days(3),
+            Timestamp::now() + days(3),
         )
         .await
         .expect("create test poll");
@@ -6161,7 +6162,7 @@ async fn test_polls_member_access_and_admin_boundary() {
             member_user,
             member_guilds,
             "csrf_poll_123".to_owned(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -6191,7 +6192,7 @@ async fn test_polls_member_access_and_admin_boundary() {
             b_user,
             b_guilds,
             "csrf_b_123".to_owned(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -6342,7 +6343,7 @@ async fn test_polls_member_access_and_admin_boundary() {
             "Expired Question",
             &["A".to_string(), "B".to_string()],
             false,
-            Utc::now() - Duration::minutes(10),
+            Timestamp::now() - SignedDuration::from_mins(10),
         )
         .await
         .expect("create expired poll");
@@ -6408,7 +6409,7 @@ async fn test_community_member_self_service_and_admin_boundary() {
             user_a,
             a_guilds,
             "csrf_a_123".to_owned(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -6439,7 +6440,7 @@ async fn test_community_member_self_service_and_admin_boundary() {
             user_b,
             b_guilds,
             "csrf_b_123".to_owned(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -6469,7 +6470,7 @@ async fn test_community_member_self_service_and_admin_boundary() {
             outsider_user,
             outsider_guilds,
             "csrf_c_123".to_owned(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -6710,7 +6711,7 @@ async fn test_read_only_get_endpoints_do_not_require_csrf() {
             admin_user,
             admin_guilds,
             "csrf_secret_token_123".to_owned(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -6907,7 +6908,7 @@ async fn test_revalidate_guild_permission_owner_fallback_fails_closed_on_transfe
             permissions: "0".to_owned(), // Live permissions are 0 (e.g. ownership was transferred)
         }],
         csrf_token: "csrf_transferred".to_owned(),
-        expires_at: Utc::now() + Duration::days(1),
+        expires_at: Timestamp::now() + days(1),
         access_token: None,
     };
 
@@ -7029,7 +7030,7 @@ async fn test_ensure_manage_roles_access_revocation_and_live_permissions_issue_3
             permissions: "268435488".to_owned(), // MANAGE_GUILD | MANAGE_ROLES
         }],
         csrf_token: "csrf_role_guard".to_owned(),
-        expires_at: Utc::now() + Duration::days(1),
+        expires_at: Timestamp::now() + days(1),
         access_token: None,
     };
 
@@ -7074,7 +7075,7 @@ async fn test_ensure_manage_roles_access_revocation_and_live_permissions_issue_3
             permissions: "32".to_owned(), // Snapshot only had MANAGE_GUILD!
         }],
         csrf_token: "csrf_role_guard".to_owned(),
-        expires_at: Utc::now() + Duration::days(1),
+        expires_at: Timestamp::now() + days(1),
         access_token: None,
     };
     let result = ensure_manage_roles_access(&state, &session_promoted, guild_id).await;
@@ -7131,7 +7132,7 @@ async fn test_logout_revocation_success_and_lifecycle() {
             permissions: "8".to_owned(),
         }],
         csrf_token: "csrf_token_logout_123".to_owned(),
-        expires_at: Utc::now() + Duration::days(1),
+        expires_at: Timestamp::now() + days(1),
         access_token: None,
     };
 
@@ -7154,7 +7155,7 @@ async fn test_logout_revocation_success_and_lifecycle() {
         (user_id.to_owned(), guild_id.to_owned()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -7253,7 +7254,7 @@ async fn test_recruitment_applications_pagination_and_batch_fetching() {
             permissions: "8".to_owned(),
         }],
         csrf_token: "csrf_token_recruitment".to_owned(),
-        expires_at: Utc::now() + Duration::days(1),
+        expires_at: Timestamp::now() + days(1),
         access_token: None,
     };
 
@@ -7276,7 +7277,7 @@ async fn test_recruitment_applications_pagination_and_batch_fetching() {
         (admin_id.to_owned(), guild_id.to_owned()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -7293,8 +7294,8 @@ async fn test_recruitment_applications_pagination_and_batch_fetching() {
             submitted_answers: sqlx::types::Json(Vec::new()),
             current_stage: "submitted".to_owned(),
             version: 1,
-            submitted_at: Utc::now() - chrono::Duration::minutes(i as i64),
-            updated_at: Utc::now() - chrono::Duration::minutes(i as i64),
+            submitted_at: Timestamp::now() - SignedDuration::from_mins(i as i64),
+            updated_at: Timestamp::now() - SignedDuration::from_mins(i as i64),
             decided_at: None,
             decision_reason: None,
             decided_by: None,
@@ -7521,7 +7522,7 @@ async fn test_cleanup_dynamic_voice_csrf_and_atomic_isolation_issue_247() {
             user,
             guilds,
             csrf_token.to_owned(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -7545,7 +7546,10 @@ async fn test_cleanup_dynamic_voice_csrf_and_atomic_isolation_issue_247() {
     state
         .app
         .storage
-        .set_dynamic_voice_empty_since("chan_1_stale", Some(Utc::now() - Duration::seconds(60)))
+        .set_dynamic_voice_empty_since(
+            "chan_1_stale",
+            Some(Timestamp::now() - SignedDuration::from_secs(60)),
+        )
         .await
         .unwrap();
 
@@ -7558,7 +7562,10 @@ async fn test_cleanup_dynamic_voice_csrf_and_atomic_isolation_issue_247() {
     state
         .app
         .storage
-        .set_dynamic_voice_empty_since("chan_1_recent", Some(Utc::now() - Duration::seconds(10)))
+        .set_dynamic_voice_empty_since(
+            "chan_1_recent",
+            Some(Timestamp::now() - SignedDuration::from_secs(10)),
+        )
         .await
         .unwrap();
 
@@ -7578,7 +7585,10 @@ async fn test_cleanup_dynamic_voice_csrf_and_atomic_isolation_issue_247() {
     state
         .app
         .storage
-        .set_dynamic_voice_empty_since("chan_2_stale", Some(Utc::now() - Duration::seconds(60)))
+        .set_dynamic_voice_empty_since(
+            "chan_2_stale",
+            Some(Timestamp::now() - SignedDuration::from_secs(60)),
+        )
         .await
         .unwrap();
 
@@ -7978,7 +7988,7 @@ async fn test_metrics_endpoint_bearer_token_session_cookie_and_ip_authorization(
             user,
             vec![],
             "csrf_metrics".to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -8052,7 +8062,7 @@ async fn test_giveaways_end_and_reroll_lifecycle_and_conflict() {
             admin_user,
             admin_guilds,
             admin_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -8083,7 +8093,7 @@ async fn test_giveaways_end_and_reroll_lifecycle_and_conflict() {
             member_user,
             member_guilds,
             member_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -8099,7 +8109,7 @@ async fn test_giveaways_end_and_reroll_lifecycle_and_conflict() {
             "channel_123",
             "VIP Subscription",
             1,
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
         )
         .await
         .expect("create giveaway");
@@ -8227,7 +8237,7 @@ async fn test_giveaways_end_and_reroll_lifecycle_and_conflict() {
             "channel_123",
             "Empty Giveaway",
             1,
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
         )
         .await
         .unwrap();
@@ -8307,7 +8317,7 @@ async fn test_giveaway_self_entry_and_creator_policy() {
                 permissions: "32".to_owned(),
             }],
             creator_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -8334,7 +8344,7 @@ async fn test_giveaway_self_entry_and_creator_policy() {
                 permissions: "0".to_owned(),
             }],
             regular_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -8355,7 +8365,7 @@ async fn test_giveaway_self_entry_and_creator_policy() {
             "111222333444555",
             "Self Entry Nitro",
             1,
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             Some(creator_user_id),
         )
         .await
@@ -8416,7 +8426,7 @@ async fn test_giveaway_self_entry_and_creator_policy() {
             "111222333444555",
             "Self Entry Allowed Nitro",
             1,
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             Some(creator_user_id),
         )
         .await
@@ -8446,7 +8456,7 @@ async fn test_giveaway_self_entry_and_creator_policy() {
             "111222333444555",
             "Legacy Giveaway",
             1,
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -8638,7 +8648,7 @@ async fn test_giveaway_max_winners_and_channel_view_live_mode() {
                 permissions: "32".to_owned(),
             }],
             admin_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -8648,7 +8658,7 @@ async fn test_giveaway_max_winners_and_channel_view_live_mode() {
         ("111111111111111111".to_owned(), guild_id.to_owned()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -8673,7 +8683,7 @@ async fn test_giveaway_max_winners_and_channel_view_live_mode() {
                 permissions: "0".to_owned(),
             }],
             no_view_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -8947,7 +8957,7 @@ async fn test_giveaway_cross_guild_channel_isolation_live_mode() {
                 },
             ],
             admin_a_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -8957,7 +8967,7 @@ async fn test_giveaway_cross_guild_channel_isolation_live_mode() {
         (admin_a_id.to_owned(), guild_a.to_owned()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -8984,7 +8994,7 @@ async fn test_giveaway_cross_guild_channel_isolation_live_mode() {
                 permissions: "32".to_owned(), // MANAGE_GUILD in B
             }],
             admin_b_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -8994,7 +9004,7 @@ async fn test_giveaway_cross_guild_channel_isolation_live_mode() {
         (admin_b_id.to_owned(), guild_b.to_owned()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -9452,7 +9462,7 @@ async fn test_reaction_roles_web_api_and_isolation() {
                 },
             ],
             admin_a_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -9462,7 +9472,7 @@ async fn test_reaction_roles_web_api_and_isolation() {
         (admin_a_id.to_owned(), guild_a.to_owned()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -9498,7 +9508,7 @@ async fn test_reaction_roles_web_api_and_isolation() {
                 },
             ],
             admin_b_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -9508,7 +9518,7 @@ async fn test_reaction_roles_web_api_and_isolation() {
         (admin_b_id.to_owned(), guild_b.to_owned()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -9536,7 +9546,7 @@ async fn test_reaction_roles_web_api_and_isolation() {
                 permissions: "32".to_owned(), // MANAGE_GUILD without MANAGE_ROLES
             }],
             no_role_mgmt_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -9546,7 +9556,7 @@ async fn test_reaction_roles_web_api_and_isolation() {
         (no_role_mgmt_id.to_owned(), guild_a.to_owned()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -9999,7 +10009,7 @@ async fn test_store_items_privilege_escalation_guard_suite() {
                 permissions: "268435488".to_owned(),
             }],
             admin_a_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -10009,7 +10019,7 @@ async fn test_store_items_privilege_escalation_guard_suite() {
         (admin_a_id.to_owned(), guild_a.to_owned()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -10037,7 +10047,7 @@ async fn test_store_items_privilege_escalation_guard_suite() {
                 permissions: "32".to_owned(),
             }],
             no_role_mgmt_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -10047,7 +10057,7 @@ async fn test_store_items_privilege_escalation_guard_suite() {
         (no_role_mgmt_id.to_owned(), guild_a.to_owned()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -10075,7 +10085,7 @@ async fn test_store_items_privilege_escalation_guard_suite() {
                 permissions: "0".to_owned(),
             }],
             buyer_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -10460,7 +10470,7 @@ async fn test_polls_channel_view_live_mode_and_cross_guild_suite() {
                 permissions: "32".to_owned(),
             }],
             admin_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -10470,7 +10480,7 @@ async fn test_polls_channel_view_live_mode_and_cross_guild_suite() {
         (admin_id.to_owned(), guild_a.to_owned()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -10495,7 +10505,7 @@ async fn test_polls_channel_view_live_mode_and_cross_guild_suite() {
                 permissions: "0".to_owned(),
             }],
             with_view_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -10522,7 +10532,7 @@ async fn test_polls_channel_view_live_mode_and_cross_guild_suite() {
                 permissions: "0".to_owned(),
             }],
             no_view_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -10549,7 +10559,7 @@ async fn test_polls_channel_view_live_mode_and_cross_guild_suite() {
                 permissions: "0".to_owned(),
             }],
             outsider_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -10963,7 +10973,7 @@ async fn test_giveaway_private_thread_membership_authorization_suite() {
                 d_user,
                 d_guilds,
                 s_csrf,
-                Utc::now() + Duration::hours(1),
+                Timestamp::now() + SignedDuration::from_hours(1),
                 None,
             )
             .await
@@ -10975,12 +10985,12 @@ async fn test_giveaway_private_thread_membership_authorization_suite() {
         (admin_id.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
     // 4. Create active giveaways in storage for test channels
-    let expires = Utc::now() + Duration::hours(2);
+    let expires = Timestamp::now() + SignedDuration::from_hours(2);
     let ga_private = web_state
         .app
         .storage
@@ -11441,7 +11451,7 @@ async fn test_module_autorole_privilege_escalation_guard_suite() {
                 permissions: "268435488".to_owned(), // MANAGE_GUILD | MANAGE_ROLES
             }],
             admin_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -11451,7 +11461,7 @@ async fn test_module_autorole_privilege_escalation_guard_suite() {
         (admin_id.to_owned(), guild_a.to_owned()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -11478,7 +11488,7 @@ async fn test_module_autorole_privilege_escalation_guard_suite() {
                 permissions: "32".to_owned(), // MANAGE_GUILD only
             }],
             no_roles_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -11488,7 +11498,7 @@ async fn test_module_autorole_privilege_escalation_guard_suite() {
         (no_roles_id.to_owned(), guild_a.to_owned()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -11923,7 +11933,7 @@ async fn test_progression_role_rewards_privilege_escalation_guard_suite() {
                 permissions: "268435488".to_owned(),
             }],
             admin_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -11933,7 +11943,7 @@ async fn test_progression_role_rewards_privilege_escalation_guard_suite() {
         (admin_id.to_owned(), guild_a.to_owned()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -11960,7 +11970,7 @@ async fn test_progression_role_rewards_privilege_escalation_guard_suite() {
                 permissions: "32".to_owned(),
             }],
             no_roles_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -11970,7 +11980,7 @@ async fn test_progression_role_rewards_privilege_escalation_guard_suite() {
         (no_roles_id.to_owned(), guild_a.to_owned()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -12640,7 +12650,7 @@ async fn test_recruitment_privilege_escalation_and_self_accept_guard_suite() {
                     permissions: perms.to_owned(),
                 }],
                 csrf.to_owned(),
-                Utc::now() + Duration::hours(1),
+                Timestamp::now() + SignedDuration::from_hours(1),
                 None,
             )
             .await
@@ -12651,7 +12661,7 @@ async fn test_recruitment_privilege_escalation_and_self_accept_guard_suite() {
                 (uid.to_owned(), guild_a.to_owned()),
                 CachedGuildPermission {
                     can_manage: true,
-                    checked_at: Utc::now(),
+                    checked_at: Timestamp::now(),
                 },
             );
         }
@@ -13015,9 +13025,9 @@ async fn test_recruitment_privilege_escalation_and_self_accept_guard_suite() {
             status: "pending".to_string(),
             attempts: 0,
             last_error: None,
-            next_attempt_at: Utc::now() - Duration::minutes(1),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            next_attempt_at: Timestamp::now() - SignedDuration::from_mins(1),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -13036,9 +13046,9 @@ async fn test_recruitment_privilege_escalation_and_self_accept_guard_suite() {
             submitted_answers: sqlx::types::Json(vec![]),
             current_stage: "completed".to_string(),
             version: 1,
-            submitted_at: Utc::now(),
-            updated_at: Utc::now(),
-            decided_at: Some(Utc::now()),
+            submitted_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
+            decided_at: Some(Timestamp::now()),
             decision_reason: None,
             decided_by: Some(admin_id.to_string()),
         })
@@ -13327,7 +13337,7 @@ async fn test_recruitment_review_role_authorization_and_approval_policy_suite() 
                     permissions: perms.to_owned(),
                 }],
                 csrf.to_owned(),
-                Utc::now() + Duration::hours(2),
+                Timestamp::now() + SignedDuration::from_hours(2),
                 None,
             )
             .await
@@ -13338,7 +13348,7 @@ async fn test_recruitment_review_role_authorization_and_approval_policy_suite() 
                 (uid.to_owned(), guild_a.to_owned()),
                 CachedGuildPermission {
                     can_manage: true,
-                    checked_at: Utc::now(),
+                    checked_at: Timestamp::now(),
                 },
             );
         }
@@ -13535,8 +13545,8 @@ async fn test_recruitment_review_role_authorization_and_approval_policy_suite() 
             reviewer_user_id: lost_role_user_id.to_string(),
             recommendation: "approve".to_string(),
             note: Some("stale review".to_string()),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -13872,7 +13882,7 @@ async fn test_store_purchase_concurrent_fulfillment_race_suite() {
                 permissions: "0".to_owned(),
             }],
             buyer_csrf.to_owned(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -13937,7 +13947,12 @@ async fn test_store_purchase_concurrent_fulfillment_race_suite() {
     web_state
         .app
         .storage
-        .update_store_purchase_fulfillment(test_purchase.id, "completed", None, Some(Utc::now()))
+        .update_store_purchase_fulfillment(
+            test_purchase.id,
+            "completed",
+            None,
+            Some(Timestamp::now()),
+        )
         .await
         .unwrap();
 
@@ -14108,7 +14123,7 @@ async fn test_economy_store_purchase_idempotency_validation_and_rate_limit_suite
                 permissions: "0".to_owned(),
             }],
             buyer_csrf.to_owned(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -14452,7 +14467,7 @@ async fn test_recruitment_n_plus_one_avoidance_and_approval_threshold_suite() {
                 permissions: "0".to_owned(),
             }],
             reviewer_csrf.to_owned(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -14477,8 +14492,8 @@ async fn test_recruitment_n_plus_one_avoidance_and_approval_threshold_suite() {
                 final_approvals: 2,
                 ..Default::default()
             }),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -14495,8 +14510,8 @@ async fn test_recruitment_n_plus_one_avoidance_and_approval_threshold_suite() {
             submitted_answers: sqlx::types::Json(vec![]),
             current_stage: "screening".to_string(),
             version: 1,
-            submitted_at: Utc::now(),
-            updated_at: Utc::now(),
+            submitted_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
             decided_at: None,
             decision_reason: None,
             decided_by: None,
@@ -14583,8 +14598,8 @@ async fn test_recruitment_n_plus_one_avoidance_and_approval_threshold_suite() {
                 final_approvals: 2,
                 ..Default::default()
             }),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -14599,8 +14614,8 @@ async fn test_recruitment_n_plus_one_avoidance_and_approval_threshold_suite() {
         submitted_answers: sqlx::types::Json(vec![]),
         current_stage: "screening".to_string(),
         version: 1,
-        submitted_at: Utc::now(),
-        updated_at: Utc::now(),
+        submitted_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         decided_at: None,
         decision_reason: None,
         decided_by: None,
@@ -14637,8 +14652,8 @@ async fn test_recruitment_n_plus_one_avoidance_and_approval_threshold_suite() {
         submitted_answers: sqlx::types::Json(vec![]),
         current_stage: "screening".to_string(),
         version: 1,
-        submitted_at: Utc::now(),
-        updated_at: Utc::now(),
+        submitted_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         decided_at: None,
         decision_reason: None,
         decided_by: None,
@@ -14662,8 +14677,8 @@ async fn test_recruitment_n_plus_one_avoidance_and_approval_threshold_suite() {
                 reviewer_user_id: format!("33300033300033300{i}"),
                 recommendation: "approve".to_string(),
                 note: Some(format!("Approval note {i}")),
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
+                created_at: Timestamp::now(),
+                updated_at: Timestamp::now(),
             })
             .await
             .unwrap();
@@ -14694,7 +14709,7 @@ async fn test_recruitment_n_plus_one_avoidance_and_approval_threshold_suite() {
                 permissions: "8".to_owned(),
             }],
             admin_csrf.to_owned(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -14703,7 +14718,7 @@ async fn test_recruitment_n_plus_one_avoidance_and_approval_threshold_suite() {
         (owner_id.to_owned(), guild_id.to_owned()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
     let cookie_admin = format!("rusty_discord_bot_session={admin_session}");
@@ -14745,8 +14760,8 @@ async fn test_recruitment_n_plus_one_avoidance_and_approval_threshold_suite() {
         submitted_answers: sqlx::types::Json(vec![]),
         current_stage: "screening".to_string(),
         version: 1,
-        submitted_at: Utc::now(),
-        updated_at: Utc::now(),
+        submitted_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         decided_at: None,
         decision_reason: None,
         decided_by: None,
@@ -14768,8 +14783,8 @@ async fn test_recruitment_n_plus_one_avoidance_and_approval_threshold_suite() {
             reviewer_user_id: "333000333000333001".to_string(),
             recommendation: "approve".to_string(),
             note: Some("Single approval".to_string()),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -14829,8 +14844,8 @@ async fn test_recruitment_track_concurrency_and_slug_uniqueness_suite() {
             target_role_id: None,
             version: 1,
             config: sqlx::types::Json(RecruitmentTrackConfig::default()),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         };
 
         tasks.push(tokio::spawn(async move {
@@ -14910,8 +14925,8 @@ async fn test_recruitment_track_concurrency_and_slug_uniqueness_suite() {
         target_role_id: None,
         version: 1,
         config: sqlx::types::Json(RecruitmentTrackConfig::default()),
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     let other_res = store.upsert_recruitment_track(other_guild_track);
     assert!(
@@ -14929,8 +14944,8 @@ async fn test_recruitment_track_concurrency_and_slug_uniqueness_suite() {
         target_role_id: None,
         version: 1,
         config: sqlx::types::Json(RecruitmentTrackConfig::default()),
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     let hijack_res = store.upsert_recruitment_track(hijack_track);
     assert!(
@@ -14991,7 +15006,7 @@ async fn test_sticky_messages_validation_and_crud() {
                 permissions: "8".to_string(),
             }],
             csrf_token.to_string(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -15001,7 +15016,7 @@ async fn test_sticky_messages_validation_and_crud() {
         (user_id.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -15365,7 +15380,7 @@ async fn test_sticky_messages_view_authorization_and_isolation_issue_320() {
                 permissions: "32".to_string(), // MANAGE_GUILD
             }],
             csrf_forbidden.to_string(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -15390,7 +15405,7 @@ async fn test_sticky_messages_view_authorization_and_isolation_issue_320() {
                 permissions: "32".to_string(), // MANAGE_GUILD
             }],
             csrf_allowed.to_string(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -15400,7 +15415,7 @@ async fn test_sticky_messages_view_authorization_and_isolation_issue_320() {
         (u_forbidden_id.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -15408,7 +15423,7 @@ async fn test_sticky_messages_view_authorization_and_isolation_issue_320() {
         (u_allowed_id.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -15745,7 +15760,7 @@ async fn test_snapshot_api_scrubbing_and_historic_record_isolation_issue_328() {
                 permissions: "32".to_string(), // MANAGE_GUILD
             }],
             csrf_a.to_string(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -15771,7 +15786,7 @@ async fn test_snapshot_api_scrubbing_and_historic_record_isolation_issue_328() {
                 permissions: "32".to_string(), // MANAGE_GUILD
             }],
             csrf_b.to_string(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -15781,7 +15796,7 @@ async fn test_snapshot_api_scrubbing_and_historic_record_isolation_issue_328() {
         (user_a_id.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -15789,7 +15804,7 @@ async fn test_snapshot_api_scrubbing_and_historic_record_isolation_issue_328() {
         (user_b_id.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -16019,7 +16034,7 @@ async fn test_scheduled_event_chronological_window_and_rsvp_cutoff_issue_331() {
                 permissions: "32".to_string(), // MANAGE_GUILD
             }],
             admin_csrf.to_string(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -16044,7 +16059,7 @@ async fn test_scheduled_event_chronological_window_and_rsvp_cutoff_issue_331() {
                 permissions: "0".to_string(), // Regular member
             }],
             member_csrf.to_string(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -16054,8 +16069,8 @@ async fn test_scheduled_event_chronological_window_and_rsvp_cutoff_issue_331() {
     let member_cookie = format!("rusty_discord_bot_session={member_session}");
 
     // 1. Rejection of end_time < start_time with HTTP 400
-    let start = Utc::now() + Duration::days(5);
-    let before_start = start - Duration::hours(2);
+    let start = Timestamp::now() + days(5);
+    let before_start = start - SignedDuration::from_hours(2);
 
     let resp_earlier = client
         .post(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
@@ -16118,7 +16133,7 @@ async fn test_scheduled_event_chronological_window_and_rsvp_cutoff_issue_331() {
     );
 
     // 3. Valid creation succeeds and produces compliant iCalendar export (DTEND > DTSTART)
-    let valid_end = start + Duration::hours(3);
+    let valid_end = start + SignedDuration::from_hours(3);
     let resp_valid = client
         .post(format!("{base_url}/api/guilds/{guild_id}/scheduled-events"))
         .header(COOKIE, &admin_cookie)
@@ -16150,8 +16165,8 @@ async fn test_scheduled_event_chronological_window_and_rsvp_cutoff_issue_331() {
     assert!(ics_text.contains("DTEND:"));
 
     // 4. RSVP Cutoff: Event that has ended rejects RSVP with HTTP 409 Conflict
-    let expired_start = Utc::now() - Duration::days(2);
-    let expired_end = Utc::now() - Duration::days(1);
+    let expired_start = Timestamp::now() - days(2);
+    let expired_end = Timestamp::now() - days(1);
     let expired_event = web_state
         .app
         .storage
@@ -16229,7 +16244,7 @@ async fn test_scheduled_event_chronological_window_and_rsvp_cutoff_issue_331() {
                     permissions: "0".to_string(),
                 }],
                 user_csrf.clone(),
-                Utc::now() + Duration::hours(2),
+                Timestamp::now() + SignedDuration::from_hours(2),
                 None,
             )
             .await
@@ -16265,8 +16280,8 @@ async fn test_scheduled_event_chronological_window_and_rsvp_cutoff_issue_331() {
     );
 
     // 6. Ongoing event allows late RSVP
-    let ongoing_start = Utc::now() - Duration::minutes(15);
-    let ongoing_end = Utc::now() + Duration::minutes(45);
+    let ongoing_start = Timestamp::now() - SignedDuration::from_mins(15);
+    let ongoing_end = Timestamp::now() + SignedDuration::from_mins(45);
     let ongoing_event = web_state
         .app
         .storage
@@ -16341,7 +16356,7 @@ async fn test_lua_event_routing_auth_and_permissions() {
                 permissions: "32".to_string(), // MANAGE_GUILD
             }],
             admin_csrf.to_string(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -16368,7 +16383,7 @@ async fn test_lua_event_routing_auth_and_permissions() {
                 permissions: "0".to_string(),
             }],
             unauth_csrf.to_string(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -16467,7 +16482,7 @@ async fn test_lua_event_routing_validation_and_disclaimer() {
                 permissions: "32".to_string(),
             }],
             "csrf".to_string(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -16610,7 +16625,7 @@ async fn test_lua_event_routing_guild_isolation_and_manifest_defaults() {
                 },
             ],
             "csrf".to_string(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -16785,7 +16800,7 @@ async fn test_lua_event_routing_pagination_and_rate_limiting() {
                 permissions: "32".to_string(),
             }],
             "csrf".to_string(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -17001,7 +17016,7 @@ async fn test_guild_cases_pagination_and_no_500_issue_367() {
             owner: true,
             permissions: "8".to_string(), // ADMINISTRATOR
         }],
-        expires_at: Utc::now() + Duration::hours(2),
+        expires_at: Timestamp::now() + SignedDuration::from_hours(2),
         access_token: None,
         csrf_token: "csrf_367".to_string(),
     };
@@ -17034,7 +17049,7 @@ async fn test_guild_cases_pagination_and_no_500_issue_367() {
     assert!(body_empty["next_offset"].is_null());
 
     // 2. Populate cases in guild_id (105 cases) and 5 cases in other_guild_id
-    let now = Utc::now();
+    let now = Timestamp::now();
     for i in 1..=105 {
         web_state
             .app
@@ -17201,7 +17216,7 @@ async fn test_module_draft_resource_limits_and_validation_issue_375() {
             owner: true,
             permissions: "8".to_string(), // ADMINISTRATOR
         }],
-        expires_at: Utc::now() + Duration::hours(2),
+        expires_at: Timestamp::now() + SignedDuration::from_hours(2),
         access_token: None,
         csrf_token: csrf_token.to_string(),
     };
@@ -17236,7 +17251,7 @@ async fn test_module_draft_resource_limits_and_validation_issue_375() {
             owner: true,
             permissions: "8".to_string(),
         }],
-        expires_at: Utc::now() + Duration::hours(2),
+        expires_at: Timestamp::now() + SignedDuration::from_hours(2),
         access_token: None,
         csrf_token: "csrf_other".to_string(),
     };
@@ -17457,7 +17472,7 @@ async fn test_sse_eventsource_connection_limits_and_isolation_issue_376() {
                 permissions: "8".to_string(),
             },
         ],
-        expires_at: Utc::now() + Duration::hours(2),
+        expires_at: Timestamp::now() + SignedDuration::from_hours(2),
         access_token: None,
         csrf_token: "csrf_sse_1".to_string(),
     };
@@ -17492,7 +17507,7 @@ async fn test_sse_eventsource_connection_limits_and_isolation_issue_376() {
             owner: true,
             permissions: "8".to_string(),
         }],
-        expires_at: Utc::now() + Duration::hours(2),
+        expires_at: Timestamp::now() + SignedDuration::from_hours(2),
         access_token: None,
         csrf_token: "csrf_sse_2".to_string(),
     };
@@ -17632,7 +17647,7 @@ async fn test_ai_knowledge_doc_validation_quota_and_deletion_issue_377() {
             owner: true,
             permissions: "8".to_string(),
         }],
-        expires_at: Utc::now() + Duration::hours(2),
+        expires_at: Timestamp::now() + SignedDuration::from_hours(2),
         access_token: None,
         csrf_token: csrf_token.to_string(),
     };
@@ -17667,7 +17682,7 @@ async fn test_ai_knowledge_doc_validation_quota_and_deletion_issue_377() {
             owner: true,
             permissions: "8".to_string(),
         }],
-        expires_at: Utc::now() + Duration::hours(2),
+        expires_at: Timestamp::now() + SignedDuration::from_hours(2),
         access_token: None,
         csrf_token: "csrf_377_other".to_string(),
     };
@@ -17884,7 +17899,7 @@ async fn test_ai_knowledge_doc_validation_quota_and_deletion_issue_377() {
                 title: format!("Doc #{i}"),
                 content: format!("Content #{i}"),
                 source_type: "bulk".to_string(),
-                created_at: chrono::Utc::now(),
+                created_at: Timestamp::now(),
             })
             .await
             .expect("fill doc under quota");
@@ -17901,7 +17916,7 @@ async fn test_ai_knowledge_doc_validation_quota_and_deletion_issue_377() {
             title: "Excess Doc".to_string(),
             content: "Excess content".to_string(),
             source_type: "bulk".to_string(),
-            created_at: chrono::Utc::now(),
+            created_at: Timestamp::now(),
         })
         .await;
     assert!(
@@ -17948,7 +17963,7 @@ async fn test_scheduled_events_validation_quota_and_pagination_issue_393() {
                 permissions: "8".to_string(),
             }],
             admin_csrf.to_string(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -17973,7 +17988,7 @@ async fn test_scheduled_events_validation_quota_and_pagination_issue_393() {
                 permissions: "0".to_string(),
             }],
             member_csrf.to_string(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -17998,7 +18013,7 @@ async fn test_scheduled_events_validation_quota_and_pagination_issue_393() {
                 permissions: "8".to_string(),
             }],
             foreign_admin_csrf.to_string(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -18008,21 +18023,21 @@ async fn test_scheduled_events_validation_quota_and_pagination_issue_393() {
         (admin_id.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
     permissions_cache.insert(
         (member_id.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: false,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
     permissions_cache.insert(
         (foreign_admin_id.to_string(), foreign_guild_id.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -18039,7 +18054,7 @@ async fn test_scheduled_events_validation_quota_and_pagination_issue_393() {
     let member_cookie = format!("rusty_discord_bot_session={member_session}");
     let foreign_cookie = format!("rusty_discord_bot_session={foreign_admin_session}");
 
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     // 1. Validation tests on POST /api/guilds/{guild_id}/scheduled-events
     // 1a. Unauthenticated -> 401
@@ -18048,7 +18063,7 @@ async fn test_scheduled_events_validation_quota_and_pagination_issue_393() {
         .json(&serde_json::json!({
             "title": "Unauth event",
             "description": "desc",
-            "start_time": (now + Duration::hours(1)).to_rfc3339(),
+            "start_time": (now + SignedDuration::from_hours(1)).to_rfc3339(),
         }))
         .send()
         .await
@@ -18063,7 +18078,7 @@ async fn test_scheduled_events_validation_quota_and_pagination_issue_393() {
         .json(&serde_json::json!({
             "title": "Member event",
             "description": "desc",
-            "start_time": (now + Duration::hours(1)).to_rfc3339(),
+            "start_time": (now + SignedDuration::from_hours(1)).to_rfc3339(),
         }))
         .send()
         .await
@@ -18077,7 +18092,7 @@ async fn test_scheduled_events_validation_quota_and_pagination_issue_393() {
         .json(&serde_json::json!({
             "title": "No CSRF",
             "description": "desc",
-            "start_time": (now + Duration::hours(1)).to_rfc3339(),
+            "start_time": (now + SignedDuration::from_hours(1)).to_rfc3339(),
         }))
         .send()
         .await
@@ -18092,7 +18107,7 @@ async fn test_scheduled_events_validation_quota_and_pagination_issue_393() {
         .json(&serde_json::json!({
             "title": "   ",
             "description": "desc",
-            "start_time": (now + Duration::hours(1)).to_rfc3339(),
+            "start_time": (now + SignedDuration::from_hours(1)).to_rfc3339(),
         }))
         .send()
         .await
@@ -18111,7 +18126,7 @@ async fn test_scheduled_events_validation_quota_and_pagination_issue_393() {
         .json(&serde_json::json!({
             "title": long_title,
             "description": "desc",
-            "start_time": (now + Duration::hours(1)).to_rfc3339(),
+            "start_time": (now + SignedDuration::from_hours(1)).to_rfc3339(),
         }))
         .send()
         .await
@@ -18127,7 +18142,7 @@ async fn test_scheduled_events_validation_quota_and_pagination_issue_393() {
         .json(&serde_json::json!({
             "title": "Valid title",
             "description": long_desc,
-            "start_time": (now + Duration::hours(1)).to_rfc3339(),
+            "start_time": (now + SignedDuration::from_hours(1)).to_rfc3339(),
         }))
         .send()
         .await
@@ -18148,8 +18163,8 @@ async fn test_scheduled_events_validation_quota_and_pagination_issue_393() {
         .json(&serde_json::json!({
             "title": "  Sprint Planning  ",
             "description": "  Discuss Q4 roadmap  ",
-            "start_time": (now + Duration::hours(1)).to_rfc3339(),
-            "end_time": (now + Duration::hours(2)).to_rfc3339(),
+            "start_time": (now + SignedDuration::from_hours(1)).to_rfc3339(),
+            "end_time": (now + SignedDuration::from_hours(2)).to_rfc3339(),
         }))
         .send()
         .await
@@ -18168,7 +18183,7 @@ async fn test_scheduled_events_validation_quota_and_pagination_issue_393() {
         .json(&serde_json::json!({
             "title": "Design Review",
             "description": "Review UI mocks",
-            "start_time": (now + Duration::hours(3)).to_rfc3339(),
+            "start_time": (now + SignedDuration::from_hours(3)).to_rfc3339(),
         }))
         .send()
         .await
@@ -18185,7 +18200,7 @@ async fn test_scheduled_events_validation_quota_and_pagination_issue_393() {
         .json(&serde_json::json!({
             "title": "Event 3 blocked",
             "description": "Blocked",
-            "start_time": (now + Duration::hours(5)).to_rfc3339(),
+            "start_time": (now + SignedDuration::from_hours(5)).to_rfc3339(),
         }))
         .send()
         .await
@@ -18260,7 +18275,7 @@ async fn test_scheduled_events_validation_quota_and_pagination_issue_393() {
         .json(&serde_json::json!({
             "title": "Event 3 created",
             "description": "After slot release",
-            "start_time": (now + Duration::hours(5)).to_rfc3339(),
+            "start_time": (now + SignedDuration::from_hours(5)).to_rfc3339(),
         }))
         .send()
         .await
@@ -18292,7 +18307,7 @@ async fn test_scheduled_events_validation_quota_and_pagination_issue_393() {
             .json(&serde_json::json!({
                 "title": format!("Batch Event {i}"),
                 "description": format!("Desc {i}"),
-                "start_time": (now + Duration::hours(10 + i as i64)).to_rfc3339(),
+                "start_time": (now + SignedDuration::from_hours(10 + i as i64)).to_rfc3339(),
             }))
             .send()
             .await
@@ -18440,7 +18455,7 @@ async fn test_event_voice_queue_config_ready_and_outbox_issue_394() {
                 permissions: "8".to_string(),
             }],
             admin_csrf.to_string(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -18465,7 +18480,7 @@ async fn test_event_voice_queue_config_ready_and_outbox_issue_394() {
                 permissions: "0".to_string(),
             }],
             member_csrf.to_string(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -18475,14 +18490,14 @@ async fn test_event_voice_queue_config_ready_and_outbox_issue_394() {
         (admin_id.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
     permissions_cache.insert(
         (member_id.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: false,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -18498,7 +18513,7 @@ async fn test_event_voice_queue_config_ready_and_outbox_issue_394() {
     let admin_cookie = format!("rusty_discord_bot_session={admin_session}");
     let member_cookie = format!("rusty_discord_bot_session={member_session}");
 
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     // 1. Create a scheduled event
     let create_resp = client
@@ -18508,7 +18523,7 @@ async fn test_event_voice_queue_config_ready_and_outbox_issue_394() {
         .json(&serde_json::json!({
             "title": "Voice Queue Event",
             "description": "Raid with voice queue and lobby pull",
-            "start_time": (now + Duration::hours(1)).to_rfc3339(),
+            "start_time": (now + SignedDuration::from_hours(1)).to_rfc3339(),
             "max_participants": 1,
         }))
         .send()
@@ -18686,7 +18701,7 @@ async fn test_event_voice_queue_config_ready_and_outbox_issue_394() {
     let no_job = web_state
         .app
         .storage
-        .claim_event_voice_outbox_job("worker_1", Duration::seconds(30))
+        .claim_event_voice_outbox_job("worker_1", SignedDuration::from_secs(30))
         .await
         .unwrap();
     assert!(no_job.is_none());
@@ -18714,7 +18729,7 @@ async fn test_event_voice_queue_config_ready_and_outbox_issue_394() {
     let claimed_job = web_state
         .app
         .storage
-        .claim_event_voice_outbox_job("worker_1", Duration::seconds(30))
+        .claim_event_voice_outbox_job("worker_1", SignedDuration::from_secs(30))
         .await
         .unwrap();
     assert!(claimed_job.is_some());
@@ -18823,7 +18838,7 @@ async fn test_event_voice_outbox_requeue_and_backoff_issue_396() {
                 permissions: "8".to_string(),
             }],
             admin_csrf.to_string(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -18833,7 +18848,7 @@ async fn test_event_voice_outbox_requeue_and_backoff_issue_396() {
         (admin_id.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -18847,7 +18862,7 @@ async fn test_event_voice_outbox_requeue_and_backoff_issue_396() {
     let client = reqwest::Client::new();
     let base_url = format!("http://{addr}");
     let admin_cookie = format!("rusty_discord_bot_session={admin_session}");
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     // 1. Create a scheduled event
     let create_resp = client
@@ -18857,7 +18872,7 @@ async fn test_event_voice_outbox_requeue_and_backoff_issue_396() {
         .json(&serde_json::json!({
             "title": "Voice Outbox Test Event",
             "description": "Testing outbox requeue and backoff policies",
-            "start_time": (now + Duration::hours(1)).to_rfc3339(),
+            "start_time": (now + SignedDuration::from_hours(1)).to_rfc3339(),
             "max_participants": 1,
         }))
         .send()
@@ -18915,7 +18930,7 @@ async fn test_event_voice_outbox_requeue_and_backoff_issue_396() {
     let claimed = web_state
         .app
         .storage
-        .claim_event_voice_outbox_job("worker_1", Duration::seconds(30))
+        .claim_event_voice_outbox_job("worker_1", SignedDuration::from_secs(30))
         .await
         .unwrap();
     assert!(claimed.is_some());
@@ -18930,7 +18945,7 @@ async fn test_event_voice_outbox_requeue_and_backoff_issue_396() {
             cl.id,
             "worker_1",
             "Rate limited 429",
-            Some(chrono::Duration::seconds(60)),
+            Some(SignedDuration::from_secs(60)),
         )
         .await
         .unwrap();
@@ -18956,7 +18971,7 @@ async fn test_event_voice_outbox_requeue_and_backoff_issue_396() {
         web_state
             .app
             .storage
-            .claim_event_voice_outbox_job("worker_2", Duration::seconds(30))
+            .claim_event_voice_outbox_job("worker_2", SignedDuration::from_secs(30))
             .await
             .unwrap()
             .is_none()
@@ -18996,7 +19011,7 @@ async fn test_event_voice_outbox_requeue_and_backoff_issue_396() {
     let claimed2 = web_state
         .app
         .storage
-        .claim_event_voice_outbox_job("worker_3", Duration::seconds(30))
+        .claim_event_voice_outbox_job("worker_3", SignedDuration::from_secs(30))
         .await
         .unwrap()
         .unwrap();
@@ -19034,7 +19049,7 @@ async fn test_event_voice_outbox_requeue_and_backoff_issue_396() {
     let claimed_after_requeue = web_state
         .app
         .storage
-        .claim_event_voice_outbox_job("worker_3", Duration::seconds(30))
+        .claim_event_voice_outbox_job("worker_3", SignedDuration::from_secs(30))
         .await
         .unwrap();
     assert!(claimed_after_requeue.is_some());
@@ -19102,7 +19117,7 @@ async fn test_workflow_builder_crud_quota_and_pagination_issue_395() {
                 permissions: "8".to_string(),
             }],
             admin_csrf.to_string(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -19127,7 +19142,7 @@ async fn test_workflow_builder_crud_quota_and_pagination_issue_395() {
                 permissions: "0".to_string(),
             }],
             member_csrf.to_string(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -19137,14 +19152,14 @@ async fn test_workflow_builder_crud_quota_and_pagination_issue_395() {
         (admin_id.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
     permissions_cache.insert(
         (member_id.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: false,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -19342,7 +19357,7 @@ async fn test_workflow_builder_crud_quota_and_pagination_issue_395() {
     // Cross-guild cursor tampering -> 400 Bad Request
     let foreign_cursor = rusty_discord_bot::storage::encode_workflow_definition_cursor(
         foreign_guild_id,
-        &Utc::now(),
+        &Timestamp::now(),
         &uuid::Uuid::new_v4(),
     );
     let tamper_resp = client
@@ -19527,7 +19542,7 @@ async fn test_command_policy_audit_atomic_and_rollback_issue_399() {
                 permissions: "8".to_owned(),
             }],
             csrf_token.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -19711,7 +19726,7 @@ async fn test_command_policy_audit_atomic_and_rollback_issue_399() {
 
     // 8. Audit failure injection on import/replace -> HTTP 500, no import
     let import_rule_id = uuid::Uuid::new_v4();
-    let now_str = Utc::now().to_rfc3339();
+    let now_str = Timestamp::now().to_rfc3339();
     let import_rules = vec![serde_json::json!({
         "id": import_rule_id.to_string(),
         "guild_id": guild_id,

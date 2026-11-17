@@ -1,5 +1,5 @@
+use crate::datetime::Timestamp;
 use anyhow::{Result, anyhow};
-use chrono::Utc;
 use serenity::{
     all::{ChannelId, GuildId, Permissions, RoleId, UserId},
     client::Context,
@@ -327,7 +327,7 @@ pub async fn execute(
                                                     purchase.id,
                                                     "completed",
                                                     None,
-                                                    Some(Utc::now()),
+                                                    Some(Timestamp::now()),
                                                 )
                                                 .await
                                             {
@@ -488,7 +488,7 @@ pub async fn execute(
                     Ok(Some(format!(
                         "💼 Pracowałeś jako **{job}** i zarobiłeś **{reward}** monet! 🪙\nTwój stan konta: **{}** monet.\nKolejna zmiana: <t:{}:R>.",
                         profile.coins,
-                        next_claim_at.timestamp()
+                        next_claim_at.as_second()
                     )))
                 }
                 WorkClaimOutcome::Cooldown {
@@ -496,7 +496,7 @@ pub async fn execute(
                     next_claim_at,
                 } => Ok(Some(format!(
                     "⏳ Musisz odpocząć przed kolejną zmianą! Następna praca dostępna <t:{}:R>.\nTwój aktualny stan konta: **{}** monet.",
-                    next_claim_at.timestamp(),
+                    next_claim_at.as_second(),
                     profile.coins
                 ))),
                 WorkClaimOutcome::AlreadyProcessed {
@@ -560,7 +560,7 @@ pub async fn execute(
                     Ok(Some(format!(
                         "🕵️ Udany skok na cyber-skarbiec! Zdobyłeś **{reward}** monet! 💰\nTwój stan konta: **{}** monet.\nKolejna akcja: <t:{}:R>.",
                         profile.coins,
-                        next_claim_at.timestamp()
+                        next_claim_at.as_second()
                     )))
                 }
                 CrimeClaimOutcome::Failure {
@@ -595,7 +595,7 @@ pub async fn execute(
                     Ok(Some(format!(
                         "🚔 Zostałeś przyłapany przez ochronę! Skok się nie powiódł i nic nie zyskałeś.\nTwój stan konta: **{}** monet.\nKolejna próba: <t:{}:R>.",
                         profile.coins,
-                        next_claim_at.timestamp()
+                        next_claim_at.as_second()
                     )))
                 }
                 CrimeClaimOutcome::Cooldown {
@@ -603,7 +603,7 @@ pub async fn execute(
                     next_claim_at,
                 } => Ok(Some(format!(
                     "⏳ Po ostatniej akcji policja wciąż cię obserwuje! Następna próba możliwa <t:{}:R>.\nStan konta: **{}** monet.",
-                    next_claim_at.timestamp(),
+                    next_claim_at.as_second(),
                     profile.coins
                 ))),
                 CrimeClaimOutcome::AlreadyProcessed {
@@ -644,7 +644,7 @@ mod tests {
         assert!(empty_text.contains("Twój ekwipunek na tym serwerze jest pusty"));
 
         // 2. 5 purchases (no has_more)
-        let now = Utc::now();
+        let now = Timestamp::now();
         let purchases_5: Vec<StorePurchase> = (0..5)
             .map(|i| StorePurchase {
                 id: Uuid::new_v4(),
@@ -700,7 +700,7 @@ mod tests {
     #[test]
     fn test_format_shop_output_bounded_display_issue_389() {
         use crate::storage::{StoreItem, StoreItemsPage};
-        let now = chrono::Utc::now();
+        let now = Timestamp::now();
 
         // 1. Empty shop
         let empty_page = StoreItemsPage {

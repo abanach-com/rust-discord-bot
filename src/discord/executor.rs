@@ -1,8 +1,8 @@
+use crate::datetime::{Timestamp, days};
+use jiff::SignedDuration;
 use std::collections::HashMap;
 
 use anyhow::{Context as _, Result, anyhow};
-
-use chrono::{Duration, Utc};
 
 use uuid::Uuid;
 
@@ -823,7 +823,8 @@ async fn execute_action(
 
             ensure_member_hierarchy(ctx, guild_id, authorizing_actor, target_id).await?;
 
-            let until = (Utc::now() + Duration::seconds(i64::try_from(*seconds)?)).to_rfc3339();
+            let until = (Timestamp::now() + SignedDuration::from_secs(i64::try_from(*seconds)?))
+                .to_rfc3339();
 
             guild_id
                 .edit_member(
@@ -1115,7 +1116,7 @@ async fn execute_action(
             }
 
             let messages = channel_id.messages(&ctx.http, get_messages).await?;
-            let two_weeks_ago = Utc::now() - chrono::Duration::days(14);
+            let two_weeks_ago = Timestamp::now() - days(14);
 
             let mut scanned = 0usize;
             let mut matched_messages = Vec::new();
@@ -1289,7 +1290,7 @@ async fn execute_action(
                 .filter_map(|s| s.parse::<u64>().ok().map(MessageId::new))
                 .collect::<Vec<_>>();
 
-            let two_weeks_ago = Utc::now() - chrono::Duration::days(14);
+            let two_weeks_ago = Timestamp::now() - days(14);
             let (deleted_count, failed_count) =
                 delete_partitioned_messages(ctx, channel_id, &msg_ids, two_weeks_ago).await?;
 
@@ -2047,7 +2048,7 @@ async fn delete_partitioned_messages(
     ctx: &Context,
     channel_id: ChannelId,
     message_ids: &[MessageId],
-    two_weeks_ago: chrono::DateTime<Utc>,
+    two_weeks_ago: Timestamp,
 ) -> Result<(usize, usize)> {
     let mut bulk_ids = Vec::new();
     let mut old_ids = Vec::new();

@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use crate::datetime::Timestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -23,15 +23,15 @@ pub struct TicketRecord {
     pub priority: String,
     pub status: String,
     pub claimed_by_user_id: Option<String>,
-    pub first_response_at: Option<DateTime<Utc>>,
-    pub last_activity_at: DateTime<Utc>,
+    pub first_response_at: Option<Timestamp>,
+    pub last_activity_at: Timestamp,
     pub close_reason: Option<String>,
     pub closed_by_user_id: Option<String>,
     pub provisioning_error: Option<String>,
     pub version: i64,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub closed_at: Option<DateTime<Utc>>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+    pub closed_at: Option<Timestamp>,
 }
 
 impl TicketRecord {
@@ -54,7 +54,7 @@ impl TicketRecord {
         format!("{:06}", self.number.max(0))
     }
 
-    pub fn activate(&mut self, channel_id: String, channel_name: String, now: DateTime<Utc>) {
+    pub fn activate(&mut self, channel_id: String, channel_name: String, now: Timestamp) {
         self.channel_id = Some(channel_id);
         self.channel_name = Some(channel_name);
         self.status = STATUS_OPEN.to_owned();
@@ -64,7 +64,7 @@ impl TicketRecord {
         self.last_activity_at = now;
     }
 
-    pub fn fail_provisioning(&mut self, error: &str, now: DateTime<Utc>) {
+    pub fn fail_provisioning(&mut self, error: &str, now: Timestamp) {
         self.status = STATUS_FAILED.to_owned();
         self.provisioning_error = Some(truncate(error, 1_000));
         self.version = self.version.saturating_add(1);
@@ -72,7 +72,7 @@ impl TicketRecord {
         self.closed_at = Some(now);
     }
 
-    pub fn claim(&mut self, actor_user_id: &str, now: DateTime<Utc>) {
+    pub fn claim(&mut self, actor_user_id: &str, now: Timestamp) {
         self.status = STATUS_CLAIMED.to_owned();
         self.claimed_by_user_id = Some(actor_user_id.to_owned());
         self.first_response_at.get_or_insert(now);
@@ -81,7 +81,7 @@ impl TicketRecord {
         self.updated_at = now;
     }
 
-    pub fn unclaim(&mut self, now: DateTime<Utc>) {
+    pub fn unclaim(&mut self, now: Timestamp) {
         self.status = STATUS_OPEN.to_owned();
         self.claimed_by_user_id = None;
         self.last_activity_at = now;
@@ -89,7 +89,7 @@ impl TicketRecord {
         self.updated_at = now;
     }
 
-    pub fn close(&mut self, actor_user_id: &str, reason: Option<&str>, now: DateTime<Utc>) {
+    pub fn close(&mut self, actor_user_id: &str, reason: Option<&str>, now: Timestamp) {
         self.status = STATUS_CLOSED.to_owned();
         self.close_reason = reason.map(|value| truncate(value, 512));
         self.closed_by_user_id = Some(actor_user_id.to_owned());
@@ -99,7 +99,7 @@ impl TicketRecord {
         self.updated_at = now;
     }
 
-    pub fn reopen(&mut self, now: DateTime<Utc>) {
+    pub fn reopen(&mut self, now: Timestamp) {
         self.status = STATUS_OPEN.to_owned();
         self.claimed_by_user_id = None;
         self.close_reason = None;
@@ -110,14 +110,14 @@ impl TicketRecord {
         self.updated_at = now;
     }
 
-    pub fn rename(&mut self, channel_name: String, now: DateTime<Utc>) {
+    pub fn rename(&mut self, channel_name: String, now: Timestamp) {
         self.channel_name = Some(channel_name);
         self.last_activity_at = now;
         self.version = self.version.saturating_add(1);
         self.updated_at = now;
     }
 
-    pub fn set_priority(&mut self, priority: &str, now: DateTime<Utc>) {
+    pub fn set_priority(&mut self, priority: &str, now: Timestamp) {
         self.priority = priority.to_owned();
         self.last_activity_at = now;
         self.version = self.version.saturating_add(1);
@@ -135,7 +135,7 @@ pub struct NewTicketReservation {
 }
 
 impl NewTicketReservation {
-    pub fn materialize(self, number: i64, now: DateTime<Utc>) -> TicketRecord {
+    pub fn materialize(self, number: i64, now: Timestamp) -> TicketRecord {
         TicketRecord {
             id: Uuid::new_v4().to_string(),
             number,
@@ -205,7 +205,7 @@ pub struct TicketParticipant {
     pub ticket_id: String,
     pub user_id: String,
     pub added_by_user_id: String,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug)]
@@ -227,7 +227,7 @@ pub struct TicketTranscript {
     pub generated_by_user_id: String,
     pub message_count: i32,
     pub content: String,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -238,7 +238,7 @@ pub struct TicketEvent {
     pub actor_user_id: Option<String>,
     pub event_type: String,
     pub data: Value,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug)]
@@ -252,7 +252,7 @@ pub struct NewTicketTranscript {
 }
 
 impl NewTicketTranscript {
-    pub fn materialize(self, now: DateTime<Utc>) -> TicketTranscript {
+    pub fn materialize(self, now: Timestamp) -> TicketTranscript {
         TicketTranscript {
             id: Uuid::new_v4().to_string(),
             ticket_id: self.ticket_id,
@@ -272,7 +272,7 @@ fn truncate(value: &str, maximum: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
+    use crate::datetime::Timestamp;
 
     use super::{
         NewTicketReservation, STATUS_CLAIMED, STATUS_CLOSED, STATUS_OPEN, STATUS_PROVISIONING,
@@ -286,12 +286,12 @@ mod tests {
             description: "Opis".to_owned(),
             queue: "support".to_owned(),
         }
-        .materialize(42, Utc::now())
+        .materialize(42, Timestamp::now())
     }
 
     #[test]
     fn ticket_moves_through_the_expected_lifecycle() {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut ticket = ticket();
         assert_eq!(ticket.status, STATUS_PROVISIONING);
 

@@ -1,3 +1,4 @@
+use rusty_discord_bot::datetime::Timestamp;
 use std::{
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
@@ -913,7 +914,6 @@ async fn welcome_module_sends_goodbye_message_on_member_remove() {
 
 #[tokio::test]
 async fn test_quote_storage_quota_enforcement_and_isolation_issue_385() {
-    use chrono::Utc;
     use rusty_discord_bot::storage::{
         MAX_QUOTES_PER_AUTHOR_PER_GUILD, MAX_QUOTES_PER_GUILD, QuoteRecord, Storage,
     };
@@ -941,7 +941,7 @@ async fn test_quote_storage_quota_enforcement_and_isolation_issue_385() {
             added_by: author_u.to_string(),
             author_id: author_u.to_string(),
             body: format!("Quote {i} by U"),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
         storage
             .create_quote(quote)
@@ -956,7 +956,7 @@ async fn test_quote_storage_quota_enforcement_and_isolation_issue_385() {
         added_by: author_u.to_string(),
         author_id: author_u.to_string(),
         body: "Quote 4 by U (exceeds author quota)".to_string(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     let err_u = storage.create_quote(quote_u4).await.unwrap_err();
     assert!(
@@ -973,7 +973,7 @@ async fn test_quote_storage_quota_enforcement_and_isolation_issue_385() {
         added_by: author_v.to_string(),
         author_id: author_u.to_string(),
         body: "Quote 1 by V quoting U".to_string(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     let saved_v1 = storage
         .create_quote(quote_v1)
@@ -986,7 +986,7 @@ async fn test_quote_storage_quota_enforcement_and_isolation_issue_385() {
         added_by: author_v.to_string(),
         author_id: author_v.to_string(),
         body: "Quote 2 by V".to_string(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     storage
         .create_quote(quote_v2)
@@ -1000,7 +1000,7 @@ async fn test_quote_storage_quota_enforcement_and_isolation_issue_385() {
         added_by: author_v.to_string(),
         author_id: author_v.to_string(),
         body: "Quote 3 by V (exceeds guild quota)".to_string(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     let err_guild = storage.create_quote(quote_v3).await.unwrap_err();
     assert!(
@@ -1015,7 +1015,7 @@ async fn test_quote_storage_quota_enforcement_and_isolation_issue_385() {
         added_by: author_u.to_string(),
         author_id: author_u.to_string(),
         body: "Quote 1 by U in Guild B".to_string(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     storage
         .create_quote(quote_b1)
@@ -1036,7 +1036,7 @@ async fn test_quote_storage_quota_enforcement_and_isolation_issue_385() {
         added_by: author_v.to_string(),
         author_id: author_v.to_string(),
         body: "Quote retry by V after slot freed".to_string(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     storage
         .create_quote(quote_v_retry)

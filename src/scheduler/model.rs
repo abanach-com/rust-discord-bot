@@ -1,4 +1,5 @@
-use chrono::{DateTime, Duration, Utc};
+use crate::datetime::Timestamp;
+use jiff::SignedDuration;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -18,23 +19,23 @@ pub struct ScheduledJob {
     pub creator_user_id: String,
     pub content: String,
     pub mention_creator: bool,
-    pub run_at: DateTime<Utc>,
+    pub run_at: Timestamp,
     pub repeat_every_seconds: Option<i64>,
     pub remaining_runs: Option<i64>,
     pub run_count: i64,
     pub status: String,
     pub attempts: i32,
     pub max_attempts: i32,
-    pub locked_at: Option<DateTime<Utc>>,
+    pub locked_at: Option<Timestamp>,
     pub locked_by: Option<String>,
     pub last_error: Option<String>,
-    pub last_run_at: Option<DateTime<Utc>>,
-    pub completed_at: Option<DateTime<Utc>>,
+    pub last_run_at: Option<Timestamp>,
+    pub completed_at: Option<Timestamp>,
     #[serde(default)]
     #[sqlx(default)]
-    pub cancellation_requested_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub cancellation_requested_at: Option<Timestamp>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 impl ScheduledJob {
@@ -45,7 +46,7 @@ impl ScheduledJob {
         )
     }
 
-    pub fn is_claimable(&self, now: DateTime<Utc>, stale_before: DateTime<Utc>) -> bool {
+    pub fn is_claimable(&self, now: Timestamp, stale_before: Timestamp) -> bool {
         self.attempts < self.max_attempts
             && ((self.status == STATUS_ACTIVE && self.run_at <= now)
                 || (self.status == STATUS_PROCESSING
@@ -54,7 +55,7 @@ impl ScheduledJob {
                         .is_some_and(|locked_at| locked_at < stale_before)))
     }
 
-    pub fn claim(&mut self, worker_id: &str, now: DateTime<Utc>) {
+    pub fn claim(&mut self, worker_id: &str, now: Timestamp) {
         self.status = STATUS_PROCESSING.to_owned();
         self.locked_by = Some(worker_id.to_owned());
         self.locked_at = Some(now);
@@ -62,7 +63,7 @@ impl ScheduledJob {
         self.updated_at = now;
     }
 
-    pub fn renew_lease(&mut self, worker_id: &str, now: DateTime<Utc>) -> bool {
+    pub fn renew_lease(&mut self, worker_id: &str, now: Timestamp) -> bool {
         if self.status == STATUS_PROCESSING && self.locked_by.as_deref() == Some(worker_id) {
             self.locked_at = Some(now);
             self.updated_at = now;
@@ -72,7 +73,7 @@ impl ScheduledJob {
         }
     }
 
-    pub fn mark_succeeded(&mut self, now: DateTime<Utc>) {
+    pub fn mark_succeeded(&mut self, now: Timestamp) {
         self.run_count = self.run_count.saturating_add(1);
         self.last_run_at = Some(now);
         self.last_error = None;
@@ -99,13 +100,13 @@ impl ScheduledJob {
         if let Some(remaining_runs) = self.remaining_runs.as_mut() {
             *remaining_runs = remaining_runs.saturating_sub(1);
         }
-        let scheduled_next = self.run_at + Duration::seconds(repeat_every_seconds.max(1));
-        self.run_at = scheduled_next.max(now + Duration::seconds(1));
+        let scheduled_next = self.run_at + SignedDuration::from_secs(repeat_every_seconds.max(1));
+        self.run_at = scheduled_next.max(now + SignedDuration::from_secs(1));
         self.status = STATUS_ACTIVE.to_owned();
         self.completed_at = None;
     }
 
-    pub fn mark_failed(&mut self, now: DateTime<Utc>, error: &str) {
+    pub fn mark_failed(&mut self, now: Timestamp, error: &str) {
         self.last_error = Some(truncate(error, 1_000));
         self.locked_at = None;
         self.locked_by = None;
@@ -118,7 +119,7 @@ impl ScheduledJob {
         }
 
         self.status = STATUS_ACTIVE.to_owned();
-        self.run_at = now + Duration::seconds(i64::from(self.retry_delay_seconds()));
+        self.run_at = now + SignedDuration::from_secs(i64::from(self.retry_delay_seconds()));
     }
 
     pub fn retry_delay_seconds(&self) -> u32 {
@@ -141,14 +142,14 @@ pub struct NewScheduledJob {
     pub creator_user_id: String,
     pub content: String,
     pub mention_creator: bool,
-    pub run_at: DateTime<Utc>,
+    pub run_at: Timestamp,
     pub repeat_every_seconds: Option<i64>,
     pub remaining_runs: Option<i64>,
     pub max_attempts: i32,
 }
 
 impl NewScheduledJob {
-    pub fn materialize(self, now: DateTime<Utc>) -> ScheduledJob {
+    pub fn materialize(self, now: Timestamp) -> ScheduledJob {
         ScheduledJob {
             id: Uuid::new_v4().to_string(),
             guild_id: self.guild_id,
@@ -213,12 +214,13 @@ fn truncate(value: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration, Utc};
+    use crate::datetime::Timestamp;
+    use jiff::SignedDuration;
 
     use super::{NewScheduledJob, STATUS_ACTIVE, STATUS_COMPLETED, STATUS_FAILED};
 
     fn recurring_job(remaining_runs: Option<i64>) -> super::ScheduledJob {
-        let now = Utc::now();
+        let now = Timestamp::now();
         NewScheduledJob {
             guild_id: "1".to_owned(),
             module_id: "scheduler".to_owned(),
@@ -236,20 +238,20 @@ mod tests {
 
     #[test]
     fn finite_recurrence_completes_after_the_last_run() {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut job = recurring_job(Some(2));
         job.mark_succeeded(now);
         assert_eq!(job.status, STATUS_ACTIVE);
         assert_eq!(job.remaining_runs, Some(1));
 
-        job.mark_succeeded(now + Duration::minutes(1));
+        job.mark_succeeded(now + SignedDuration::from_mins(1));
         assert_eq!(job.status, STATUS_COMPLETED);
         assert_eq!(job.remaining_runs, Some(0));
     }
 
     #[test]
     fn exhausted_retries_fail_the_job() {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut job = recurring_job(None);
         job.attempts = job.max_attempts;
         job.mark_failed(now, "network error");

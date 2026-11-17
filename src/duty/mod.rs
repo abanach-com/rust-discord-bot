@@ -1,10 +1,30 @@
-use std::str::FromStr;
-
-use chrono::{DateTime, Datelike, NaiveTime, Utc, Weekday};
-use chrono_tz::Tz;
+use jiff::SignedDuration;
+use jiff::civil::{Time, Weekday};
+use jiff::tz::TimeZone;
 use serde::{Deserialize, Serialize};
 
+use crate::datetime::Timestamp;
 use crate::storage::validate_snowflake;
+
+fn parse_duty_time(value: &str) -> Option<Time> {
+    fn parse_component(value: &str) -> Option<i8> {
+        // Stored schedules can contain one digit and leading Unicode whitespace.
+        let digits = value.trim_start();
+        if !(1..=2).contains(&digits.len()) || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        digits.parse().ok()
+    }
+
+    let (hour, minute) = value.split_once(':')?;
+    Time::new(parse_component(hour)?, parse_component(minute)?, 0, 0).ok()
+}
+
+pub(crate) fn parse_duty_timezone(name: &str) -> Option<TimeZone> {
+    let timezone = TimeZone::get(name).ok()?;
+    // Preserve exact IANA spelling and aliases, including UTC.
+    (timezone.iana_name() == Some(name)).then_some(timezone)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DutyTimeRange {
@@ -14,11 +34,11 @@ pub struct DutyTimeRange {
 
 impl DutyTimeRange {
     pub fn new(start: &str, end: &str) -> anyhow::Result<Self> {
-        NaiveTime::parse_from_str(start, "%H:%M").map_err(|_| {
+        parse_duty_time(start).ok_or_else(|| {
             anyhow::anyhow!("Invalid start time format (expected HH:MM): {}", start)
         })?;
-        NaiveTime::parse_from_str(end, "%H:%M")
-            .map_err(|_| anyhow::anyhow!("Invalid end time format (expected HH:MM): {}", end))?;
+        parse_duty_time(end)
+            .ok_or_else(|| anyhow::anyhow!("Invalid end time format (expected HH:MM): {}", end))?;
         Ok(Self {
             start: start.to_string(),
             end: end.to_string(),
@@ -26,10 +46,7 @@ impl DutyTimeRange {
     }
 
     pub fn is_overnight(&self) -> bool {
-        if let (Ok(s), Ok(e)) = (
-            NaiveTime::parse_from_str(&self.start, "%H:%M"),
-            NaiveTime::parse_from_str(&self.end, "%H:%M"),
-        ) {
+        if let (Some(s), Some(e)) = (parse_duty_time(&self.start), parse_duty_time(&self.end)) {
             s > e
         } else {
             false
@@ -58,29 +75,29 @@ pub struct RecurringSchedule {
 impl RecurringSchedule {
     pub fn ranges_for_weekday(&self, weekday: Weekday) -> &[DutyTimeRange] {
         match weekday {
-            Weekday::Mon => &self.monday,
-            Weekday::Tue => &self.tuesday,
-            Weekday::Wed => &self.wednesday,
-            Weekday::Thu => &self.thursday,
-            Weekday::Fri => &self.friday,
-            Weekday::Sat => &self.saturday,
-            Weekday::Sun => &self.sunday,
+            Weekday::Monday => &self.monday,
+            Weekday::Tuesday => &self.tuesday,
+            Weekday::Wednesday => &self.wednesday,
+            Weekday::Thursday => &self.thursday,
+            Weekday::Friday => &self.friday,
+            Weekday::Saturday => &self.saturday,
+            Weekday::Sunday => &self.sunday,
         }
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
-        for day in [
-            Weekday::Mon,
-            Weekday::Tue,
-            Weekday::Wed,
-            Weekday::Thu,
-            Weekday::Fri,
-            Weekday::Sat,
-            Weekday::Sun,
+        for (day, name) in [
+            (Weekday::Monday, "Mon"),
+            (Weekday::Tuesday, "Tue"),
+            (Weekday::Wednesday, "Wed"),
+            (Weekday::Thursday, "Thu"),
+            (Weekday::Friday, "Fri"),
+            (Weekday::Saturday, "Sat"),
+            (Weekday::Sunday, "Sun"),
         ] {
             for (index, range) in self.ranges_for_weekday(day).iter().enumerate() {
                 DutyTimeRange::new(&range.start, &range.end)
-                    .map_err(|error| anyhow::anyhow!("{day:?}[{index}]: {error}"))?;
+                    .map_err(|error| anyhow::anyhow!("{name}[{index}]: {error}"))?;
             }
         }
         Ok(())
@@ -94,7 +111,7 @@ pub struct ModeratorDutySettings {
     pub on_call_role_id: Option<String>,
     pub max_override_duration_mins: i32,
     pub fallback_channel_id: Option<String>,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -104,9 +121,9 @@ pub struct ModeratorDutyProfile {
     pub timezone: String,
     pub recurring_schedule: sqlx::types::Json<RecurringSchedule>,
     pub manual_override: Option<String>,
-    pub override_expires_at: Option<DateTime<Utc>>,
+    pub override_expires_at: Option<Timestamp>,
     pub version: i64,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
 }
 
 impl ModeratorDutyProfile {
@@ -118,11 +135,11 @@ impl ModeratorDutyProfile {
     ) -> anyhow::Result<Self> {
         validate_snowflake("guild_id", &guild_id)?;
         validate_snowflake("user_id", &user_id)?;
-        let _ = Tz::from_str(&timezone)
-            .map_err(|_| anyhow::anyhow!("Invalid IANA timezone: {}", timezone))?;
+        parse_duty_timezone(&timezone)
+            .ok_or_else(|| anyhow::anyhow!("Invalid IANA timezone: {}", timezone))?;
         schedule.validate()?;
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         Ok(Self {
             guild_id,
             user_id,
@@ -149,7 +166,7 @@ pub struct ModeratorDutyState {
     pub user_id: String,
     pub expected_on_call: bool,
     pub state_generation: i64,
-    pub last_reconciled_at: Option<DateTime<Utc>>,
+    pub last_reconciled_at: Option<Timestamp>,
     pub last_error: Option<String>,
 }
 
@@ -168,11 +185,7 @@ pub enum StaffAudience {
 ///    - 'force_on' -> true
 ///    - 'force_off' -> false
 /// 3. Otherwise evaluate recurring schedule in moderator's local timezone (handling DST & overnight shifts).
-pub fn compute_is_on_call(
-    profile: &ModeratorDutyProfile,
-    now: DateTime<Utc>,
-    is_staff: bool,
-) -> bool {
+pub fn compute_is_on_call(profile: &ModeratorDutyProfile, now: Timestamp, is_staff: bool) -> bool {
     if !is_staff {
         return false;
     }
@@ -194,8 +207,8 @@ pub fn compute_is_on_call(
     }
 
     // 3. Evaluate recurring schedule
-    let tz = Tz::from_str(&profile.timezone).unwrap_or(chrono_tz::UTC);
-    let local_now = now.with_timezone(&tz);
+    let tz = parse_duty_timezone(&profile.timezone).unwrap_or(TimeZone::UTC);
+    let local_now = tz.to_datetime(now.to_jiff());
     let current_weekday = local_now.weekday();
     let current_time = local_now.time();
 
@@ -204,11 +217,8 @@ pub fn compute_is_on_call(
         .recurring_schedule
         .ranges_for_weekday(current_weekday);
     for range in today_ranges {
-        match (
-            NaiveTime::parse_from_str(&range.start, "%H:%M"),
-            NaiveTime::parse_from_str(&range.end, "%H:%M"),
-        ) {
-            (Ok(start), Ok(end)) => {
+        match (parse_duty_time(&range.start), parse_duty_time(&range.end)) {
+            (Some(start), Some(end)) => {
                 if start <= end {
                     // Same-day shift: e.g. 18:00 - 22:00
                     if current_time >= start && current_time < end {
@@ -235,16 +245,13 @@ pub fn compute_is_on_call(
     }
 
     // B. Check yesterday's overnight shifts that carry over into today
-    let yesterday_weekday = current_weekday.pred();
+    let yesterday_weekday = current_weekday.previous();
     let yesterday_ranges = profile
         .recurring_schedule
         .ranges_for_weekday(yesterday_weekday);
     for range in yesterday_ranges {
-        match (
-            NaiveTime::parse_from_str(&range.start, "%H:%M"),
-            NaiveTime::parse_from_str(&range.end, "%H:%M"),
-        ) {
-            (Ok(start), Ok(end)) => {
+        match (parse_duty_time(&range.start), parse_duty_time(&range.end)) {
+            (Some(start), Some(end)) => {
                 if start > end && current_time < end {
                     return true;
                 }
@@ -273,10 +280,10 @@ pub struct ModeratorDutyRoleGrant {
     pub status: String, // "active", "revoke_pending", "revoked", "failed"
     pub attempts: i32,
     pub last_error: Option<String>,
-    pub next_attempt_at: DateTime<Utc>,
+    pub next_attempt_at: Timestamp,
     pub generation: i64,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -336,7 +343,7 @@ pub async fn reconcile_member_duty_state(
         None => true,
     };
 
-    let expected = compute_is_on_call(params.profile, Utc::now(), is_staff);
+    let expected = compute_is_on_call(params.profile, Timestamp::now(), is_staff);
 
     let on_call_role_id = match params.settings.on_call_role_id {
         Some(ref r) => r.clone(),
@@ -347,7 +354,7 @@ pub async fn reconcile_member_duty_state(
                     user_id: params.user_id.to_string(),
                     expected_on_call: expected,
                     state_generation: 0,
-                    last_reconciled_at: Some(Utc::now()),
+                    last_reconciled_at: Some(Timestamp::now()),
                     last_error: Some("No on_call_role_id configured".to_string()),
                 };
                 let _ = params.storage.upsert_duty_state(state).await?;
@@ -456,7 +463,7 @@ pub async fn reconcile_member_duty_state(
             user_id: params.user_id.to_string(),
             expected_on_call: expected,
             state_generation: 0,
-            last_reconciled_at: Some(Utc::now()),
+            last_reconciled_at: Some(Timestamp::now()),
             last_error: error.clone(),
         };
         let _ = params.storage.upsert_duty_state(state).await?;
@@ -514,20 +521,20 @@ pub async fn process_duty_role_revocations(
                     Ok(_) => {
                         grant.status = "revoked".to_string();
                         grant.last_error = None;
-                        grant.updated_at = Utc::now();
+                        grant.updated_at = Timestamp::now();
                         processed += 1;
                     }
                     Err(e) => {
                         let err_msg = e.to_string();
                         grant.attempts += 1;
                         grant.last_error = Some(err_msg);
-                        grant.updated_at = Utc::now();
+                        grant.updated_at = Timestamp::now();
                         if grant.attempts >= 5 {
                             grant.status = "failed".to_string();
                         } else {
                             let backoff_secs = 2u64.pow(grant.attempts.min(6) as u32) * 5;
                             grant.next_attempt_at =
-                                Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
+                                Timestamp::now() + SignedDuration::from_secs(backoff_secs as i64);
                         }
                     }
                 }
@@ -617,7 +624,7 @@ pub async fn reconcile_all_duty_guilds(
                 on_call_role_id: None,
                 max_override_duration_mins: 1440,
                 fallback_channel_id: None,
-                updated_at: Utc::now(),
+                updated_at: Timestamp::now(),
             });
 
         let profiles = storage.list_duty_profiles(&guild_id).await?;
@@ -643,7 +650,7 @@ pub async fn reconcile_all_duty_guilds(
                                 user_id: profile.user_id.clone(),
                                 expected_on_call: false,
                                 state_generation: 0,
-                                last_reconciled_at: Some(Utc::now()),
+                                last_reconciled_at: Some(Timestamp::now()),
                                 last_error: Some(format!("Failed to fetch Discord member: {e}")),
                             })
                             .await;
@@ -716,7 +723,36 @@ pub async fn run_moderator_duty_reconciler_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+
+    #[test]
+    fn duty_time_ranges_keep_accepting_stored_single_digit_components() {
+        let range = DutyTimeRange::new("\u{2003}22: 0", "1:\u{a0}3").unwrap();
+        assert!(range.is_overnight());
+        assert!(DutyTimeRange::new("22 :00", "01:03").is_err());
+        assert!(DutyTimeRange::new("22:00 ", "01:03").is_err());
+        assert!(DutyTimeRange::new("22:00:00", "01:03").is_err());
+    }
+
+    #[test]
+    fn duty_profiles_accept_exact_iana_names_and_aliases() {
+        for (zone, valid) in [
+            ("UTC", true),
+            ("Etc/UTC", true),
+            ("Europe/Berlin", true),
+            ("Europe/Kiev", true),
+            ("europe/berlin", false),
+            ("Etc/Unknown", false),
+            ("+01:00", false),
+        ] {
+            let profile = ModeratorDutyProfile::new(
+                "100000000000000001".to_string(),
+                "200000000000000001".to_string(),
+                zone.to_string(),
+                RecurringSchedule::default(),
+            );
+            assert_eq!(profile.is_ok(), valid, "{zone}");
+        }
+    }
 
     #[test]
     fn test_non_staff_never_on_call() {
@@ -733,7 +769,7 @@ mod tests {
         )
         .unwrap();
 
-        let now = Utc.with_ymd_and_hms(2026, 11, 2, 12, 0, 0).unwrap(); // Monday
+        let now = "2026-11-02T12:00:00Z".parse::<Timestamp>().unwrap(); // Monday
         assert!(
             compute_is_on_call(&profile, now, true),
             "Staff should be on call"
@@ -759,21 +795,27 @@ mod tests {
         )
         .unwrap();
 
-        let now = Utc.with_ymd_and_hms(2026, 11, 2, 10, 0, 0).unwrap(); // Monday 10:00 UTC (inside schedule)
+        let now = "2026-11-02T10:00:00Z".parse::<Timestamp>().unwrap(); // Monday 10:00 UTC (inside schedule)
 
         // Normal schedule: on call
         assert!(compute_is_on_call(&profile, now, true));
 
         // Manual force_off with future expiry: overrides schedule to off
         profile.manual_override = Some("force_off".to_string());
-        profile.override_expires_at = Some(now + chrono::Duration::hours(2));
+        profile.override_expires_at = Some(now + SignedDuration::from_hours(2));
         assert!(
             !compute_is_on_call(&profile, now, true),
             "Manual force_off must override recurring schedule"
         );
 
+        assert!(compute_is_on_call(
+            &profile,
+            profile.override_expires_at.unwrap(),
+            true
+        ));
+
         // After expiry: reverts to recurring schedule (on call)
-        let after_expiry = now + chrono::Duration::hours(3); // 13:00 UTC
+        let after_expiry = now + SignedDuration::from_hours(3); // 13:00 UTC
         assert!(
             compute_is_on_call(&profile, after_expiry, true),
             "After manual override expiry, should revert to schedule"
@@ -797,22 +839,22 @@ mod tests {
         .unwrap();
 
         // 1. Friday 21:59 UTC: not on call
-        let fri_before = Utc.with_ymd_and_hms(2026, 11, 6, 21, 59, 0).unwrap();
+        let fri_before = "2026-11-06T21:59:00Z".parse::<Timestamp>().unwrap();
         assert!(!compute_is_on_call(&profile, fri_before, true));
 
         // 2. Friday 22:30 UTC: on call
-        let fri_during = Utc.with_ymd_and_hms(2026, 11, 6, 22, 30, 0).unwrap();
+        let fri_during = "2026-11-06T22:30:00Z".parse::<Timestamp>().unwrap();
         assert!(compute_is_on_call(&profile, fri_during, true));
 
         // 3. Saturday 01:30 UTC: still on call from Friday overnight shift!
-        let sat_early = Utc.with_ymd_and_hms(2026, 11, 7, 1, 30, 0).unwrap();
+        let sat_early = "2026-11-07T01:30:00Z".parse::<Timestamp>().unwrap();
         assert!(
             compute_is_on_call(&profile, sat_early, true),
             "Overnight shift must continue on Saturday early morning"
         );
 
         // 4. Saturday 02:01 UTC: shift finished
-        let sat_after = Utc.with_ymd_and_hms(2026, 11, 7, 2, 1, 0).unwrap();
+        let sat_after = "2026-11-07T02:01:00Z".parse::<Timestamp>().unwrap();
         assert!(!compute_is_on_call(&profile, sat_after, true));
     }
 
@@ -833,15 +875,74 @@ mod tests {
         .unwrap();
 
         // In winter (CET, UTC+1): 13:00 UTC = 14:00 Berlin (start of shift)
-        let wed_winter = Utc.with_ymd_and_hms(2026, 11, 4, 13, 30, 0).unwrap();
+        let wed_winter = "2026-11-04T13:30:00Z".parse::<Timestamp>().unwrap();
         assert!(
             compute_is_on_call(&profile, wed_winter, true),
             "13:30 UTC is 14:30 CET (active)"
         );
 
         // 12:30 UTC = 13:30 Berlin (before shift)
-        let wed_winter_before = Utc.with_ymd_and_hms(2026, 11, 4, 12, 30, 0).unwrap();
+        let wed_winter_before = "2026-11-04T12:30:00Z".parse::<Timestamp>().unwrap();
         assert!(!compute_is_on_call(&profile, wed_winter_before, true));
+    }
+
+    #[test]
+    fn duty_schedule_skips_nonexistent_wall_times_during_dst_gap() {
+        let profile = ModeratorDutyProfile::new(
+            "100000000000000001".to_string(),
+            "200000000000000001".to_string(),
+            "Europe/Berlin".to_string(),
+            RecurringSchedule {
+                sunday: vec![DutyTimeRange::new("02:15", "02:45").unwrap()],
+                ..RecurringSchedule::default()
+            },
+        )
+        .unwrap();
+
+        // The same shift is active on a Sunday before the clocks change.
+        assert!(compute_is_on_call(
+            &profile,
+            "2026-03-22T01:30:00Z".parse().unwrap(),
+            true,
+        ));
+        for instant in [
+            "2026-03-29T00:59:59Z", // 01:59:59 CET
+            "2026-03-29T01:00:00Z", // 03:00:00 CEST
+            "2026-03-29T01:30:00Z", // 03:30:00 CEST
+            "2026-03-29T02:30:00Z", // 04:30:00 CEST
+        ] {
+            assert!(
+                !compute_is_on_call(&profile, instant.parse().unwrap(), true),
+                "{instant}"
+            );
+        }
+    }
+
+    #[test]
+    fn duty_schedule_applies_to_both_occurrences_of_repeated_wall_times() {
+        let profile = ModeratorDutyProfile::new(
+            "100000000000000001".to_string(),
+            "200000000000000001".to_string(),
+            "Europe/Berlin".to_string(),
+            RecurringSchedule {
+                sunday: vec![DutyTimeRange::new("02:15", "02:45").unwrap()],
+                ..RecurringSchedule::default()
+            },
+        )
+        .unwrap();
+
+        for (instant, expected) in [
+            ("2026-10-25T00:15:00Z", true),  // 02:15 CEST
+            ("2026-10-25T00:45:00Z", false), // 02:45 CEST
+            ("2026-10-25T01:15:00Z", true),  // 02:15 CET
+            ("2026-10-25T01:45:00Z", false), // 02:45 CET
+        ] {
+            assert_eq!(
+                compute_is_on_call(&profile, instant.parse().unwrap(), true),
+                expected,
+                "{instant}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -858,7 +959,7 @@ mod tests {
             on_call_role_id: Some(on_call_role.clone()),
             max_override_duration_mins: 1440,
             fallback_channel_id: None,
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         };
 
         let mut profile = ModeratorDutyProfile::new(
@@ -932,7 +1033,7 @@ mod tests {
             on_call_role_id: Some(on_call_role.clone()),
             max_override_duration_mins: 1440,
             fallback_channel_id: None,
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         };
 
         let mut profile = ModeratorDutyProfile::new(
@@ -981,7 +1082,7 @@ mod tests {
             on_call_role_id: Some(on_call_role.clone()),
             max_override_duration_mins: 1440,
             fallback_channel_id: Some(fallback_chan.clone()),
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         };
         store.upsert_duty_settings(settings).await.unwrap();
 
@@ -998,7 +1099,7 @@ mod tests {
                 user_id: "200000000000000001".to_string(),
                 expected_on_call: true,
                 state_generation: 1,
-                last_reconciled_at: Some(Utc::now()),
+                last_reconciled_at: Some(Timestamp::now()),
                 last_error: None,
             })
             .await
@@ -1023,7 +1124,7 @@ mod tests {
             on_call_role_id: Some(on_call_role),
             max_override_duration_mins: 1440,
             fallback_channel_id: None,
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         };
         store.upsert_duty_settings(settings).await.unwrap();
 
@@ -1134,7 +1235,7 @@ mod tests {
             manual_override: None,
             override_expires_at: None,
             version: 0,
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         };
         assert!(profile.schedule_error().is_some());
         assert!(profile.schedule_error().unwrap().contains("Mon[0]"));

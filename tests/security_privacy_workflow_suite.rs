@@ -1,7 +1,8 @@
+use jiff::SignedDuration;
+use rusty_discord_bot::datetime::{Timestamp, days};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
 use dashmap::DashMap;
 use reqwest::header::COOKIE;
 use serde_json::json;
@@ -115,7 +116,7 @@ async fn test_security_privacy_workflow_suite() {
                 permissions: "8".to_string(),
             }],
             csrf_token.to_string(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -125,7 +126,7 @@ async fn test_security_privacy_workflow_suite() {
         (user_id.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -146,12 +147,12 @@ async fn test_security_privacy_workflow_suite() {
             provider_account_id: Some("gh_acc_99".to_string()),
             access_token: Some("ghp_super_secret_personal_access_token_12345".to_string()),
             refresh_token: Some("ghr_secret_refresh_token_67890".to_string()),
-            token_expires_at: Some(Utc::now() + Duration::days(30)),
+            token_expires_at: Some(Timestamp::now() + days(30)),
             scopes: json!(["repo", "read:user"]),
             metadata: json!({"login": "octocat"}),
             enabled: true,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         })
         .await
         .expect("upsert integration connection");
@@ -258,7 +259,7 @@ async fn test_security_privacy_workflow_suite() {
                     visible_to_subject: true,
                     expires_at: None,
                 },
-                Utc::now(),
+                Timestamp::now(),
             )
             .await
             .expect("create subject case");
@@ -281,7 +282,7 @@ async fn test_security_privacy_workflow_suite() {
                 visible_to_subject: true,
                 expires_at: None,
             },
-            Utc::now(),
+            Timestamp::now(),
         )
         .await
         .expect("create other user case");
@@ -318,7 +319,7 @@ async fn test_security_privacy_workflow_suite() {
             guild_id: guild_id.to_string(),
             user_id: user_id.to_string(),
             reason: "Proszę nie przeszkadzać (test AFK)".to_string(),
-            set_at: chrono::Utc::now(),
+            set_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -331,7 +332,7 @@ async fn test_security_privacy_workflow_suite() {
             guild_id: guild_id.to_string(),
             user_id: "888888888".to_string(),
             reason: "Other user AFK".to_string(),
-            set_at: chrono::Utc::now(),
+            set_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -343,7 +344,7 @@ async fn test_security_privacy_workflow_suite() {
             guild_id: "200".to_string(),
             user_id: user_id.to_string(),
             reason: "Other guild AFK".to_string(),
-            set_at: chrono::Utc::now(),
+            set_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -762,11 +763,12 @@ async fn test_security_privacy_workflow_suite() {
     // =========================================================================
 
     // Create an event with max_participants = 2
+    let roster_start = Timestamp::now() + SignedDuration::from_hours(1);
     let roster_event = json!({
         "title": "2-Player Tournament",
         "description": "Strict 2-player capacity",
-        "start_time": "2026-12-01T19:00:00Z",
-        "end_time": "2026-12-01T21:00:00Z",
+        "start_time": roster_start,
+        "end_time": roster_start + SignedDuration::from_hours(2),
         "timezone": "UTC",
         "max_participants": 2
     });
@@ -838,7 +840,7 @@ async fn test_security_privacy_workflow_suite() {
                 permissions: "8".to_string(),
             }],
             csrf_2.to_string(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -847,7 +849,7 @@ async fn test_security_privacy_workflow_suite() {
         (user_2.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
     let cookie_2 = format!("rusty_discord_bot_session={session_2}");
@@ -874,7 +876,7 @@ async fn test_security_privacy_workflow_suite() {
                 permissions: "8".to_string(),
             }],
             csrf_3.to_string(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -883,7 +885,7 @@ async fn test_security_privacy_workflow_suite() {
         (user_3.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
     let cookie_3 = format!("rusty_discord_bot_session={session_3}");
@@ -982,7 +984,7 @@ async fn test_security_privacy_workflow_suite() {
                 creator_user_id: user_id.to_string(),
                 content: "Reminder 1".to_string(),
                 mention_creator: false,
-                run_at: Utc::now() + Duration::hours(5),
+                run_at: Timestamp::now() + SignedDuration::from_hours(5),
                 repeat_every_seconds: None,
                 remaining_runs: None,
                 max_attempts: 3,
@@ -1029,7 +1031,7 @@ async fn test_security_privacy_workflow_suite() {
                 creator_user_id: user_id.to_string(),
                 content: "Reminder 2".to_string(),
                 mention_creator: false,
-                run_at: Utc::now() - Duration::minutes(1), // due now
+                run_at: Timestamp::now() - SignedDuration::from_mins(1), // due now
                 repeat_every_seconds: None,
                 remaining_runs: None,
                 max_attempts: 3,
@@ -1048,7 +1050,12 @@ async fn test_security_privacy_workflow_suite() {
     let claimed = state
         .app
         .scheduler
-        .claim_due(worker_id, Utc::now(), Utc::now() - Duration::hours(1), 10)
+        .claim_due(
+            worker_id,
+            Timestamp::now(),
+            Timestamp::now() - SignedDuration::from_hours(1),
+            10,
+        )
         .await
         .expect("claim due job");
     assert!(claimed.iter().any(|j| j.id == proc_job_id));
@@ -1100,7 +1107,7 @@ async fn test_security_privacy_workflow_suite() {
     let mark_res = state
         .app
         .scheduler
-        .mark_cancelled(&proc_job_id, worker_id, Utc::now())
+        .mark_cancelled(&proc_job_id, worker_id, Timestamp::now())
         .await
         .expect("mark cancelled");
     assert!(mark_res.is_some());
@@ -1115,8 +1122,8 @@ async fn test_security_privacy_workflow_suite() {
         .scheduler
         .claim_due(
             "another_worker",
-            Utc::now() + Duration::hours(1),
-            Utc::now() - Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
+            Timestamp::now() - SignedDuration::from_hours(1),
             10,
         )
         .await
@@ -1137,7 +1144,7 @@ async fn test_security_privacy_workflow_suite() {
             "Favorite Editor?",
             &["VSCode".to_string(), "Neovim".to_string()],
             false,
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
         )
         .await
         .unwrap();
@@ -1189,7 +1196,7 @@ async fn test_security_privacy_workflow_suite() {
             "chan_giveaways",
             "Discord Nitro",
             1,
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
         )
         .await
         .unwrap();
@@ -1549,7 +1556,7 @@ async fn test_security_privacy_workflow_suite() {
                 },
             ],
             csrf_token.to_string(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -1559,7 +1566,7 @@ async fn test_security_privacy_workflow_suite() {
         (user_id.to_string(), audit_test_guild.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -1633,7 +1640,7 @@ async fn test_security_privacy_workflow_suite() {
 
     // Test Audit retention pruning
     // Past cutoff: 0 pruned
-    let past_cutoff = Utc::now() - Duration::days(45);
+    let past_cutoff = Timestamp::now() - days(45);
     let pruned_past = state
         .app
         .storage
@@ -1646,7 +1653,7 @@ async fn test_security_privacy_workflow_suite() {
     );
 
     // Future cutoff: all 5 should be pruned
-    let future_cutoff = Utc::now() + Duration::days(1);
+    let future_cutoff = Timestamp::now() + days(1);
     let pruned_future = state
         .app
         .storage
@@ -1729,14 +1736,14 @@ async fn test_workflow_dry_run_validation_only_semantics_issue_400() {
         (user_id.to_string(), guild_id.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
     perms_cache.insert(
         (user_id.to_string(), other_guild_id.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -1768,7 +1775,7 @@ async fn test_workflow_dry_run_validation_only_semantics_issue_400() {
                 },
             ],
             csrf_token.to_string(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -1902,8 +1909,8 @@ async fn test_workflow_dry_run_validation_only_semantics_issue_400() {
         ]),
         is_active: true,
         version: 1,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     // Direct store insertion (simulating database edge-case or legacy stored state)
     state

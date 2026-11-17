@@ -1,3 +1,5 @@
+use crate::datetime::Timestamp;
+use jiff::SignedDuration;
 use std::{
     sync::{
         Arc, RwLock,
@@ -7,7 +9,6 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use dashmap::DashMap;
 use serenity::all::{
     Channel, ChannelId, ChannelType, CreateAllowedMentions, CreateMessage, GuildId, Http,
@@ -492,10 +493,11 @@ async fn run_channel_worker(
 
             // 2. Cooldown check: if inside cooldown, sleep until fixed deadline while coalescing triggers WITHOUT querying storage
             if let Some(last_bumped) = sticky.last_bumped_at {
-                let elapsed = Utc::now().signed_duration_since(last_bumped);
-                let cooldown_dur = chrono::Duration::seconds(i64::from(sticky.cooldown_seconds));
+                let elapsed = Timestamp::now().duration_since(last_bumped);
+                let cooldown_dur = SignedDuration::from_secs(i64::from(sticky.cooldown_seconds));
                 if elapsed < cooldown_dur {
-                    let remaining = (cooldown_dur - elapsed).to_std().unwrap_or_default();
+                    let remaining =
+                        std::time::Duration::try_from(cooldown_dur - elapsed).unwrap_or_default();
                     if !remaining.is_zero() {
                         let deadline = tokio::time::Instant::now() + remaining;
 
@@ -590,7 +592,7 @@ async fn run_channel_worker(
             };
 
             // 5. Commit delivery state to storage with optimistic concurrency control (CAS)
-            let now = Utc::now();
+            let now = Timestamp::now();
             let commit_res = env
                 .storage
                 .update_sticky_posted_message(

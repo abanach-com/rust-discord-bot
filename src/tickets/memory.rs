@@ -1,9 +1,10 @@
+use crate::datetime::Timestamp;
+use jiff::SignedDuration;
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
-use chrono::{Duration, Utc};
 use serde_json::{Value, json};
 
 use super::model::{
@@ -37,7 +38,7 @@ impl MemoryTicketStore {
         max_open_per_user: u8,
     ) -> ReserveTicketOutcome {
         let mut state = self.lock();
-        let now = Utc::now();
+        let now = Timestamp::now();
         expire_stale_provisioning(&mut state, now);
 
         let active_count = state
@@ -100,7 +101,11 @@ impl MemoryTicketStore {
                     current_status: ticket.status.clone(),
                 };
             }
-            ticket.activate(channel_id.to_owned(), channel_name.to_owned(), Utc::now());
+            ticket.activate(
+                channel_id.to_owned(),
+                channel_name.to_owned(),
+                Timestamp::now(),
+            );
             ticket.clone()
         };
 
@@ -129,7 +134,7 @@ impl MemoryTicketStore {
                     current_status: ticket.status.clone(),
                 };
             }
-            ticket.fail_provisioning(error, Utc::now());
+            ticket.fail_provisioning(error, Timestamp::now());
             ticket.clone()
         };
         push_event(
@@ -188,7 +193,7 @@ impl MemoryTicketStore {
                 return TicketMutationOutcome::NotFound;
             };
             match ticket.status.as_str() {
-                STATUS_OPEN => ticket.claim(actor_user_id, Utc::now()),
+                STATUS_OPEN => ticket.claim(actor_user_id, Timestamp::now()),
                 STATUS_CLAIMED if ticket.claimed_by_user_id.as_deref() == Some(actor_user_id) => {
                     return TicketMutationOutcome::Conflict {
                         message: "ticket is already claimed by this user".to_owned(),
@@ -237,7 +242,7 @@ impl MemoryTicketStore {
             if !allow_any && ticket.claimed_by_user_id.as_deref() != Some(actor_user_id) {
                 return TicketMutationOutcome::Forbidden;
             }
-            ticket.unclaim(Utc::now());
+            ticket.unclaim(Timestamp::now());
             ticket.clone()
         };
         push_event(
@@ -267,7 +272,7 @@ impl MemoryTicketStore {
                     current_status: ticket.status.clone(),
                 };
             }
-            ticket.close(actor_user_id, reason, Utc::now());
+            ticket.close(actor_user_id, reason, Timestamp::now());
             ticket.clone()
         };
         push_event(
@@ -292,7 +297,7 @@ impl MemoryTicketStore {
                     current_status: ticket.status.clone(),
                 };
             }
-            ticket.reopen(Utc::now());
+            ticket.reopen(Timestamp::now());
             ticket.clone()
         };
         push_event(
@@ -322,7 +327,7 @@ impl MemoryTicketStore {
                     current_status: ticket.status.clone(),
                 };
             }
-            ticket.rename(channel_name.to_owned(), Utc::now());
+            ticket.rename(channel_name.to_owned(), Timestamp::now());
             ticket.clone()
         };
         push_event(
@@ -347,7 +352,7 @@ impl MemoryTicketStore {
             actor_user_id,
             TicketMutation::SetPriority,
             json!({ "priority": priority }),
-            |ticket| ticket.set_priority(priority, Utc::now()),
+            |ticket| ticket.set_priority(priority, Timestamp::now()),
         )
     }
 
@@ -383,7 +388,7 @@ impl MemoryTicketStore {
             ticket_id: ticket_id.to_owned(),
             user_id: user_id.to_owned(),
             added_by_user_id: actor_user_id.to_owned(),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
         participants.insert(user_id.to_owned(), participant.clone());
         push_event(
@@ -448,7 +453,7 @@ impl MemoryTicketStore {
 
     pub fn store_transcript(&self, transcript: NewTicketTranscript) -> TicketTranscript {
         let mut state = self.lock();
-        let transcript = transcript.materialize(Utc::now());
+        let transcript = transcript.materialize(Timestamp::now());
         push_event(
             &mut state,
             &transcript.ticket_id,
@@ -485,7 +490,7 @@ impl MemoryTicketStore {
             .cloned()
     }
 
-    pub fn prune_transcripts(&self, cutoff: chrono::DateTime<chrono::Utc>, limit: usize) -> u64 {
+    pub fn prune_transcripts(&self, cutoff: Timestamp, limit: usize) -> u64 {
         let mut state = self.lock();
         let limit = limit.clamp(1, 5000);
         let mut removed = 0usize;
@@ -553,8 +558,8 @@ impl MemoryTicketStore {
     }
 }
 
-fn expire_stale_provisioning(state: &mut MemoryTicketState, now: chrono::DateTime<Utc>) {
-    let stale_before = now - Duration::minutes(PROVISIONING_TIMEOUT_MINUTES);
+fn expire_stale_provisioning(state: &mut MemoryTicketState, now: Timestamp) {
+    let stale_before = now - SignedDuration::from_mins(PROVISIONING_TIMEOUT_MINUTES);
     let stale_ids = state
         .tickets
         .values()
@@ -598,7 +603,7 @@ fn push_event(
         actor_user_id: actor_user_id.map(str::to_owned),
         event_type: event_type.to_owned(),
         data,
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     });
 }
 

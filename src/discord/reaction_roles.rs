@@ -1,5 +1,5 @@
+use crate::datetime::Timestamp;
 use anyhow::{Context as _, Result, anyhow, ensure};
-use chrono::Utc;
 use serenity::{
     all::{ChannelId, GuildId, Permissions, Reaction, ReactionType, RoleId, UserId},
     client::Context,
@@ -269,7 +269,7 @@ pub async fn execute_reaction_role_action(
                 emoji_key: emoji_key.clone(),
                 role_id: role_id.clone(),
                 created_by: actor_id_str.clone(),
-                created_at: Utc::now(),
+                created_at: Timestamp::now(),
             };
 
             state

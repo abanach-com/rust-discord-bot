@@ -1,6 +1,6 @@
+use crate::datetime::Timestamp;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -54,8 +54,8 @@ pub struct CommandPolicyRule {
     pub enabled: bool,
     pub version: i64,
     pub created_by: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 pub fn validate_policy_rule_fields(rule: &CommandPolicyRule) -> anyhow::Result<()> {
@@ -212,7 +212,7 @@ impl CommandPolicyRule {
             PolicyResource::Action { action_key } => ("action", None, None, Some(action_key)),
         };
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         Ok(Self {
             id: Uuid::new_v4(),
             guild_id,
@@ -1084,7 +1084,7 @@ mod tests {
         let guild_id = "100000000000000001";
         let user_id = "200000000000000001";
         let channel_id = "300000000000000001";
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         // 1. Raw rule with uppercase fields fails canonical validation
         let mut raw_rule = CommandPolicyRule {

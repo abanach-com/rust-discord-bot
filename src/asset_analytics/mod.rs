@@ -1,7 +1,10 @@
+use crate::datetime::Timestamp;
+#[cfg(test)]
+use crate::datetime::days;
+use jiff::civil::Date;
 use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
 
-use chrono::{DateTime, NaiveDate, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
@@ -62,11 +65,12 @@ pub struct ParsedSticker {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AssetUsageDaily {
     pub guild_id: String,
-    pub usage_date: NaiveDate,
+    #[sqlx(try_from = "jiff_sqlx::Date")]
+    pub usage_date: Date,
     pub asset_kind: String,
     pub asset_id: String,
     pub usage_count: i64,
-    pub last_used_at: DateTime<Utc>,
+    pub last_used_at: Timestamp,
 }
 
 /// Inventory record for a known emoji or sticker in a guild.
@@ -80,8 +84,8 @@ pub struct AssetInventoryItem {
     pub is_guild_owned: Option<bool>,
     #[serde(default = "default_true")]
     pub is_active: bool,
-    pub first_seen_at: DateTime<Utc>,
-    pub last_seen_at: DateTime<Utc>,
+    pub first_seen_at: Timestamp,
+    pub last_seen_at: Timestamp,
 }
 
 fn default_true() -> bool {
@@ -103,8 +107,8 @@ pub struct AssetUsageStat {
     pub usage_30d: i64,
     pub usage_total: i64,
     pub period_usage: i64,
-    pub first_seen_at: Option<DateTime<Utc>>,
-    pub last_used_at: Option<DateTime<Utc>>,
+    pub first_seen_at: Option<Timestamp>,
+    pub last_used_at: Option<Timestamp>,
     pub unused_days: Option<i64>,
 }
 
@@ -118,7 +122,7 @@ pub struct AssetUsageAggregate {
     pub usage_30d: i64,
     pub usage_today: i64,
     pub period_usage: i64,
-    pub last_used_at: Option<DateTime<Utc>>,
+    pub last_used_at: Option<Timestamp>,
 }
 
 /// Summary report returned to the dashboard and API.
@@ -139,7 +143,7 @@ pub struct AssetUsageSummary {
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct AssetUsageKey {
     pub guild_id: String,
-    pub day: NaiveDate,
+    pub day: Date,
     pub kind: AssetKind,
     pub asset_id: String,
 }
@@ -151,8 +155,8 @@ struct InMemInventory {
     animated: bool,
     is_guild_owned: Option<bool>,
     is_active: bool,
-    first_seen_at: DateTime<Utc>,
-    last_seen_at: DateTime<Utc>,
+    first_seen_at: Timestamp,
+    last_seen_at: Timestamp,
 }
 
 /// Bounded FIFO deduplication cache for message IDs.
@@ -292,7 +296,7 @@ pub fn parse_custom_emojis(content: &str) -> Vec<ParsedCustomEmoji> {
 pub struct AssetAnalyticsBatcher {
     storage: crate::storage::Storage,
     counts: DashMap<AssetUsageKey, u64>,
-    last_seen: DashMap<AssetUsageKey, DateTime<Utc>>,
+    last_seen: DashMap<AssetUsageKey, Timestamp>,
     inventory: DashMap<(String, AssetKind, String), InMemInventory>,
     dedupe: Mutex<BoundedMessageDedupe>,
     flush_lock: tokio::sync::Mutex<()>,
@@ -336,8 +340,8 @@ impl AssetAnalyticsBatcher {
             }
         }
 
-        let now = Utc::now();
-        let today = now.date_naive();
+        let now = Timestamp::now();
+        let today = now.date();
         let mut total_recorded = 0;
 
         // 2. Parse and record custom emojis
@@ -432,7 +436,7 @@ impl AssetAnalyticsBatcher {
         if validate_snowflake("guild_id", guild_id).is_err() {
             return;
         }
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         for emoji in emojis {
             if validate_snowflake("asset_id", &emoji.id).is_err() {
@@ -503,7 +507,7 @@ impl AssetAnalyticsBatcher {
         animated: bool,
         is_guild_owned: Option<bool>,
         count: u64,
-        timestamp: DateTime<Utc>,
+        timestamp: Timestamp,
     ) {
         if validate_snowflake("guild_id", guild_id).is_err()
             || validate_snowflake("asset_id", asset_id).is_err()
@@ -512,7 +516,7 @@ impl AssetAnalyticsBatcher {
             return;
         }
 
-        let day = timestamp.date_naive();
+        let day = timestamp.date();
         let key = AssetUsageKey {
             guild_id: guild_id.to_string(),
             day,
@@ -599,7 +603,7 @@ impl AssetAnalyticsBatcher {
                     .last_seen
                     .remove(&key)
                     .map(|(_, ts)| ts)
-                    .unwrap_or_else(Utc::now);
+                    .unwrap_or_else(Timestamp::now);
                 snapshot_counts.push((key, count, last_used));
             }
         }
@@ -731,7 +735,7 @@ pub fn build_asset_summary_from_aggregates(
     period: &str,
     aggregates: &[AssetUsageAggregate],
     inventory_rows: &[AssetInventoryItem],
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> AssetUsageSummary {
     let mut inv_map = std::collections::HashMap::new();
     for inv in inventory_rows {
@@ -780,7 +784,7 @@ pub fn build_asset_summary_from_aggregates(
             unique_assets_used += 1;
         }
 
-        let unused_days = last_used_at.map(|lu| (now - lu).num_days().max(0));
+        let unused_days = last_used_at.map(|lu| ((now - lu).as_hours() / 24).max(0));
 
         let stat = AssetUsageStat {
             asset_id: id,
@@ -853,13 +857,13 @@ pub fn calculate_asset_summary_at(
     period: &str,
     daily_rows: &[AssetUsageDaily],
     inventory_rows: &[AssetInventoryItem],
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> AssetUsageSummary {
-    let today = now.date_naive();
-    let seven_days_ago = today - chrono::Duration::days(6);
-    let thirty_days_ago = today - chrono::Duration::days(29);
+    let today = now.date();
+    let seven_days_ago = today - jiff::Span::new().days(6);
+    let thirty_days_ago = today - jiff::Span::new().days(29);
 
-    let period_cutoff: Option<NaiveDate> = match period {
+    let period_cutoff: Option<Date> = match period {
         "today" => Some(today),
         "7d" => Some(seven_days_ago),
         "30d" => Some(thirty_days_ago),
@@ -872,7 +876,7 @@ pub fn calculate_asset_summary_at(
         thirty_days: i64,
         total: i64,
         period: i64,
-        last_used_at: DateTime<Utc>,
+        last_used_at: Timestamp,
     }
 
     let mut agg_map = std::collections::HashMap::new();
@@ -949,7 +953,7 @@ pub fn calculate_asset_summary_at(
     )
 }
 
-/// Helper to aggregate raw daily rows and inventory into a full `AssetUsageSummary` at `Utc::now()`.
+/// Helper to aggregate raw daily rows and inventory into a full `AssetUsageSummary` at `Timestamp::now()`.
 pub fn calculate_asset_summary(
     guild_id: &str,
     target_kind: Option<AssetKind>,
@@ -963,7 +967,7 @@ pub fn calculate_asset_summary(
         period,
         daily_rows,
         inventory_rows,
-        Utc::now(),
+        Timestamp::now(),
     )
 }
 
@@ -1039,7 +1043,7 @@ mod tests {
 
         let guild_id = "100000000000000001";
         let emoji_id = "200000000000000002";
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         // 1. Record 5 usages
         batcher.record_asset_usage(
@@ -1108,7 +1112,7 @@ mod tests {
 
         let guild_id = "100000000000000001";
         let shared_id = "999888777666555444";
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         batcher.record_asset_usage(
             guild_id,
@@ -1164,7 +1168,7 @@ mod tests {
         let guild_1 = "100000000000000001";
         let guild_2 = "200000000000000002";
         let emoji_id = "300000000000000003";
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         // Guild 1: external emoji used
         batcher.record_asset_usage(
@@ -1216,9 +1220,9 @@ mod tests {
         let guild_2 = "200000000000000002";
         let asset_id = "400000000000000004";
 
-        let old_date = Utc::now().date_naive() - chrono::Duration::days(100);
-        let recent_date = Utc::now().date_naive() - chrono::Duration::days(10);
-        let now = Utc::now();
+        let old_date = Timestamp::now().date() - jiff::Span::new().days(100);
+        let recent_date = Timestamp::now().date() - jiff::Span::new().days(10);
+        let now = Timestamp::now();
 
         let daily_items = vec![
             AssetUsageDaily {
@@ -1276,15 +1280,15 @@ mod tests {
 
     #[test]
     fn test_date_boundaries_exact_7d_and_30d() {
-        let fixed_now: DateTime<Utc> = "2026-11-05T12:00:00Z".parse().unwrap();
+        let fixed_now: Timestamp = "2026-11-05T12:00:00Z".parse().unwrap();
         let guild_id = "100000000000000001";
         let asset_id = "200000000000000002";
 
-        let d_today = NaiveDate::from_ymd_opt(2026, 11, 5).unwrap();
-        let d_6_ago = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap(); // today - 6 (inclusive for 7d)
-        let d_7_ago = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap(); // today - 7 (MUST be excluded from 7d)
-        let d_29_ago = NaiveDate::from_ymd_opt(2026, 10, 7).unwrap(); // today - 29 (inclusive for 30d)
-        let d_30_ago = NaiveDate::from_ymd_opt(2026, 10, 6).unwrap(); // today - 30 (MUST be excluded from 30d)
+        let d_today = jiff::civil::date(2026, 11, 5);
+        let d_6_ago = jiff::civil::date(2026, 10, 30); // today - 6 (inclusive for 7d)
+        let d_7_ago = jiff::civil::date(2026, 10, 29); // today - 7 (MUST be excluded from 7d)
+        let d_29_ago = jiff::civil::date(2026, 10, 7); // today - 29 (inclusive for 30d)
+        let d_30_ago = jiff::civil::date(2026, 10, 6); // today - 30 (MUST be excluded from 30d)
 
         let daily_rows = vec![
             AssetUsageDaily {
@@ -1482,8 +1486,8 @@ mod tests {
         let batcher = AssetAnalyticsBatcher::new(storage.clone());
 
         let guild_id = "100000000000000001";
-        let now = Utc::now();
-        let past_45d = now - chrono::Duration::days(45);
+        let now = Timestamp::now();
+        let past_45d = now - days(45);
 
         // 1. Sync inventory snapshot from guild (3 emojis)
         let emojis = vec![
@@ -1588,7 +1592,7 @@ mod tests {
             false,
             Some(true),
             99,
-            Utc::now(),
+            Timestamp::now(),
         );
         assert_eq!(batcher.pending_counts_len(), 1);
 
@@ -1615,7 +1619,7 @@ mod tests {
         let guild_id = "100000000000000001";
         let emoji_a = "200000000000000001";
         let emoji_b = "200000000000000002";
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         // 1. Initial guild state: both A and B are active
         let active_items = vec![
