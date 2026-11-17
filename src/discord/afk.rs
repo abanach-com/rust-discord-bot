@@ -1,5 +1,5 @@
+use crate::datetime::Timestamp;
 use anyhow::{Context as _, Result, anyhow, ensure};
-use chrono::Utc;
 use serenity::all::{
     ChannelId, CreateAllowedMentions, CreateMessage, GuildId, Permissions, UserId,
 };
@@ -95,7 +95,7 @@ pub async fn execute_afk_action(
                 guild_id: guild_id_str.clone(),
                 user_id: actor_id_str.clone(),
                 reason: trimmed_reason.clone(),
-                set_at: Utc::now(),
+                set_at: Timestamp::now(),
             };
 
             state
@@ -179,7 +179,7 @@ pub async fn execute_afk_action(
                 Some(record) => Ok(Some(format!(
                     "💤 <@{}> jest AFK od <t:{}:R>: **{}**",
                     record.user_id,
-                    record.set_at.timestamp(),
+                    record.set_at.as_second(),
                     record.reason
                 ))),
                 None => Ok(Some(format!(
@@ -281,7 +281,7 @@ pub async fn execute_afk_action(
                     let mut notice = format!(
                         "ℹ️ <@{}> jest obecnie AFK od <t:{}:R>: **{}**",
                         afk_record.user_id,
-                        afk_record.set_at.timestamp(),
+                        afk_record.set_at.as_second(),
                         afk_record.reason
                     );
 

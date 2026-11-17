@@ -1,4 +1,5 @@
 use anyhow::Result;
+use jiff::SignedDuration;
 use serenity::all::{
     Channel, ChannelId, ChannelType, Context, EditMember, GuildId, Permissions, UserId,
 };
@@ -430,7 +431,7 @@ pub async fn process_claimed_event_voice_job(
                                     job.id,
                                     worker_id,
                                     &err_str,
-                                    Some(chrono::Duration::seconds(5)),
+                                    Some(SignedDuration::from_secs(5)),
                                 )
                                 .await?;
                             Ok(ProcessEventVoiceJobOutcome {

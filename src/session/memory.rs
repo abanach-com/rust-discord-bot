@@ -1,6 +1,7 @@
+use crate::datetime::Timestamp;
+use jiff::SignedDuration;
 use std::sync::Arc;
 
-use chrono::{DateTime, Duration, Utc};
 use dashmap::DashMap;
 
 use super::model::{DashboardGuild, DashboardUser, Session, StoredSession, hash_session_id};
@@ -8,7 +9,7 @@ use super::model::{DashboardGuild, DashboardUser, Session, StoredSession, hash_s
 #[derive(Clone, Default)]
 pub struct MemorySessionStore {
     sessions: Arc<DashMap<String, StoredSession>>,
-    oauth_states: Arc<DashMap<String, DateTime<Utc>>>,
+    oauth_states: Arc<DashMap<String, Timestamp>>,
 }
 
 impl MemorySessionStore {
@@ -23,14 +24,14 @@ impl MemorySessionStore {
         user: DashboardUser,
         guilds: Vec<DashboardGuild>,
         csrf_token: String,
-        expires_at: DateTime<Utc>,
+        expires_at: Timestamp,
         _access_token: Option<String>,
     ) -> anyhow::Result<()> {
         let hash = hash_session_id(session_id);
         let user_id = user.id.clone();
         let user_data = serde_json::to_value(&user)?;
         let guilds_data = serde_json::to_value(&guilds)?;
-        let now = Utc::now();
+        let now = Timestamp::now();
         self.sessions.insert(
             hash.clone(),
             StoredSession {
@@ -49,14 +50,14 @@ impl MemorySessionStore {
 
     pub fn get_session(&self, session_id: &str) -> anyhow::Result<Option<Session>> {
         let hash = hash_session_id(session_id);
-        let now = Utc::now();
+        let now = Timestamp::now();
         if let Some(mut entry) = self.sessions.get_mut(&hash) {
             if entry.expires_at <= now {
                 drop(entry);
                 self.sessions.remove(&hash);
                 return Ok(None);
             }
-            if entry.last_seen_at <= now - Duration::seconds(60) {
+            if entry.last_seen_at <= now - SignedDuration::from_secs(60) {
                 entry.last_seen_at = now;
             }
             let user: DashboardUser = serde_json::from_value(entry.user_data.clone())?;
@@ -85,7 +86,7 @@ impl MemorySessionStore {
     }
 
     pub fn cleanup_expired_sessions(&self) -> anyhow::Result<u64> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let before = self.sessions.len();
         self.sessions.retain(|_, s| s.expires_at > now);
         let after = self.sessions.len();
@@ -93,20 +94,20 @@ impl MemorySessionStore {
     }
 
     pub fn save_oauth_state(&self, state: &str) -> anyhow::Result<()> {
-        self.oauth_states.insert(state.to_owned(), Utc::now());
+        self.oauth_states.insert(state.to_owned(), Timestamp::now());
         Ok(())
     }
 
     pub fn consume_oauth_state(&self, state: &str) -> anyhow::Result<bool> {
         if let Some((_, created_at)) = self.oauth_states.remove(state) {
-            let valid = Utc::now() - created_at <= Duration::minutes(10);
+            let valid = Timestamp::now() - created_at <= SignedDuration::from_mins(10);
             return Ok(valid);
         }
         Ok(false)
     }
 
     pub fn cleanup_expired_oauth_states(&self) -> anyhow::Result<u64> {
-        let cutoff = Utc::now() - Duration::minutes(10);
+        let cutoff = Timestamp::now() - SignedDuration::from_mins(10);
         let before = self.oauth_states.len();
         self.oauth_states
             .retain(|_, created_at| *created_at >= cutoff);
@@ -115,12 +116,12 @@ impl MemorySessionStore {
     }
 
     pub fn count_active_sessions(&self) -> anyhow::Result<usize> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Ok(self.sessions.iter().filter(|s| s.expires_at > now).count())
     }
 
     pub fn count_pending_oauth_states(&self) -> anyhow::Result<usize> {
-        let cutoff = Utc::now() - Duration::minutes(10);
+        let cutoff = Timestamp::now() - SignedDuration::from_mins(10);
         Ok(self
             .oauth_states
             .iter()

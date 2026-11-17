@@ -1,6 +1,7 @@
+use jiff::SignedDuration;
+use rusty_discord_bot::datetime::Timestamp;
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
 use dashmap::DashMap;
 use reqwest::header::COOKIE;
 use rusty_discord_bot::{
@@ -102,7 +103,7 @@ async fn test_phase3_games_rp_and_knowledge_suite() {
             user,
             guilds,
             csrf_token.to_owned(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -570,7 +571,7 @@ async fn test_phase3_games_rp_and_knowledge_suite() {
         title: "Regulamin Społeczności".to_string(),
         content: "Zasada 1: Szanuj innych użytkowników. Obowiązuje kultura osobista.".to_string(),
         source_type: "community_rules".to_string(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     state
         .app

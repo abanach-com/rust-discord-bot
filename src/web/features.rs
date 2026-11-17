@@ -1,3 +1,5 @@
+use crate::datetime::{Timestamp, days};
+use jiff::SignedDuration;
 use std::collections::{HashMap, HashSet};
 
 use axum::{
@@ -6,8 +8,6 @@ use axum::{
     http::HeaderMap,
     response::{IntoResponse, Response},
 };
-
-use chrono::{DateTime, Utc};
 
 use serde::{Deserialize, Serialize};
 
@@ -1003,17 +1003,19 @@ pub struct CreatePollRequest {
     pub duration_minutes: Option<i64>,
 }
 
-fn checked_expires_at(minutes: i64) -> Result<DateTime<Utc>, ApiError> {
+fn checked_expires_at(minutes: i64) -> Result<Timestamp, ApiError> {
     if !(1..=43_200).contains(&minutes) {
         return Err(ApiError::bad_request(
             "duration_minutes must be between 1 and 43200",
         ));
     }
-    let delta = chrono::Duration::try_minutes(minutes)
+    let delta = minutes
+        .checked_mul(60)
+        .map(SignedDuration::from_secs)
         .ok_or_else(|| ApiError::bad_request("duration_minutes out of range"))?;
-    Utc::now()
-        .checked_add_signed(delta)
-        .ok_or_else(|| ApiError::bad_request("expiration is out of range"))
+    Timestamp::now()
+        .checked_add(delta)
+        .map_err(|_| ApiError::bad_request("expiration is out of range"))
 }
 
 pub async fn create_poll(
@@ -1264,7 +1266,7 @@ pub async fn join_giveaway(
 
     ensure_channel_view_access(&state, &session, &guild_id, &ga.channel_id).await?;
 
-    if ga.ended || Utc::now() >= ga.expires_at {
+    if ga.ended || Timestamp::now() >= ga.expires_at {
         return Ok(Json(json!({"joined": false})));
     }
 
@@ -1751,7 +1753,7 @@ pub async fn purchase_store_item(
                     .await
                 {
                     Ok(()) => {
-                        let now = Utc::now();
+                        let now = Timestamp::now();
                         if let Err(e) = state
                             .app
                             .storage
@@ -1911,12 +1913,12 @@ pub async fn list_store_purchases(
 pub struct SearchMembersQuery {
     pub roles: Option<String>,
     pub exclude_roles: Option<String>,
-    pub joined_after: Option<DateTime<Utc>>,
-    pub joined_before: Option<DateTime<Utc>>,
-    pub account_created_after: Option<DateTime<Utc>>,
-    pub account_created_before: Option<DateTime<Utc>>,
+    pub joined_after: Option<Timestamp>,
+    pub joined_before: Option<Timestamp>,
+    pub account_created_after: Option<Timestamp>,
+    pub account_created_before: Option<Timestamp>,
     pub min_case_count: Option<i64>,
-    pub identity_changed_after: Option<DateTime<Utc>>,
+    pub identity_changed_after: Option<Timestamp>,
     pub limit: Option<u16>,
     pub cursor: Option<String>,
 }
@@ -2197,9 +2199,9 @@ pub struct CreateScheduledEventRequest {
 
     pub description: String,
 
-    pub start_time: DateTime<Utc>,
+    pub start_time: Timestamp,
 
-    pub end_time: Option<DateTime<Utc>>,
+    pub end_time: Option<Timestamp>,
 
     #[serde(default = "default_timezone")]
     pub timezone: String,
@@ -2446,7 +2448,7 @@ pub async fn join_event_roster(
         .filter(|ev| ev.guild_id == guild_id)
         .ok_or_else(|| ApiError::not_found("Scheduled event was not found in this guild."))?;
 
-    if !event.is_registration_open(Utc::now()) {
+    if !event.is_registration_open(Timestamp::now()) {
         return Err(ApiError::conflict("Event registration is closed"));
     }
 
@@ -2558,7 +2560,7 @@ pub async fn get_event_voice_queue(
             lobby_channel_id: None,
             target_channel_id: None,
             mode: EVENT_VOICE_MODE_NOTIFY_ONLY.to_string(),
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         });
 
     Ok(Json(config))
@@ -2596,7 +2598,7 @@ pub async fn update_event_voice_queue(
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()),
         mode: payload.mode,
-        updated_at: Utc::now(),
+        updated_at: Timestamp::now(),
     };
 
     let actor_id = session.user.id.clone();
@@ -3293,7 +3295,10 @@ pub async fn link_game_account(
 
     ensure_guild_access(&state, &session, &guild_id).await?;
 
-    let code = format!("{:06X}", (Utc::now().timestamp_subsec_nanos() % 0xFFFFFF));
+    let code = format!(
+        "{:06X}",
+        (Timestamp::now().to_jiff().subsec_nanosecond() % 0xFFFFFF)
+    );
 
     let link = state
         .app
@@ -4475,7 +4480,7 @@ pub struct PolicyExportData {
     pub version: u32,
     pub guild_id: String,
     pub revision: i64,
-    pub exported_at: DateTime<Utc>,
+    pub exported_at: Timestamp,
     pub rules: Vec<CommandPolicyRule>,
 }
 
@@ -4567,7 +4572,7 @@ pub async fn upsert_policy_rule(
         return Err(ApiError::bad_request("Effect must be 'allow' or 'deny'"));
     }
 
-    let now = Utc::now();
+    let now = Timestamp::now();
     let rule_id = payload.id.unwrap_or_else(Uuid::new_v4);
     let rule = CommandPolicyRule {
         id: rule_id,
@@ -4808,7 +4813,7 @@ pub async fn export_policies(
         version: 1,
         guild_id,
         revision,
-        exported_at: Utc::now(),
+        exported_at: Timestamp::now(),
         rules,
     }))
 }
@@ -4945,7 +4950,7 @@ pub async fn get_duty_settings(
             on_call_role_id: None,
             max_override_duration_mins: 1440,
             fallback_channel_id: None,
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         });
 
     Ok(Json(json!({ "settings": settings })))
@@ -4989,7 +4994,7 @@ pub async fn upsert_duty_settings(
         on_call_role_id: payload.on_call_role_id,
         max_override_duration_mins: payload.max_override_duration_mins.unwrap_or(1440).max(1),
         fallback_channel_id: payload.fallback_channel_id,
-        updated_at: Utc::now(),
+        updated_at: Timestamp::now(),
     };
 
     let saved = state
@@ -5131,7 +5136,7 @@ pub async fn upsert_duty_profile(
     validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
     validate_snowflake("user_id", &user_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
 
-    let _ = payload.timezone.parse::<chrono_tz::Tz>().map_err(|_| {
+    let _ = crate::duty::parse_duty_timezone(&payload.timezone).ok_or_else(|| {
         ApiError::bad_request(format!("Invalid IANA timezone: {}", payload.timezone))
     })?;
 
@@ -5159,7 +5164,7 @@ pub async fn upsert_duty_profile(
 
     profile.timezone = payload.timezone;
     profile.recurring_schedule = sqlx::types::Json(payload.recurring_schedule);
-    profile.updated_at = Utc::now();
+    profile.updated_at = Timestamp::now();
 
     let saved = state
         .app
@@ -5291,11 +5296,13 @@ pub async fn set_duty_override(
                     "Override duration exceeds guild policy",
                 ));
             }
-            let delta = chrono::Duration::try_minutes(minutes)
+            let delta = minutes
+                .checked_mul(60)
+                .map(SignedDuration::from_secs)
                 .ok_or_else(|| ApiError::bad_request("Invalid override duration"))?;
-            let expires_at = Utc::now()
-                .checked_add_signed(delta)
-                .ok_or_else(|| ApiError::bad_request("Override expiry out of range"))?;
+            let expires_at = Timestamp::now()
+                .checked_add(delta)
+                .map_err(|_| ApiError::bad_request("Override expiry out of range"))?;
             profile.manual_override = Some("force_off".to_string());
             profile.override_expires_at = Some(expires_at);
         }
@@ -5358,7 +5365,7 @@ pub async fn reconcile_guild_duty(
             on_call_role_id: None,
             max_override_duration_mins: 1440,
             fallback_channel_id: None,
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         });
 
     let profiles = state
@@ -5417,7 +5424,7 @@ pub async fn reconcile_guild_duty(
                                 user_id: profile.user_id.clone(),
                                 expected_on_call: false,
                                 state_generation: 0,
-                                last_reconciled_at: Some(Utc::now()),
+                                last_reconciled_at: Some(Timestamp::now()),
                                 last_error: Some(err_msg.clone()),
                             })
                             .await;
@@ -5950,8 +5957,8 @@ pub async fn upsert_recruitment_track(
         target_role_id: payload.target_role_id,
         config: sqlx::types::Json(payload.config),
         version: 1,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
 
     let saved = state
@@ -6240,8 +6247,7 @@ pub async fn apply_recruitment_track(
         let latest_rejection_at = rejected_apps.iter().filter_map(|app| app.decided_at).max();
 
         if let Some(decided_at) = latest_rejection_at
-            && Utc::now() - decided_at
-                < chrono::Duration::days(i64::from(track.config.cooldown_days))
+            && Timestamp::now() - decided_at < days(i64::from(track.config.cooldown_days))
         {
             return Err(ApiError::bad_request(format!(
                 "You must wait {} days after a rejected application before reapplying",
@@ -6263,8 +6269,8 @@ pub async fn apply_recruitment_track(
         submitted_answers: sqlx::types::Json(payload.answers),
         current_stage: "submitted".to_string(),
         version: 1,
-        submitted_at: Utc::now(),
-        updated_at: Utc::now(),
+        submitted_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         decided_at: None,
         decision_reason: None,
         decided_by: None,
@@ -6349,8 +6355,8 @@ pub async fn review_recruitment_application(
         reviewer_user_id: session.user.id.clone(),
         recommendation: payload.recommendation,
         note: payload.note,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
 
     let saved = state
@@ -6736,8 +6742,8 @@ pub async fn upsert_help_forum(
         archive_on_close: payload.archive_on_close,
         require_question_tag: payload.require_question_tag,
         welcome_message: payload.welcome_message,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
 
     let token = &state.app.config.discord_token;
@@ -7648,7 +7654,7 @@ pub async fn create_reaction_role(
         emoji_key: emoji_key.clone(),
         role_id: payload.role_id.clone(),
         created_by: Some(session.user.id.clone()),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
 
     let saved = state
@@ -7788,10 +7794,10 @@ mod tests {
 
         // Valid boundaries: 1 minute and 43200 minutes (30 days)
         let min_exp = checked_expires_at(1).expect("1 minute must be valid");
-        assert!(min_exp > Utc::now());
+        assert!(min_exp > Timestamp::now());
 
         let max_exp = checked_expires_at(43_200).expect("43200 minutes (30 days) must be valid");
-        assert!(max_exp > Utc::now());
+        assert!(max_exp > Timestamp::now());
 
         // Default durations: 1440 (1 day) and 60 (1 hour)
         assert!(checked_expires_at(1440).is_ok());

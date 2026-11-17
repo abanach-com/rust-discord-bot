@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use crate::datetime::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
@@ -64,7 +64,7 @@ pub struct ProviderCapability {
 pub struct ProviderEvent {
     pub guild_id: String,
     pub event_id: String,
-    pub occurred_at: DateTime<Utc>,
+    pub occurred_at: Timestamp,
     pub source: String,
     pub subject: String,
     pub pii_classified: bool,
@@ -84,7 +84,7 @@ pub struct ConnectFlow {
     pub provider: String,
     pub authorization_url: String,
     pub state: String,
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,7 +94,7 @@ pub struct DeliveryReceipt {
     pub event_id: String,
     pub acknowledged: bool,
     pub status: String,
-    pub delivered_at: DateTime<Utc>,
+    pub delivered_at: Timestamp,
 }
 
 pub trait ProviderAdapter: Send + Sync {

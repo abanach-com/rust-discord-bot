@@ -34,6 +34,22 @@ To enforce quality gates before merging into `main`, repository settings should 
    - Prevent administrative bypass where feasible.
 2. Note: Modifying GitHub repository branch rules requires administrative privileges on `abanach-com/rust-discord-bot` (Settings -> Branches / Rulesets). Token with standard write permissions cannot modify branch protection directly.
 
+## Date and time dependencies
+
+Application timestamps and calendar dates use Jiff 1.0.0. The Jiff SQLx adapter
+uses the existing PostgreSQL TIMESTAMPTZ and DATE column types. UTC JSON
+timestamps retain their RFC 3339 representation and 0, 3, 6, or 9 fraction
+digits. Duty uses the bundled IANA timezone database.
+
+Jiff's representable instant range is narrower than Chrono's. Legacy expanded
+years outside the Jiff range cannot be decoded, and Jiff normalizes a leap
+second (`:60`) to second 59. Installations with manually entered extreme dates
+should check them before upgrading.
+
+Chrono remains transitive through Songbird 0.6.0 and serde-aux 4.7.0. The
+existing cargo-deny workspace rule for unmaintained dependencies applies to
+direct dependencies. Chrono-tz is absent from the dependency graph.
+
 ## Baseline verified on 2026-09-02
 
 Rust was updated to **1.100.0** on 2026-11-17 after checking the

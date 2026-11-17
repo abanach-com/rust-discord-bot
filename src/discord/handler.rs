@@ -1,3 +1,5 @@
+use crate::datetime::Timestamp;
+use jiff::SignedDuration;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use std::time::{Duration, Instant};
@@ -156,7 +158,7 @@ impl EventHandler for Handler {
 
     async fn guild_create(&self, ctx: Context, guild: serenity::all::Guild, _is_new: Option<bool>) {
         let guild_id_str = guild.id.to_string();
-        let now = chrono::Utc::now();
+        let now = Timestamp::now();
 
         // 1. Reconcile emojis (Issue #201: cold-start deactivates emojis removed offline)
         let emoji_items: Vec<crate::asset_analytics::AssetInventoryItem> = guild
@@ -253,7 +255,7 @@ impl EventHandler for Handler {
         current_state: std::collections::HashMap<serenity::all::EmojiId, serenity::all::Emoji>,
     ) {
         let guild_id_str = guild_id.to_string();
-        let now = chrono::Utc::now();
+        let now = Timestamp::now();
         let emoji_items: Vec<crate::asset_analytics::AssetInventoryItem> = current_state
             .values()
             .map(|e| crate::asset_analytics::AssetInventoryItem {
@@ -292,7 +294,7 @@ impl EventHandler for Handler {
         current_state: std::collections::HashMap<serenity::all::StickerId, serenity::all::Sticker>,
     ) {
         let guild_id_str = guild_id.to_string();
-        let now = chrono::Utc::now();
+        let now = Timestamp::now();
         let sticker_items: Vec<crate::asset_analytics::AssetInventoryItem> = current_state
             .values()
             .map(|s| crate::asset_analytics::AssetInventoryItem {
@@ -801,7 +803,7 @@ impl EventHandler for Handler {
             .collect();
         let joined_at = new_member
             .joined_at
-            .and_then(|ts| chrono::DateTime::from_timestamp(ts.unix_timestamp(), 0));
+            .and_then(|ts| Timestamp::from_second(ts.unix_timestamp()).ok());
         let g_id_str = guild_id.get().to_string();
         let u_id_str = new_member.user.id.get().to_string();
 
@@ -874,7 +876,7 @@ impl EventHandler for Handler {
         let g_id_str = event.guild_id.get().to_string();
         let u_id_str = event.user.id.get().to_string();
         let roles: Vec<String> = event.roles.iter().map(|r| r.get().to_string()).collect();
-        let joined_at = chrono::DateTime::from_timestamp(event.joined_at.unix_timestamp(), 0);
+        let joined_at = Timestamp::from_second(event.joined_at.unix_timestamp()).ok();
 
         let old_nick = old_if_available.as_ref().and_then(|m| m.nick.as_deref());
         let new_nick = event.nick.as_deref();
@@ -1199,8 +1201,8 @@ impl EventHandler for Handler {
                     thread_id: thread_id_str,
                     owner_user_id: owner_id_str,
                     status: initial_status.to_string(),
-                    opened_at: chrono::Utc::now(),
-                    last_activity_at: chrono::Utc::now(),
+                    opened_at: Timestamp::now(),
+                    last_activity_at: Timestamp::now(),
                     first_helper_response_at: None,
                     closed_at: None,
                     closing_reason: None,
@@ -1258,7 +1260,7 @@ impl EventHandler for Handler {
             {
                 let mut updated = session;
                 updated.status = "open".to_string();
-                updated.last_activity_at = chrono::Utc::now();
+                updated.last_activity_at = Timestamp::now();
                 updated.generation += 1;
                 let _ = storage.create_help_forum_session(updated).await;
 
@@ -1999,7 +2001,7 @@ async fn handle_duty_builtin_command(
             on_call_role_id: None,
             max_override_duration_mins: 1440,
             fallback_channel_id: None,
-            updated_at: chrono::Utc::now(),
+            updated_at: Timestamp::now(),
         });
 
     let member_roles: Vec<String> = command
@@ -2079,11 +2081,13 @@ async fn handle_duty_builtin_command(
             .min(settings.max_override_duration_mins as u64)
             .max(1);
 
-        let delta = chrono::Duration::try_minutes(duration_mins as i64)
-            .unwrap_or_else(|| chrono::Duration::minutes(120));
-        let expires_at = chrono::Utc::now()
-            .checked_add_signed(delta)
-            .unwrap_or_else(chrono::Utc::now);
+        let delta = (duration_mins as i64)
+            .checked_mul(60)
+            .map(SignedDuration::from_secs)
+            .unwrap_or_else(|| SignedDuration::from_mins(120));
+        let expires_at = Timestamp::now()
+            .checked_add(delta)
+            .unwrap_or_else(|_| Timestamp::now());
         profile.manual_override = Some("force_off".to_string());
         profile.override_expires_at = Some(expires_at);
         let saved = state.storage.upsert_duty_profile(profile).await?;
@@ -2107,7 +2111,7 @@ async fn handle_duty_builtin_command(
 
         let msg = format!(
             "🔴 You are now **OFF DUTY** (pings-off) for {duration_mins} minutes (until <t:{}:t>).",
-            expires_at.timestamp()
+            expires_at.as_second()
         );
         respond_or_edit(ctx, command, deferred, responded, &msg).await?;
         return Ok(());
@@ -2118,10 +2122,10 @@ async fn handle_duty_builtin_command(
             Some(ref sr) => member_roles.contains(sr),
             None => true,
         };
-        let is_on_call = crate::duty::compute_is_on_call(&profile, chrono::Utc::now(), is_staff);
+        let is_on_call = crate::duty::compute_is_on_call(&profile, Timestamp::now(), is_staff);
 
         let override_info = match (&profile.manual_override, profile.override_expires_at) {
-            (Some(o), Some(exp)) => format!("{o} (until <t:{}:R>)", exp.timestamp()),
+            (Some(o), Some(exp)) => format!("{o} (until <t:{}:R>)", exp.as_second()),
             (Some(o), None) => o.clone(),
             _ => "None (following schedule)".to_string(),
         };

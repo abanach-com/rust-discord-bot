@@ -1,6 +1,6 @@
+use crate::datetime::Timestamp;
 use std::sync::Arc;
 
-use chrono::Utc;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
 use uuid::Uuid;
@@ -194,7 +194,11 @@ impl PostgresTicketStore {
                         current_status: ticket.status.clone(),
                     });
                 }
-                ticket.activate(channel_id.to_owned(), channel_name.to_owned(), Utc::now());
+                ticket.activate(
+                    channel_id.to_owned(),
+                    channel_name.to_owned(),
+                    Timestamp::now(),
+                );
                 Ok(())
             },
         )
@@ -217,7 +221,7 @@ impl PostgresTicketStore {
                         current_status: ticket.status.clone(),
                     });
                 }
-                ticket.fail_provisioning(error, Utc::now());
+                ticket.fail_provisioning(error, Timestamp::now());
                 Ok(())
             },
         )
@@ -377,7 +381,7 @@ impl PostgresTicketStore {
             json!({ "claimed_by_user_id": actor_user_id }),
             |ticket| match ticket.status.as_str() {
                 STATUS_OPEN => {
-                    ticket.claim(actor_user_id, Utc::now());
+                    ticket.claim(actor_user_id, Timestamp::now());
                     Ok(())
                 }
                 STATUS_CLAIMED if ticket.claimed_by_user_id.as_deref() == Some(actor_user_id) => {
@@ -416,7 +420,7 @@ impl PostgresTicketStore {
                 if !allow_any && ticket.claimed_by_user_id.as_deref() != Some(actor_user_id) {
                     return Err(TicketMutationOutcome::Forbidden);
                 }
-                ticket.unclaim(Utc::now());
+                ticket.unclaim(Timestamp::now());
                 Ok(())
             },
         )
@@ -440,7 +444,7 @@ impl PostgresTicketStore {
                         current_status: ticket.status.clone(),
                     });
                 }
-                ticket.close(actor_user_id, reason, Utc::now());
+                ticket.close(actor_user_id, reason, Timestamp::now());
                 Ok(())
             },
         )
@@ -463,7 +467,7 @@ impl PostgresTicketStore {
                         current_status: ticket.status.clone(),
                     });
                 }
-                ticket.reopen(Utc::now());
+                ticket.reopen(Timestamp::now());
                 Ok(())
             },
         )
@@ -487,7 +491,7 @@ impl PostgresTicketStore {
                         current_status: ticket.status.clone(),
                     });
                 }
-                ticket.rename(channel_name.to_owned(), Utc::now());
+                ticket.rename(channel_name.to_owned(), Timestamp::now());
                 Ok(())
             },
         )
@@ -511,7 +515,7 @@ impl PostgresTicketStore {
                         current_status: ticket.status.clone(),
                     });
                 }
-                ticket.set_priority(priority, Utc::now());
+                ticket.set_priority(priority, Timestamp::now());
                 Ok(())
             },
         )
@@ -670,7 +674,7 @@ impl PostgresTicketStore {
             channel_id: String,
             generated_by_user_id: String,
             message_count: i32,
-            created_at: chrono::DateTime<chrono::Utc>,
+            created_at: Timestamp,
         }
 
         let stored = sqlx::query_as::<_, InsertedTranscriptRow>(
@@ -784,7 +788,7 @@ impl PostgresTicketStore {
             ciphertext: Option<Vec<u8>>,
             nonce: Option<Vec<u8>>,
             key_id: Option<String>,
-            created_at: chrono::DateTime<chrono::Utc>,
+            created_at: Timestamp,
         }
 
         let row = sqlx::query_as::<_, TranscriptQueryRow>(
@@ -852,7 +856,7 @@ impl PostgresTicketStore {
             ciphertext: Option<Vec<u8>>,
             nonce: Option<Vec<u8>>,
             key_id: Option<String>,
-            created_at: chrono::DateTime<chrono::Utc>,
+            created_at: Timestamp,
         }
 
         let row = sqlx::query_as::<_, TranscriptQueryRow>(
@@ -966,11 +970,7 @@ impl PostgresTicketStore {
         Ok(count)
     }
 
-    pub async fn prune_transcripts(
-        &self,
-        cutoff: chrono::DateTime<chrono::Utc>,
-        limit: usize,
-    ) -> anyhow::Result<u64> {
+    pub async fn prune_transcripts(&self, cutoff: Timestamp, limit: usize) -> anyhow::Result<u64> {
         let limit = limit.clamp(1, 5000) as i64;
         let res = sqlx::query(
             r#"

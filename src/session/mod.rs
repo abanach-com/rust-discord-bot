@@ -1,9 +1,9 @@
+use crate::datetime::Timestamp;
 mod memory;
 mod model;
 mod postgres;
 
 use anyhow::Result;
-use chrono::DateTime;
 
 pub use memory::MemorySessionStore;
 pub use model::{DashboardGuild, DashboardUser, Session, StoredSession, hash_session_id};
@@ -44,7 +44,7 @@ impl SessionStore {
         user: DashboardUser,
         guilds: Vec<DashboardGuild>,
         csrf_token: String,
-        expires_at: DateTime<chrono::Utc>,
+        expires_at: Timestamp,
         access_token: Option<String>,
     ) -> Result<()> {
         match self {
@@ -81,7 +81,7 @@ impl SessionStore {
     pub async fn get_stored_session_last_seen(
         &self,
         session_id: &str,
-    ) -> Result<Option<DateTime<chrono::Utc>>> {
+    ) -> Result<Option<Timestamp>> {
         match self {
             Self::Memory(store) => Ok(store.get_stored_session(session_id).map(|s| s.last_seen_at)),
             Self::Postgres(store) => store.get_stored_session_last_seen(session_id).await,

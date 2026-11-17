@@ -1,4 +1,5 @@
-use chrono::{Duration, Utc};
+use jiff::SignedDuration;
+use rusty_discord_bot::datetime::Timestamp;
 use rusty_discord_bot::session::{
     DashboardGuild, DashboardUser, MemorySessionStore, SessionStore, hash_session_id,
 };
@@ -26,7 +27,7 @@ async fn test_session_store_lifecycle_and_hashing() {
     }];
 
     // 1. Save session with access_token (which must be discarded)
-    let expires_at = Utc::now() + Duration::hours(2);
+    let expires_at = Timestamp::now() + SignedDuration::from_hours(2);
     store
         .save_session(
             session_id,
@@ -100,7 +101,7 @@ async fn test_expired_session_cleanup() {
             user,
             vec![],
             "csrf".to_string(),
-            Utc::now() - Duration::seconds(10),
+            Timestamp::now() - SignedDuration::from_secs(10),
             None,
         )
         .unwrap();
@@ -130,7 +131,7 @@ async fn test_session_last_seen_throttling() {
             user,
             vec![],
             "csrf_secret".to_string(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .unwrap();

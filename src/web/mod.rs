@@ -1,3 +1,5 @@
+use crate::datetime::{Timestamp, days};
+use jiff::SignedDuration;
 pub mod auth;
 pub mod features;
 pub mod integrations;
@@ -161,28 +163,28 @@ pub async fn serve_with_shutdown(
             interval.tick().await;
             let (states, sessions, perms) = auth::cleanup_stale_records(&cleanup_state).await;
             cleanup_state.app.rate_limiter.cleanup_stale_entries();
-            let lfg_cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+            let lfg_cutoff = Timestamp::now() - days(7);
             let pruned_lfg = cleanup_state
                 .app
                 .storage
                 .prune_steam_lfg_posts(lfg_cutoff)
                 .await
                 .unwrap_or(0);
-            let audit_cutoff = chrono::Utc::now() - chrono::Duration::days(45);
+            let audit_cutoff = Timestamp::now() - days(45);
             let pruned_audit = cleanup_state
                 .app
                 .storage
                 .prune_audit_events(audit_cutoff, 1000)
                 .await
                 .unwrap_or(0);
-            let ticket_cutoff = chrono::Utc::now() - chrono::Duration::days(90);
+            let ticket_cutoff = Timestamp::now() - days(90);
             let pruned_transcripts = cleanup_state
                 .app
                 .tickets
                 .prune_transcripts(ticket_cutoff, 1000)
                 .await
                 .unwrap_or(0);
-            let economy_cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
+            let economy_cutoff = Timestamp::now() - SignedDuration::from_hours(24);
             let pruned_purchase_reqs = cleanup_state
                 .app
                 .storage
@@ -205,7 +207,7 @@ pub async fn serve_with_shutdown(
                         Ordering::Relaxed,
                     );
             }
-            let ai_metering_cutoff = chrono::Utc::now() - chrono::Duration::days(90);
+            let ai_metering_cutoff = Timestamp::now() - days(90);
             let pruned_ai_metering = cleanup_state
                 .app
                 .storage

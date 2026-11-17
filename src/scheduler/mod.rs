@@ -1,3 +1,5 @@
+use crate::datetime::Timestamp;
+use jiff::SignedDuration;
 mod memory;
 mod model;
 mod postgres;
@@ -6,7 +8,6 @@ pub mod time;
 use std::{sync::Arc, time::Duration as StdDuration};
 
 use anyhow::{Context as _, Result, anyhow};
-use chrono::{Duration, Utc};
 use serenity::{
     all::{ChannelId, GuildId, UserId},
     builder::{CreateAllowedMentions, CreateMessage},
@@ -168,12 +169,7 @@ impl SchedulerStore {
         }
     }
 
-    pub async fn renew_lease(
-        &self,
-        job_id: &str,
-        worker_id: &str,
-        now: chrono::DateTime<Utc>,
-    ) -> Result<bool> {
+    pub async fn renew_lease(&self, job_id: &str, worker_id: &str, now: Timestamp) -> Result<bool> {
         match self {
             Self::Memory(store) => Ok(store.renew_lease(job_id, worker_id, now)),
             Self::Postgres(store) => Ok(store.renew_lease(job_id, worker_id, now).await?),
@@ -182,8 +178,8 @@ impl SchedulerStore {
 
     pub async fn finalize_expired_leases(
         &self,
-        now: chrono::DateTime<Utc>,
-        stale_before: chrono::DateTime<Utc>,
+        now: Timestamp,
+        stale_before: Timestamp,
     ) -> Result<u64> {
         match self {
             Self::Memory(store) => Ok(store.finalize_expired_leases(now, stale_before)),
@@ -194,8 +190,8 @@ impl SchedulerStore {
     pub async fn claim_due(
         &self,
         worker_id: &str,
-        now: chrono::DateTime<Utc>,
-        stale_before: chrono::DateTime<Utc>,
+        now: Timestamp,
+        stale_before: Timestamp,
         limit: u8,
     ) -> Result<Vec<ScheduledJob>> {
         match self {
@@ -210,7 +206,7 @@ impl SchedulerStore {
         &self,
         job_id: &str,
         worker_id: &str,
-        now: chrono::DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<Option<ScheduledJob>> {
         match self {
             Self::Memory(store) => Ok(store.mark_succeeded(job_id, worker_id, now)),
@@ -222,7 +218,7 @@ impl SchedulerStore {
         &self,
         job_id: &str,
         worker_id: &str,
-        now: chrono::DateTime<Utc>,
+        now: Timestamp,
         error: &str,
     ) -> Result<Option<ScheduledJob>> {
         match self {
@@ -242,7 +238,7 @@ impl SchedulerStore {
         &self,
         job_id: &str,
         worker_id: &str,
-        now: chrono::DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<Option<ScheduledJob>> {
         match self {
             Self::Memory(store) => Ok(store.mark_cancelled(job_id, worker_id, now)),
@@ -285,13 +281,13 @@ async fn process_due_jobs(
         return Ok(());
     }
 
-    let now = Utc::now();
+    let now = Timestamp::now();
     let jobs = state
         .scheduler
         .claim_due(
             worker_id,
             now,
-            now - Duration::seconds(LEASE_SECONDS),
+            now - SignedDuration::from_secs(LEASE_SECONDS),
             available_permits as u8,
         )
         .await?;
@@ -337,7 +333,7 @@ async fn process_single_job(
     {
         if let Ok(Some(cancelled)) = state
             .scheduler
-            .mark_cancelled(&job.id, &worker_id, Utc::now())
+            .mark_cancelled(&job.id, &worker_id, Timestamp::now())
             .await
         {
             state
@@ -371,7 +367,7 @@ async fn process_single_job(
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    let now = Utc::now();
+                    let now = Timestamp::now();
                     match state_heartbeat.scheduler.renew_lease(&job_id, &worker_id_heartbeat, now).await {
                         Ok(true) => {
                             tracing::trace!(job_id = %job_id, "scheduler lease successfully renewed");
@@ -424,7 +420,7 @@ async fn process_single_job(
         DeliveryOutcome::CancelledInFlight => {
             if let Ok(Some(cancelled)) = state
                 .scheduler
-                .mark_cancelled(&job.id, &worker_id, Utc::now())
+                .mark_cancelled(&job.id, &worker_id, Timestamp::now())
                 .await
             {
                 state
@@ -450,7 +446,7 @@ async fn process_single_job(
 
             let Some(updated) = state
                 .scheduler
-                .mark_succeeded(&job.id, &worker_id, Utc::now())
+                .mark_succeeded(&job.id, &worker_id, Timestamp::now())
                 .await
                 .unwrap_or_else(|err| {
                     tracing::error!(job_id = %job.id, ?err, "failed to commit scheduler job success");
@@ -486,7 +482,7 @@ async fn process_single_job(
             {
                 state
                     .scheduler
-                    .mark_cancelled(&job.id, &worker_id, Utc::now())
+                    .mark_cancelled(&job.id, &worker_id, Timestamp::now())
                     .await
                     .ok()
                     .flatten()
@@ -514,7 +510,7 @@ async fn process_single_job(
             let error_message = format!("{error:#}");
             let Some(updated) = state
                 .scheduler
-                .mark_failed(&job.id, &worker_id, Utc::now(), &error_message)
+                .mark_failed(&job.id, &worker_id, Timestamp::now(), &error_message)
                 .await
                 .unwrap_or_else(|err| {
                     tracing::error!(job_id = %job.id, ?err, "failed to commit scheduler job failure");

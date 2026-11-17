@@ -1729,8 +1729,8 @@ fn format_ticket_info(
         ticket.creator_user_id,
         claimed,
         participant_list,
-        ticket.created_at.timestamp(),
-        ticket.last_activity_at.timestamp(),
+        ticket.created_at.as_second(),
+        ticket.last_activity_at.as_second(),
         ticket.subject,
         recent_events,
     )

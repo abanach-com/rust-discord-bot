@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use crate::datetime::Timestamp;
 use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -7,7 +7,7 @@ pub struct ComponentPayload {
     pub user_id: String,
     pub action: String,
     pub payload: String,
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -40,7 +40,7 @@ pub fn encode_component_id(
     payload: &str,
     ttl_seconds: i64,
 ) -> String {
-    let expires_at = Utc::now().timestamp() + ttl_seconds;
+    let expires_at = Timestamp::now().as_second() + ttl_seconds;
     let body = format!("{expires_at}:{guild_id}:{user_id}:{action}:{payload}");
     let sig = compute_signature(secret, &body);
     format!("v1:{sig}:{body}")
@@ -73,7 +73,7 @@ pub fn decode_and_validate_component_id(
     let expires_at_ts = expires_at_str
         .parse::<i64>()
         .map_err(|_| ComponentError::InvalidFormat)?;
-    if Utc::now().timestamp() > expires_at_ts {
+    if Timestamp::now().as_second() > expires_at_ts {
         return Err(ComponentError::Expired);
     }
 
@@ -85,7 +85,7 @@ pub fn decode_and_validate_component_id(
         return Err(ComponentError::UserMismatch);
     }
 
-    let expires_at = DateTime::from_timestamp(expires_at_ts, 0).unwrap_or_else(Utc::now);
+    let expires_at = Timestamp::from_second(expires_at_ts).unwrap_or_else(|_| Timestamp::now());
 
     Ok(ComponentPayload {
         guild_id: guild_id.to_owned(),

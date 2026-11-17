@@ -1,17 +1,19 @@
-use chrono::Utc;
+use crate::datetime::Timestamp;
+use jiff::SignedDuration;
 
 use crate::storage::ScheduledEvent;
 
 pub fn generate_icalendar_event(event: &ScheduledEvent) -> String {
-    let now = Utc::now().format("%Y%m%dT%H%M%SZ");
-    let dtstart = event.start_time.format("%Y%m%dT%H%M%SZ");
+    let now = Timestamp::now().to_jiff().strftime("%Y%m%dT%H%M%SZ");
+    let dtstart = event.start_time.to_jiff().strftime("%Y%m%dT%H%M%SZ");
     let dtend = event
         .end_time
-        .map(|e| e.format("%Y%m%dT%H%M%SZ").to_string())
+        .map(|e| e.to_jiff().strftime("%Y%m%dT%H%M%SZ").to_string())
         .unwrap_or_else(|| {
-            (event.start_time + chrono::Duration::hours(1))
-                .format("%Y%m%dT%H%M%SZ")
-                .to_string()
+            (jiff::tz::TimeZone::UTC.to_datetime(event.start_time.to_jiff())
+                + SignedDuration::from_hours(1))
+            .strftime("%Y%m%dT%H%M%SZ")
+            .to_string()
         });
 
     let summary = escape_ics_text(&event.title);
@@ -48,7 +50,6 @@ fn escape_ics_text(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::DateTime;
     use uuid::Uuid;
 
     #[test]
@@ -58,17 +59,11 @@ mod tests {
             guild_id: "123".to_owned(),
             title: "Community Game Night, & More!".to_owned(),
             description: "Join us for fun\nBring friends!".to_owned(),
-            start_time: DateTime::parse_from_rfc3339("2026-12-01T19:00:00Z")
-                .unwrap()
-                .with_timezone(&Utc),
-            end_time: Some(
-                DateTime::parse_from_rfc3339("2026-12-01T21:00:00Z")
-                    .unwrap()
-                    .with_timezone(&Utc),
-            ),
+            start_time: Timestamp::parse_rfc3339("2026-12-01T19:00:00Z").unwrap(),
+            end_time: Some(Timestamp::parse_rfc3339("2026-12-01T21:00:00Z").unwrap()),
             timezone: "Europe/Warsaw".to_owned(),
             max_participants: Some(10),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
 
         let ics = generate_icalendar_event(&ev);
@@ -82,19 +77,39 @@ mod tests {
     }
 
     #[test]
+    fn test_implicit_icalendar_end_near_timestamp_limit() {
+        let start_time = Timestamp::parse_rfc3339("9999-12-30T21:45:00Z").unwrap();
+        let mut event = ScheduledEvent {
+            id: Uuid::new_v4(),
+            guild_id: "123".to_owned(),
+            title: "Future meeting".to_owned(),
+            description: String::new(),
+            start_time,
+            end_time: None,
+            timezone: "UTC".to_owned(),
+            max_participants: None,
+            created_at: Timestamp::now(),
+        };
+
+        assert!(generate_icalendar_event(&event).contains("DTEND:99991230T224500Z"));
+        assert!(event.registration_deadline() > start_time);
+
+        event.end_time = Some(Timestamp::parse_rfc3339("9999-12-30T21:55:00Z").unwrap());
+        assert_eq!(Some(event.registration_deadline()), event.end_time);
+    }
+
+    #[test]
     fn test_generate_icalendar_event_with_malicious_crlf_timezone() {
         let ev = ScheduledEvent {
             id: Uuid::new_v4(),
             guild_id: "123".to_owned(),
             title: "Safe Meeting".to_owned(),
             description: "Safe description".to_owned(),
-            start_time: DateTime::parse_from_rfc3339("2026-12-01T19:00:00Z")
-                .unwrap()
-                .with_timezone(&Utc),
+            start_time: Timestamp::parse_rfc3339("2026-12-01T19:00:00Z").unwrap(),
             end_time: None,
             timezone: "UTC\r\nSUMMARY:INJECTED_COLLISION\r\nBEGIN:VEVENT".to_owned(),
             max_participants: None,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
 
         let ics = generate_icalendar_event(&ev);

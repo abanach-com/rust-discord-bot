@@ -1,3 +1,4 @@
+use crate::datetime::{Timestamp, days};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -5,7 +6,6 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
-use chrono::Utc;
 use dashmap::DashMap;
 use serenity::all::{ChannelId, GuildId, Http, MessageId};
 use tokio::sync::{mpsc, oneshot};
@@ -296,7 +296,7 @@ async fn process_delete_batch(http: &Http, channel_id: ChannelId, batch: Vec<Del
         return;
     }
 
-    let two_weeks_ago_unix = (Utc::now() - chrono::Duration::days(14)).timestamp();
+    let two_weeks_ago_unix = (Timestamp::now() - days(14)).as_second();
     let mut bulk_ids = Vec::new();
     let mut old_ids = Vec::new();
 

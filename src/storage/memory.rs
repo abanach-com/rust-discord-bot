@@ -1,7 +1,8 @@
+use crate::datetime::{Timestamp, days};
+use jiff::SignedDuration;
+use jiff::civil::Date;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-
-use chrono::{DateTime, Duration, Utc};
 
 use dashmap::{DashMap, DashSet};
 
@@ -72,7 +73,7 @@ pub struct MemoryStore {
 
     progression: Arc<DashMap<MemberKey, MemberProgress>>,
 
-    reputation_cooldowns: Arc<DashMap<ReputationKey, chrono::DateTime<Utc>>>,
+    reputation_cooldowns: Arc<DashMap<ReputationKey, Timestamp>>,
 
     progression_lock: Arc<Mutex<()>>,
 
@@ -108,7 +109,7 @@ pub struct MemoryStore {
 
     store_purchases: Arc<DashMap<Uuid, StorePurchase>>,
 
-    economy_cooldowns: Arc<DashMap<(String, String, String), chrono::DateTime<Utc>>>,
+    economy_cooldowns: Arc<DashMap<(String, String, String), Timestamp>>,
 
     pub(crate) economy_idempotency: Arc<DashMap<(String, String), EconomyIdempotencyEntry>>,
 
@@ -201,7 +202,7 @@ pub struct MemoryStore {
 
     integration_webhook_subs: Arc<DashMap<Uuid, IntegrationWebhookSubscription>>,
 
-    integration_event_dedupes: Arc<DashMap<(String, String), chrono::DateTime<Utc>>>,
+    integration_event_dedupes: Arc<DashMap<(String, String), Timestamp>>,
 
     integration_delivery_logs: Arc<DashMap<Uuid, IntegrationDeliveryLog>>,
 
@@ -259,12 +260,8 @@ pub struct MemoryStore {
 
     plugin_guild_installs: Arc<DashMap<(String, String), PluginGuildInstallation>>,
 
-    asset_usage_daily: Arc<
-        DashMap<
-            (String, chrono::NaiveDate, String, String),
-            crate::asset_analytics::AssetUsageDaily,
-        >,
-    >,
+    asset_usage_daily:
+        Arc<DashMap<(String, Date, String, String), crate::asset_analytics::AssetUsageDaily>>,
 
     asset_inventory:
         Arc<DashMap<(String, String, String), crate::asset_analytics::AssetInventoryItem>>,
@@ -289,7 +286,7 @@ pub struct MemoryStore {
 }
 
 struct StoreItemHeapItem {
-    key: (DateTime<Utc>, Uuid),
+    key: (Timestamp, Uuid),
     item: StoreItem,
 }
 
@@ -315,7 +312,7 @@ impl Ord for StoreItemHeapItem {
 }
 
 struct StorePurchaseHeapItem {
-    key: (DateTime<Utc>, Uuid),
+    key: (Timestamp, Uuid),
     purchase: StorePurchase,
 }
 
@@ -341,7 +338,7 @@ impl Ord for StorePurchaseHeapItem {
 }
 
 struct SocialDraftHeapItem {
-    key: (DateTime<Utc>, Uuid),
+    key: (Timestamp, Uuid),
     draft: SocialPublicationDraft,
 }
 
@@ -367,7 +364,7 @@ impl Ord for SocialDraftHeapItem {
 }
 
 struct ScheduledEventHeapItem {
-    key: (DateTime<Utc>, Uuid),
+    key: (Timestamp, Uuid),
     event: ScheduledEvent,
 }
 
@@ -438,7 +435,7 @@ impl MemoryStore {
 
             config,
 
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         };
 
         self.settings
@@ -509,7 +506,7 @@ impl MemoryStore {
 
                 "data": data,
 
-                "created_at": Utc::now(),
+                "created_at": Timestamp::now(),
 
             }),
         );
@@ -518,7 +515,7 @@ impl MemoryStore {
     }
 
     pub fn list_audit_events(&self, guild_id: &str, limit: i64) -> Vec<AuditLogEntry> {
-        let cutoff = Utc::now() - Duration::days(45);
+        let cutoff = Timestamp::now() - days(45);
         let mut entries: Vec<AuditLogEntry> = self
             .audit_log
             .iter()
@@ -559,7 +556,7 @@ impl MemoryStore {
         limit: usize,
         offset: usize,
     ) -> Vec<AuditLogEntry> {
-        let cutoff = Utc::now() - Duration::days(45);
+        let cutoff = Timestamp::now() - days(45);
         let mut entries: Vec<AuditLogEntry> = self
             .audit_log
             .iter()
@@ -591,7 +588,7 @@ impl MemoryStore {
     }
 
     pub fn count_audit_events(&self, guild_id: &str) -> u64 {
-        let cutoff = Utc::now() - Duration::days(45);
+        let cutoff = Timestamp::now() - days(45);
         self.audit_log
             .iter()
             .filter(|entry| {
@@ -604,7 +601,7 @@ impl MemoryStore {
                 }
                 if let Some(created_at_val) = val.get("created_at")
                     && let Ok(created_at) =
-                        serde_json::from_value::<DateTime<Utc>>(created_at_val.clone())
+                        serde_json::from_value::<Timestamp>(created_at_val.clone())
                 {
                     return created_at >= cutoff;
                 }
@@ -613,14 +610,13 @@ impl MemoryStore {
             .count() as u64
     }
 
-    pub fn prune_audit_events(&self, cutoff: DateTime<Utc>, limit: usize) -> u64 {
+    pub fn prune_audit_events(&self, cutoff: Timestamp, limit: usize) -> u64 {
         let limit = limit.clamp(1, 5000);
         let mut expired_keys = Vec::new();
         for entry in self.audit_log.iter() {
             let val = entry.value();
             if let Some(created_at_val) = val.get("created_at")
-                && let Ok(created_at) =
-                    serde_json::from_value::<DateTime<Utc>>(created_at_val.clone())
+                && let Ok(created_at) = serde_json::from_value::<Timestamp>(created_at_val.clone())
                 && created_at < cutoff
             {
                 expired_keys.push(*entry.key());
@@ -662,7 +658,7 @@ impl MemoryStore {
 
             config: params.config,
 
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         };
 
         self.settings.insert(key.clone(), new_settings.clone());
@@ -721,7 +717,7 @@ impl MemoryStore {
                     module_id: prev.module_id.clone(),
                     enabled: prev.enabled,
                     config: serde_json::Value::Object(config_map),
-                    updated_at: Utc::now(),
+                    updated_at: Timestamp::now(),
                 }
             }
             None => {
@@ -739,7 +735,7 @@ impl MemoryStore {
                     module_id: "starboard".to_owned(),
                     enabled: true,
                     config: serde_json::Value::Object(config_map),
-                    updated_at: Utc::now(),
+                    updated_at: Timestamp::now(),
                 }
             }
         };
@@ -773,7 +769,7 @@ impl MemoryStore {
     pub fn get_member_progress(&self, guild_id: &str, user_id: &str) -> MemberProgress {
         let _guard = self.progression_guard();
 
-        self.profile(guild_id, user_id, Utc::now())
+        self.profile(guild_id, user_id, Timestamp::now())
     }
 
     pub fn has_member_progress(&self, guild_id: &str, user_id: &str) -> anyhow::Result<bool> {
@@ -920,7 +916,7 @@ impl MemoryStore {
             progression_erased,
             related_records_erased: related_erased,
             retained_records,
-            erased_at: Utc::now(),
+            erased_at: Timestamp::now(),
         }
     }
 
@@ -937,7 +933,7 @@ impl MemoryStore {
     ) -> XpAward {
         let _guard = self.progression_guard();
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let mut profile = self.profile(guild_id, user_id, now);
 
@@ -946,7 +942,8 @@ impl MemoryStore {
         profile.messages = profile.messages.saturating_add(1);
 
         let eligible = profile.last_xp_at.as_ref().is_none_or(|last_award| {
-            now.signed_duration_since(*last_award) >= Duration::seconds(i64::from(cooldown_seconds))
+            now.duration_since(*last_award)
+                >= SignedDuration::from_secs(i64::from(cooldown_seconds))
         });
 
         let awarded = if eligible { amount.max(0) } else { 0 };
@@ -987,12 +984,12 @@ impl MemoryStore {
     ) -> DailyClaimOutcome {
         let _guard = self.progression_guard();
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let mut profile = self.profile(guild_id, user_id, now);
 
         if let Some(last_claim) = profile.last_daily_at {
-            let next_claim_at = last_claim + Duration::hours(24);
+            let next_claim_at = last_claim + SignedDuration::from_hours(24);
 
             if now < next_claim_at {
                 return DailyClaimOutcome::Cooldown {
@@ -1002,7 +999,7 @@ impl MemoryStore {
                 };
             }
 
-            profile.daily_streak = if now <= last_claim + Duration::hours(48) {
+            profile.daily_streak = if now <= last_claim + SignedDuration::from_hours(48) {
                 profile.daily_streak.saturating_add(1).max(1)
             } else {
                 1
@@ -1033,7 +1030,7 @@ impl MemoryStore {
 
             reward,
 
-            next_claim_at: now + Duration::hours(24),
+            next_claim_at: now + SignedDuration::from_hours(24),
         }
     }
 
@@ -1055,7 +1052,7 @@ impl MemoryStore {
         roll: Option<f64>,
     ) -> WorkClaimOutcome {
         let _guard = self.progression_guard();
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         if let Some(id) = interaction_id
             && let Some(entry) = self
@@ -1084,7 +1081,7 @@ impl MemoryStore {
             "work".to_string(),
         );
         if let Some(last_claim) = self.economy_cooldowns.get(&cooldown_key) {
-            let next_claim_at = *last_claim + Duration::seconds(cooldown_seconds as i64);
+            let next_claim_at = *last_claim + SignedDuration::from_secs(cooldown_seconds as i64);
             if now < next_claim_at {
                 let profile = self.profile(guild_id, user_id, now);
                 return WorkClaimOutcome::Cooldown {
@@ -1111,7 +1108,7 @@ impl MemoryStore {
         profile.updated_at = now;
         self.store_profile(profile.clone());
 
-        let next_claim_at = now + Duration::seconds(cooldown_seconds as i64);
+        let next_claim_at = now + SignedDuration::from_secs(cooldown_seconds as i64);
         self.economy_cooldowns.insert(cooldown_key, now);
 
         let outcome = WorkClaimOutcome::Claimed {
@@ -1151,7 +1148,7 @@ impl MemoryStore {
         roll: Option<f64>,
     ) -> CrimeClaimOutcome {
         let _guard = self.progression_guard();
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         if let Some(id) = interaction_id
             && let Some(entry) = self
@@ -1189,7 +1186,7 @@ impl MemoryStore {
             "crime".to_string(),
         );
         if let Some(last_claim) = self.economy_cooldowns.get(&cooldown_key) {
-            let next_claim_at = *last_claim + Duration::seconds(cooldown_seconds as i64);
+            let next_claim_at = *last_claim + SignedDuration::from_secs(cooldown_seconds as i64);
             if now < next_claim_at {
                 let profile = self.profile(guild_id, user_id, now);
                 return CrimeClaimOutcome::Cooldown {
@@ -1203,7 +1200,7 @@ impl MemoryStore {
             .unwrap_or_else(Self::generate_random_unit_float)
             .clamp(0.0, 1.0);
         let success = r <= success_rate;
-        let next_claim_at = now + Duration::seconds(cooldown_seconds as i64);
+        let next_claim_at = now + SignedDuration::from_secs(cooldown_seconds as i64);
 
         let mut profile = self.profile(guild_id, user_id, now);
 
@@ -1267,7 +1264,7 @@ impl MemoryStore {
 
         let _guard = self.progression_guard();
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let mut sender = self.profile(guild_id, sender_user_id, now);
 
@@ -1341,12 +1338,13 @@ impl MemoryStore {
 
         let _guard = self.progression_guard();
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let cooldown_key = (guild_id.to_owned(), giver_user_id.to_owned());
 
         if let Some(last_given_at) = self.reputation_cooldowns.get(&cooldown_key) {
-            let next_available_at = *last_given_at + Duration::seconds(i64::from(cooldown_seconds));
+            let next_available_at =
+                *last_given_at + SignedDuration::from_secs(i64::from(cooldown_seconds));
 
             if now < next_available_at {
                 return ReputationGrantOutcome::Cooldown { next_available_at };
@@ -1370,7 +1368,7 @@ impl MemoryStore {
 
             amount,
 
-            next_available_at: now + Duration::seconds(i64::from(cooldown_seconds)),
+            next_available_at: now + SignedDuration::from_secs(i64::from(cooldown_seconds)),
         }
     }
 
@@ -1389,7 +1387,7 @@ impl MemoryStore {
     ) -> MemberProgress {
         let _guard = self.progression_guard();
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let mut profile = self.profile(guild_id, user_id, now);
 
@@ -1415,7 +1413,7 @@ impl MemoryStore {
     ) -> anyhow::Result<MemberProgress> {
         let _guard = self.progression_guard();
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let mut profile = self.profile(params.guild_id, params.user_id, now);
 
@@ -1546,7 +1544,7 @@ impl MemoryStore {
 
             entry.error = error.map(str::to_owned);
 
-            entry.updated_at = Utc::now();
+            entry.updated_at = Timestamp::now();
         }
     }
 
@@ -1575,7 +1573,7 @@ impl MemoryStore {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn profile(&self, guild_id: &str, user_id: &str, now: chrono::DateTime<Utc>) -> MemberProgress {
+    fn profile(&self, guild_id: &str, user_id: &str, now: Timestamp) -> MemberProgress {
         let key = (guild_id.to_owned(), user_id.to_owned());
 
         self.progression.get(&key).map_or_else(
@@ -1621,7 +1619,7 @@ impl MemoryStore {
 
             updated_by: updated_by.to_owned(),
 
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         };
 
         self.module_drafts
@@ -1729,7 +1727,7 @@ impl MemoryStore {
                 appeal.staff_notes = Some(notes.to_owned());
             }
 
-            appeal.updated_at = Utc::now();
+            appeal.updated_at = Timestamp::now();
 
             if status != "pending" {
                 let key = (
@@ -1756,7 +1754,7 @@ impl MemoryStore {
 
         role_id: &str,
 
-        expires_at: chrono::DateTime<Utc>,
+        expires_at: Timestamp,
     ) -> Uuid {
         let id = Uuid::new_v4();
 
@@ -1773,7 +1771,7 @@ impl MemoryStore {
 
                 expires_at,
 
-                created_at: Utc::now(),
+                created_at: Timestamp::now(),
             },
         );
 
@@ -1781,7 +1779,7 @@ impl MemoryStore {
     }
 
     pub fn get_active_timed_roles(&self, guild_id: &str, user_id: &str) -> Vec<TimedRoleGrant> {
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         self.timed_roles
             .iter()
@@ -1826,7 +1824,7 @@ impl MemoryStore {
 
             created_by: created_by.to_owned(),
 
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
 
         self.server_snapshots.insert(id, snapshot.clone());
@@ -1880,7 +1878,7 @@ impl MemoryStore {
     ) -> CustomAutomation {
         let id = Uuid::new_v4();
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let automation = CustomAutomation {
             id,
@@ -1962,7 +1960,7 @@ impl MemoryStore {
 
             cooldown_seconds,
 
-            last_updated_at: Utc::now(),
+            last_updated_at: Timestamp::now(),
 
             last_posted_message_id: old_last_posted,
 
@@ -1983,7 +1981,7 @@ impl MemoryStore {
         guild_id: &str,
         channel_id: &str,
         posted_message_id: &str,
-        bumped_at: DateTime<Utc>,
+        bumped_at: Timestamp,
         expected_generation: i64,
         expected_revision: Uuid,
     ) -> Option<StickyMessage> {
@@ -2023,7 +2021,7 @@ impl MemoryStore {
 
         is_anonymous: bool,
 
-        expires_at: chrono::DateTime<Utc>,
+        expires_at: Timestamp,
     ) -> anyhow::Result<CommunityPoll> {
         super::validate_poll_input(question, options)?;
 
@@ -2048,7 +2046,7 @@ impl MemoryStore {
 
             expires_at,
 
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
 
         self.polls.insert(id, poll.clone());
@@ -2081,7 +2079,7 @@ impl MemoryStore {
             return Ok(None);
         }
 
-        if Utc::now() >= poll.expires_at {
+        if Timestamp::now() >= poll.expires_at {
             anyhow::bail!("Poll has expired");
         }
 
@@ -2132,7 +2130,7 @@ impl MemoryStore {
 
         winners_count: i32,
 
-        expires_at: chrono::DateTime<Utc>,
+        expires_at: Timestamp,
     ) -> Giveaway {
         self.create_giveaway_with_id(
             Uuid::new_v4(),
@@ -2153,7 +2151,7 @@ impl MemoryStore {
         channel_id: &str,
         prize: &str,
         winners_count: i32,
-        expires_at: chrono::DateTime<Utc>,
+        expires_at: Timestamp,
         created_by_user_id: Option<&str>,
     ) -> Giveaway {
         let giveaway = Giveaway {
@@ -2175,7 +2173,7 @@ impl MemoryStore {
 
             expires_at,
 
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
 
             created_by_user_id: created_by_user_id.map(|s| s.to_owned()),
         };
@@ -2196,7 +2194,7 @@ impl MemoryStore {
             None => return false,
         };
 
-        if ga.ended || chrono::Utc::now() >= ga.expires_at {
+        if ga.ended || Timestamp::now() >= ga.expires_at {
             return false;
         }
 
@@ -2379,7 +2377,7 @@ impl MemoryStore {
     }
 
     pub fn finish_expired_giveaways(&self) -> anyhow::Result<Vec<(Giveaway, Vec<String>)>> {
-        let now = chrono::Utc::now();
+        let now = Timestamp::now();
         let mut expired_ids = Vec::new();
         for entry in self.giveaways.iter() {
             let ga = entry.value();
@@ -2573,7 +2571,7 @@ impl MemoryStore {
                     role_id: role_id.to_owned(),
                     binding_id,
                     granted_by_bot,
-                    created_at: Utc::now(),
+                    created_at: Timestamp::now(),
                 };
                 vac.insert(grant.clone());
                 grant
@@ -2825,14 +2823,14 @@ impl MemoryStore {
         guild_id: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<BirthdayRecord>> {
-        self.list_upcoming_birthdays_at(guild_id, limit, Utc::now().date_naive())
+        self.list_upcoming_birthdays_at(guild_id, limit, Timestamp::now().date())
     }
 
     pub fn list_upcoming_birthdays_at(
         &self,
         guild_id: &str,
         limit: usize,
-        today: chrono::NaiveDate,
+        today: Date,
     ) -> anyhow::Result<Vec<BirthdayRecord>> {
         validate_snowflake("guild_id", guild_id)?;
         let limit = limit.clamp(1, 100);
@@ -2906,7 +2904,7 @@ impl MemoryStore {
 
             reaction_count,
 
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
 
         self.starboard_entries.insert(
@@ -2941,7 +2939,7 @@ impl MemoryStore {
         &self,
         guild_id: &str,
         limit: usize,
-        cursor: Option<(&DateTime<Utc>, &Uuid)>,
+        cursor: Option<(&Timestamp, &Uuid)>,
     ) -> StoreItemsPage {
         let capacity = limit.saturating_add(1);
         let mut heap: std::collections::BinaryHeap<StoreItemHeapItem> =
@@ -3126,7 +3124,7 @@ impl MemoryStore {
 
             stock,
 
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
 
         self.store_items.insert(id, item.clone());
@@ -3189,7 +3187,7 @@ impl MemoryStore {
             validate_snowflake("role_id", r_id)?;
         }
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let mut profile = self.profile(guild_id, user_id, now);
 
@@ -3278,7 +3276,7 @@ impl MemoryStore {
         guild_id: &str,
         user_id: Option<&str>,
         limit: usize,
-        cursor: Option<(&DateTime<Utc>, &Uuid)>,
+        cursor: Option<(&Timestamp, &Uuid)>,
     ) -> StorePurchasesPage {
         let capacity = limit.saturating_add(1);
         let mut heap: std::collections::BinaryHeap<StorePurchaseHeapItem> =
@@ -3378,7 +3376,7 @@ impl MemoryStore {
             return Ok(false);
         }
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         let can_claim = if purchase.fulfillment_status == "pending" {
             true
         } else if purchase.fulfillment_status == "processing" {
@@ -3389,7 +3387,7 @@ impl MemoryStore {
 
         if can_claim {
             purchase.fulfillment_status = "processing".to_string();
-            purchase.lease_expires_at = Some(now + chrono::Duration::seconds(60));
+            purchase.lease_expires_at = Some(now + SignedDuration::from_secs(60));
             Ok(true)
         } else {
             Ok(false)
@@ -3401,7 +3399,7 @@ impl MemoryStore {
         purchase_id: Uuid,
         status: &str,
         failure_reason: Option<&str>,
-        fulfilled_at: Option<DateTime<Utc>>,
+        fulfilled_at: Option<Timestamp>,
     ) -> anyhow::Result<()> {
         let _guard = self.progression_guard();
         let mut purchase = self
@@ -3421,7 +3419,7 @@ impl MemoryStore {
         Ok(())
     }
 
-    pub fn prune_economy_purchase_requests(&self, cutoff: DateTime<Utc>, limit: usize) -> u64 {
+    pub fn prune_economy_purchase_requests(&self, cutoff: Timestamp, limit: usize) -> u64 {
         let _guard = self.progression_guard();
         let mut to_remove = Vec::new();
         for entry in self.economy_purchase_requests.iter() {
@@ -3439,7 +3437,7 @@ impl MemoryStore {
         count
     }
 
-    pub fn prune_economy_idempotency(&self, cutoff: DateTime<Utc>, limit: usize) -> u64 {
+    pub fn prune_economy_idempotency(&self, cutoff: Timestamp, limit: usize) -> u64 {
         let _guard = self.progression_guard();
         let mut to_remove = Vec::new();
         for entry in self.economy_idempotency.iter() {
@@ -3485,8 +3483,8 @@ impl MemoryStore {
         } else {
             90
         };
-        let now = Utc::now();
-        let expires_at = now + Duration::days(retention);
+        let now = Timestamp::now();
+        let expires_at = now + days(retention);
 
         let record = MemberIdentityRecord {
             id: Uuid::new_v4(),
@@ -3512,7 +3510,7 @@ impl MemoryStore {
         validate_snowflake("guild_id", guild_id)?;
         validate_snowflake("user_id", user_id)?;
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         let max_limit = limit.clamp(1, 100);
 
         let mut list: Vec<MemberIdentityRecord> = self
@@ -3530,7 +3528,7 @@ impl MemoryStore {
     }
 
     pub fn cleanup_expired_identity_history(&self) -> u64 {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let before = self.identity_history.len();
         self.identity_history.retain(|_, r| r.expires_at > now);
         before.saturating_sub(self.identity_history.len()) as u64
@@ -3557,7 +3555,7 @@ impl MemoryStore {
         validate_snowflake("guild_id", params.guild_id)?;
 
         let account_created_at = snowflake_created_at(u_num);
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let snapshot = MemberSnapshot {
             guild_id: params.guild_id.to_string(),
@@ -3594,7 +3592,7 @@ impl MemoryStore {
         validate_snowflake("guild_id", guild_id)?;
 
         let limit = filter.limit.unwrap_or(25).clamp(1, 100) as usize;
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         // Keyset cursor extraction with legacy user_id fallback
         let (cursor_joined_at, cursor_user_id) = if let Some(ref cur) = filter.cursor {
@@ -3614,7 +3612,7 @@ impl MemoryStore {
         };
 
         // Pre-aggregate active history for this guild in a single O(H) pass
-        let mut history_stats: HashMap<String, (i64, Option<DateTime<Utc>>)> = HashMap::new();
+        let mut history_stats: HashMap<String, (i64, Option<Timestamp>)> = HashMap::new();
         for r in self.identity_history.iter() {
             if r.guild_id == guild_id && r.expires_at > now {
                 let entry = history_stats.entry(r.user_id.clone()).or_insert((0, None));
@@ -3760,7 +3758,7 @@ impl MemoryStore {
         validate_snowflake("channel_id", channel_id)?;
         validate_snowflake("actor_user_id", actor_user_id)?;
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         let plan = CleanupPlan {
             id: Uuid::new_v4(),
             guild_id: guild_id.to_string(),
@@ -3769,7 +3767,7 @@ impl MemoryStore {
             message_ids: serde_json::to_value(message_ids)
                 .unwrap_or_else(|_| serde_json::json!([])),
             created_at: now,
-            expires_at: now + chrono::Duration::seconds(ttl_seconds),
+            expires_at: now + SignedDuration::from_secs(ttl_seconds),
             consumed_at: None,
         };
         self.cleanup_plans.insert(plan.id, plan.clone());
@@ -3799,7 +3797,7 @@ impl MemoryStore {
         validate_snowflake("guild_id", guild_id)?;
         validate_snowflake("actor_user_id", actor_user_id)?;
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         if let Some(mut plan) = self.cleanup_plans.get_mut(&plan_id)
             && plan.guild_id == guild_id
             && plan.actor_user_id == actor_user_id
@@ -3879,7 +3877,7 @@ impl MemoryStore {
             .lock()
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-        let mut existing_for_guild: HashMap<String, (Uuid, DateTime<Utc>, String)> = self
+        let mut existing_for_guild: HashMap<String, (Uuid, Timestamp, String)> = self
             .companion_mappings
             .iter()
             .filter(|m| m.guild_id == guild_id)
@@ -3902,7 +3900,7 @@ impl MemoryStore {
             );
         }
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut saved = Vec::new();
 
         for item in items {
@@ -4010,7 +4008,7 @@ impl MemoryStore {
             voice_channel_id: params.voice_channel_id.to_string(),
             text_channel_id: params.text_channel_id.to_string(),
             user_id: params.user_id.to_string(),
-            granted_at: Utc::now(),
+            granted_at: Timestamp::now(),
             generation: params.generation,
             status: "active".to_string(),
             revoke_attempts: 0,
@@ -4070,7 +4068,7 @@ impl MemoryStore {
         if let Some(mut lease) = self.companion_leases.get_mut(&key) {
             lease.revoke_attempts += 1;
             lease.last_error = Some(error.to_string());
-            lease.next_attempt_at = Some(Utc::now() + Duration::seconds(30));
+            lease.next_attempt_at = Some(Timestamp::now() + SignedDuration::from_secs(30));
         }
         Ok(())
     }
@@ -4220,7 +4218,7 @@ impl MemoryStore {
             }),
         )?;
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         rule.updated_at = now;
         self.policy_rules.insert(rule.id, rule.clone());
         self.bump_policy_revision(&rule.guild_id)?;
@@ -4334,7 +4332,7 @@ impl MemoryStore {
         )?;
 
         self.policy_rules.retain(|_, r| r.guild_id != guild_id);
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut inserted = Vec::with_capacity(rules.len());
         for mut rule in rules {
             rule.updated_at = now;
@@ -4386,7 +4384,7 @@ impl MemoryStore {
         if let Some(ref c_id) = settings.fallback_channel_id {
             validate_snowflake("fallback_channel_id", c_id)?;
         }
-        settings.updated_at = Utc::now();
+        settings.updated_at = Timestamp::now();
         self.duty_settings
             .insert(settings.guild_id.clone(), settings.clone());
         Ok(settings)
@@ -4435,7 +4433,7 @@ impl MemoryStore {
         validate_snowflake("guild_id", &profile.guild_id)?;
         validate_snowflake("user_id", &profile.user_id)?;
         profile.version += 1;
-        profile.updated_at = Utc::now();
+        profile.updated_at = Timestamp::now();
         self.duty_profiles.insert(
             (profile.guild_id.clone(), profile.user_id.clone()),
             profile.clone(),
@@ -4487,7 +4485,7 @@ impl MemoryStore {
         validate_snowflake("guild_id", &state.guild_id)?;
         validate_snowflake("user_id", &state.user_id)?;
         state.state_generation += 1;
-        state.last_reconciled_at = Some(Utc::now());
+        state.last_reconciled_at = Some(Timestamp::now());
         self.duty_states.insert(
             (state.guild_id.clone(), state.user_id.clone()),
             state.clone(),
@@ -4521,7 +4519,7 @@ impl MemoryStore {
         validate_snowflake("guild_id", &grant.guild_id)?;
         validate_snowflake("user_id", &grant.user_id)?;
         validate_snowflake("role_id", &grant.role_id)?;
-        grant.updated_at = Utc::now();
+        grant.updated_at = Timestamp::now();
         self.duty_role_grants.insert(
             (
                 grant.guild_id.clone(),
@@ -4549,7 +4547,7 @@ impl MemoryStore {
             user_id.to_string(),
             role_id.to_string(),
         );
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         if let Some(mut existing) = self.duty_role_grants.get_mut(&key) {
             existing.status = status.to_string();
@@ -4592,7 +4590,7 @@ impl MemoryStore {
             validate_snowflake("role_id", rid)?;
         }
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut updated = Vec::new();
 
         for mut entry in self.duty_role_grants.iter_mut() {
@@ -4620,7 +4618,7 @@ impl MemoryStore {
             validate_snowflake("guild_id", gid)?;
         }
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         let list: Vec<_> = self
             .duty_role_grants
             .iter()
@@ -4673,7 +4671,7 @@ impl MemoryStore {
 
             standings_json: serde_json::json!(standings),
 
-            archived_at: Utc::now(),
+            archived_at: Timestamp::now(),
         };
 
         self.progression_seasons.insert(season.id, season.clone());
@@ -4691,9 +4689,9 @@ impl MemoryStore {
 
         description: &str,
 
-        start_time: chrono::DateTime<Utc>,
+        start_time: Timestamp,
 
-        end_time: Option<chrono::DateTime<Utc>>,
+        end_time: Option<Timestamp>,
 
         timezone: &str,
 
@@ -4749,7 +4747,7 @@ impl MemoryStore {
 
             max_participants,
 
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
 
         self.events.insert(id, ev.clone());
@@ -4773,7 +4771,7 @@ impl MemoryStore {
         &self,
         guild_id: &str,
         limit: usize,
-        cursor: Option<(&DateTime<Utc>, &Uuid)>,
+        cursor: Option<(&Timestamp, &Uuid)>,
     ) -> anyhow::Result<ScheduledEventsPage> {
         let capacity = limit + 1;
         let mut heap = std::collections::BinaryHeap::with_capacity(capacity);
@@ -4880,7 +4878,7 @@ impl MemoryStore {
             .events
             .get(&event_id)
             .ok_or_else(|| anyhow::anyhow!("Scheduled event not found"))?;
-        let now = Utc::now();
+        let now = Timestamp::now();
         anyhow::ensure!(
             event.is_registration_open(now),
             "Event registration is closed"
@@ -4924,7 +4922,7 @@ impl MemoryStore {
 
             position,
 
-            joined_at: Utc::now(),
+            joined_at: Timestamp::now(),
         };
 
         roster_list.push(entry.clone());
@@ -4961,7 +4959,7 @@ impl MemoryStore {
                     .get(&event_id)
                     .filter(|c| c.enabled)
                 {
-                    let now = Utc::now();
+                    let now = Timestamp::now();
                     let key = (event_id, promoted_user.clone());
                     let promoted_gen = self
                         .event_voice_member_states
@@ -5055,7 +5053,7 @@ impl MemoryStore {
             .ok_or_else(|| anyhow::anyhow!("Scheduled event not found"))?;
         anyhow::ensure!(event.guild_id == config.guild_id, "Event guild_id mismatch");
         let mut cfg = config;
-        cfg.updated_at = Utc::now();
+        cfg.updated_at = Timestamp::now();
 
         let actor = actor_id.unwrap_or("system");
         self.record_audit(
@@ -5119,7 +5117,7 @@ impl MemoryStore {
         let role_type = user_entry.role_type.clone();
 
         let key = (event_id, user_id.to_string());
-        let now = Utc::now();
+        let now = Timestamp::now();
         let current_gen = self
             .event_voice_member_states
             .get(&key)
@@ -5213,7 +5211,7 @@ impl MemoryStore {
             .map(|s| s.generation + 1)
             .unwrap_or(2);
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         let state = EventVoiceMemberState {
             event_id,
             guild_id: event.guild_id.clone(),
@@ -5299,7 +5297,7 @@ impl MemoryStore {
     pub fn claim_event_voice_outbox_job(
         &self,
         worker_id: &str,
-        lease_duration: chrono::Duration,
+        lease_duration: SignedDuration,
     ) -> anyhow::Result<Option<EventVoiceOutboxJob>> {
         let _lock = self
             .event_voice_write_lock
@@ -5309,7 +5307,7 @@ impl MemoryStore {
             .event_voice_outbox
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let candidate_idx = outbox.iter().position(|j| {
             (j.state == EVENT_VOICE_JOB_STATE_PENDING && j.next_attempt_at <= now)
@@ -5349,7 +5347,7 @@ impl MemoryStore {
                 && j.state == EVENT_VOICE_JOB_STATE_LEASED
         }) {
             job.state = EVENT_VOICE_JOB_STATE_DONE.to_string();
-            job.updated_at = Utc::now();
+            job.updated_at = Timestamp::now();
             Ok(true)
         } else {
             Ok(false)
@@ -5361,7 +5359,7 @@ impl MemoryStore {
         job_id: Uuid,
         lease_owner: &str,
         error: &str,
-        retry_delay: Option<chrono::Duration>,
+        retry_delay: Option<SignedDuration>,
     ) -> anyhow::Result<bool> {
         let _lock = self
             .event_voice_write_lock
@@ -5371,7 +5369,7 @@ impl MemoryStore {
             .event_voice_outbox
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let now = Utc::now();
+        let now = Timestamp::now();
         if let Some(job) = outbox.iter_mut().find(|j| {
             j.id == job_id
                 && j.lease_owner.as_deref() == Some(lease_owner)
@@ -5407,7 +5405,7 @@ impl MemoryStore {
             .event_voice_outbox
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let now = Utc::now();
+        let now = Timestamp::now();
         if let Some(job) = outbox.iter_mut().find(|j| {
             j.id == job_id
                 && j.lease_owner.as_deref() == Some(lease_owner)
@@ -5462,7 +5460,7 @@ impl MemoryStore {
 
             status: "in_progress".to_owned(),
 
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
 
         self.tournaments.insert(id, tournament.clone());
@@ -5527,7 +5525,7 @@ impl MemoryStore {
 
             campaign_tag: campaign_tag.map(|s| s.to_owned()),
 
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         });
 
         inv.uses += 1;
@@ -5561,7 +5559,7 @@ impl MemoryStore {
 
             empty_since: None,
 
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
 
         self.dynamic_voice
@@ -5580,7 +5578,11 @@ impl MemoryStore {
             if room.guild_id != guild_id {
                 return false;
             }
-            room.empty_since = if is_empty { Some(Utc::now()) } else { None };
+            room.empty_since = if is_empty {
+                Some(Timestamp::now())
+            } else {
+                None
+            };
             true
         } else {
             false
@@ -5588,13 +5590,13 @@ impl MemoryStore {
     }
 
     pub fn get_stale_dynamic_voice_rooms(&self, threshold_seconds: i64) -> Vec<DynamicVoiceRoom> {
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         self.dynamic_voice
             .iter()
             .filter(|e| {
                 if let Some(empty_since) = e.empty_since {
-                    (now - empty_since).num_seconds() >= threshold_seconds
+                    (now - empty_since).as_secs() >= threshold_seconds
                 } else {
                     false
                 }
@@ -5616,7 +5618,7 @@ impl MemoryStore {
     pub fn set_dynamic_voice_empty_since(
         &self,
         channel_id: &str,
-        empty_since: Option<DateTime<Utc>>,
+        empty_since: Option<Timestamp>,
     ) -> bool {
         if let Some(mut room) = self.dynamic_voice.get_mut(channel_id) {
             room.empty_since = empty_since;
@@ -5631,7 +5633,7 @@ impl MemoryStore {
         guild_id: &str,
         threshold_seconds: i64,
     ) -> Vec<String> {
-        let cutoff = Utc::now() - Duration::seconds(threshold_seconds);
+        let cutoff = Timestamp::now() - SignedDuration::from_secs(threshold_seconds);
         let mut removed = Vec::new();
         self.dynamic_voice.retain(|channel_id, room| {
             if room.guild_id == guild_id
@@ -5674,7 +5676,7 @@ impl MemoryStore {
 
             last_polled_at: None,
 
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
 
         self.feeds.insert(id, sub.clone());
@@ -5694,7 +5696,7 @@ impl MemoryStore {
         if let Some(mut sub) = self.feeds.get_mut(&subscription_id) {
             sub.watermark = Some(watermark.to_owned());
 
-            sub.last_polled_at = Some(Utc::now());
+            sub.last_polled_at = Some(Timestamp::now());
         }
     }
 
@@ -5728,7 +5730,7 @@ impl MemoryStore {
 
             verified: code.is_none(),
 
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
 
         let key = (guild_id.to_owned(), user_id.to_owned(), platform.to_owned());
@@ -5753,7 +5755,7 @@ impl MemoryStore {
         if let Some(mut link) = self.game_links.get_mut(&key)
             && link.verification_code.as_deref() == Some(code)
         {
-            if link.verified || Utc::now() - link.created_at > chrono::Duration::minutes(15) {
+            if link.verified || Timestamp::now() - link.created_at > SignedDuration::from_mins(15) {
                 return false;
             }
 
@@ -5878,7 +5880,7 @@ impl MemoryStore {
 
             rarity: rarity.to_owned(),
 
-            acquired_at: Utc::now(),
+            acquired_at: Timestamp::now(),
         };
 
         self.cards.insert(id, card.clone());
@@ -5939,9 +5941,9 @@ impl MemoryStore {
 
             status: "pending".to_owned(),
 
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
 
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         };
 
         self.card_trades.insert(trade.id, trade.clone());
@@ -6025,7 +6027,7 @@ impl MemoryStore {
 
         trade.status = "accepted".to_owned();
 
-        trade.updated_at = Utc::now();
+        trade.updated_at = Timestamp::now();
 
         Ok(true)
     }
@@ -6068,7 +6070,7 @@ impl MemoryStore {
 
                     prefix_or_brackets: prefix_or_brackets.to_owned(),
 
-                    created_at: Utc::now(),
+                    created_at: Timestamp::now(),
                 };
 
                 self.tuppers.insert(id, profile.clone());
@@ -6101,7 +6103,7 @@ impl MemoryStore {
     ) -> FaqEntry {
         let id = Uuid::new_v4();
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let entry = FaqEntry {
             id,
@@ -6269,7 +6271,7 @@ impl MemoryStore {
         match self.integration_event_dedupes.entry(key) {
             dashmap::mapref::entry::Entry::Occupied(_) => false,
             dashmap::mapref::entry::Entry::Vacant(entry) => {
-                entry.insert(Utc::now());
+                entry.insert(Timestamp::now());
                 true
             }
         }
@@ -6279,7 +6281,7 @@ impl MemoryStore {
         &self,
         provider: &str,
         event_id: &str,
-        processed_at: DateTime<Utc>,
+        processed_at: Timestamp,
     ) {
         let key = (provider.to_ascii_lowercase(), event_id.to_string());
         self.integration_event_dedupes.insert(key, processed_at);
@@ -6296,7 +6298,7 @@ impl MemoryStore {
         guild_id: &str,
         provider: Option<&str>,
         limit: Option<usize>,
-        before_created_at: Option<DateTime<Utc>>,
+        before_created_at: Option<Timestamp>,
         before_id: Option<Uuid>,
     ) -> Vec<IntegrationDeliveryLog> {
         let max_results = limit.unwrap_or(50).clamp(1, 100);
@@ -6340,7 +6342,7 @@ impl MemoryStore {
         list
     }
 
-    pub fn prune_event_dedupes(&self, before: DateTime<Utc>, limit: usize) -> u64 {
+    pub fn prune_event_dedupes(&self, before: Timestamp, limit: usize) -> u64 {
         let max_delete = limit.clamp(1, 5000);
         let keys: Vec<_> = self
             .integration_event_dedupes
@@ -6359,7 +6361,7 @@ impl MemoryStore {
         count
     }
 
-    pub fn prune_delivery_logs(&self, before: DateTime<Utc>, limit: usize) -> u64 {
+    pub fn prune_delivery_logs(&self, before: Timestamp, limit: usize) -> u64 {
         let max_delete = limit.clamp(1, 5000);
         let ids: Vec<_> = self
             .integration_delivery_logs
@@ -6462,7 +6464,7 @@ impl MemoryStore {
     }
 
     pub fn count_active_steam_lfg_posts(&self, guild_id: &str, author_id: &str) -> usize {
-        let now = Utc::now();
+        let now = Timestamp::now();
         self.steam_lfg_posts
             .iter()
             .filter(|e| e.guild_id == guild_id && e.author_id == author_id && e.expires_at > now)
@@ -6470,14 +6472,14 @@ impl MemoryStore {
     }
 
     pub fn count_active_steam_lfg_posts_guild(&self, guild_id: &str) -> usize {
-        let now = Utc::now();
+        let now = Timestamp::now();
         self.steam_lfg_posts
             .iter()
             .filter(|e| e.guild_id == guild_id && e.expires_at > now)
             .count()
     }
 
-    pub fn prune_steam_lfg_posts(&self, cutoff: DateTime<Utc>) -> u64 {
+    pub fn prune_steam_lfg_posts(&self, cutoff: Timestamp) -> u64 {
         let before = self.steam_lfg_posts.len();
         self.steam_lfg_posts
             .retain(|_, post| post.expires_at > cutoff);
@@ -6485,7 +6487,7 @@ impl MemoryStore {
     }
 
     pub fn list_steam_lfg_posts(&self, guild_id: &str, game_id: Option<&str>) -> Vec<SteamLfgPost> {
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         self.steam_lfg_posts
             .iter()
@@ -6513,7 +6515,7 @@ impl MemoryStore {
             anyhow::bail!("LFG listing not found in guild");
         }
 
-        if entry.expires_at <= Utc::now() {
+        if entry.expires_at <= Timestamp::now() {
             anyhow::bail!("LFG listing has expired");
         }
 
@@ -7131,7 +7133,7 @@ impl MemoryStore {
         guild_id: &str,
         status: Option<&str>,
         limit: usize,
-        cursor: Option<(&DateTime<Utc>, &Uuid)>,
+        cursor: Option<(&Timestamp, &Uuid)>,
     ) -> SocialDraftsPage {
         let limit = limit.clamp(1, 100);
         let capacity = limit.saturating_add(1);
@@ -7325,7 +7327,7 @@ impl MemoryStore {
 
                 is_halted: false,
 
-                reset_at: Utc::now() + chrono::Duration::days(30),
+                reset_at: Timestamp::now() + days(30),
             })
             .clone()
     }
@@ -7362,19 +7364,19 @@ impl MemoryStore {
 
                 is_halted: false,
 
-                reset_at: Utc::now() + chrono::Duration::days(30),
+                reset_at: Timestamp::now() + days(30),
             });
 
         // Periodic reset check (#125)
 
-        if Utc::now() >= budget.reset_at {
+        if Timestamp::now() >= budget.reset_at {
             budget.used_tokens = 0;
 
             budget.used_usd = 0.0;
 
             budget.is_halted = false;
 
-            budget.reset_at = Utc::now() + chrono::Duration::days(30);
+            budget.reset_at = Timestamp::now() + days(30);
         }
 
         if budget.is_halted {
@@ -7448,14 +7450,14 @@ impl MemoryStore {
                 request_id: request_id.to_string(),
                 tokens,
                 usd,
-                created_at: Utc::now(),
+                created_at: Timestamp::now(),
             },
         );
 
         Ok(updated)
     }
 
-    pub fn prune_ai_metering_events(&self, cutoff: DateTime<Utc>, limit: usize) -> u64 {
+    pub fn prune_ai_metering_events(&self, cutoff: Timestamp, limit: usize) -> u64 {
         let _guard = match self.ai_metering_write_lock.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -7671,7 +7673,7 @@ impl MemoryStore {
             sha256_hash: saved.sha256_hash.clone(),
             manifest: saved.manifest.clone(),
             is_verified: saved.is_verified,
-            published_at: Utc::now(),
+            published_at: Timestamp::now(),
         };
         self.marketplace_releases
             .insert((saved.plugin_id.clone(), saved.version.clone()), release);
@@ -7887,7 +7889,7 @@ impl MemoryStore {
             track.version = existing.version + 1;
         }
 
-        track.updated_at = Utc::now();
+        track.updated_at = Timestamp::now();
         self.recruitment_tracks.insert(track.id, track.clone());
         Ok(track)
     }
@@ -7962,7 +7964,7 @@ impl MemoryStore {
     ) -> anyhow::Result<crate::recruitment::RecruitmentApplication> {
         validate_snowflake("guild_id", &app.guild_id)?;
         validate_snowflake("applicant_user_id", &app.applicant_user_id)?;
-        let now = Utc::now();
+        let now = Timestamp::now();
         app.submitted_at = now;
         app.updated_at = now;
         self.recruitment_applications.insert(app.id, app.clone());
@@ -8000,7 +8002,7 @@ impl MemoryStore {
             );
         }
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         app.submitted_at = now;
         app.updated_at = now;
         self.recruitment_applications.insert(app.id, app.clone());
@@ -8028,7 +8030,7 @@ impl MemoryStore {
         entry.status = params.new_status.to_string();
         entry.current_stage = params.new_stage.to_string();
         entry.version += 1;
-        entry.updated_at = Utc::now();
+        entry.updated_at = Timestamp::now();
         if params.new_status == "accepted"
             || params.new_status == "rejected"
             || params.new_status == "withdrawn"
@@ -8075,7 +8077,7 @@ impl MemoryStore {
         entry.status = "accepted".to_string();
         entry.current_stage = params.new_stage.to_string();
         entry.version += 1;
-        entry.updated_at = Utc::now();
+        entry.updated_at = Timestamp::now();
         entry.decided_at = Some(entry.updated_at);
         entry.decided_by = params.decided_by.map(|s| s.to_string());
         entry.decision_reason = params.decision_reason.map(|s| s.to_string());
@@ -8091,9 +8093,9 @@ impl MemoryStore {
                 status: "pending".to_string(),
                 attempts: 0,
                 last_error: None,
-                next_attempt_at: Utc::now(),
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
+                next_attempt_at: Timestamp::now(),
+                created_at: Timestamp::now(),
+                updated_at: Timestamp::now(),
             };
             self.recruitment_role_fulfillments
                 .insert(f.application_id, f.clone());
@@ -8112,7 +8114,7 @@ impl MemoryStore {
             && entry.status == "pending"
         {
             entry.status = "cancelled".to_string();
-            entry.updated_at = Utc::now();
+            entry.updated_at = Timestamp::now();
             cancelled = 1;
         }
         Ok(cancelled)
@@ -8198,7 +8200,7 @@ impl MemoryStore {
     ) -> anyhow::Result<crate::recruitment::RecruitmentReview> {
         validate_snowflake("guild_id", &review.guild_id)?;
         validate_snowflake("reviewer_user_id", &review.reviewer_user_id)?;
-        review.updated_at = Utc::now();
+        review.updated_at = Timestamp::now();
         if let Some(existing) = self.recruitment_reviews.iter().find(|r| {
             r.application_id == review.application_id
                 && r.reviewer_user_id == review.reviewer_user_id
@@ -8226,7 +8228,7 @@ impl MemoryStore {
         validate_snowflake("guild_id", &fulfillment.guild_id)?;
         validate_snowflake("user_id", &fulfillment.user_id)?;
         validate_snowflake("role_id", &fulfillment.role_id)?;
-        fulfillment.updated_at = Utc::now();
+        fulfillment.updated_at = Timestamp::now();
         self.recruitment_role_fulfillments
             .insert(fulfillment.application_id, fulfillment.clone());
         Ok(fulfillment)
@@ -8239,7 +8241,7 @@ impl MemoryStore {
         if let Some(gid) = guild_id {
             validate_snowflake("guild_id", gid)?;
         }
-        let now = Utc::now();
+        let now = Timestamp::now();
         let list: Vec<_> = self
             .recruitment_role_fulfillments
             .iter()
@@ -8296,7 +8298,7 @@ impl MemoryStore {
         mut config: crate::help_forum::HelpForumConfig,
     ) -> anyhow::Result<crate::help_forum::HelpForumConfig> {
         crate::help_forum::validate_help_forum_config(&config)?;
-        config.updated_at = Utc::now();
+        config.updated_at = Timestamp::now();
         let key = (config.guild_id.clone(), config.forum_channel_id.clone());
         self.help_forum_configs.insert(key, config.clone());
         Ok(config)
@@ -8360,11 +8362,11 @@ impl MemoryStore {
         validate_snowflake("thread_id", &session.thread_id)?;
         validate_snowflake("owner_user_id", &session.owner_user_id)?;
 
-        let now = Utc::now();
-        if session.opened_at == DateTime::<Utc>::UNIX_EPOCH {
+        let now = Timestamp::now();
+        if session.opened_at == Timestamp::unix_epoch() {
             session.opened_at = now;
         }
-        if session.last_activity_at == DateTime::<Utc>::UNIX_EPOCH {
+        if session.last_activity_at == Timestamp::unix_epoch() {
             session.last_activity_at = now;
         }
         if session.generation == 0 {
@@ -8399,7 +8401,7 @@ impl MemoryStore {
             return Ok(Some(entry.value().clone()));
         }
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         entry.generation += 1;
         entry.last_activity_at = now;
 
@@ -8439,7 +8441,7 @@ impl MemoryStore {
         }
 
         entry.status = new_status.to_string();
-        entry.closed_at = Some(Utc::now());
+        entry.closed_at = Some(Timestamp::now());
         entry.closing_reason = reason.map(|s| s.to_string());
         Ok(true)
     }
@@ -8453,7 +8455,7 @@ impl MemoryStore {
         validate_snowflake("owner_user_id", owner_user_id)?;
 
         let mut changed = 0;
-        let now = Utc::now();
+        let now = Timestamp::now();
         for mut item in self.help_forum_sessions.iter_mut() {
             if item.guild_id == guild_id
                 && item.owner_user_id == owner_user_id
@@ -8694,8 +8696,10 @@ impl MemoryStore {
             validate_snowflake("guild_id", gid)?;
         }
 
-        let cutoff =
-            chrono::Utc::now().date_naive() - chrono::Duration::days(older_than_days as i64);
+        let cutoff = Timestamp::now()
+            .date()
+            .checked_sub(days(i64::from(older_than_days)))
+            .unwrap_or(Date::MIN);
         let mut pruned = 0;
 
         self.asset_usage_daily.retain(|(gid, date, _, _), _| {

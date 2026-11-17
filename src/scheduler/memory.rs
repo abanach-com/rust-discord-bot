@@ -1,9 +1,9 @@
+use crate::datetime::Timestamp;
+use jiff::SignedDuration;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
-
-use chrono::{DateTime, Utc};
 
 use super::model::{
     CreateJobOutcome, JobMutation, JobMutationOutcome, NewScheduledJob, STATUS_ACTIVE,
@@ -42,7 +42,7 @@ impl MemorySchedulerStore {
             return CreateJobOutcome::LimitReached { limit: max_jobs };
         }
 
-        let job = job.materialize(Utc::now());
+        let job = job.materialize(Timestamp::now());
         jobs.insert(job.id.clone(), job.clone());
         CreateJobOutcome::Created(Box::new(job))
     }
@@ -68,7 +68,7 @@ impl MemorySchedulerStore {
                 return Ok(CreateJobOutcome::LimitReached { limit: max_jobs });
             }
 
-            job.materialize(Utc::now())
+            job.materialize(Timestamp::now())
         };
 
         storage
@@ -155,7 +155,7 @@ impl MemorySchedulerStore {
             };
         }
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         match mutation {
             JobMutation::Cancel => {
                 if job.status == STATUS_PROCESSING {
@@ -178,7 +178,7 @@ impl MemorySchedulerStore {
             JobMutation::Resume => {
                 job.status = STATUS_ACTIVE.to_owned();
                 if job.run_at <= now {
-                    job.run_at = now + chrono::Duration::seconds(1);
+                    job.run_at = now + SignedDuration::from_secs(1);
                 }
                 job.completed_at = None;
                 job.locked_at = None;
@@ -221,7 +221,7 @@ impl MemorySchedulerStore {
                 });
             }
 
-            let now = Utc::now();
+            let now = Timestamp::now();
             let mut updated = job.clone();
             let event_name = match mutation {
                 JobMutation::Cancel => {
@@ -248,7 +248,7 @@ impl MemorySchedulerStore {
                 JobMutation::Resume => {
                     updated.status = STATUS_ACTIVE.to_owned();
                     if updated.run_at <= now {
-                        updated.run_at = now + chrono::Duration::seconds(1);
+                        updated.run_at = now + SignedDuration::from_secs(1);
                     }
                     updated.completed_at = None;
                     updated.locked_at = None;
@@ -284,7 +284,7 @@ impl MemorySchedulerStore {
         Ok(JobMutationOutcome::Updated(Box::new(updated)))
     }
 
-    pub fn renew_lease(&self, job_id: &str, worker_id: &str, now: DateTime<Utc>) -> bool {
+    pub fn renew_lease(&self, job_id: &str, worker_id: &str, now: Timestamp) -> bool {
         let mut jobs = self.lock();
         let Some(job) = jobs.get_mut(job_id) else {
             return false;
@@ -292,7 +292,7 @@ impl MemorySchedulerStore {
         job.renew_lease(worker_id, now)
     }
 
-    pub fn finalize_expired_leases(&self, now: DateTime<Utc>, stale_before: DateTime<Utc>) -> u64 {
+    pub fn finalize_expired_leases(&self, now: Timestamp, stale_before: Timestamp) -> u64 {
         let mut count = 0u64;
         let mut jobs = self.lock();
 
@@ -335,8 +335,8 @@ impl MemorySchedulerStore {
     pub fn claim_due(
         &self,
         worker_id: &str,
-        now: DateTime<Utc>,
-        stale_before: DateTime<Utc>,
+        now: Timestamp,
+        stale_before: Timestamp,
         limit: u8,
     ) -> Vec<ScheduledJob> {
         self.finalize_expired_leases(now, stale_before);
@@ -364,7 +364,7 @@ impl MemorySchedulerStore {
         &self,
         job_id: &str,
         worker_id: &str,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Option<ScheduledJob> {
         let mut jobs = self.lock();
         let job = jobs.get_mut(job_id)?;
@@ -379,7 +379,7 @@ impl MemorySchedulerStore {
         &self,
         job_id: &str,
         worker_id: &str,
-        now: DateTime<Utc>,
+        now: Timestamp,
         error: &str,
     ) -> Option<ScheduledJob> {
         let mut jobs = self.lock();
@@ -404,7 +404,7 @@ impl MemorySchedulerStore {
         &self,
         job_id: &str,
         worker_id: &str,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Option<ScheduledJob> {
         let mut jobs = self.lock();
         let job = jobs.get_mut(job_id)?;

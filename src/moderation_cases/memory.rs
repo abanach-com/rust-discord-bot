@@ -1,6 +1,8 @@
+use crate::datetime::Timestamp;
+#[cfg(test)]
+use jiff::SignedDuration;
 use std::{collections::BTreeMap, sync::Arc};
 
-use chrono::{DateTime, Utc};
 use serde_json::json;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -40,7 +42,7 @@ impl MemoryModerationCaseStore {
     pub async fn create_case(
         &self,
         input: CreateCase,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<ModerationCase, CaseError> {
         input.validate(now)?;
         let mut state = self.state.lock().await;
@@ -97,7 +99,7 @@ impl MemoryModerationCaseStore {
         &self,
         guild_id: u64,
         case_number: i64,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<CaseDetails, CaseError> {
         let mut state = self.state.lock().await;
         expire_due(&mut state, guild_id, now);
@@ -113,7 +115,7 @@ impl MemoryModerationCaseStore {
         &self,
         guild_id: u64,
         filter: CaseFilter,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<Vec<ModerationCase>, CaseError> {
         filter.validate()?;
         let mut state = self.state.lock().await;
@@ -147,7 +149,7 @@ impl MemoryModerationCaseStore {
         guild_id: u64,
         limit: usize,
         offset: usize,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<(Vec<ModerationCase>, u64), CaseError> {
         let mut state = self.state.lock().await;
         expire_due(&mut state, guild_id, now);
@@ -173,7 +175,7 @@ impl MemoryModerationCaseStore {
         &self,
         guild_id: u64,
         subject_user_id: u64,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<Vec<ModerationCase>, CaseError> {
         if self
             .failure_injected
@@ -204,7 +206,7 @@ impl MemoryModerationCaseStore {
         actor_user_id: u64,
         expected_version: i64,
         update: UpdateCase,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<ModerationCase, CaseError> {
         update.validate(now)?;
         if update.is_empty() {
@@ -269,7 +271,7 @@ impl MemoryModerationCaseStore {
         author_user_id: u64,
         body: String,
         visible_to_subject: bool,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<CaseNote, CaseError> {
         validate_note(&body)?;
         let mut state = self.state.lock().await;
@@ -309,7 +311,7 @@ impl MemoryModerationCaseStore {
         author_user_id: u64,
         label: String,
         value: String,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<CaseEvidence, CaseError> {
         validate_evidence(&label, &value)?;
         let mut state = self.state.lock().await;
@@ -350,7 +352,7 @@ impl MemoryModerationCaseStore {
         actor_user_id: u64,
         expected_version: i64,
         reason: String,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<ModerationCase, CaseError> {
         validate_void_reason(&reason)?;
         let mut state = self.state.lock().await;
@@ -391,7 +393,7 @@ impl MemoryModerationCaseStore {
         case_number: i64,
         actor_user_id: u64,
         expected_version: i64,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<ModerationCase, CaseError> {
         let mut state = self.state.lock().await;
         let snapshot = {
@@ -435,7 +437,7 @@ impl MemoryModerationCaseStore {
         &self,
         guild_id: u64,
         actor_user_id: Option<u64>,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<ModeratorStats, CaseError> {
         let mut state = self.state.lock().await;
         expire_due(&mut state, guild_id, now);
@@ -504,7 +506,7 @@ fn verify_version(
     Ok(())
 }
 
-fn expire_due(state: &mut MemoryState, guild_id: u64, now: DateTime<Utc>) {
+fn expire_due(state: &mut MemoryState, guild_id: u64, now: Timestamp) {
     let due = state
         .cases
         .range((guild_id, i64::MIN)..=(guild_id, i64::MAX))
@@ -544,7 +546,7 @@ fn push_event(
     actor_user_id: u64,
     event_type: &str,
     payload: serde_json::Value,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) {
     state.events.entry(case_id).or_default().push(CaseEvent {
         id: Uuid::new_v4(),
@@ -558,7 +560,6 @@ fn push_event(
 
 #[cfg(test)]
 mod tests {
-    use chrono::Duration;
 
     use super::*;
     use crate::moderation_cases::CaseSeverity;
@@ -581,7 +582,7 @@ mod tests {
     #[tokio::test]
     async fn assigns_monotonic_per_guild_case_numbers() {
         let store = MemoryModerationCaseStore::new();
-        let now = Utc::now();
+        let now = Timestamp::now();
         let first = store.create_case(input(), now).await.unwrap();
         let second = store.create_case(input(), now).await.unwrap();
         assert_eq!(first.case_number, 1);
@@ -591,7 +592,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_stale_updates() {
         let store = MemoryModerationCaseStore::new();
-        let now = Utc::now();
+        let now = Timestamp::now();
         let created = store.create_case(input(), now).await.unwrap();
         let update = UpdateCase {
             reason: Some("Updated reason".to_owned()),
@@ -613,12 +614,12 @@ mod tests {
     #[tokio::test]
     async fn lazily_expires_active_cases_and_records_event() {
         let store = MemoryModerationCaseStore::new();
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut expiring = input();
-        expiring.expires_at = Some(now + Duration::minutes(1));
+        expiring.expires_at = Some(now + SignedDuration::from_mins(1));
         let created = store.create_case(expiring, now).await.unwrap();
         let details = store
-            .get_case(1, created.case_number, now + Duration::minutes(2))
+            .get_case(1, created.case_number, now + SignedDuration::from_mins(2))
             .await
             .unwrap();
         assert_eq!(details.case.status, CaseStatus::Expired);

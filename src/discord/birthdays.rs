@@ -1,5 +1,5 @@
+use crate::datetime::Timestamp;
 use anyhow::{Context as _, Result, anyhow, ensure};
-use chrono::Utc;
 use serenity::all::{ChannelId, GuildId, Permissions, UserId};
 use serenity::client::Context;
 
@@ -66,7 +66,7 @@ pub async fn execute_birthday_action(
                 user_id: actor_id_str.clone(),
                 month: *month as i16,
                 day: *day as i16,
-                updated_at: Utc::now(),
+                updated_at: Timestamp::now(),
             };
 
             let saved = state

@@ -1,5 +1,7 @@
-use chrono::{DateTime, Duration, Utc};
+use jiff::SignedDuration;
 use thiserror::Error;
+
+use crate::datetime::Timestamp;
 
 const MAX_REPEAT_SECONDS: u64 = 31_557_600;
 
@@ -23,10 +25,10 @@ pub enum ScheduleTimeError {
 
 pub fn parse_schedule_time(
     value: &str,
-    now: DateTime<Utc>,
+    now: Timestamp,
     minimum_delay_seconds: u32,
     maximum_delay_seconds: u64,
-) -> Result<DateTime<Utc>, ScheduleTimeError> {
+) -> Result<Timestamp, ScheduleTimeError> {
     let value = value.trim();
     if value.is_empty() {
         return Err(ScheduleTimeError::Empty);
@@ -50,12 +52,9 @@ pub fn parse_schedule_time(
                     minimum_seconds: minimum_delay_seconds,
                 });
             }
-            let duration = Duration::try_seconds(
-                i64::try_from(seconds).map_err(|_| ScheduleTimeError::Overflow)?,
-            )
-            .ok_or(ScheduleTimeError::Overflow)?;
-            now.checked_add_signed(duration)
-                .ok_or(ScheduleTimeError::Overflow)?
+            let seconds = i64::try_from(seconds).map_err(|_| ScheduleTimeError::Overflow)?;
+            now.checked_add(SignedDuration::from_secs(seconds))
+                .map_err(|_| ScheduleTimeError::Overflow)?
         }
         Err(ScheduleTimeError::Overflow) => {
             return Err(ScheduleTimeError::TooFar {
@@ -136,34 +135,32 @@ pub fn parse_duration_seconds(value: &str) -> Result<u64, ScheduleTimeError> {
 
 fn parse_absolute(
     value: &str,
-    now: DateTime<Utc>,
+    now: Timestamp,
     minimum_delay_seconds: u32,
     maximum_delay_seconds: u64,
-) -> Result<DateTime<Utc>, ScheduleTimeError> {
+) -> Result<Timestamp, ScheduleTimeError> {
     let target = parse_absolute_timestamp(value)?;
     validate_horizon(target, now, minimum_delay_seconds, maximum_delay_seconds)
 }
 
-fn parse_absolute_timestamp(value: &str) -> Result<DateTime<Utc>, ScheduleTimeError> {
+fn parse_absolute_timestamp(value: &str) -> Result<Timestamp, ScheduleTimeError> {
     if value.bytes().all(|byte| byte.is_ascii_digit()) {
         let timestamp = value
             .parse::<i64>()
             .map_err(|_| ScheduleTimeError::Invalid)?;
-        return DateTime::from_timestamp(timestamp, 0).ok_or(ScheduleTimeError::Invalid);
+        return Timestamp::from_second(timestamp).map_err(|_| ScheduleTimeError::Invalid);
     }
 
-    DateTime::parse_from_rfc3339(value)
-        .map(|value| value.with_timezone(&Utc))
-        .map_err(|_| ScheduleTimeError::Invalid)
+    Timestamp::parse_rfc3339(value).map_err(|_| ScheduleTimeError::Invalid)
 }
 
 fn validate_horizon(
-    target: DateTime<Utc>,
-    now: DateTime<Utc>,
+    target: Timestamp,
+    now: Timestamp,
     minimum_delay_seconds: u32,
     maximum_delay_seconds: u64,
-) -> Result<DateTime<Utc>, ScheduleTimeError> {
-    let delay = target.signed_duration_since(now).num_seconds();
+) -> Result<Timestamp, ScheduleTimeError> {
+    let delay = target.duration_since(now).as_secs();
     if delay < i64::from(minimum_delay_seconds) {
         return Err(ScheduleTimeError::TooSoon {
             minimum_seconds: minimum_delay_seconds,
@@ -182,9 +179,9 @@ fn validate_horizon(
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
-
-    use super::{parse_duration_seconds, parse_repeat_interval, parse_schedule_time};
+    use super::{
+        ScheduleTimeError, parse_duration_seconds, parse_repeat_interval, parse_schedule_time,
+    };
 
     #[test]
     fn parses_compound_relative_duration() {
@@ -193,25 +190,60 @@ mod tests {
 
     #[test]
     fn parses_rfc3339_and_unix_timestamps() {
-        let now = Utc
-            .with_ymd_and_hms(2026, 9, 3, 10, 0, 0)
-            .single()
-            .expect("valid test time");
+        let now = "2026-09-03T10:00:00Z".parse().unwrap();
         let rfc = parse_schedule_time("2026-09-03T12:00:00Z", now, 10, 86_400)
             .expect("RFC 3339 should parse");
-        let unix = parse_schedule_time(&rfc.timestamp().to_string(), now, 10, 86_400)
+        let unix = parse_schedule_time(&rfc.as_second().to_string(), now, 10, 86_400)
             .expect("Unix timestamp should parse");
+        let offset = parse_schedule_time("2026-09-03T14:00:00+02:00", now, 10, 86_400)
+            .expect("an explicit UTC offset should parse");
         assert_eq!(rfc, unix);
+        assert_eq!(rfc, offset);
+    }
+
+    #[test]
+    fn rejects_non_rfc3339_absolute_times() {
+        let now = "2026-09-03T10:00:00Z".parse().unwrap();
+        for value in [
+            "2026-09-03T12:00Z",
+            "2026-09-03T14:00:00+02",
+            "2026-09-03T14:00:00+0200",
+            "2026-09-03T14:00:00+02:00[Europe/Warsaw]",
+            "2026-09-03T12:00:00",
+            "2026-09-04T12:00:00+24:00",
+        ] {
+            assert_eq!(
+                parse_schedule_time(value, now, 10, 86_400),
+                Err(ScheduleTimeError::Invalid),
+                "{value}"
+            );
+        }
     }
 
     #[test]
     fn enforces_schedule_horizon() {
-        let now = Utc
-            .with_ymd_and_hms(2026, 9, 3, 10, 0, 0)
-            .single()
-            .expect("valid test time");
+        let now = "2026-09-03T10:00:00Z".parse().unwrap();
         assert!(parse_schedule_time("5s", now, 10, 86_400).is_err());
         assert!(parse_schedule_time("2d", now, 10, 86_400).is_err());
+    }
+
+    #[test]
+    fn checks_absolute_horizon_in_whole_seconds() {
+        let now = "2026-09-03T10:00:00.500Z".parse().unwrap();
+        assert_eq!(
+            parse_schedule_time("2026-09-03T10:00:10.499Z", now, 10, 60),
+            Err(ScheduleTimeError::TooSoon {
+                minimum_seconds: 10
+            })
+        );
+        assert!(parse_schedule_time("2026-09-03T10:00:10.500Z", now, 10, 60).is_ok());
+        assert!(parse_schedule_time("2026-09-03T10:01:01.499Z", now, 10, 60).is_ok());
+        assert_eq!(
+            parse_schedule_time("2026-09-03T10:01:01.500Z", now, 10, 60),
+            Err(ScheduleTimeError::TooFar {
+                maximum_seconds: 60
+            })
+        );
     }
 
     #[test]
@@ -222,12 +254,7 @@ mod tests {
 
     #[test]
     fn extreme_duration_does_not_panic_and_enforces_boundaries() {
-        use super::ScheduleTimeError;
-
-        let now = Utc
-            .with_ymd_and_hms(2026, 9, 3, 10, 0, 0)
-            .single()
-            .expect("valid test time");
+        let now = "2026-09-03T10:00:00Z".parse().unwrap();
 
         // Exact maximum delay succeeds
         let exact_max = parse_schedule_time("86400s", now, 10, 86_400);
@@ -241,7 +268,7 @@ mod tests {
             })
         );
 
-        // Extreme values that would cause Duration::seconds to overflow / panic
+        // Extreme durations still produce a horizon error instead of overflowing.
         assert_eq!(
             parse_schedule_time("9223372036854775807s", now, 10, 86_400),
             Err(ScheduleTimeError::TooFar {

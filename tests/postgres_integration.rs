@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration, civil::date};
+use jiff_sqlx::ToSqlx;
 use rusty_discord_bot::{
+    datetime::{Timestamp, days},
     moderation_cases::{CaseKind, CaseSeverity, CreateCase, ModerationCaseStore},
     scheduler::{
         CreateJobOutcome, JobMutation, JobMutationOutcome, NewScheduledJob, SchedulerStore,
@@ -22,6 +24,41 @@ fn get_database_url() -> Option<String> {
     std::env::var("DATABASE_URL")
         .ok()
         .filter(|v| !v.trim().is_empty())
+}
+
+#[tokio::test]
+async fn test_existing_postgres_timestamp_and_date_codecs() {
+    let Some(database_url) = get_database_url() else {
+        eprintln!("SKIPPING PostgreSQL datetime codec test: DATABASE_URL not set");
+        return;
+    };
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("connect to PostgreSQL");
+
+    let (timestamp, civil_date): (Timestamp, jiff_sqlx::Date) =
+        sqlx::query_as("SELECT TIMESTAMPTZ '1969-12-31 18:59:59.123456-05:00', DATE '1968-02-29'")
+            .fetch_one(&pool)
+            .await
+            .expect("decode existing PostgreSQL datetime values");
+
+    let expected_timestamp = "1969-12-31T23:59:59.123456Z"
+        .parse::<Timestamp>()
+        .expect("parse UTC timestamp fixture");
+    let expected_date = date(1968, 2, 29);
+    assert_eq!(timestamp, expected_timestamp);
+    assert_eq!(civil_date.to_jiff(), expected_date);
+
+    let correctly_encoded: bool = sqlx::query_scalar(
+        "SELECT $1::timestamptz = TIMESTAMPTZ '1969-12-31 18:59:59.123456-05:00'
+            AND $2::date = DATE '1968-02-29'",
+    )
+    .bind(expected_timestamp)
+    .bind(expected_date.to_sqlx())
+    .fetch_one(&pool)
+    .await
+    .expect("compare encoded datetime values in PostgreSQL");
+    assert!(correctly_encoded);
 }
 
 #[tokio::test]
@@ -79,7 +116,7 @@ async fn test_postgres_integration_suite() {
         .await
         .expect("SchedulerStore should connect to Postgres");
 
-    let now = Utc::now();
+    let now = Timestamp::now();
     let job = NewScheduledJob {
         guild_id: guild_id.clone(),
         module_id: "scheduler".to_owned(),
@@ -87,7 +124,7 @@ async fn test_postgres_integration_suite() {
         creator_user_id: "user_owner_1".to_owned(),
         content: "PostgreSQL test reminder".to_owned(),
         mention_creator: true,
-        run_at: now - Duration::seconds(5), // already due
+        run_at: now - SignedDuration::from_secs(5), // already due
         repeat_every_seconds: None,
         remaining_runs: Some(1),
         max_attempts: 5,
@@ -143,7 +180,7 @@ async fn test_postgres_integration_suite() {
         creator_user_id: "user_owner_1".to_owned(),
         content: "PostgreSQL claim_due test reminder".to_owned(),
         mention_creator: false,
-        run_at: Utc::now() - Duration::seconds(10), // due
+        run_at: Timestamp::now() - SignedDuration::from_secs(10), // due
         repeat_every_seconds: None,
         remaining_runs: Some(1),
         max_attempts: 5,
@@ -163,8 +200,8 @@ async fn test_postgres_integration_suite() {
     let claimed = scheduler
         .claim_due(
             worker_id,
-            Utc::now(),
-            Utc::now() - Duration::seconds(60),
+            Timestamp::now(),
+            Timestamp::now() - SignedDuration::from_secs(60),
             10,
         )
         .await
@@ -209,7 +246,7 @@ async fn test_postgres_integration_suite() {
 
     // Finalize cancellation
     scheduler
-        .mark_cancelled(&due_record.id, worker_id, Utc::now())
+        .mark_cancelled(&due_record.id, worker_id, Timestamp::now())
         .await
         .expect("mark_cancelled on postgres");
 
@@ -243,7 +280,7 @@ async fn test_postgres_integration_suite() {
         creator_user_id: user_a.clone(),
         content: "Job A expired lease".to_owned(),
         mention_creator: false,
-        run_at: Utc::now() - Duration::seconds(200),
+        run_at: Timestamp::now() - SignedDuration::from_secs(200),
         repeat_every_seconds: None,
         remaining_runs: Some(1),
         max_attempts: 1,
@@ -258,7 +295,7 @@ async fn test_postgres_integration_suite() {
     };
 
     // Transition job A directly to processing with attempts=1, locked_at in the past
-    let stale_locked_at = Utc::now() - Duration::seconds(120);
+    let stale_locked_at = Timestamp::now() - SignedDuration::from_secs(120);
     sqlx::query(
         "UPDATE scheduled_jobs SET status = 'processing', attempts = 1, locked_by = 'worker-stale', locked_at = $1 WHERE id = $2::uuid",
     )
@@ -277,7 +314,7 @@ async fn test_postgres_integration_suite() {
         creator_user_id: user_b.clone(),
         content: "Job B active due".to_owned(),
         mention_creator: false,
-        run_at: Utc::now() - Duration::seconds(10),
+        run_at: Timestamp::now() - SignedDuration::from_secs(10),
         repeat_every_seconds: None,
         remaining_runs: Some(1),
         max_attempts: 3,
@@ -299,7 +336,7 @@ async fn test_postgres_integration_suite() {
         creator_user_id: user_a.clone(),
         content: "Job A second attempt".to_owned(),
         mention_creator: false,
-        run_at: Utc::now(),
+        run_at: Timestamp::now(),
         repeat_every_seconds: None,
         remaining_runs: Some(1),
         max_attempts: 1,
@@ -344,8 +381,8 @@ async fn test_postgres_integration_suite() {
 
     // Call claim_due: cleanup will encounter the trigger failure, but must NOT drop error silently
     // and must NOT block Job B from being claimed (preventing regression #60).
-    let now = Utc::now();
-    let stale_before = now - Duration::seconds(60);
+    let now = Timestamp::now();
+    let stale_before = now - SignedDuration::from_secs(60);
     let claimed_jobs = scheduler_with_metrics
         .claim_due("worker-claim-resilient", now, stale_before, 10)
         .await
@@ -643,7 +680,7 @@ async fn test_postgres_integration_suite() {
             user.clone(),
             guilds.clone(),
             "pg_csrf_secret".to_string(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             Some("ephemeral_discord_bearer_token".to_string()),
         )
         .await
@@ -758,7 +795,7 @@ async fn test_postgres_integration_suite() {
     let mod_store = ModerationCaseStore::connect(Some(&database_url))
         .await
         .expect("ModerationCaseStore should connect to Postgres");
-    let mod_now = Utc::now();
+    let mod_now = Timestamp::now();
     let mod_case = mod_store
         .create_case(
             CreateCase {
@@ -771,7 +808,7 @@ async fn test_postgres_integration_suite() {
                 reason: "PostgreSQL integration test warning".to_string(),
                 source_module: "moderation".to_string(),
                 visible_to_subject: true,
-                expires_at: Some(mod_now + Duration::days(7)),
+                expires_at: Some(mod_now + days(7)),
             },
             mod_now,
         )
@@ -1066,7 +1103,7 @@ async fn test_postgres_integration_suite() {
     assert_eq!(e2.used_tokens, 800);
 
     // Prune with past cutoff deletes nothing
-    let past_cutoff = Utc::now() - chrono::Duration::hours(1);
+    let past_cutoff = Timestamp::now() - SignedDuration::from_hours(1);
     let deleted_past = store
         .prune_ai_metering_events(past_cutoff, 100)
         .await
@@ -1077,14 +1114,14 @@ async fn test_postgres_integration_suite() {
     sqlx::query(
         "UPDATE ai_metering_events SET created_at = $1 WHERE guild_id = $2 AND request_id = $3",
     )
-    .bind(Utc::now() - chrono::Duration::days(100))
+    .bind(Timestamp::now() - days(100))
     .bind(&prune_guild)
     .bind("req_p1")
     .execute(store.pool())
     .await
     .expect("backdate event 1");
 
-    let retention_cutoff = Utc::now() - chrono::Duration::days(90);
+    let retention_cutoff = Timestamp::now() - days(90);
     let deleted = store
         .prune_ai_metering_events(retention_cutoff, 100)
         .await
@@ -1245,7 +1282,7 @@ async fn test_postgres_integration_suite() {
             &guild_id,
             "PostgreSQL Raid Event",
             "Event roster test",
-            Utc::now(),
+            Timestamp::now(),
             None,
             "UTC",
             Some(1), // capacity = 1
@@ -1333,7 +1370,7 @@ async fn test_postgres_integration_suite() {
             &guild_id,
             "Concurrent Event",
             "Test parallel joins",
-            Utc::now(),
+            Timestamp::now(),
             None,
             "UTC",
             Some(5),
@@ -1439,7 +1476,7 @@ async fn test_postgres_integration_suite() {
             .contains("idempotency conflict")
     );
 
-    let now_pg = Utc::now();
+    let now_pg = Timestamp::now();
     store
         .update_store_purchase_fulfillment(purchase.id, "completed", None, Some(now_pg))
         .await
@@ -1499,7 +1536,7 @@ async fn test_postgres_integration_suite() {
 
     // Complete the delivery
     store
-        .update_store_purchase_fulfillment(p_purchase.id, "completed", None, Some(Utc::now()))
+        .update_store_purchase_fulfillment(p_purchase.id, "completed", None, Some(Timestamp::now()))
         .await
         .unwrap();
 
@@ -1524,7 +1561,7 @@ async fn test_postgres_integration_suite() {
 
     // 20c. Test Issue #292: Retention pruning of economy_purchase_requests & economy_idempotency with SKIP LOCKED
     // Pruning with past cutoff does not delete active idempotency keys
-    let past_cutoff = Utc::now() - Duration::hours(1);
+    let past_cutoff = Timestamp::now() - SignedDuration::from_hours(1);
     let past_pruned = store
         .prune_economy_purchase_requests(past_cutoff, 500)
         .await
@@ -1542,7 +1579,7 @@ async fn test_postgres_integration_suite() {
     assert_eq!(retry_before_expire.id, purchase.id);
 
     // Prune with future cutoff: auxiliary deduplication keys are reclaimed
-    let future_cutoff = Utc::now() + Duration::hours(25);
+    let future_cutoff = Timestamp::now() + SignedDuration::from_hours(25);
     let pruned_purchases = store
         .prune_economy_purchase_requests(future_cutoff, 500)
         .await
@@ -1568,7 +1605,10 @@ async fn test_postgres_integration_suite() {
         let store_c = store.clone();
         prune_handles.push(tokio::spawn(async move {
             store_c
-                .prune_economy_purchase_requests(Utc::now() + Duration::hours(50), 500)
+                .prune_economy_purchase_requests(
+                    Timestamp::now() + SignedDuration::from_hours(50),
+                    500,
+                )
                 .await
         }));
     }
@@ -1616,7 +1656,7 @@ async fn test_postgres_integration_suite() {
 
     let intel_guild_id = "777000000000000002";
     let member_user = "888000000000000001";
-    let joined_dt = Utc::now() - Duration::days(5);
+    let joined_dt = Timestamp::now() - days(5);
 
     store
         .upsert_member_snapshot(UpsertMemberSnapshotParams {
@@ -1689,8 +1729,8 @@ async fn test_postgres_integration_suite() {
 
     // 21b. Test Identity History Janitor & Expiration Cleanup in Postgres
     let expired_id = Uuid::new_v4();
-    let past_observed = Utc::now() - chrono::Duration::days(120);
-    let past_expiry = Utc::now() - chrono::Duration::days(30);
+    let past_observed = Timestamp::now() - days(120);
+    let past_expiry = Timestamp::now() - days(30);
     sqlx::query(
         r#"
         INSERT INTO member_identity_history
@@ -1777,9 +1817,9 @@ async fn test_postgres_integration_suite() {
     let pg_user_1 = "900719925474099991";
     let pg_user_2 = "900719925474099992";
     let pg_user_3 = "900719925474099993";
-    let pg_now = Utc::now();
-    let pg_t1 = pg_now - chrono::Duration::hours(1);
-    let pg_t2 = pg_now - chrono::Duration::hours(2);
+    let pg_now = Timestamp::now();
+    let pg_t1 = pg_now - SignedDuration::from_hours(1);
+    let pg_t2 = pg_now - SignedDuration::from_hours(2);
 
     store
         .upsert_member_snapshot(rusty_discord_bot::storage::UpsertMemberSnapshotParams {
@@ -2150,7 +2190,7 @@ async fn test_postgres_integration_suite() {
             added_by: quote_user.to_string(),
             author_id: other_user.to_string(),
             body: "Quote 1 by other added by quote_user".to_string(),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         })
         .await
         .expect("create quote 1");
@@ -2161,7 +2201,7 @@ async fn test_postgres_integration_suite() {
             added_by: other_user.to_string(),
             author_id: quote_user.to_string(),
             body: "Quote 2 by quote_user added by other".to_string(),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         })
         .await
         .expect("create quote 2");
@@ -2171,7 +2211,7 @@ async fn test_postgres_integration_suite() {
             user_id: quote_user.to_string(),
             month: 5,
             day: 15,
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         })
         .await
         .expect("set birthday");
@@ -2282,7 +2322,7 @@ async fn test_postgres_integration_suite() {
             global_name: Some("Departing"),
             nickname: None,
             role_ids: &[],
-            joined_at: Some(Utc::now()),
+            joined_at: Some(Timestamp::now()),
         })
         .await
         .expect("upsert snapshot in postgres");
@@ -2514,7 +2554,7 @@ async fn test_postgres_integration_suite() {
         on_call_role_id: Some(on_call_role.to_string()),
         max_override_duration_mins: 720,
         fallback_channel_id: None,
-        updated_at: Utc::now(),
+        updated_at: Timestamp::now(),
     };
 
     let saved_dsettings = store
@@ -2542,7 +2582,7 @@ async fn test_postgres_integration_suite() {
         user_id: duty_user.to_string(),
         expected_on_call: true,
         state_generation: 0,
-        last_reconciled_at: Some(Utc::now()),
+        last_reconciled_at: Some(Timestamp::now()),
         last_error: None,
     };
 
@@ -2590,8 +2630,8 @@ async fn test_postgres_integration_suite() {
                 ..Default::default()
             }),
             version: 1,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         })
         .await
         .expect("upsert recruitment track in pg");
@@ -2613,8 +2653,8 @@ async fn test_postgres_integration_suite() {
             ]),
             current_stage: "submitted".to_string(),
             version: 1,
-            submitted_at: Utc::now(),
-            updated_at: Utc::now(),
+            submitted_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
             decided_at: None,
             decision_reason: None,
             decided_by: None,
@@ -2637,8 +2677,8 @@ async fn test_postgres_integration_suite() {
             reviewer_user_id: rec_reviewer1.to_string(),
             recommendation: "approve".to_string(),
             note: Some("Looks solid".to_string()),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         })
         .await
         .expect("upsert review 1 in pg");
@@ -2652,8 +2692,8 @@ async fn test_postgres_integration_suite() {
             reviewer_user_id: rec_reviewer2.to_string(),
             recommendation: "approve".to_string(),
             note: Some("Seconded".to_string()),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         })
         .await
         .expect("upsert review 2 in pg");
@@ -2715,9 +2755,9 @@ async fn test_postgres_integration_suite() {
             status: "pending".to_string(),
             attempts: 0,
             last_error: None,
-            next_attempt_at: Utc::now(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            next_attempt_at: Timestamp::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         })
         .await
         .expect("upsert role fulfillment in pg");
@@ -2765,8 +2805,8 @@ async fn test_postgres_integration_suite() {
             archive_on_close: true,
             require_question_tag: false,
             welcome_message: Some("Need help? Ask here.".to_string()),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         })
         .await
         .expect("upsert help forum config in pg");
@@ -2779,8 +2819,8 @@ async fn test_postgres_integration_suite() {
             thread_id: hf_thread.to_string(),
             owner_user_id: hf_owner.to_string(),
             status: "open".to_string(),
-            opened_at: Utc::now(),
-            last_activity_at: Utc::now(),
+            opened_at: Timestamp::now(),
+            last_activity_at: Timestamp::now(),
             first_helper_response_at: None,
             closed_at: None,
             closing_reason: None,
@@ -2888,7 +2928,7 @@ async fn test_postgres_integration_suite() {
         emoji_key: rr_emoji.to_string(),
         role_id: rr_role.to_string(),
         created_by: Some("pg_admin".to_string()),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
 
     let rr_created = store
@@ -2967,7 +3007,7 @@ async fn test_postgres_integration_suite() {
             emoji_key: "🎉".to_string(),
             role_id: "role_grant_test".to_string(),
             created_by: Some("pg_admin".to_string()),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -2981,7 +3021,7 @@ async fn test_postgres_integration_suite() {
             emoji_key: "✅".to_string(),
             role_id: "role_grant_test".to_string(),
             created_by: Some("pg_admin".to_string()),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -3113,7 +3153,7 @@ async fn test_postgres_integration_suite() {
             emoji_key: "🔒".to_string(),
             role_id: "role_privacy_test".to_string(),
             created_by: None,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -3189,7 +3229,7 @@ async fn test_postgres_integration_suite() {
             guild_id: rr_guild.to_string(),
             user_id: afk_pg_user.to_string(),
             reason: "Postgres AFK reason".to_string(),
-            set_at: Utc::now(),
+            set_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -3199,7 +3239,7 @@ async fn test_postgres_integration_suite() {
             guild_id: rr_guild.to_string(),
             user_id: afk_other_user.to_string(),
             reason: "Other user Postgres AFK".to_string(),
-            set_at: Utc::now(),
+            set_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -3209,7 +3249,7 @@ async fn test_postgres_integration_suite() {
             guild_id: afk_other_guild.to_string(),
             user_id: afk_pg_user.to_string(),
             reason: "Other guild Postgres AFK".to_string(),
-            set_at: Utc::now(),
+            set_at: Timestamp::now(),
         })
         .await
         .unwrap();
@@ -3360,7 +3400,7 @@ async fn test_postgres_integration_suite() {
     assert_eq!(created_sticky.generation, 0);
 
     // 3. Stale CAS update with wrong generation or revision fails safely
-    let bump_time = Utc::now();
+    let bump_time = Timestamp::now();
     let stale_gen_res = store
         .update_sticky_posted_message(
             sticky_guild,
@@ -3511,7 +3551,7 @@ async fn test_postgres_integration_suite() {
             discord_channel_id: tg_channel.to_string(),
             secret_token: "pg_secret_bridge".to_string(),
             paused: false,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         })
         .await
         .expect("create telegram bridge in pg");
@@ -3523,7 +3563,7 @@ async fn test_postgres_integration_suite() {
         telegram_message_id: "tg_pg_orphan".to_string(),
         discord_message_id: "dc_pg_orphan".to_string(),
         direction: "telegram_to_discord".to_string(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     let orphan_res = store.record_telegram_message_mapping(orphan_mapping).await;
     assert!(
@@ -3538,7 +3578,7 @@ async fn test_postgres_integration_suite() {
         telegram_message_id: "tg_pg_valid".to_string(),
         discord_message_id: "dc_pg_valid".to_string(),
         direction: "telegram_to_discord".to_string(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     let rec_res = store
         .record_telegram_message_mapping(valid_mapping.clone())
@@ -3571,9 +3611,9 @@ async fn test_postgres_integration_suite() {
 
     // 25. Scheduled Events chronological window and RSVP cutoff (#331)
     let ev_guild = "777000000000000001";
-    let now = Utc::now();
-    let ev_start = now + chrono::Duration::days(3);
-    let ev_earlier = ev_start - chrono::Duration::hours(1);
+    let now = Timestamp::now();
+    let ev_start = now + days(3);
+    let ev_earlier = ev_start - SignedDuration::from_hours(1);
 
     // 25.1. PostgreSQL rejects end_time <= start_time
     let invalid_pg_ev = store
@@ -3599,7 +3639,7 @@ async fn test_postgres_integration_suite() {
             "Valid PG Event",
             "end > start",
             ev_start,
-            Some(ev_start + chrono::Duration::hours(2)),
+            Some(ev_start + SignedDuration::from_hours(2)),
             "UTC",
             Some(10),
         )
@@ -3608,8 +3648,8 @@ async fn test_postgres_integration_suite() {
     assert!(valid_pg_ev.end_time.unwrap() > valid_pg_ev.start_time);
 
     // 25.3. Expired event rejects RSVP in PostgreSQL
-    let past_start = now - chrono::Duration::days(2);
-    let past_end = now - chrono::Duration::days(1);
+    let past_start = now - days(2);
+    let past_end = now - days(1);
     let past_pg_ev = store
         .create_scheduled_event(
             ev_guild,
@@ -3674,7 +3714,7 @@ async fn test_postgres_integration_suite() {
             user_id: b_user_leap.to_string(),
             month: 2,
             day: 29,
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         })
         .await
         .expect("set leap bday in pg");
@@ -3685,7 +3725,7 @@ async fn test_postgres_integration_suite() {
             user_id: b_user_march.to_string(),
             month: 3,
             day: 1,
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         })
         .await
         .expect("set march bday in pg");
@@ -3696,7 +3736,7 @@ async fn test_postgres_integration_suite() {
             user_id: b_user_feb28.to_string(),
             month: 2,
             day: 28,
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         })
         .await
         .expect("set feb28 bday in pg");
@@ -3706,7 +3746,7 @@ async fn test_postgres_integration_suite() {
     // Next 01.03 is 2027-03-01
     // Next 29.02 is 2028-02-29
     // Ordering MUST be: 28.02, then 01.03, then 29.02.
-    let pg_frozen_2026 = chrono::NaiveDate::from_ymd_opt(2026, 11, 8).unwrap();
+    let pg_frozen_2026 = date(2026, 11, 8);
     let pg_up_2026 = store
         .list_upcoming_birthdays_at(bday_pg_guild, 3, pg_frozen_2026)
         .await
@@ -3726,7 +3766,7 @@ async fn test_postgres_integration_suite() {
 
     // In leap year before leap day: 2028-02-28
     // Ordering MUST be: 28.02, then 29.02, then 01.03.
-    let pg_frozen_2028_feb = chrono::NaiveDate::from_ymd_opt(2028, 2, 28).unwrap();
+    let pg_frozen_2028_feb = date(2028, 2, 28);
     let pg_up_2028 = store
         .list_upcoming_birthdays_at(bday_pg_guild, 3, pg_frozen_2028_feb)
         .await
@@ -3737,7 +3777,7 @@ async fn test_postgres_integration_suite() {
 
     // After leap day: 2028-03-01
     // Ordering MUST be: 01.03, then 28.02, then 29.02.
-    let pg_frozen_2028_mar = chrono::NaiveDate::from_ymd_opt(2028, 3, 1).unwrap();
+    let pg_frozen_2028_mar = date(2028, 3, 1);
     let pg_up_2028_mar = store
         .list_upcoming_birthdays_at(bday_pg_guild, 3, pg_frozen_2028_mar)
         .await
@@ -3747,7 +3787,7 @@ async fn test_postgres_integration_suite() {
     assert_eq!(pg_up_2028_mar[2].user_id, b_user_leap);
 
     // Century boundary check: 2097-01-01
-    let pg_frozen_2097 = chrono::NaiveDate::from_ymd_opt(2097, 1, 1).unwrap();
+    let pg_frozen_2097 = date(2097, 1, 1);
     let pg_up_century = store
         .list_upcoming_birthdays_at(bday_pg_guild, 3, pg_frozen_2097)
         .await
@@ -3770,7 +3810,7 @@ async fn test_postgres_integration_suite() {
         scheduled_at: None,
         approved_by: None,
         status: "draft".to_string(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
 
     let sp_created = store
@@ -3886,7 +3926,7 @@ async fn test_postgres_integration_suite() {
         scheduled_at: None,
         approved_by: None,
         status: "draft".to_string(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     let create_fail_res = store.create_social_draft(fault_draft_create).await;
     assert!(
@@ -3910,7 +3950,7 @@ async fn test_postgres_integration_suite() {
         scheduled_at: None,
         approved_by: None,
         status: "draft".to_string(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     let created_for_approval = store
         .create_social_draft(fault_draft_approve)

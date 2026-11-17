@@ -1,5 +1,6 @@
+use crate::datetime::Timestamp;
 use anyhow::{Context as _, Result, anyhow, ensure};
-use chrono::{Duration, Utc};
+use jiff::SignedDuration;
 use serenity::{
     all::{ChannelId, ChannelType, GuildId, Permissions, UserId},
     builder::{CreateAllowedMentions, CreateMessage},
@@ -164,11 +165,11 @@ pub async fn execute(
             )
             .await?;
 
-            let expires_at = Utc::now() + Duration::minutes(*duration_minutes);
+            let expires_at = Timestamp::now() + SignedDuration::from_mins(*duration_minutes);
             let target_channel_str = target_channel.get().to_string();
             let ga_id = Uuid::new_v4();
 
-            let end_unix = expires_at.timestamp();
+            let end_unix = expires_at.as_second();
             let host_mention = actor_id_str
                 .as_deref()
                 .map(|a| format!("<@{a}>"))

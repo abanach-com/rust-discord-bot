@@ -1,6 +1,6 @@
+use crate::datetime::Timestamp;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
 use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
 use uuid::Uuid;
@@ -82,7 +82,7 @@ impl PostgresSchedulerStore {
             return Ok(CreateJobOutcome::LimitReached { limit: max_jobs });
         }
 
-        let job = new_job.materialize(Utc::now());
+        let job = new_job.materialize(Timestamp::now());
         let created = sqlx::query_as::<_, ScheduledJob>(
             r#"
             INSERT INTO scheduled_jobs (
@@ -185,7 +185,7 @@ impl PostgresSchedulerStore {
             return Ok(CreateJobOutcome::LimitReached { limit: max_jobs });
         }
 
-        let job = new_job.materialize(Utc::now());
+        let job = new_job.materialize(Timestamp::now());
         let created = sqlx::query_as::<_, ScheduledJob>(
             r#"
             INSERT INTO scheduled_jobs (
@@ -655,7 +655,7 @@ impl PostgresSchedulerStore {
         &self,
         job_id: &str,
         worker_id: &str,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> anyhow::Result<bool> {
         if Uuid::parse_str(job_id).is_err() {
             return Ok(false);
@@ -682,8 +682,8 @@ impl PostgresSchedulerStore {
 
     pub async fn finalize_expired_leases(
         &self,
-        now: DateTime<Utc>,
-        stale_before: DateTime<Utc>,
+        now: Timestamp,
+        stale_before: Timestamp,
     ) -> Result<u64, sqlx::Error> {
         let result = sqlx::query(
             r#"
@@ -734,8 +734,8 @@ impl PostgresSchedulerStore {
     pub async fn claim_due(
         &self,
         worker_id: &str,
-        now: DateTime<Utc>,
-        stale_before: DateTime<Utc>,
+        now: Timestamp,
+        stale_before: Timestamp,
         limit: u8,
     ) -> anyhow::Result<Vec<ScheduledJob>> {
         if let Err(error) = self.finalize_expired_leases(now, stale_before).await {
@@ -807,7 +807,7 @@ impl PostgresSchedulerStore {
         &self,
         job_id: &str,
         worker_id: &str,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> anyhow::Result<Option<ScheduledJob>> {
         self.finish_attempt(job_id, worker_id, now, None).await
     }
@@ -816,7 +816,7 @@ impl PostgresSchedulerStore {
         &self,
         job_id: &str,
         worker_id: &str,
-        now: DateTime<Utc>,
+        now: Timestamp,
         error: &str,
     ) -> anyhow::Result<Option<ScheduledJob>> {
         self.finish_attempt(job_id, worker_id, now, Some(error))
@@ -827,7 +827,7 @@ impl PostgresSchedulerStore {
         &self,
         job_id: &str,
         worker_id: &str,
-        now: DateTime<Utc>,
+        now: Timestamp,
         error: Option<&str>,
     ) -> anyhow::Result<Option<ScheduledJob>> {
         if Uuid::parse_str(job_id).is_err() {
@@ -879,7 +879,7 @@ impl PostgresSchedulerStore {
         &self,
         job_id: &str,
         worker_id: &str,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> anyhow::Result<Option<ScheduledJob>> {
         if Uuid::parse_str(job_id).is_err() {
             return Ok(None);

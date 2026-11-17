@@ -1,7 +1,8 @@
+use crate::datetime::Timestamp;
 use crate::integrations::{
     CapabilityStatus, IntegrationError, ProviderAdapter, ProviderCapability,
 };
-use chrono::{DateTime, Duration, Utc};
+use jiff::SignedDuration;
 use serde::{Deserialize, Serialize};
 use std::sync::{OnceLock, RwLock};
 
@@ -42,26 +43,26 @@ pub struct LeagueCatalogResponse {
     pub game: String,
     pub leagues: Vec<String>,
     pub status: CatalogStatus,
-    pub observed_at: Option<DateTime<Utc>>,
+    pub observed_at: Option<Timestamp>,
     pub source: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 struct CachedLeagues {
     leagues: Vec<String>,
-    observed_at: DateTime<Utc>,
+    observed_at: Timestamp,
     source: String,
 }
 
 pub struct PoeLeagueCatalog {
-    pub ttl: Duration,
-    pub stale_grace: Duration,
+    pub ttl: SignedDuration,
+    pub stale_grace: SignedDuration,
     poe1_cache: RwLock<Option<CachedLeagues>>,
     poe2_cache: RwLock<Option<CachedLeagues>>,
 }
 
 impl PoeLeagueCatalog {
-    pub fn new(ttl: Duration, stale_grace: Duration) -> Self {
+    pub fn new(ttl: SignedDuration, stale_grace: SignedDuration) -> Self {
         Self {
             ttl,
             stale_grace,
@@ -73,7 +74,7 @@ impl PoeLeagueCatalog {
     pub fn get_leagues(
         &self,
         version: &str,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<LeagueCatalogResponse, &'static str> {
         let (game_name, cache_lock, permanent) = match version.to_lowercase().as_str() {
             "poe1" => (
@@ -94,7 +95,7 @@ impl PoeLeagueCatalog {
             .map_err(|_| "Failed to acquire league cache read lock")?;
 
         if let Some(cached) = guard.as_ref() {
-            let age = now.signed_duration_since(cached.observed_at);
+            let age = now.duration_since(cached.observed_at);
             if age <= self.ttl {
                 return Ok(LeagueCatalogResponse {
                     game: game_name.to_string(),
@@ -129,7 +130,7 @@ impl PoeLeagueCatalog {
         version: &str,
         leagues: Vec<String>,
         source: &str,
-        observed_at: DateTime<Utc>,
+        observed_at: Timestamp,
     ) -> Result<(), &'static str> {
         match version.to_lowercase().as_str() {
             "poe1" => {
@@ -188,7 +189,12 @@ impl PoeLeagueCatalog {
 
 pub fn global_poe_catalog() -> &'static PoeLeagueCatalog {
     static INSTANCE: OnceLock<PoeLeagueCatalog> = OnceLock::new();
-    INSTANCE.get_or_init(|| PoeLeagueCatalog::new(Duration::hours(1), Duration::hours(24)))
+    INSTANCE.get_or_init(|| {
+        PoeLeagueCatalog::new(
+            SignedDuration::from_hours(1),
+            SignedDuration::from_hours(24),
+        )
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -319,8 +325,11 @@ mod tests {
 
     #[test]
     fn test_poe_catalog_initial_state_is_unavailable_and_no_settlers_of_kalguur() {
-        let catalog = PoeLeagueCatalog::new(Duration::hours(1), Duration::hours(24));
-        let now = Utc::now();
+        let catalog = PoeLeagueCatalog::new(
+            SignedDuration::from_hours(1),
+            SignedDuration::from_hours(24),
+        );
+        let now = Timestamp::now();
 
         let poe1 = catalog.get_leagues("poe1", now).unwrap();
         assert_eq!(poe1.game, "Path of Exile 1");
@@ -342,8 +351,11 @@ mod tests {
 
     #[test]
     fn test_poe_catalog_fresh_stale_lifecycle_and_poe2_dated_leagues() {
-        let catalog = PoeLeagueCatalog::new(Duration::hours(1), Duration::hours(24));
-        let t0 = Utc::now();
+        let catalog = PoeLeagueCatalog::new(
+            SignedDuration::from_hours(1),
+            SignedDuration::from_hours(24),
+        );
+        let t0 = Timestamp::now();
 
         // 1. PoE 2 receives dated leagues (e.g. Forbidden Rites, Runes of Aldur)
         catalog
@@ -362,7 +374,7 @@ mod tests {
 
         // Immediately after -> Fresh
         let res_fresh = catalog
-            .get_leagues("poe2", t0 + Duration::minutes(10))
+            .get_leagues("poe2", t0 + SignedDuration::from_mins(10))
             .unwrap();
         assert_eq!(res_fresh.status, CatalogStatus::Fresh);
         assert_eq!(res_fresh.observed_at, Some(t0));
@@ -371,14 +383,14 @@ mod tests {
 
         // After TTL but before stale grace (e.g. +2 hours) -> Stale
         let res_stale = catalog
-            .get_leagues("poe2", t0 + Duration::hours(2))
+            .get_leagues("poe2", t0 + SignedDuration::from_hours(2))
             .unwrap();
         assert_eq!(res_stale.status, CatalogStatus::Stale);
         assert_eq!(res_stale.observed_at, Some(t0));
 
         // After stale grace (e.g. +26 hours) -> Unavailable with permanent fallback
         let res_unavail = catalog
-            .get_leagues("poe2", t0 + Duration::hours(26))
+            .get_leagues("poe2", t0 + SignedDuration::from_hours(26))
             .unwrap();
         assert_eq!(res_unavail.status, CatalogStatus::Unavailable);
         assert_eq!(res_unavail.leagues, vec!["Standard 2", "Hardcore 2"]);
@@ -386,8 +398,11 @@ mod tests {
 
     #[test]
     fn test_poe1_rejects_settlers_and_cross_game_contamination() {
-        let catalog = PoeLeagueCatalog::new(Duration::hours(1), Duration::hours(24));
-        let now = Utc::now();
+        let catalog = PoeLeagueCatalog::new(
+            SignedDuration::from_hours(1),
+            SignedDuration::from_hours(24),
+        );
+        let now = Timestamp::now();
 
         // Reject Settlers of Kalguur in PoE 1
         let err_settlers = catalog.update_leagues(

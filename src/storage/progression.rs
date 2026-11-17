@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use crate::datetime::Timestamp;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -11,14 +11,14 @@ pub struct MemberProgress {
     pub reputation: i64,
     pub messages: i64,
     pub daily_streak: i32,
-    pub last_xp_at: Option<DateTime<Utc>>,
-    pub last_daily_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub last_xp_at: Option<Timestamp>,
+    pub last_daily_at: Option<Timestamp>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 impl MemberProgress {
-    pub fn empty(guild_id: &str, user_id: &str, now: DateTime<Utc>) -> Self {
+    pub fn empty(guild_id: &str, user_id: &str, now: Timestamp) -> Self {
         Self {
             guild_id: guild_id.to_owned(),
             user_id: user_id.to_owned(),
@@ -54,11 +54,11 @@ pub enum DailyClaimOutcome {
     Claimed {
         profile: MemberProgress,
         reward: i64,
-        next_claim_at: DateTime<Utc>,
+        next_claim_at: Timestamp,
     },
     Cooldown {
         profile: MemberProgress,
-        next_claim_at: DateTime<Utc>,
+        next_claim_at: Timestamp,
     },
 }
 
@@ -81,10 +81,10 @@ pub enum ReputationGrantOutcome {
     Granted {
         profile: MemberProgress,
         amount: i64,
-        next_available_at: DateTime<Utc>,
+        next_available_at: Timestamp,
     },
     Cooldown {
-        next_available_at: DateTime<Utc>,
+        next_available_at: Timestamp,
     },
     SameAccount,
 }
@@ -95,11 +95,11 @@ pub enum WorkClaimOutcome {
         profile: MemberProgress,
         reward: i64,
         job: String,
-        next_claim_at: DateTime<Utc>,
+        next_claim_at: Timestamp,
     },
     Cooldown {
         profile: MemberProgress,
-        next_claim_at: DateTime<Utc>,
+        next_claim_at: Timestamp,
     },
     AlreadyProcessed {
         profile: MemberProgress,
@@ -113,16 +113,16 @@ pub enum CrimeClaimOutcome {
     Success {
         profile: MemberProgress,
         reward: i64,
-        next_claim_at: DateTime<Utc>,
+        next_claim_at: Timestamp,
     },
     Failure {
         profile: MemberProgress,
         penalty: i64,
-        next_claim_at: DateTime<Utc>,
+        next_claim_at: Timestamp,
     },
     Cooldown {
         profile: MemberProgress,
-        next_claim_at: DateTime<Utc>,
+        next_claim_at: Timestamp,
     },
     AlreadyProcessed {
         profile: MemberProgress,

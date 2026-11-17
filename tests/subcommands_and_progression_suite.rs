@@ -1,3 +1,4 @@
+use rusty_discord_bot::datetime::Timestamp;
 use std::path::PathBuf;
 
 use rusty_discord_bot::lua::{
@@ -835,7 +836,6 @@ async fn test_tags_subcommands() {
 
 #[tokio::test]
 async fn test_tags_storage_lifecycle() {
-    use chrono::Utc;
     use rusty_discord_bot::storage::{Storage, TagRecord};
 
     let storage = Storage::memory();
@@ -855,8 +855,8 @@ async fn test_tags_storage_lifecycle() {
         name: "rules".to_string(),
         content: "1. Be polite\n2. No spam".to_string(),
         author_id: "222222222222222222".to_string(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     storage
         .set_tag(guild_id, tag.clone())

@@ -1,3 +1,4 @@
+use crate::datetime::Timestamp;
 pub mod crypto;
 mod memory;
 mod model;
@@ -285,11 +286,7 @@ impl TicketStore {
         }
     }
 
-    pub async fn prune_transcripts(
-        &self,
-        cutoff: chrono::DateTime<chrono::Utc>,
-        limit: usize,
-    ) -> Result<u64> {
+    pub async fn prune_transcripts(&self, cutoff: Timestamp, limit: usize) -> Result<u64> {
         match self {
             Self::Memory(store) => Ok(store.prune_transcripts(cutoff, limit)),
             Self::Postgres(store) => store.prune_transcripts(cutoff, limit).await,

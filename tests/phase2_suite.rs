@@ -1,6 +1,7 @@
+use jiff::SignedDuration;
+use rusty_discord_bot::datetime::{Timestamp, days};
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
 use dashmap::DashMap;
 use reqwest::header::COOKIE;
 use rusty_discord_bot::{
@@ -112,7 +113,7 @@ async fn test_phase2_community_operations_and_media_suite() {
             user,
             guilds,
             csrf_token.to_owned(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -890,7 +891,7 @@ async fn test_phase2_community_operations_and_media_suite() {
     let event_req = serde_json::json!({
         "title": "Community Raid Night",
         "description": "Defeat the ender dragon together",
-        "start_time": Utc::now() + Duration::hours(1),
+        "start_time": Timestamp::now() + SignedDuration::from_hours(1),
         "timezone": "Europe/Warsaw",
         "max_participants": 2
     });
@@ -1154,7 +1155,7 @@ async fn test_guild_store_member_access_and_purchase_isolation() {
                 permissions: "8".to_owned(),
             }],
             admin_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -1203,7 +1204,7 @@ async fn test_guild_store_member_access_and_purchase_isolation() {
                 permissions: "0".to_owned(), // No manage guild or admin
             }],
             member_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -1241,7 +1242,7 @@ async fn test_guild_store_member_access_and_purchase_isolation() {
                 permissions: "0".to_owned(),
             }],
             non_member_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -1546,7 +1547,7 @@ async fn test_offline_mode_false_live_membership_verification() {
                 permissions: "0".to_string(),
             }],
             csrf_token.to_string(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -1740,7 +1741,7 @@ async fn test_store_purchases_pagination_and_bounded_inventory_issue_387() {
                 permissions: "8".to_owned(),
             }],
             admin_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -1769,7 +1770,7 @@ async fn test_store_purchases_pagination_and_bounded_inventory_issue_387() {
                 permissions: "0".to_owned(),
             }],
             member_a_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -1792,11 +1793,11 @@ async fn test_store_purchases_pagination_and_bounded_inventory_issue_387() {
         .unwrap();
 
     // 4. Seed 55 purchases for member A with pairs of duplicate timestamps to test tie-breaker (id DESC)
-    let base_time = Utc::now() - Duration::days(10);
+    let base_time = Timestamp::now() - days(10);
     let mut expected_member_a_ids = std::collections::HashSet::new();
 
     for i in 0..55 {
-        let dt = base_time + Duration::seconds(((i / 2) * 2) as i64);
+        let dt = base_time + SignedDuration::from_secs(((i / 2) * 2) as i64);
         let purchase_id = uuid::Uuid::new_v4();
         let purchase = rusty_discord_bot::storage::StorePurchase {
             id: purchase_id,
@@ -1951,7 +1952,7 @@ async fn test_store_purchases_pagination_and_bounded_inventory_issue_387() {
     let forged_user_cursor = rusty_discord_bot::storage::encode_store_purchase_cursor(
         guild_a,
         Some(member_b_user_id),
-        &Utc::now(),
+        &Timestamp::now(),
         &uuid::Uuid::new_v4(),
     );
     let forged_resp = client
@@ -1969,7 +1970,7 @@ async fn test_store_purchases_pagination_and_bounded_inventory_issue_387() {
     let foreign_guild_cursor = rusty_discord_bot::storage::encode_store_purchase_cursor(
         guild_b,
         Some(member_a_user_id),
-        &Utc::now(),
+        &Timestamp::now(),
         &uuid::Uuid::new_v4(),
     );
     let foreign_resp = client
@@ -1987,7 +1988,7 @@ async fn test_store_purchases_pagination_and_bounded_inventory_issue_387() {
     let unbounded_cursor = rusty_discord_bot::storage::encode_store_purchase_cursor(
         guild_a,
         None,
-        &Utc::now(),
+        &Timestamp::now(),
         &uuid::Uuid::new_v4(),
     );
     let unbounded_resp = client
@@ -2101,7 +2102,7 @@ async fn test_store_items_pagination_quota_and_lookups_issue_389() {
                 permissions: "8".to_owned(),
             }],
             admin_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -2130,7 +2131,7 @@ async fn test_store_items_pagination_quota_and_lookups_issue_389() {
                 permissions: "1024".to_owned(),
             }],
             member_a_csrf.to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -2158,7 +2159,7 @@ async fn test_store_items_pagination_quota_and_lookups_issue_389() {
                 permissions: "1024".to_owned(),
             }],
             "csrf_member_b_items_389".to_owned(),
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
             None,
         )
         .await
@@ -2330,7 +2331,7 @@ async fn test_store_items_pagination_quota_and_lookups_issue_389() {
     // Cross-guild cursor validation -> 400 Bad Request
     let foreign_cursor = rusty_discord_bot::storage::encode_store_item_cursor(
         guild_b,
-        &chrono::Utc::now(),
+        &Timestamp::now(),
         &uuid::Uuid::new_v4(),
     );
     let cross_resp = client

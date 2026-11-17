@@ -1,4 +1,5 @@
-use chrono::{DateTime, Duration, Utc};
+use crate::datetime::Timestamp;
+use jiff::SignedDuration;
 use serde::{Deserialize, Serialize};
 
 use crate::storage::validate_snowflake;
@@ -15,8 +16,8 @@ pub struct HelpForumConfig {
     pub archive_on_close: bool,
     pub require_question_tag: bool,
     pub welcome_message: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 impl Default for HelpForumConfig {
@@ -32,8 +33,8 @@ impl Default for HelpForumConfig {
             archive_on_close: true,
             require_question_tag: false,
             welcome_message: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         }
     }
 }
@@ -45,10 +46,10 @@ pub struct HelpForumSession {
     pub thread_id: String,
     pub owner_user_id: String,
     pub status: String, // 'open', 'solved', 'inactive', 'deleted', 'owner_left'
-    pub opened_at: DateTime<Utc>,
-    pub last_activity_at: DateTime<Utc>,
-    pub first_helper_response_at: Option<DateTime<Utc>>,
-    pub closed_at: Option<DateTime<Utc>>,
+    pub opened_at: Timestamp,
+    pub last_activity_at: Timestamp,
+    pub first_helper_response_at: Option<Timestamp>,
+    pub closed_at: Option<Timestamp>,
     pub closing_reason: Option<String>,
     pub generation: i64,
 }
@@ -134,7 +135,7 @@ pub fn calculate_stats_from_sessions(
 
         if let Some(first_resp) = s.first_helper_response_at {
             answered_count += 1;
-            let diff = (first_resp - s.opened_at).num_seconds();
+            let diff = (first_resp - s.opened_at).as_secs();
             if diff >= 0 {
                 response_durations.push(diff as f64);
             }
@@ -143,7 +144,7 @@ pub fn calculate_stats_from_sessions(
         }
 
         if let Some(closed) = s.closed_at {
-            let diff = (closed - s.opened_at).num_seconds();
+            let diff = (closed - s.opened_at).as_secs();
             if diff >= 0 {
                 lifetimes.push(diff as f64);
             }
@@ -300,7 +301,7 @@ pub async fn reconcile_idle_help_forums(
     validate_snowflake("guild_id", guild_id)?;
     let configs = storage.list_help_forum_configs(guild_id).await?;
     let mut closed_count = 0;
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     for cfg in configs {
         if !cfg.enabled {
@@ -312,7 +313,7 @@ pub async fn reconcile_idle_help_forums(
             .await?;
 
         for session in sessions {
-            let idle_duration = Duration::minutes(cfg.idle_close_minutes as i64);
+            let idle_duration = SignedDuration::from_mins(cfg.idle_close_minutes as i64);
             if now - session.last_activity_at >= idle_duration {
                 let close_res = close_help_forum_session_with_discord(
                     storage,
@@ -408,8 +409,8 @@ mod tests {
             thread_id: "300000000000000001".to_string(),
             owner_user_id: "400000000000000001".to_string(),
             status: "open".to_string(),
-            opened_at: Utc::now(),
-            last_activity_at: Utc::now(),
+            opened_at: Timestamp::now(),
+            last_activity_at: Timestamp::now(),
             first_helper_response_at: None,
             closed_at: None,
             closing_reason: None,
@@ -427,8 +428,8 @@ mod tests {
             archive_on_close: true,
             require_question_tag: false,
             welcome_message: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         };
 
         // 1. Owner can close when owner_can_close is true
@@ -480,17 +481,17 @@ mod tests {
 
     #[test]
     fn test_calculate_stats_from_sessions() {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let s1 = HelpForumSession {
             guild_id: "100000000000000001".to_string(),
             forum_channel_id: "200000000000000001".to_string(),
             thread_id: "1".to_string(),
             owner_user_id: "user1".to_string(),
             status: "solved".to_string(),
-            opened_at: now - Duration::seconds(600),
+            opened_at: now - SignedDuration::from_secs(600),
             last_activity_at: now,
-            first_helper_response_at: Some(now - Duration::seconds(540)), // 60s first response
-            closed_at: Some(now),                                         // 600s lifetime
+            first_helper_response_at: Some(now - SignedDuration::from_secs(540)), // 60s first response
+            closed_at: Some(now),                                                 // 600s lifetime
             closing_reason: Some("solved".to_string()),
             generation: 1,
         };
@@ -501,10 +502,10 @@ mod tests {
             thread_id: "2".to_string(),
             owner_user_id: "user2".to_string(),
             status: "inactive".to_string(),
-            opened_at: now - Duration::seconds(1200),
-            last_activity_at: now - Duration::seconds(100),
-            first_helper_response_at: Some(now - Duration::seconds(1080)), // 120s first response
-            closed_at: Some(now),                                          // 1200s lifetime
+            opened_at: now - SignedDuration::from_secs(1200),
+            last_activity_at: now - SignedDuration::from_secs(100),
+            first_helper_response_at: Some(now - SignedDuration::from_secs(1080)), // 120s first response
+            closed_at: Some(now),                                                  // 1200s lifetime
             closing_reason: Some("inactive".to_string()),
             generation: 1,
         };
@@ -515,8 +516,8 @@ mod tests {
             thread_id: "3".to_string(),
             owner_user_id: "user3".to_string(),
             status: "open".to_string(),
-            opened_at: now - Duration::seconds(300),
-            last_activity_at: now - Duration::seconds(50),
+            opened_at: now - SignedDuration::from_secs(300),
+            last_activity_at: now - SignedDuration::from_secs(50),
             first_helper_response_at: None, // unanswered
             closed_at: None,
             closing_reason: None,
@@ -604,7 +605,7 @@ mod tests {
         };
         storage.upsert_help_forum_config(cfg).await.unwrap();
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         // Thread 1: idle for 2 hours -> should be auto-closed
         let s1 = HelpForumSession {
@@ -613,8 +614,8 @@ mod tests {
             thread_id: thread_1.to_string(),
             owner_user_id: "400000000000000001".to_string(),
             status: "open".to_string(),
-            opened_at: now - Duration::hours(3),
-            last_activity_at: now - Duration::hours(2),
+            opened_at: now - SignedDuration::from_hours(3),
+            last_activity_at: now - SignedDuration::from_hours(2),
             first_helper_response_at: None,
             closed_at: None,
             closing_reason: None,
@@ -629,8 +630,8 @@ mod tests {
             thread_id: thread_2.to_string(),
             owner_user_id: "400000000000000002".to_string(),
             status: "open".to_string(),
-            opened_at: now - Duration::hours(1),
-            last_activity_at: now - Duration::minutes(10),
+            opened_at: now - SignedDuration::from_hours(1),
+            last_activity_at: now - SignedDuration::from_mins(10),
             first_helper_response_at: None,
             closed_at: None,
             closing_reason: None,

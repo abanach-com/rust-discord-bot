@@ -1,3 +1,8 @@
+use crate::datetime::Timestamp;
+#[cfg(test)]
+use crate::datetime::days;
+use jiff::SignedDuration;
+use jiff::civil::Date;
 mod memory;
 
 mod postgres;
@@ -5,8 +10,6 @@ mod postgres;
 mod progression;
 
 use std::collections::HashMap;
-
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
 
 use serde::{Deserialize, Serialize};
 
@@ -98,7 +101,7 @@ pub struct UserErasureReport {
     pub progression_erased: bool,
     pub related_records_erased: usize,
     pub retained_records: Vec<RetainedRecordNotice>,
-    pub erased_at: DateTime<Utc>,
+    pub erased_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -118,7 +121,7 @@ pub struct GuildModuleSettings {
 
     pub config: Value,
 
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -135,7 +138,7 @@ pub struct AuditLogEntry {
 
     pub data: Value,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -156,9 +159,9 @@ pub struct ModerationExecutionIntent {
 
     pub error: Option<String>,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -171,7 +174,7 @@ pub struct ModuleDraftConfig {
 
     pub updated_by: String,
 
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,9 +201,9 @@ pub struct ModerationAppeal {
 
     pub staff_notes: Option<String>,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -213,9 +216,9 @@ pub struct TimedRoleGrant {
 
     pub role_id: String,
 
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -230,7 +233,7 @@ pub struct ServerSnapshot {
 
     pub created_by: String,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -249,9 +252,9 @@ pub struct CustomAutomation {
 
     pub enabled: bool,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -266,13 +269,13 @@ pub struct StickyMessage {
 
     pub cooldown_seconds: i32,
 
-    pub last_updated_at: DateTime<Utc>,
+    pub last_updated_at: Timestamp,
 
     #[serde(default)]
     pub last_posted_message_id: Option<String>,
 
     #[serde(default)]
-    pub last_bumped_at: Option<DateTime<Utc>>,
+    pub last_bumped_at: Option<Timestamp>,
 
     #[serde(default)]
     #[sqlx(default)]
@@ -299,9 +302,9 @@ pub struct CommunityPoll {
 
     pub is_anonymous: bool,
 
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -322,9 +325,9 @@ pub struct Giveaway {
 
     pub ended: bool,
 
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 
     pub created_by_user_id: Option<String>,
 }
@@ -334,8 +337,8 @@ pub struct TagRecord {
     pub name: String,
     pub content: String,
     pub author_id: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::FromRow)]
@@ -347,7 +350,7 @@ pub struct ReactionRoleBinding {
     pub emoji_key: String,
     pub role_id: String,
     pub created_by: Option<String>,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::FromRow)]
@@ -358,7 +361,7 @@ pub struct ReactionRoleGrant {
     pub role_id: String,
     pub binding_id: Uuid,
     pub granted_by_bot: bool,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -376,7 +379,7 @@ pub struct QuoteRecord {
     pub added_by: String,
     pub author_id: String,
     pub body: String,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::FromRow)]
@@ -385,7 +388,7 @@ pub struct BirthdayRecord {
     pub user_id: String,
     pub month: i16,
     pub day: i16,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::FromRow)]
@@ -393,7 +396,7 @@ pub struct AfkRecord {
     pub guild_id: String,
     pub user_id: String,
     pub reason: String,
-    pub set_at: DateTime<Utc>,
+    pub set_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -408,7 +411,7 @@ pub struct StarboardEntry {
 
     pub reaction_count: i32,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -427,7 +430,7 @@ pub struct StoreItem {
 
     pub stock: Option<i32>,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -448,13 +451,13 @@ pub struct StorePurchase {
 
     pub failure_reason: Option<String>,
 
-    pub fulfilled_at: Option<DateTime<Utc>>,
+    pub fulfilled_at: Option<Timestamp>,
 
     #[serde(default)]
     #[sqlx(default)]
-    pub lease_expires_at: Option<DateTime<Utc>>,
+    pub lease_expires_at: Option<Timestamp>,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 pub const MAX_STORE_ITEMS_PER_GUILD: usize = 500;
@@ -471,7 +474,7 @@ pub struct StoreItemsPage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreItemCursor {
     pub guild_id: String,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     pub id: Uuid,
 }
 
@@ -486,7 +489,7 @@ pub struct StorePurchasesPage {
 pub struct StorePurchaseCursor {
     pub guild_id: Option<String>,
     pub user_id: Option<String>,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     pub id: Uuid,
 }
 
@@ -579,7 +582,7 @@ fn base64url_decode_store_cursor(input: &str) -> anyhow::Result<Vec<u8>> {
 pub fn encode_store_purchase_cursor(
     guild_id: &str,
     user_id: Option<&str>,
-    created_at: &DateTime<Utc>,
+    created_at: &Timestamp,
     id: &Uuid,
 ) -> String {
     let payload = format!(
@@ -619,14 +622,13 @@ pub fn decode_store_purchase_cursor(cursor: &str) -> anyhow::Result<StorePurchas
             } else {
                 Some(parts[1].trim().to_string())
             };
-            let created_at = DateTime::parse_from_rfc3339(parts[2].trim())
-                .map(|dt| dt.with_timezone(&Utc))
+            let created_at = Timestamp::parse_rfc3339(parts[2].trim())
                 .or_else(|_| {
                     parts[2]
                         .trim()
                         .parse::<i64>()
                         .ok()
-                        .and_then(DateTime::from_timestamp_millis)
+                        .and_then(|ms| Timestamp::from_millisecond(ms).ok())
                         .ok_or_else(|| anyhow::anyhow!("invalid timestamp"))
                 })
                 .map_err(|e| anyhow::anyhow!("Failed to parse cursor timestamp: {e}"))?;
@@ -654,14 +656,13 @@ pub fn decode_store_purchase_cursor(cursor: &str) -> anyhow::Result<StorePurchas
         } else {
             Some(parts[1].trim().to_string())
         };
-        let created_at = DateTime::parse_from_rfc3339(parts[2].trim())
-            .map(|dt| dt.with_timezone(&Utc))
+        let created_at = Timestamp::parse_rfc3339(parts[2].trim())
             .or_else(|_| {
                 parts[2]
                     .trim()
                     .parse::<i64>()
                     .ok()
-                    .and_then(DateTime::from_timestamp_millis)
+                    .and_then(|ms| Timestamp::from_millisecond(ms).ok())
                     .ok_or_else(|| anyhow::anyhow!("invalid timestamp"))
             })
             .map_err(|e| anyhow::anyhow!("Failed to parse cursor timestamp: {e}"))?;
@@ -681,14 +682,13 @@ pub fn decode_store_purchase_cursor(cursor: &str) -> anyhow::Result<StorePurchas
 
     // 3. "timestamp|uuid"
     if parts.len() == 2 {
-        let created_at = DateTime::parse_from_rfc3339(parts[0].trim())
-            .map(|dt| dt.with_timezone(&Utc))
+        let created_at = Timestamp::parse_rfc3339(parts[0].trim())
             .or_else(|_| {
                 parts[0]
                     .trim()
                     .parse::<i64>()
                     .ok()
-                    .and_then(DateTime::from_timestamp_millis)
+                    .and_then(|ms| Timestamp::from_millisecond(ms).ok())
                     .ok_or_else(|| anyhow::anyhow!("invalid timestamp"))
             })
             .map_err(|e| anyhow::anyhow!("Failed to parse cursor timestamp: {e}"))?;
@@ -706,13 +706,12 @@ pub fn decode_store_purchase_cursor(cursor: &str) -> anyhow::Result<StorePurchas
     if let Some((left, right)) = s.rsplit_once(':')
         && let Ok(id) = Uuid::parse_str(right.trim())
     {
-        let created_at = DateTime::parse_from_rfc3339(left.trim())
-            .map(|dt| dt.with_timezone(&Utc))
+        let created_at = Timestamp::parse_rfc3339(left.trim())
             .or_else(|_| {
                 left.trim()
                     .parse::<i64>()
                     .ok()
-                    .and_then(DateTime::from_timestamp_millis)
+                    .and_then(|ms| Timestamp::from_millisecond(ms).ok())
                     .ok_or_else(|| anyhow::anyhow!("invalid timestamp"))
             })
             .map_err(|e| anyhow::anyhow!("Failed to parse cursor timestamp: {e}"))?;
@@ -728,7 +727,7 @@ pub fn decode_store_purchase_cursor(cursor: &str) -> anyhow::Result<StorePurchas
 }
 
 /// Encodes a store items keyset pagination cursor binding `guild_id`, `created_at`, and `id`.
-pub fn encode_store_item_cursor(guild_id: &str, created_at: &DateTime<Utc>, id: &Uuid) -> String {
+pub fn encode_store_item_cursor(guild_id: &str, created_at: &Timestamp, id: &Uuid) -> String {
     let payload = format!("v1|{}|{}|{}", guild_id.trim(), created_at.to_rfc3339(), id);
     base64url_encode_store_cursor(payload.as_bytes())
 }
@@ -752,8 +751,7 @@ pub fn decode_store_item_cursor(cursor: &str) -> anyhow::Result<StoreItemCursor>
     if guild_id.is_empty() {
         anyhow::bail!("store item cursor missing guild_id");
     }
-    let created_at = DateTime::parse_from_rfc3339(parts[2].trim())
-        .map(|dt| dt.with_timezone(&Utc))
+    let created_at = Timestamp::parse_rfc3339(parts[2].trim())
         .map_err(|e| anyhow::anyhow!("Failed to parse cursor timestamp: {e}"))?;
     let id = Uuid::parse_str(parts[3].trim())
         .map_err(|e| anyhow::anyhow!("Failed to parse cursor UUID: {e}"))?;
@@ -769,7 +767,7 @@ pub fn decode_store_item_cursor(cursor: &str) -> anyhow::Result<StoreItemCursor>
 pub fn encode_social_draft_cursor(
     guild_id: &str,
     status: Option<&str>,
-    created_at: &DateTime<Utc>,
+    created_at: &Timestamp,
     id: &Uuid,
 ) -> String {
     let status_str = status.unwrap_or("");
@@ -807,8 +805,7 @@ pub fn decode_social_draft_cursor(cursor: &str) -> anyhow::Result<SocialDraftCur
     } else {
         Some(parts[2].trim().to_string())
     };
-    let created_at = DateTime::parse_from_rfc3339(parts[3].trim())
-        .map(|dt| dt.with_timezone(&Utc))
+    let created_at = Timestamp::parse_rfc3339(parts[3].trim())
         .map_err(|e| anyhow::anyhow!("Failed to parse cursor timestamp: {e}"))?;
     let id = Uuid::parse_str(parts[4].trim())
         .map_err(|e| anyhow::anyhow!("Failed to parse cursor UUID: {e}"))?;
@@ -878,16 +875,12 @@ pub struct ScheduledEventsPage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScheduledEventCursor {
     pub guild_id: String,
-    pub start_time: DateTime<Utc>,
+    pub start_time: Timestamp,
     pub id: Uuid,
 }
 
 /// Encodes a scheduled events keyset pagination cursor binding `guild_id`, `start_time`, and `id`.
-pub fn encode_scheduled_event_cursor(
-    guild_id: &str,
-    start_time: &DateTime<Utc>,
-    id: &Uuid,
-) -> String {
+pub fn encode_scheduled_event_cursor(guild_id: &str, start_time: &Timestamp, id: &Uuid) -> String {
     let payload = format!("v1|{}|{}|{}", guild_id.trim(), start_time.to_rfc3339(), id);
     base64url_encode_store_cursor(payload.as_bytes())
 }
@@ -912,8 +905,7 @@ pub fn decode_scheduled_event_cursor(cursor: &str) -> anyhow::Result<ScheduledEv
     if guild_id.is_empty() {
         anyhow::bail!("scheduled event cursor missing guild_id");
     }
-    let start_time = DateTime::parse_from_rfc3339(parts[2].trim())
-        .map(|dt| dt.with_timezone(&Utc))
+    let start_time = Timestamp::parse_rfc3339(parts[2].trim())
         .map_err(|e| anyhow::anyhow!("Failed to parse cursor timestamp: {e}"))?;
     let id = Uuid::parse_str(parts[3].trim())
         .map_err(|e| anyhow::anyhow!("Failed to parse cursor UUID: {e}"))?;
@@ -933,13 +925,13 @@ pub struct EconomyPurchaseRequestRecord {
     pub item_id: Uuid,
     pub purchase_id: Uuid,
     pub balance_after: i64,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EconomyIdempotencyEntry {
     pub user_id: String,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     pub outcome_json: String,
 }
 
@@ -1013,13 +1005,13 @@ pub fn validate_poll_input(question: &str, options: &[String]) -> anyhow::Result
 /// For Feb 29 birthdays, this calculates the next actual leap day (Feb 29) on or after `today`,
 /// searching up to 8 years ahead (which handles the century non-leap gap, e.g. year 2100).
 #[must_use]
-pub fn next_birthday_date(month: i16, day: i16, today: NaiveDate) -> Option<NaiveDate> {
+pub fn next_birthday_date(month: i16, day: i16, today: Date) -> Option<Date> {
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
     let current_year = today.year();
     (current_year..=current_year + 8).find_map(|year| {
-        let candidate = NaiveDate::from_ymd_opt(year, month as u32, day as u32)?;
+        let candidate = Date::new(year, month as i8, day as i8).ok()?;
         if candidate >= today {
             Some(candidate)
         } else {
@@ -1028,9 +1020,9 @@ pub fn next_birthday_date(month: i16, day: i16, today: NaiveDate) -> Option<Naiv
     })
 }
 
-pub fn snowflake_created_at(id: u64) -> DateTime<Utc> {
+pub fn snowflake_created_at(id: u64) -> Timestamp {
     let millis = (id >> 22) + 1_420_070_400_000;
-    DateTime::from_timestamp_millis(millis as i64).unwrap_or_else(Utc::now)
+    Timestamp::from_millisecond(millis as i64).unwrap_or_else(|_| Timestamp::now())
 }
 
 /// Background janitor periodically pruning expired identity history records.
@@ -1077,14 +1069,14 @@ pub async fn run_economy_idempotency_janitor(
     metrics: Option<std::sync::Arc<crate::metrics::Metrics>>,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
     interval: std::time::Duration,
-    retention: chrono::Duration,
+    retention: SignedDuration,
 ) {
     let mut timer = tokio::time::interval(interval);
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     tracing::info!(
         interval_secs = interval.as_secs(),
-        retention_hours = retention.num_hours(),
+        retention_hours = retention.as_hours(),
         "started economy idempotency janitor"
     );
 
@@ -1095,7 +1087,7 @@ pub async fn run_economy_idempotency_janitor(
                 break;
             }
             _ = timer.tick() => {
-                let cutoff = chrono::Utc::now() - retention;
+                let cutoff = Timestamp::now() - retention;
                 let pruned_purchases = match storage.prune_economy_purchase_requests(cutoff, 1000).await {
                     Ok(n) => n,
                     Err(err) => {
@@ -1134,14 +1126,14 @@ pub async fn run_ai_metering_idempotency_janitor(
     metrics: Option<std::sync::Arc<crate::metrics::Metrics>>,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
     interval: std::time::Duration,
-    retention: chrono::Duration,
+    retention: SignedDuration,
 ) {
     let mut timer = tokio::time::interval(interval);
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     tracing::info!(
         interval_secs = interval.as_secs(),
-        retention_days = retention.num_days(),
+        retention_days = retention.as_hours() / 24,
         "started AI metering idempotency janitor"
     );
 
@@ -1152,7 +1144,7 @@ pub async fn run_ai_metering_idempotency_janitor(
                 break;
             }
             _ = timer.tick() => {
-                let cutoff = chrono::Utc::now() - retention;
+                let cutoff = Timestamp::now() - retention;
                 let pruned = match storage.prune_ai_metering_events(cutoff, 1000).await {
                     Ok(n) => n,
                     Err(err) => {
@@ -1181,16 +1173,16 @@ pub async fn run_integrations_retention_janitor(
     storage: Storage,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
     interval: std::time::Duration,
-    dedupe_retention: chrono::Duration,
-    logs_retention: chrono::Duration,
+    dedupe_retention: SignedDuration,
+    logs_retention: SignedDuration,
 ) {
     let mut timer = tokio::time::interval(interval);
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     tracing::info!(
         interval_secs = interval.as_secs(),
-        dedupe_retention_days = dedupe_retention.num_days(),
-        logs_retention_days = logs_retention.num_days(),
+        dedupe_retention_days = dedupe_retention.as_hours() / 24,
+        logs_retention_days = logs_retention.as_hours() / 24,
         "started integrations retention janitor"
     );
 
@@ -1201,7 +1193,7 @@ pub async fn run_integrations_retention_janitor(
                 break;
             }
             _ = timer.tick() => {
-                let now = chrono::Utc::now();
+                let now = Timestamp::now();
                 let dedupe_cutoff = now - dedupe_retention;
                 let logs_cutoff = now - logs_retention;
 
@@ -1237,8 +1229,8 @@ pub struct MemberIdentityRecord {
     pub kind: String,
     pub old_value: Option<String>,
     pub new_value: Option<String>,
-    pub observed_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
+    pub observed_at: Timestamp,
+    pub expires_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -1249,9 +1241,9 @@ pub struct MemberSnapshot {
     pub global_name: Option<String>,
     pub nickname: Option<String>,
     pub role_ids: serde_json::Value,
-    pub joined_at: Option<DateTime<Utc>>,
-    pub account_created_at: Option<DateTime<Utc>>,
-    pub updated_at: DateTime<Utc>,
+    pub joined_at: Option<Timestamp>,
+    pub account_created_at: Option<Timestamp>,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Clone, Debug)]
@@ -1262,7 +1254,7 @@ pub struct UpsertMemberSnapshotParams<'a> {
     pub global_name: Option<&'a str>,
     pub nickname: Option<&'a str>,
     pub role_ids: &'a [String],
-    pub joined_at: Option<DateTime<Utc>>,
+    pub joined_at: Option<Timestamp>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -1271,12 +1263,12 @@ pub struct MemberSearchFilter {
     pub role_ids: Vec<String>,
     #[serde(default)]
     pub exclude_role_ids: Vec<String>,
-    pub joined_after: Option<DateTime<Utc>>,
-    pub joined_before: Option<DateTime<Utc>>,
-    pub account_created_after: Option<DateTime<Utc>>,
-    pub account_created_before: Option<DateTime<Utc>>,
+    pub joined_after: Option<Timestamp>,
+    pub joined_before: Option<Timestamp>,
+    pub account_created_after: Option<Timestamp>,
+    pub account_created_before: Option<Timestamp>,
     pub min_case_count: Option<i64>,
-    pub identity_changed_after: Option<DateTime<Utc>>,
+    pub identity_changed_after: Option<Timestamp>,
     pub limit: Option<u16>,
     pub cursor: Option<String>,
 }
@@ -1288,8 +1280,8 @@ pub struct MemberSearchRow {
     pub global_name: Option<String>,
     pub nickname: Option<String>,
     pub role_ids: Vec<String>,
-    pub joined_at: Option<DateTime<Utc>>,
-    pub account_created_at: Option<DateTime<Utc>>,
+    pub joined_at: Option<Timestamp>,
+    pub account_created_at: Option<Timestamp>,
     pub moderation_case_count: i64,
     pub xp: Option<i64>,
     pub level: Option<i32>,
@@ -1298,16 +1290,16 @@ pub struct MemberSearchRow {
 }
 
 /// Encodes a pagination cursor as "{timestamp_millis}_{user_id}" or "null_{user_id}".
-pub fn encode_member_search_cursor(joined_at: Option<DateTime<Utc>>, user_id: &str) -> String {
+pub fn encode_member_search_cursor(joined_at: Option<Timestamp>, user_id: &str) -> String {
     match joined_at {
-        Some(dt) => format!("{}_{}", dt.timestamp_millis(), user_id),
+        Some(dt) => format!("{}_{}", dt.as_millisecond(), user_id),
         None => format!("null_{}", user_id),
     }
 }
 
 /// Parses a pagination cursor into (joined_at, user_id).
 /// Supports both composite keyset ("{millis}_{user_id}" or "null_{user_id}") and legacy plain user_id.
-pub fn parse_member_search_cursor(cursor: &str) -> Option<(Option<DateTime<Utc>>, String)> {
+pub fn parse_member_search_cursor(cursor: &str) -> Option<(Option<Timestamp>, String)> {
     let trimmed = cursor.trim();
     if trimmed.is_empty() {
         return None;
@@ -1322,7 +1314,9 @@ pub fn parse_member_search_cursor(cursor: &str) -> Option<(Option<DateTime<Utc>>
             return Some((None, user_id));
         }
         if let Ok(ms) = left.parse::<i64>() {
-            return DateTime::from_timestamp_millis(ms).map(|dt| (Some(dt), user_id));
+            return Timestamp::from_millisecond(ms)
+                .ok()
+                .map(|dt| (Some(dt), user_id));
         }
     }
 
@@ -1336,9 +1330,9 @@ pub fn parse_member_search_cursor(cursor: &str) -> Option<(Option<DateTime<Utc>>
 /// Returns true if (row_joined_at, row_user_id) comes strictly after (cursor_joined_at, cursor_user_id)
 /// according to ORDER BY joined_at DESC NULLS LAST, user_id ASC.
 pub fn is_member_after_cursor(
-    row_joined_at: Option<DateTime<Utc>>,
+    row_joined_at: Option<Timestamp>,
     row_user_id: &str,
-    cursor_joined_at: Option<DateTime<Utc>>,
+    cursor_joined_at: Option<Timestamp>,
     cursor_user_id: &str,
 ) -> bool {
     match cursor_joined_at {
@@ -1375,9 +1369,9 @@ pub struct CleanupPlan {
     pub channel_id: String,
     pub actor_user_id: String,
     pub message_ids: Value,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
-    pub consumed_at: Option<DateTime<Utc>>,
+    pub created_at: Timestamp,
+    pub expires_at: Timestamp,
+    pub consumed_at: Option<Timestamp>,
 }
 
 impl CleanupPlan {
@@ -1394,7 +1388,7 @@ pub struct CompanionChannelMapping {
     pub text_channel_id: String,
     pub allow_send_messages: bool,
     pub allow_read_history: bool,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     #[serde(default = "default_true_field")]
     pub enabled: bool,
 }
@@ -1450,15 +1444,15 @@ pub struct CompanionChannelLease {
     pub voice_channel_id: String,
     pub text_channel_id: String,
     pub user_id: String,
-    pub granted_at: DateTime<Utc>,
+    pub granted_at: Timestamp,
     pub generation: Uuid,
     #[serde(default = "default_lease_status")]
     pub status: String,
     #[serde(default)]
     pub revoke_attempts: i32,
-    pub next_attempt_at: Option<DateTime<Utc>>,
+    pub next_attempt_at: Option<Timestamp>,
     pub last_error: Option<String>,
-    pub revoked_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<Timestamp>,
     #[serde(default)]
     pub allow_bits: i64,
     #[serde(default)]
@@ -1492,7 +1486,7 @@ pub struct ProgressionSeason {
 
     pub standings_json: Value,
 
-    pub archived_at: DateTime<Utc>,
+    pub archived_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -1505,24 +1499,26 @@ pub struct ScheduledEvent {
 
     pub description: String,
 
-    pub start_time: DateTime<Utc>,
+    pub start_time: Timestamp,
 
-    pub end_time: Option<DateTime<Utc>>,
+    pub end_time: Option<Timestamp>,
 
     pub timezone: String,
 
     pub max_participants: Option<i32>,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 impl ScheduledEvent {
-    pub fn registration_deadline(&self) -> DateTime<Utc> {
-        self.end_time
-            .unwrap_or(self.start_time + chrono::Duration::hours(1))
+    pub fn registration_deadline(&self) -> Timestamp {
+        self.end_time.unwrap_or_else(|| {
+            self.start_time
+                .saturating_add(SignedDuration::from_hours(1))
+        })
     }
 
-    pub fn is_registration_open(&self, now: DateTime<Utc>) -> bool {
+    pub fn is_registration_open(&self, now: Timestamp) -> bool {
         now < self.registration_deadline()
     }
 }
@@ -1537,7 +1533,7 @@ pub struct EventRoster {
 
     pub position: i32,
 
-    pub joined_at: DateTime<Utc>,
+    pub joined_at: Timestamp,
 }
 
 pub const EVENT_VOICE_MODE_NOTIFY_ONLY: &str = "notify_only";
@@ -1564,7 +1560,7 @@ pub struct EventVoiceQueueConfig {
     pub lobby_channel_id: Option<String>,
     pub target_channel_id: Option<String>,
     pub mode: String,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
 }
 
 impl Default for EventVoiceQueueConfig {
@@ -1576,7 +1572,7 @@ impl Default for EventVoiceQueueConfig {
             lobby_channel_id: None,
             target_channel_id: None,
             mode: EVENT_VOICE_MODE_NOTIFY_ONLY.to_string(),
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         }
     }
 }
@@ -1616,8 +1612,8 @@ pub struct EventVoiceMemberState {
     pub ready_status: String,
     pub consent_auto_move: bool,
     pub generation: i64,
-    pub ready_at: Option<DateTime<Utc>>,
-    pub updated_at: DateTime<Utc>,
+    pub ready_at: Option<Timestamp>,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1626,11 +1622,11 @@ pub struct EventVoiceQueueRosterEntry {
     pub user_id: String,
     pub role_type: String,
     pub position: i32,
-    pub joined_at: DateTime<Utc>,
+    pub joined_at: Timestamp,
     pub ready_status: String,
     pub consent_auto_move: bool,
     pub generation: i64,
-    pub ready_at: Option<DateTime<Utc>>,
+    pub ready_at: Option<Timestamp>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -1642,13 +1638,13 @@ pub struct EventVoiceOutboxJob {
     pub kind: String,
     pub state: String,
     pub attempts: i32,
-    pub next_attempt_at: DateTime<Utc>,
+    pub next_attempt_at: Timestamp,
     pub lease_owner: Option<String>,
-    pub lease_until: Option<DateTime<Utc>>,
+    pub lease_until: Option<Timestamp>,
     pub generation: i64,
     pub last_error: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -1663,7 +1659,7 @@ pub struct Tournament {
 
     pub status: String,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -1678,7 +1674,7 @@ pub struct InviteTracking {
 
     pub campaign_tag: Option<String>,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -1689,9 +1685,9 @@ pub struct DynamicVoiceRoom {
 
     pub owner_id: String,
 
-    pub empty_since: Option<DateTime<Utc>>,
+    pub empty_since: Option<Timestamp>,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -1708,9 +1704,9 @@ pub struct FeedSubscription {
 
     pub watermark: Option<String>,
 
-    pub last_polled_at: Option<DateTime<Utc>>,
+    pub last_polled_at: Option<Timestamp>,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -1729,7 +1725,7 @@ pub struct GameAccountLink {
 
     pub verified: bool,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -1759,7 +1755,7 @@ pub struct CardCollection {
 
     pub rarity: String,
 
-    pub acquired_at: DateTime<Utc>,
+    pub acquired_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -1778,9 +1774,9 @@ pub struct CardTrade {
 
     pub status: String,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -1797,7 +1793,7 @@ pub struct TupperProfile {
 
     pub prefix_or_brackets: String,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -1824,9 +1820,9 @@ pub struct FaqEntry {
 
     pub category: String,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
 }
 
 // ==========================================
@@ -1849,7 +1845,7 @@ pub struct IntegrationConnection {
 
     pub refresh_token: Option<String>,
 
-    pub token_expires_at: Option<DateTime<Utc>>,
+    pub token_expires_at: Option<Timestamp>,
 
     pub scopes: Value,
 
@@ -1857,9 +1853,9 @@ pub struct IntegrationConnection {
 
     pub enabled: bool,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -1880,7 +1876,7 @@ pub struct IntegrationWebhookSubscription {
 
     pub active: bool,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -1899,7 +1895,7 @@ pub struct IntegrationDeliveryLog {
 
     pub payload_summary: Value,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -1916,7 +1912,7 @@ pub struct LinkedAccount {
 
     pub attributes: Value,
 
-    pub verified_at: DateTime<Utc>,
+    pub verified_at: Timestamp,
 
     pub synced_role_id: Option<String>,
 }
@@ -1939,9 +1935,9 @@ pub struct SteamLfgPost {
 
     pub current_players: Value,
 
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 pub const MAX_STEAM_LFG_GAME_ID_CHARS: usize = 64;
@@ -2098,7 +2094,7 @@ pub struct GitHubDevopsMapping {
 
     pub last_status: String,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -2123,7 +2119,7 @@ pub struct TwitchStreamSubscription {
 
     pub last_game: Option<String>,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -2144,7 +2140,7 @@ pub struct KickStreamSubscription {
 
     pub is_live: bool,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -2161,7 +2157,7 @@ pub struct YouTubeChannelSubscription {
 
     pub last_video_id: Option<String>,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -2178,7 +2174,7 @@ pub struct TelegramBridge {
 
     pub paused: bool,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -2193,7 +2189,7 @@ pub struct TelegramMessageMapping {
 
     pub direction: String,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 pub const MAX_WORKFLOWS_PER_GUILD: usize = 200;
@@ -2227,13 +2223,13 @@ pub struct WorkflowDefinitionsPage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkflowDefinitionCursor {
     pub guild_id: String,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     pub id: Uuid,
 }
 
 pub fn encode_workflow_definition_cursor(
     guild_id: &str,
-    created_at: &DateTime<Utc>,
+    created_at: &Timestamp,
     id: &Uuid,
 ) -> String {
     let payload = format!("v1|{}|{}|{}", guild_id.trim(), created_at.to_rfc3339(), id);
@@ -2259,8 +2255,7 @@ pub fn decode_workflow_definition_cursor(cursor: &str) -> anyhow::Result<Workflo
     if guild_id.is_empty() {
         anyhow::bail!("workflow definition cursor missing guild_id");
     }
-    let created_at = DateTime::parse_from_rfc3339(parts[2].trim())
-        .map(|dt| dt.with_timezone(&Utc))
+    let created_at = Timestamp::parse_rfc3339(parts[2].trim())
         .map_err(|e| anyhow::anyhow!("Failed to parse cursor timestamp: {e}"))?;
     let id = Uuid::parse_str(parts[3].trim())
         .map_err(|e| anyhow::anyhow!("Failed to parse cursor UUID: {e}"))?;
@@ -2345,9 +2340,9 @@ pub struct WorkflowDefinition {
 
     pub version: i32,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -2364,7 +2359,7 @@ pub struct WorkflowRunExecution {
 
     pub logs: Value,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -2383,7 +2378,7 @@ pub struct GitLabSubscription {
 
     pub discord_channel_id: String,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -2400,7 +2395,7 @@ pub struct VkSubscription {
 
     pub discord_channel_id: String,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -2419,7 +2414,7 @@ pub struct RedditSubscription {
 
     pub last_seen_fullname: Option<String>,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -2436,7 +2431,7 @@ pub struct GamingHubGameStatus {
 
     pub player_count: i32,
 
-    pub last_checked_at: DateTime<Utc>,
+    pub last_checked_at: Timestamp,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
@@ -2453,13 +2448,13 @@ pub struct SocialPublicationDraft {
 
     pub targets: Value,
 
-    pub scheduled_at: Option<DateTime<Utc>>,
+    pub scheduled_at: Option<Timestamp>,
 
     pub approved_by: Option<String>,
 
     pub status: String,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 pub const MAX_PENDING_SOCIAL_DRAFTS_PER_GUILD: usize = 200;
@@ -2504,7 +2499,7 @@ pub struct SocialDraftsPage {
 pub struct SocialDraftCursor {
     pub guild_id: String,
     pub status: Option<String>,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     pub id: Uuid,
 }
 
@@ -2522,7 +2517,7 @@ pub struct AiGuildBudget {
 
     pub is_halted: bool,
 
-    pub reset_at: DateTime<Utc>,
+    pub reset_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -2539,7 +2534,7 @@ pub struct AiKnowledgeDocument {
 
     pub source_type: String,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -2550,7 +2545,7 @@ pub struct AiMeteringEvent {
     pub request_id: String,
     pub tokens: i64,
     pub usd: f64,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -2586,7 +2581,7 @@ pub struct PluginMarketplacePackage {
 
     pub is_verified: bool,
 
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 pub const MAX_MARKETPLACE_PACKAGES_PER_PUBLISHER: usize = 100;
@@ -2605,7 +2600,7 @@ pub struct PluginMarketplaceRelease {
     pub sha256_hash: String,
     pub manifest: Value,
     pub is_verified: bool,
-    pub published_at: DateTime<Utc>,
+    pub published_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow, PartialEq, Eq)]
@@ -2617,7 +2612,7 @@ pub struct MarketplacePackageSummary {
     pub author: String,
     pub sha256_hash: String,
     pub is_verified: bool,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 impl From<PluginMarketplacePackage> for MarketplacePackageSummary {
@@ -2658,11 +2653,11 @@ pub struct MarketplacePackagesPage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarketplacePackageCursor {
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     pub id: Uuid,
 }
 
-pub fn encode_marketplace_package_cursor(created_at: &DateTime<Utc>, id: &Uuid) -> String {
+pub fn encode_marketplace_package_cursor(created_at: &Timestamp, id: &Uuid) -> String {
     let payload = format!("v1|{}|{}", created_at.to_rfc3339(), id);
     base64url_encode_store_cursor(payload.as_bytes())
 }
@@ -2684,9 +2679,8 @@ pub fn decode_marketplace_package_cursor(cursor: &str) -> anyhow::Result<Marketp
     if parts.len() != 3 || parts[0] != "v1" {
         anyhow::bail!("invalid marketplace package cursor format: expected v1 format");
     }
-    let created_at = DateTime::parse_from_rfc3339(parts[1].trim())
-        .map_err(|e| anyhow::anyhow!("invalid cursor created_at timestamp: {e}"))?
-        .with_timezone(&Utc);
+    let created_at = Timestamp::parse_rfc3339(parts[1].trim())
+        .map_err(|e| anyhow::anyhow!("invalid cursor created_at timestamp: {e}"))?;
     let id = Uuid::parse_str(parts[2].trim())
         .map_err(|e| anyhow::anyhow!("invalid cursor id uuid: {e}"))?;
     Ok(MarketplacePackageCursor { created_at, id })
@@ -2765,7 +2759,7 @@ pub struct PluginGuildInstallation {
 
     pub config: Value,
 
-    pub installed_at: DateTime<Utc>,
+    pub installed_at: Timestamp,
 }
 
 impl Storage {
@@ -2994,11 +2988,7 @@ impl Storage {
         }
     }
 
-    pub async fn prune_audit_events(
-        &self,
-        cutoff: chrono::DateTime<chrono::Utc>,
-        limit: usize,
-    ) -> anyhow::Result<u64> {
+    pub async fn prune_audit_events(&self, cutoff: Timestamp, limit: usize) -> anyhow::Result<u64> {
         match self {
             Self::Memory(store) => Ok(store.prune_audit_events(cutoff, limit)),
             Self::Postgres(store) => store.prune_audit_events(cutoff, limit).await,
@@ -3536,7 +3526,7 @@ impl Storage {
 
         role_id: &str,
 
-        expires_at: DateTime<Utc>,
+        expires_at: Timestamp,
     ) -> anyhow::Result<Uuid> {
         match self {
             Self::Memory(store) => {
@@ -3792,7 +3782,7 @@ impl Storage {
         guild_id: &str,
         channel_id: &str,
         posted_message_id: &str,
-        bumped_at: DateTime<Utc>,
+        bumped_at: Timestamp,
         expected_generation: i64,
         expected_revision: Uuid,
     ) -> anyhow::Result<Option<StickyMessage>> {
@@ -3833,7 +3823,7 @@ impl Storage {
 
         is_anonymous: bool,
 
-        expires_at: DateTime<Utc>,
+        expires_at: Timestamp,
     ) -> anyhow::Result<CommunityPoll> {
         validate_poll_input(question, options)?;
 
@@ -3905,7 +3895,7 @@ impl Storage {
 
         winners_count: i32,
 
-        expires_at: DateTime<Utc>,
+        expires_at: Timestamp,
     ) -> anyhow::Result<Giveaway> {
         match self {
             Self::Memory(store) => {
@@ -3928,7 +3918,7 @@ impl Storage {
         channel_id: &str,
         prize: &str,
         winners_count: i32,
-        expires_at: DateTime<Utc>,
+        expires_at: Timestamp,
         created_by_user_id: Option<&str>,
     ) -> anyhow::Result<Giveaway> {
         match self {
@@ -4270,7 +4260,7 @@ impl Storage {
         &self,
         guild_id: &str,
         limit: usize,
-        today: NaiveDate,
+        today: Date,
     ) -> anyhow::Result<Vec<BirthdayRecord>> {
         match self {
             Self::Memory(store) => store.list_upcoming_birthdays_at(guild_id, limit, today),
@@ -4504,7 +4494,7 @@ impl Storage {
         guild_id: &str,
         user_id: Option<&str>,
         limit: usize,
-        cursor: Option<(&DateTime<Utc>, &Uuid)>,
+        cursor: Option<(&Timestamp, &Uuid)>,
     ) -> anyhow::Result<StorePurchasesPage> {
         match self {
             Self::Memory(store) => {
@@ -4554,7 +4544,7 @@ impl Storage {
         purchase_id: Uuid,
         status: &str,
         failure_reason: Option<&str>,
-        fulfilled_at: Option<DateTime<Utc>>,
+        fulfilled_at: Option<Timestamp>,
     ) -> anyhow::Result<()> {
         match self {
             Self::Memory(store) => store.update_store_purchase_fulfillment(
@@ -4579,7 +4569,7 @@ impl Storage {
 
     pub async fn prune_economy_purchase_requests(
         &self,
-        cutoff: DateTime<Utc>,
+        cutoff: Timestamp,
         limit: usize,
     ) -> anyhow::Result<u64> {
         match self {
@@ -4590,7 +4580,7 @@ impl Storage {
 
     pub async fn prune_economy_idempotency(
         &self,
-        cutoff: DateTime<Utc>,
+        cutoff: Timestamp,
         limit: usize,
     ) -> anyhow::Result<u64> {
         match self {
@@ -5630,9 +5620,9 @@ impl Storage {
 
         description: &str,
 
-        start_time: DateTime<Utc>,
+        start_time: Timestamp,
 
-        end_time: Option<DateTime<Utc>>,
+        end_time: Option<Timestamp>,
 
         timezone: &str,
 
@@ -5684,7 +5674,7 @@ impl Storage {
         &self,
         guild_id: &str,
         limit: usize,
-        cursor: Option<(&DateTime<Utc>, &Uuid)>,
+        cursor: Option<(&Timestamp, &Uuid)>,
     ) -> anyhow::Result<ScheduledEventsPage> {
         match self {
             Self::Memory(store) => store.list_scheduled_events_page(guild_id, limit, cursor),
@@ -5839,7 +5829,7 @@ impl Storage {
     pub async fn claim_event_voice_outbox_job(
         &self,
         worker_id: &str,
-        lease_duration: chrono::Duration,
+        lease_duration: SignedDuration,
     ) -> anyhow::Result<Option<EventVoiceOutboxJob>> {
         match self {
             Self::Memory(store) => store.claim_event_voice_outbox_job(worker_id, lease_duration),
@@ -5871,7 +5861,7 @@ impl Storage {
         job_id: Uuid,
         lease_owner: &str,
         error: &str,
-        retry_delay: Option<chrono::Duration>,
+        retry_delay: Option<SignedDuration>,
     ) -> anyhow::Result<bool> {
         match self {
             Self::Memory(store) => {
@@ -6058,7 +6048,7 @@ impl Storage {
     pub async fn set_dynamic_voice_empty_since(
         &self,
         channel_id: &str,
-        empty_since: Option<DateTime<Utc>>,
+        empty_since: Option<Timestamp>,
     ) -> anyhow::Result<bool> {
         match self {
             Self::Memory(store) => Ok(store.set_dynamic_voice_empty_since(channel_id, empty_since)),
@@ -6533,7 +6523,7 @@ impl Storage {
         &self,
         provider: &str,
         event_id: &str,
-        processed_at: chrono::DateTime<chrono::Utc>,
+        processed_at: Timestamp,
     ) -> anyhow::Result<()> {
         match self {
             Self::Memory(store) => {
@@ -6565,7 +6555,7 @@ impl Storage {
         guild_id: &str,
         provider: Option<&str>,
         limit: Option<usize>,
-        before_created_at: Option<chrono::DateTime<chrono::Utc>>,
+        before_created_at: Option<Timestamp>,
         before_id: Option<uuid::Uuid>,
     ) -> anyhow::Result<Vec<IntegrationDeliveryLog>> {
         match self {
@@ -6586,7 +6576,7 @@ impl Storage {
 
     pub async fn prune_event_dedupes(
         &self,
-        before: chrono::DateTime<chrono::Utc>,
+        before: Timestamp,
         limit: usize,
     ) -> anyhow::Result<u64> {
         match self {
@@ -6597,7 +6587,7 @@ impl Storage {
 
     pub async fn prune_delivery_logs(
         &self,
-        before: chrono::DateTime<chrono::Utc>,
+        before: Timestamp,
         limit: usize,
     ) -> anyhow::Result<u64> {
         match self {
@@ -6741,7 +6731,7 @@ impl Storage {
         }
     }
 
-    pub async fn prune_steam_lfg_posts(&self, cutoff: DateTime<Utc>) -> anyhow::Result<u64> {
+    pub async fn prune_steam_lfg_posts(&self, cutoff: Timestamp) -> anyhow::Result<u64> {
         match self {
             Self::Memory(store) => Ok(store.prune_steam_lfg_posts(cutoff)),
             Self::Postgres(store) => store.prune_steam_lfg_posts(cutoff).await,
@@ -7180,7 +7170,7 @@ impl Storage {
         guild_id: &str,
         status: Option<&str>,
         limit: usize,
-        cursor: Option<(&DateTime<Utc>, &Uuid)>,
+        cursor: Option<(&Timestamp, &Uuid)>,
     ) -> anyhow::Result<SocialDraftsPage> {
         match self {
             Self::Memory(store) => {
@@ -7277,7 +7267,7 @@ impl Storage {
 
     pub async fn prune_ai_metering_events(
         &self,
-        cutoff: DateTime<Utc>,
+        cutoff: Timestamp,
         limit: usize,
     ) -> anyhow::Result<u64> {
         match self {
@@ -7726,7 +7716,7 @@ mod tests {
                 price: -100,
                 role_id: None,
                 stock: Some(5),
-                created_at: Utc::now(),
+                created_at: Timestamp::now(),
             },
         );
 
@@ -7788,7 +7778,7 @@ mod tests {
         assert_eq!(purchase.fulfillment_status, "pending");
         assert!(purchase.fulfilled_at.is_none());
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         store
             .update_store_purchase_fulfillment(purchase.id, "completed", None, Some(now))
             .await
@@ -7912,7 +7902,7 @@ mod tests {
                 price: 250,
                 role_id: Some("../../../../../guilds/333/members/444/roles/555".to_owned()),
                 stock: Some(5),
-                created_at: Utc::now(),
+                created_at: Timestamp::now(),
             },
         );
 
@@ -8026,7 +8016,7 @@ mod tests {
         let store = Storage::Memory(MemoryStore::default());
         let guild_id = "100000000000000001";
         let user_id = "200000000000000001";
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         // 1. Insert a non-expired record and an expired record
         let active_rec = MemberIdentityRecord {
@@ -8036,8 +8026,8 @@ mod tests {
             kind: "nickname".to_string(),
             old_value: Some("OldNick".to_string()),
             new_value: Some("ActiveNick".to_string()),
-            observed_at: now - chrono::Duration::days(1),
-            expires_at: now + chrono::Duration::days(30),
+            observed_at: now - days(1),
+            expires_at: now + days(30),
         };
         let expired_rec = MemberIdentityRecord {
             id: Uuid::new_v4(),
@@ -8046,8 +8036,8 @@ mod tests {
             kind: "nickname".to_string(),
             old_value: Some("ActiveNick".to_string()),
             new_value: Some("ExpiredNick".to_string()),
-            observed_at: now - chrono::Duration::days(95),
-            expires_at: now - chrono::Duration::days(5),
+            observed_at: now - days(95),
+            expires_at: now - days(5),
         };
 
         store.insert_raw_identity_record(active_rec);
@@ -8086,8 +8076,8 @@ mod tests {
             kind: "global_name".to_string(),
             old_value: None,
             new_value: Some("OldGlobal".to_string()),
-            observed_at: now - chrono::Duration::days(100),
-            expires_at: now - chrono::Duration::days(10),
+            observed_at: now - days(100),
+            expires_at: now - days(10),
         };
         store.insert_raw_identity_record(expired_rec_2);
         assert_eq!(store.raw_identity_history_count(), Some(2));
@@ -8120,9 +8110,9 @@ mod tests {
         let user_b = "200000000000000002";
         let user_c = "200000000000000003";
 
-        let now = Utc::now();
-        let one_hour_ago = now - chrono::Duration::hours(1);
-        let two_days_ago = now - chrono::Duration::days(2);
+        let now = Timestamp::now();
+        let one_hour_ago = now - SignedDuration::from_hours(1);
+        let two_days_ago = now - days(2);
 
         let role_a = ["9991".to_string()];
         let role_b = ["9992".to_string()];
@@ -8221,7 +8211,7 @@ mod tests {
             .search_members(
                 guild_1,
                 &MemberSearchFilter {
-                    joined_after: Some(now - chrono::Duration::days(1)),
+                    joined_after: Some(now - days(1)),
                     ..Default::default()
                 },
             )
@@ -8237,12 +8227,12 @@ mod tests {
     async fn test_member_search_keyset_pagination_and_performance() {
         let store = Storage::Memory(MemoryStore::default());
         let guild_id = "111000000000000001";
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         // 1. Insert 5 users with varied joined_at (including duplicate timestamps, null, and large snowflakes > 2^53)
         // Snowflake > 2^53: 18_446_744_073_709_551_615 is max u64, e.g. "900719925474099991" > 2^53 (9007199254740992)
-        let t1 = now - chrono::Duration::hours(1);
-        let t2 = now - chrono::Duration::hours(2);
+        let t1 = now - SignedDuration::from_hours(1);
+        let t2 = now - SignedDuration::from_hours(2);
 
         let users = vec![
             ("100", "user_100", Some(t1)),
@@ -8544,7 +8534,7 @@ mod tests {
                 guild_id,
                 "Raid Night",
                 "Description",
-                Utc::now(),
+                Timestamp::now(),
                 None,
                 "UTC",
                 Some(1), // capacity = 1
@@ -8610,7 +8600,7 @@ mod tests {
                 guild_id,
                 "Stress Event",
                 "Description",
-                Utc::now(),
+                Timestamp::now(),
                 None,
                 "UTC",
                 Some(5),
@@ -9102,7 +9092,7 @@ mod tests {
                 global_name: Some("User Four"),
                 nickname: Some("Four"),
                 role_ids: &[],
-                joined_at: Some(Utc::now()),
+                joined_at: Some(Timestamp::now()),
             })
             .await
             .unwrap();
@@ -9115,7 +9105,7 @@ mod tests {
                 global_name: Some("User Four"),
                 nickname: None,
                 role_ids: &[],
-                joined_at: Some(Utc::now()),
+                joined_at: Some(Timestamp::now()),
             })
             .await
             .unwrap();
@@ -9592,7 +9582,7 @@ mod tests {
             on_call_role_id: Some("500000000000000001".to_string()),
             max_override_duration_mins: 720,
             fallback_channel_id: Some("600000000000000001".to_string()),
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         };
         let saved_settings = store.upsert_duty_settings(settings).await.unwrap();
         assert_eq!(saved_settings.max_override_duration_mins, 720);
@@ -9628,7 +9618,7 @@ mod tests {
             user_id: user_id.to_string(),
             expected_on_call: true,
             state_generation: 0,
-            last_reconciled_at: Some(Utc::now()),
+            last_reconciled_at: Some(Timestamp::now()),
             last_error: None,
         };
         let saved_state = store.upsert_duty_state(state).await.unwrap();
@@ -9661,7 +9651,7 @@ mod tests {
 
         // 1. GitHub DevOps mapping UPSERT parity
         let id1 = Uuid::new_v4();
-        let created_at1 = Utc::now() - chrono::Duration::hours(2);
+        let created_at1 = Timestamp::now() - SignedDuration::from_hours(2);
         let mapping1 = GitHubDevopsMapping {
             id: id1,
             guild_id: guild_id.to_string(),
@@ -9685,7 +9675,7 @@ mod tests {
             issue_or_pr_number: 42,
             discord_thread_id: "thread_B".to_string(),
             last_status: "closed".to_string(),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
         let res2 = store.upsert_github_devops_mapping(mapping2).await.unwrap();
         // ID and created_at must be preserved from first insert
@@ -9704,7 +9694,7 @@ mod tests {
 
         // 2. Twitch Subscription UPSERT parity
         let twitch_id1 = Uuid::new_v4();
-        let twitch_created1 = Utc::now() - chrono::Duration::hours(1);
+        let twitch_created1 = Timestamp::now() - SignedDuration::from_hours(1);
         let twitch1 = TwitchStreamSubscription {
             id: twitch_id1,
             guild_id: guild_id.to_string(),
@@ -9732,7 +9722,7 @@ mod tests {
             is_live: true,
             last_title: Some("Streaming Rust Bot".to_string()),
             last_game: Some("Rust".to_string()),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
         let t_res2 = store.upsert_twitch_subscription(twitch2).await.unwrap();
         assert_eq!(t_res2.id, twitch_id1);
@@ -9750,7 +9740,7 @@ mod tests {
 
         // 3. Kick Subscription UPSERT parity
         let kick_id1 = Uuid::new_v4();
-        let kick_created1 = Utc::now() - chrono::Duration::hours(1);
+        let kick_created1 = Timestamp::now() - SignedDuration::from_hours(1);
         let kick1 = KickStreamSubscription {
             id: kick_id1,
             guild_id: guild_id.to_string(),
@@ -9774,7 +9764,7 @@ mod tests {
             live_role_id: Some("role_kick".to_string()),
             last_message_id: Some("msg_kick_1".to_string()),
             is_live: true,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
         let k_res2 = store.upsert_kick_subscription(kick2).await.unwrap();
         assert_eq!(k_res2.id, kick_id1);
@@ -9791,7 +9781,7 @@ mod tests {
 
         // 4. YouTube Subscription UPSERT parity
         let yt_id1 = Uuid::new_v4();
-        let yt_created1 = Utc::now() - chrono::Duration::hours(1);
+        let yt_created1 = Timestamp::now() - SignedDuration::from_hours(1);
         let yt1 = YouTubeChannelSubscription {
             id: yt_id1,
             guild_id: guild_id.to_string(),
@@ -9811,7 +9801,7 @@ mod tests {
             channel_title: "Tech Channel Updated".to_string(),
             discord_channel_id: "disc_yt_2".to_string(),
             last_video_id: Some("vid_abc".to_string()),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
         let yt_res2 = store.upsert_youtube_subscription(yt2).await.unwrap();
         assert_eq!(yt_res2.id, yt_id1);
@@ -10201,8 +10191,8 @@ mod tests {
                     description: "Looking for group".to_string(),
                     max_players: 4,
                     current_players: serde_json::json!([author_id]),
-                    expires_at: Utc::now() + chrono::Duration::hours(1),
-                    created_at: Utc::now(),
+                    expires_at: Timestamp::now() + SignedDuration::from_hours(1),
+                    created_at: Timestamp::now(),
                 })
                 .await
                 .expect("create active post");
@@ -10220,8 +10210,8 @@ mod tests {
                     description: "Old group".to_string(),
                     max_players: 4,
                     current_players: serde_json::json!([author_id]),
-                    expires_at: Utc::now() - chrono::Duration::days(10),
-                    created_at: Utc::now() - chrono::Duration::days(11),
+                    expires_at: Timestamp::now() - days(10),
+                    created_at: Timestamp::now() - days(11),
                 })
                 .await
                 .expect("create expired post");
@@ -10241,7 +10231,7 @@ mod tests {
         assert_eq!(active_guild, 3);
 
         // Run janitor with 7-day cutoff: should prune the 2 posts expired 10 days ago
-        let cutoff = Utc::now() - chrono::Duration::days(7);
+        let cutoff = Timestamp::now() - days(7);
         let pruned = store
             .prune_steam_lfg_posts(cutoff)
             .await
@@ -10418,8 +10408,8 @@ mod tests {
                 description: "desc".to_string(),
                 max_players: 5,
                 current_players: serde_json::json!(["author_123"]),
-                expires_at: Utc::now() + chrono::Duration::hours(1),
-                created_at: Utc::now(),
+                expires_at: Timestamp::now() + SignedDuration::from_hours(1),
+                created_at: Timestamp::now(),
             })
             .await;
         assert!(direct_bad.is_err());
@@ -10434,8 +10424,8 @@ mod tests {
                 description: "  Ready to queue  ".to_string(),
                 max_players: 5,
                 current_players: serde_json::json!(["author_123"]),
-                expires_at: Utc::now() + chrono::Duration::hours(1),
-                created_at: Utc::now(),
+                expires_at: Timestamp::now() + SignedDuration::from_hours(1),
+                created_at: Timestamp::now(),
             })
             .await
             .expect("storage normalizes valid padded post");
@@ -10549,7 +10539,7 @@ mod tests {
                 "chan_1",
                 "Grand Prize",
                 1,
-                Utc::now() + chrono::Duration::hours(1),
+                Timestamp::now() + SignedDuration::from_hours(1),
             )
             .await
             .expect("create giveaway");
@@ -10600,7 +10590,7 @@ mod tests {
                 "chan_1",
                 "Empty Prize",
                 1,
-                Utc::now() + chrono::Duration::hours(1),
+                Timestamp::now() + SignedDuration::from_hours(1),
             )
             .await
             .unwrap();
@@ -10623,7 +10613,7 @@ mod tests {
                 "chan_1",
                 "Expired Prize",
                 1,
-                Utc::now() + chrono::Duration::hours(1),
+                Timestamp::now() + SignedDuration::from_hours(1),
             )
             .await
             .unwrap();
@@ -10636,7 +10626,7 @@ mod tests {
 
         if let Storage::Memory(ref mem) = store {
             let mut g = mem.giveaways.get_mut(&expired_ga.id).unwrap();
-            g.expires_at = Utc::now() - chrono::Duration::minutes(5);
+            g.expires_at = Timestamp::now() - SignedDuration::from_mins(5);
         }
 
         let finished_expired = store
@@ -10918,7 +10908,7 @@ mod tests {
         assert!(matches!(work_res, WorkClaimOutcome::Claimed { .. }));
 
         // Pruning with past cutoff does not remove active entries
-        let past_cutoff = Utc::now() - chrono::Duration::hours(1);
+        let past_cutoff = Timestamp::now() - SignedDuration::from_hours(1);
         let pruned_purchases_past = store
             .prune_economy_purchase_requests(past_cutoff, 100)
             .await
@@ -10940,7 +10930,7 @@ mod tests {
         assert_eq!(coins_cached, 900); // snapshot balance_after at purchase time
 
         // Pruning with future cutoff removes auxiliary records
-        let future_cutoff = Utc::now() + chrono::Duration::hours(25);
+        let future_cutoff = Timestamp::now() + SignedDuration::from_hours(25);
         let pruned_purchases_future = store
             .prune_economy_purchase_requests(future_cutoff, 100)
             .await
@@ -11023,7 +11013,7 @@ mod tests {
             scheduled_at: None,
             approved_by: None,
             status: "draft".to_string(),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
 
         let created = store.create_social_draft(draft).await.unwrap();
@@ -11108,7 +11098,7 @@ mod tests {
             scheduled_at: None,
             approved_by: None,
             status: "draft".to_string(),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
 
         // 1. Injected audit failure on create must rollback
@@ -11137,7 +11127,7 @@ mod tests {
             scheduled_at: None,
             approved_by: None,
             status: "draft".to_string(),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
         let created = store.create_social_draft(draft_2).await.unwrap();
         assert_eq!(created.status, "draft");
@@ -11204,7 +11194,7 @@ mod tests {
             scheduled_at: None,
             approved_by: None,
             status: "draft".to_string(),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
 
         let created = store.create_social_draft(draft).await.unwrap();
@@ -11276,7 +11266,7 @@ mod tests {
             scheduled_at: None,
             approved_by: None,
             status: "draft".to_string(),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
         let created2 = store.create_social_draft(draft2).await.unwrap();
 
@@ -11329,14 +11319,14 @@ mod tests {
         // 2. Keyset cursor encode / decode & tamper tests
         let guild_id = "393000000000000001";
         let other_guild_id = "393000000000000002";
-        let now = Utc::now();
+        let now = Timestamp::now();
         let ev_id = Uuid::new_v4();
 
         let cursor_str = encode_scheduled_event_cursor(guild_id, &now, &ev_id);
         let decoded = decode_scheduled_event_cursor(&cursor_str).unwrap();
         assert_eq!(decoded.guild_id, guild_id);
         assert_eq!(decoded.id, ev_id);
-        assert_eq!(decoded.start_time.timestamp(), now.timestamp());
+        assert_eq!(decoded.start_time.as_second(), now.as_second());
 
         // Invalid cursor formats
         assert!(decode_scheduled_event_cursor("").is_err());
@@ -11352,8 +11342,8 @@ mod tests {
                 guild_id,
                 "  Event 1  ",
                 "  Description 1  ",
-                now + chrono::Duration::hours(1),
-                Some(now + chrono::Duration::hours(2)),
+                now + SignedDuration::from_hours(1),
+                Some(now + SignedDuration::from_hours(2)),
                 "UTC",
                 Some(10),
             )
@@ -11367,7 +11357,7 @@ mod tests {
                 guild_id,
                 "Event 2",
                 "Description 2",
-                now + chrono::Duration::hours(3),
+                now + SignedDuration::from_hours(3),
                 None,
                 "UTC",
                 None,
@@ -11381,7 +11371,7 @@ mod tests {
                 guild_id,
                 "Event 3",
                 "Description 3",
-                now + chrono::Duration::hours(5),
+                now + SignedDuration::from_hours(5),
                 None,
                 "UTC",
                 None,
@@ -11427,7 +11417,7 @@ mod tests {
                 guild_id,
                 "Event 3",
                 "Description 3",
-                now + chrono::Duration::hours(5),
+                now + SignedDuration::from_hours(5),
                 None,
                 "UTC",
                 None,
@@ -11438,7 +11428,7 @@ mod tests {
 
         // 4. Keyset pagination with tiebreakers and bounded top-K
         store.set_scheduled_events_quota_for_test(None);
-        let shared_time = now + chrono::Duration::hours(10);
+        let shared_time = now + SignedDuration::from_hours(10);
         let ev4 = store
             .create_scheduled_event(
                 guild_id,
@@ -11470,7 +11460,7 @@ mod tests {
                 other_guild_id,
                 "Foreign Event",
                 "Foreign",
-                now + chrono::Duration::hours(1),
+                now + SignedDuration::from_hours(1),
                 None,
                 "UTC",
                 None,
@@ -11607,7 +11597,7 @@ mod tests {
     fn test_store_purchase_cursor_encoding_and_validation_issue_387() {
         let guild_id = "guild_123";
         let user_id = "user_456";
-        let now = Utc::now();
+        let now = Timestamp::now();
         let pid = Uuid::new_v4();
 
         // 1. Round-trip with user_id
@@ -11616,10 +11606,7 @@ mod tests {
         assert_eq!(decoded.guild_id.as_deref(), Some(guild_id));
         assert_eq!(decoded.user_id.as_deref(), Some(user_id));
         assert_eq!(decoded.id, pid);
-        assert_eq!(
-            decoded.created_at.timestamp_millis(),
-            now.timestamp_millis()
-        );
+        assert_eq!(decoded.created_at.as_millisecond(), now.as_millisecond());
 
         // 2. Round-trip without user_id (admin cursor)
         let encoded_admin = encode_store_purchase_cursor(guild_id, None, &now, &pid);
@@ -11676,10 +11663,10 @@ mod tests {
             .unwrap();
 
         // Populate 10 purchases: 5 pairs with equal timestamps to verify id DESC tie-breaker
-        let base_time = Utc::now() - chrono::Duration::hours(10);
+        let base_time = Timestamp::now() - SignedDuration::from_hours(10);
         let mut ids = Vec::new();
         for i in 0..10 {
-            let dt = base_time + chrono::Duration::minutes((i / 2) * 5);
+            let dt = base_time + SignedDuration::from_mins((i / 2) * 5);
             let purchase = StorePurchase {
                 id: Uuid::new_v4(),
                 guild_id: guild_id.to_string(),
@@ -11792,7 +11779,7 @@ mod tests {
     #[test]
     fn test_store_item_cursor_encoding_and_validation_issue_389() {
         let guild_id = "guild_test_123";
-        let now = Utc::now();
+        let now = Timestamp::now();
         let item_id = Uuid::new_v4();
 
         // 1. Round-trip valid cursor
@@ -11800,10 +11787,7 @@ mod tests {
         let decoded = decode_store_item_cursor(&encoded).expect("decode valid item cursor");
         assert_eq!(decoded.guild_id, guild_id);
         assert_eq!(decoded.id, item_id);
-        assert_eq!(
-            decoded.created_at.timestamp_millis(),
-            now.timestamp_millis()
-        );
+        assert_eq!(decoded.created_at.as_millisecond(), now.as_millisecond());
 
         // 2. Error handling: empty and malformed cursors
         assert!(decode_store_item_cursor("").is_err());
@@ -11826,10 +11810,10 @@ mod tests {
         let other_guild = "guild_other";
 
         // Create 10 items with pairwise equal timestamps to test (created_at DESC, id DESC)
-        let base_time = Utc::now() - chrono::Duration::hours(5);
+        let base_time = Timestamp::now() - SignedDuration::from_hours(5);
         let mut expected_ids = Vec::new();
         for i in 0..10 {
-            let dt = base_time + chrono::Duration::minutes((i / 2) * 10);
+            let dt = base_time + SignedDuration::from_mins((i / 2) * 10);
             let item = StoreItem {
                 id: Uuid::new_v4(),
                 guild_id: guild_id.to_string(),
@@ -12064,7 +12048,7 @@ mod tests {
     #[test]
     fn test_social_draft_cursor_encoding_and_validation_issue_390() {
         let guild_id = "guild_12345";
-        let now = Utc::now();
+        let now = Timestamp::now();
         let draft_id = Uuid::new_v4();
 
         // 1. With status
@@ -12073,10 +12057,7 @@ mod tests {
         let decoded = decode_social_draft_cursor(&cursor_with_status).unwrap();
         assert_eq!(decoded.guild_id, guild_id);
         assert_eq!(decoded.status.as_deref(), Some("draft"));
-        assert_eq!(
-            decoded.created_at.timestamp_millis(),
-            now.timestamp_millis()
-        );
+        assert_eq!(decoded.created_at.as_millisecond(), now.as_millisecond());
         assert_eq!(decoded.id, draft_id);
 
         // 2. Without status
@@ -12085,8 +12066,8 @@ mod tests {
         assert_eq!(decoded_no_status.guild_id, guild_id);
         assert!(decoded_no_status.status.is_none());
         assert_eq!(
-            decoded_no_status.created_at.timestamp_millis(),
-            now.timestamp_millis()
+            decoded_no_status.created_at.as_millisecond(),
+            now.as_millisecond()
         );
         assert_eq!(decoded_no_status.id, draft_id);
 
@@ -12117,13 +12098,13 @@ mod tests {
         let store = Storage::Memory(mem.clone());
         let guild_id = "social_guild_1";
         let other_guild = "social_guild_2";
-        let base_time = Utc::now();
+        let base_time = Timestamp::now();
 
         // Insert 6 drafts with known ordering
         let mut expected_draft_ids = Vec::new();
         for i in 0..6 {
             // i=2 and i=3 share the exact same timestamp to test deterministic tie-breaking by UUID
-            let dt = base_time + chrono::Duration::minutes((i / 2) * 5);
+            let dt = base_time + SignedDuration::from_mins((i / 2) * 5);
             let status = if i < 4 { "draft" } else { "approved" };
             let draft = SocialPublicationDraft {
                 id: Uuid::new_v4(),
@@ -12229,7 +12210,7 @@ mod tests {
             scheduled_at: None,
             approved_by: None,
             status: status.to_string(),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
 
         // 1 & 2 succeed
@@ -12299,7 +12280,7 @@ mod tests {
             lobby_channel_id: None,
             target_channel_id: None,
             mode: "invalid_mode".to_string(),
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         };
         assert!(validate_event_voice_queue_config(&invalid_mode).is_err());
 
@@ -12310,7 +12291,7 @@ mod tests {
             lobby_channel_id: None,
             target_channel_id: None,
             mode: EVENT_VOICE_MODE_NOTIFY_ONLY.to_string(),
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         };
         assert!(validate_event_voice_queue_config(&missing_channels).is_err());
 
@@ -12321,7 +12302,7 @@ mod tests {
             lobby_channel_id: Some(lobby_id.to_string()),
             target_channel_id: Some(lobby_id.to_string()),
             mode: EVENT_VOICE_MODE_NOTIFY_ONLY.to_string(),
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         };
         assert!(validate_event_voice_queue_config(&same_channel).is_err());
 
@@ -12332,18 +12313,18 @@ mod tests {
             lobby_channel_id: Some(lobby_id.to_string()),
             target_channel_id: Some(target_id.to_string()),
             mode: EVENT_VOICE_MODE_NOTIFY_ONLY.to_string(),
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         };
         assert!(validate_event_voice_queue_config(&valid_cfg).is_ok());
 
         // 2. Create scheduled event with capacity = 1
-        let now = Utc::now();
+        let now = Timestamp::now();
         let event = store
             .create_scheduled_event(
                 guild_id,
                 "Voice Raid Night",
                 "Testing voice queue",
-                now + chrono::Duration::hours(2),
+                now + SignedDuration::from_hours(2),
                 None,
                 "UTC",
                 Some(1),
@@ -12411,7 +12392,7 @@ mod tests {
 
         // 9. Worker 1 claims job
         let claimed_1 = store
-            .claim_event_voice_outbox_job("worker_1", chrono::Duration::seconds(30))
+            .claim_event_voice_outbox_job("worker_1", SignedDuration::from_secs(30))
             .await
             .unwrap();
         assert!(claimed_1.is_some());
@@ -12422,7 +12403,7 @@ mod tests {
 
         // Worker 2 cannot claim the same leased job (mutual exclusion / lease active)
         let claimed_2 = store
-            .claim_event_voice_outbox_job("worker_2", chrono::Duration::seconds(30))
+            .claim_event_voice_outbox_job("worker_2", SignedDuration::from_secs(30))
             .await
             .unwrap();
         assert!(claimed_2.is_none());
@@ -12450,7 +12431,7 @@ mod tests {
         assert_eq!(promoted.as_deref(), Some(user_b));
 
         let claimed_promotion = store
-            .claim_event_voice_outbox_job("worker_1", chrono::Duration::seconds(30))
+            .claim_event_voice_outbox_job("worker_1", SignedDuration::from_secs(30))
             .await
             .unwrap();
         assert!(claimed_promotion.is_some());
@@ -12510,7 +12491,7 @@ mod tests {
         );
         assert!(
             store
-                .claim_event_voice_outbox_job("worker_1", chrono::Duration::seconds(30))
+                .claim_event_voice_outbox_job("worker_1", SignedDuration::from_secs(30))
                 .await
                 .unwrap()
                 .is_none()
@@ -12531,7 +12512,7 @@ mod tests {
                 guild_id,
                 "Raid Outbox Test",
                 "Test requeue, backoff, and terminal state idempotency",
-                Utc::now() + chrono::Duration::hours(2),
+                Timestamp::now() + SignedDuration::from_hours(2),
                 None,
                 "UTC",
                 Some(1),
@@ -12549,7 +12530,7 @@ mod tests {
                     lobby_channel_id: Some(lobby_id.to_string()),
                     target_channel_id: Some(target_id.to_string()),
                     mode: EVENT_VOICE_MODE_NOTIFY_ONLY.to_string(),
-                    updated_at: Utc::now(),
+                    updated_at: Timestamp::now(),
                 },
                 Some("admin_user"),
             )
@@ -12572,7 +12553,7 @@ mod tests {
 
         // 5. Worker claims job -> leased
         let claimed = store
-            .claim_event_voice_outbox_job("worker_alpha", chrono::Duration::seconds(30))
+            .claim_event_voice_outbox_job("worker_alpha", SignedDuration::from_secs(30))
             .await
             .unwrap();
         assert!(claimed.is_some());
@@ -12597,7 +12578,7 @@ mod tests {
                 c.id,
                 "worker_alpha",
                 "Rate limited 429",
-                Some(chrono::Duration::seconds(60)),
+                Some(SignedDuration::from_secs(60)),
             )
             .await
             .unwrap();
@@ -12611,12 +12592,12 @@ mod tests {
                 .unwrap();
             let jp = j_p.unwrap();
             assert_eq!(jp.state, EVENT_VOICE_JOB_STATE_PENDING);
-            assert!(jp.next_attempt_at > Utc::now() + chrono::Duration::seconds(50));
+            assert!(jp.next_attempt_at > Timestamp::now() + SignedDuration::from_secs(50));
         }
 
         // Claim cannot pick up the job before backoff expires
         let early_claim = store
-            .claim_event_voice_outbox_job("worker_beta", chrono::Duration::seconds(30))
+            .claim_event_voice_outbox_job("worker_beta", SignedDuration::from_secs(30))
             .await
             .unwrap();
         assert!(early_claim.is_none());
@@ -12643,7 +12624,7 @@ mod tests {
 
         // Claim gen 2 job
         let claimed_gen2 = store
-            .claim_event_voice_outbox_job("worker_gamma", chrono::Duration::seconds(30))
+            .claim_event_voice_outbox_job("worker_gamma", SignedDuration::from_secs(30))
             .await
             .unwrap();
         assert!(claimed_gen2.is_some());
@@ -12669,7 +12650,7 @@ mod tests {
         // No new job to claim
         assert!(
             store
-                .claim_event_voice_outbox_job("worker_gamma", chrono::Duration::seconds(30))
+                .claim_event_voice_outbox_job("worker_gamma", SignedDuration::from_secs(30))
                 .await
                 .unwrap()
                 .is_none()
@@ -12695,7 +12676,7 @@ mod tests {
 
         // Claim gen 3 job
         let claimed_gen3 = store
-            .claim_event_voice_outbox_job("worker_delta", chrono::Duration::seconds(30))
+            .claim_event_voice_outbox_job("worker_delta", SignedDuration::from_secs(30))
             .await
             .unwrap();
         assert!(claimed_gen3.is_some());
@@ -12716,7 +12697,7 @@ mod tests {
         // While failed, claim yields None
         assert!(
             store
-                .claim_event_voice_outbox_job("worker_delta", chrono::Duration::seconds(30))
+                .claim_event_voice_outbox_job("worker_delta", SignedDuration::from_secs(30))
                 .await
                 .unwrap()
                 .is_none()
@@ -12738,7 +12719,7 @@ mod tests {
 
         // Now claim immediately picks it up!
         let claimed_requeued = store
-            .claim_event_voice_outbox_job("worker_delta", chrono::Duration::seconds(30))
+            .claim_event_voice_outbox_job("worker_delta", SignedDuration::from_secs(30))
             .await
             .unwrap();
         assert!(claimed_requeued.is_some());
@@ -12766,8 +12747,8 @@ mod tests {
                     dag_edges: serde_json::json!([]),
                     is_active: true,
                     version: 1,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
+                    created_at: Timestamp::now(),
+                    updated_at: Timestamp::now(),
                 },
                 Some("admin_user"),
             )
@@ -12787,8 +12768,8 @@ mod tests {
                     dag_edges: serde_json::json!([]),
                     is_active: true,
                     version: 1,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
+                    created_at: Timestamp::now(),
+                    updated_at: Timestamp::now(),
                 },
                 Some("admin_user"),
             )
@@ -12808,8 +12789,8 @@ mod tests {
                     dag_edges: serde_json::json!([]),
                     is_active: true,
                     version: 1,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
+                    created_at: Timestamp::now(),
+                    updated_at: Timestamp::now(),
                 },
                 Some("admin_user"),
             )
@@ -12830,8 +12811,8 @@ mod tests {
                     dag_edges: serde_json::json!([]),
                     is_active: true,
                     version: 1,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
+                    created_at: Timestamp::now(),
+                    updated_at: Timestamp::now(),
                 },
                 Some("admin_user"),
             )
@@ -12855,8 +12836,8 @@ mod tests {
                     ]),
                     is_active: true,
                     version: 1,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
+                    created_at: Timestamp::now(),
+                    updated_at: Timestamp::now(),
                 },
                 Some("admin_user"),
             )
@@ -12882,8 +12863,8 @@ mod tests {
                     dag_edges: serde_json::json!([]),
                     is_active: true,
                     version: 1,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
+                    created_at: Timestamp::now(),
+                    updated_at: Timestamp::now(),
                 },
                 Some("admin_user"),
             )
@@ -12903,8 +12884,8 @@ mod tests {
                     dag_edges: serde_json::json!([]),
                     is_active: true,
                     version: 1,
-                    created_at: Utc::now() + chrono::Duration::seconds(1),
-                    updated_at: Utc::now(),
+                    created_at: Timestamp::now() + SignedDuration::from_secs(1),
+                    updated_at: Timestamp::now(),
                 },
                 Some("admin_user"),
             )
@@ -12924,8 +12905,8 @@ mod tests {
                     dag_edges: serde_json::json!([]),
                     is_active: true,
                     version: 1,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
+                    created_at: Timestamp::now(),
+                    updated_at: Timestamp::now(),
                 },
                 Some("admin_user"),
             )
@@ -12945,8 +12926,8 @@ mod tests {
                     dag_edges: serde_json::json!([]),
                     is_active: true,
                     version: 1,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
+                    created_at: Timestamp::now(),
+                    updated_at: Timestamp::now(),
                 },
                 Some("other_admin"),
             )
@@ -12957,7 +12938,7 @@ mod tests {
         // 7. Keyset pagination test: populate 5 workflows
         store.set_workflows_quota_for_test(Some((10, 500_000)));
         let mut created_ids = vec![wf1.id, wf2.id];
-        let base_time = Utc::now();
+        let base_time = Timestamp::now();
         for i in 3..=5 {
             let wf = store
                 .create_workflow_definition(
@@ -12971,8 +12952,8 @@ mod tests {
                         dag_edges: serde_json::json!([]),
                         is_active: true,
                         version: 1,
-                        created_at: base_time + chrono::Duration::seconds(i as i64),
-                        updated_at: Utc::now(),
+                        created_at: base_time + SignedDuration::from_secs(i as i64),
+                        updated_at: Timestamp::now(),
                     },
                     Some("admin_user"),
                 )
@@ -13031,8 +13012,8 @@ mod tests {
                     dag_edges: serde_json::json!([]),
                     is_active: true,
                     version: 1,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
+                    created_at: Timestamp::now(),
+                    updated_at: Timestamp::now(),
                 },
                 Some("admin_user"),
             )
@@ -13055,7 +13036,7 @@ mod tests {
                 trigger_event: "manual".to_string(),
                 status: "success".to_string(),
                 logs: serde_json::json!([]),
-                created_at: Utc::now(),
+                created_at: Timestamp::now(),
             })
             .await
             .unwrap();
@@ -13089,8 +13070,8 @@ mod tests {
                     dag_edges: serde_json::json!([]),
                     is_active: true,
                     version: 1,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
+                    created_at: Timestamp::now(),
+                    updated_at: Timestamp::now(),
                 },
                 Some("admin_user"),
             )
@@ -13113,8 +13094,8 @@ mod tests {
                     dag_edges: serde_json::json!([]),
                     is_active: true,
                     version: 1,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
+                    created_at: Timestamp::now(),
+                    updated_at: Timestamp::now(),
                 },
                 Some("admin_user"),
             )
@@ -13167,7 +13148,7 @@ mod tests {
                 guild_id,
                 "Voice Audit Event",
                 "Testing atomic audit logging on voice queue config",
-                Utc::now() + chrono::Duration::hours(2),
+                Timestamp::now() + SignedDuration::from_hours(2),
                 None,
                 "UTC",
                 Some(10),
@@ -13183,7 +13164,7 @@ mod tests {
             lobby_channel_id: Some(lobby_id.to_string()),
             target_channel_id: Some(target_id.to_string()),
             mode: "teleport_now".to_string(),
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         };
         let val_err = store
             .set_event_voice_queue_config(invalid_cfg, Some(actor))
@@ -13207,7 +13188,7 @@ mod tests {
             lobby_channel_id: Some(lobby_id.to_string()),
             target_channel_id: Some(target_id.to_string()),
             mode: EVENT_VOICE_MODE_NOTIFY_ONLY.to_string(),
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         };
         let mis_err = store
             .set_event_voice_queue_config(mismatch_cfg, Some(actor))
@@ -13232,7 +13213,7 @@ mod tests {
             lobby_channel_id: Some(lobby_id.to_string()),
             target_channel_id: Some(target_id.to_string()),
             mode: EVENT_VOICE_MODE_AUTO_MOVE.to_string(),
-            updated_at: Utc::now(),
+            updated_at: Timestamp::now(),
         };
         let audit_fail_err = store
             .set_event_voice_queue_config(valid_cfg.clone(), Some(actor))
@@ -13293,7 +13274,7 @@ mod tests {
             sha256_hash: valid_hash.to_string(),
             manifest: serde_json::json!({"id": "valid_plugin-123_test", "version": "1.0.0"}),
             is_verified: false,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
 
         // 1. Valid package passes
@@ -13388,7 +13369,7 @@ mod tests {
                 .is_none()
         );
 
-        let base_time = Utc::now();
+        let base_time = Timestamp::now();
         let mut created_ids = Vec::new();
         for i in 1..=5 {
             let pkg = PluginMarketplacePackage {
@@ -13400,7 +13381,7 @@ mod tests {
                 sha256_hash: valid_hash.to_string(),
                 manifest: serde_json::json!({"id": format!("plugin-item-{:03}", i)}),
                 is_verified: false,
-                created_at: base_time + chrono::Duration::seconds(i as i64),
+                created_at: base_time + SignedDuration::from_secs(i as i64),
             };
             let published = store.publish_marketplace_package(pkg).await.unwrap();
             created_ids.push(published.id);
@@ -13472,7 +13453,7 @@ mod tests {
             sha256_hash: valid_hash.to_string(),
             manifest: serde_json::json!({"id": "plugin-a-one"}),
             is_verified: false,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
         assert!(store.publish_marketplace_package(pkg_a1).await.is_ok());
 
@@ -13486,7 +13467,7 @@ mod tests {
             sha256_hash: valid_hash.to_string(),
             manifest: serde_json::json!({"id": "plugin-a-two"}),
             is_verified: false,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
         assert!(store.publish_marketplace_package(pkg_a2).await.is_ok());
 
@@ -13500,7 +13481,7 @@ mod tests {
             sha256_hash: valid_hash.to_string(),
             manifest: serde_json::json!({"id": "plugin-a-three"}),
             is_verified: false,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
         let err_a3 = store.publish_marketplace_package(pkg_a3).await;
         assert!(err_a3.is_err());
@@ -13516,7 +13497,7 @@ mod tests {
             sha256_hash: valid_hash.to_string(),
             manifest: serde_json::json!({"id": "plugin-b-one"}),
             is_verified: false,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
         assert!(store.publish_marketplace_package(pkg_b1).await.is_ok());
 
@@ -13530,7 +13511,7 @@ mod tests {
             sha256_hash: valid_hash.to_string(),
             manifest: serde_json::json!({"id": "plugin-a-one", "version": "1.1.0"}),
             is_verified: false,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
         assert!(store.publish_marketplace_package(pkg_a1_v2).await.is_ok());
 
@@ -13544,7 +13525,7 @@ mod tests {
             sha256_hash: valid_hash.to_string(),
             manifest: serde_json::json!({"id": "plugin-a-one"}),
             is_verified: false,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
         let tamper_err = store.publish_marketplace_package(pkg_b_tamper).await;
         assert!(tamper_err.is_err());
@@ -13563,7 +13544,7 @@ mod tests {
     async fn test_marketplace_package_update_preserves_identity_and_pagination_issue_406() {
         let store = Storage::memory();
         let valid_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        let base_time = Utc::now();
+        let base_time = Timestamp::now();
 
         // 1. Publish pkg-a at t0
         let orig_id_a = Uuid::new_v4();
@@ -13586,7 +13567,7 @@ mod tests {
 
         // 2. Publish pkg-b at t0 + 1s
         let orig_id_b = Uuid::new_v4();
-        let time_b = base_time + chrono::Duration::seconds(1);
+        let time_b = base_time + SignedDuration::from_secs(1);
         let pkg_b = PluginMarketplacePackage {
             id: orig_id_b,
             plugin_id: "pkg-b".to_string(),
@@ -13610,7 +13591,7 @@ mod tests {
 
         // 4. Update pkg-a to version 2.0.0 with a new UUID and newer timestamp t0 + 2s
         let new_attempted_id = Uuid::new_v4();
-        let time_update = base_time + chrono::Duration::seconds(2);
+        let time_update = base_time + SignedDuration::from_secs(2);
         let pkg_a_v2 = PluginMarketplacePackage {
             id: new_attempted_id,
             plugin_id: "pkg-a".to_string(),
@@ -13663,7 +13644,7 @@ mod tests {
             sha256_hash: hash_v1.to_string(),
             manifest: manifest_v1.clone(),
             is_verified: true,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
         let published_v1 = store.publish_marketplace_package(pkg_v1).await.unwrap();
         assert_eq!(published_v1.version, "1.0.0");
@@ -13686,7 +13667,7 @@ mod tests {
             version: "1.0.0".to_string(),
             enabled: true,
             config: serde_json::json!({}),
-            installed_at: Utc::now(),
+            installed_at: Timestamp::now(),
         };
         let saved_g1 = store.install_plugin_package(inst_g1).await.unwrap();
         assert_eq!(saved_g1.version, "1.0.0");
@@ -13699,7 +13680,7 @@ mod tests {
             version: "9.9.9".to_string(),
             enabled: true,
             config: serde_json::json!({}),
-            installed_at: Utc::now(),
+            installed_at: Timestamp::now(),
         };
         assert!(store.install_plugin_package(inst_invalid).await.is_err());
 
@@ -13713,7 +13694,7 @@ mod tests {
             sha256_hash: hash_v1.to_string(),
             manifest: manifest_v1.clone(),
             is_verified: false,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
         assert!(store.publish_marketplace_package(pkg_v1_dup).await.is_err());
 
@@ -13727,7 +13708,7 @@ mod tests {
             sha256_hash: hash_v2.to_string(),
             manifest: manifest_v2.clone(),
             is_verified: false,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
         let published_v2 = store.publish_marketplace_package(pkg_v2).await.unwrap();
         assert_eq!(published_v2.version, "2.0.0");
@@ -13764,7 +13745,7 @@ mod tests {
             version: "2.0.0".to_string(),
             enabled: true,
             config: serde_json::json!({}),
-            installed_at: Utc::now(),
+            installed_at: Timestamp::now(),
         };
         let saved_g2 = store.install_plugin_package(inst_g2).await.unwrap();
         assert_eq!(saved_g2.version, "2.0.0");
@@ -13777,7 +13758,7 @@ mod tests {
             version: "1.0.0".to_string(),
             enabled: true,
             config: serde_json::json!({}),
-            installed_at: Utc::now(),
+            installed_at: Timestamp::now(),
         };
         let saved_g3 = store.install_plugin_package(inst_g3).await.unwrap();
         assert_eq!(saved_g3.version, "1.0.0");

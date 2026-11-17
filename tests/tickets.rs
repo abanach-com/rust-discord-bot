@@ -1,6 +1,6 @@
+use rusty_discord_bot::datetime::Timestamp;
 use std::path::PathBuf;
 
-use chrono::Utc;
 use rusty_discord_bot::{
     AppState,
     config::Config,
@@ -288,7 +288,11 @@ async fn participant_and_transcript_changes_are_persisted_with_ticket_events() {
             .iter()
             .any(|event| event.event_type == "ticket_transcript_created")
     );
-    assert!(events.iter().any(|event| event.created_at <= Utc::now()));
+    assert!(
+        events
+            .iter()
+            .any(|event| event.created_at <= Timestamp::now())
+    );
 }
 
 #[test]

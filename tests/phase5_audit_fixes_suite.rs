@@ -1,7 +1,8 @@
+use jiff::SignedDuration;
+use rusty_discord_bot::datetime::Timestamp;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
 use dashmap::DashMap;
 use reqwest::header::COOKIE;
 use uuid::Uuid;
@@ -111,7 +112,7 @@ async fn test_phase5_audit_fixes_comprehensive_suite() {
                 permissions: "8".to_string(),
             }],
             csrf_token.to_string(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -121,7 +122,7 @@ async fn test_phase5_audit_fixes_comprehensive_suite() {
         (user_a.to_string(), guild_a.to_string()),
         CachedGuildPermission {
             can_manage: true,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
         },
     );
 
@@ -178,8 +179,8 @@ async fn test_phase5_audit_fixes_comprehensive_suite() {
             description: "Guild B match".to_string(),
             max_players: 5,
             current_players: serde_json::json!(["user_b"]),
-            created_at: Utc::now(),
-            expires_at: Utc::now() + Duration::hours(1),
+            created_at: Timestamp::now(),
+            expires_at: Timestamp::now() + SignedDuration::from_hours(1),
         })
         .await
         .unwrap();
@@ -250,7 +251,7 @@ async fn test_phase5_audit_fixes_comprehensive_suite() {
         sha256_hash: "hash_v1".to_string(),
         manifest: serde_json::json!({"id": "author_protected_plugin"}),
         is_verified: false,
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     state
         .app
@@ -299,7 +300,7 @@ async fn test_phase5_audit_fixes_comprehensive_suite() {
                 permissions: "8".to_string(),
             }],
             csrf_b.to_string(),
-            Utc::now() + Duration::hours(2),
+            Timestamp::now() + SignedDuration::from_hours(2),
             None,
         )
         .await
@@ -417,7 +418,7 @@ async fn test_phase5_audit_fixes_comprehensive_suite() {
             "Best language?",
             &poll_options,
             false,
-            Utc::now() + Duration::hours(1),
+            Timestamp::now() + SignedDuration::from_hours(1),
         )
         .await
         .unwrap();
@@ -463,7 +464,7 @@ async fn test_phase5_audit_fixes_comprehensive_suite() {
             "Expired?",
             &poll_options,
             false,
-            Utc::now() - Duration::minutes(5),
+            Timestamp::now() - SignedDuration::from_mins(5),
         )
         .await
         .unwrap();
