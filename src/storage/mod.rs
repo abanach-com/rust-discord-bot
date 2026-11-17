@@ -2803,6 +2803,17 @@ pub struct PluginGuildInstallation {
     pub installed_at: Timestamp,
 }
 
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct UnresolvedPluginInstallation {
+    pub id: Uuid,
+    pub guild_id: String,
+    pub plugin_id: String,
+    pub version: String,
+    pub original_enabled: bool,
+    pub config: Value,
+    pub installed_at: Timestamp,
+}
+
 impl Storage {
     pub async fn connect(database_url: Option<&str>) -> anyhow::Result<Self> {
         match database_url {
@@ -7575,6 +7586,16 @@ impl Storage {
             Self::Memory(store) => Ok(store.list_installed_plugins(guild_id)),
 
             Self::Postgres(store) => store.list_installed_plugins(guild_id).await,
+        }
+    }
+
+    pub async fn list_unresolved_plugin_installations(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<UnresolvedPluginInstallation>> {
+        match self {
+            Self::Memory(_) => Ok(Vec::new()),
+            Self::Postgres(store) => store.list_unresolved_plugin_installations(guild_id).await,
         }
     }
 

@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::HeaderMap,
+    http::{HeaderMap, header::CACHE_CONTROL},
 };
 use jiff::SignedDuration;
 use serde::{Deserialize, Serialize};
@@ -22,8 +22,8 @@ use crate::storage::{
     IntegrationDeliveryLog, LinkedAccount, MarketplacePackagesPage, PluginGuildInstallation,
     PluginMarketplacePackage, PluginMarketplaceRelease, SocialDraftApprovalError, SocialDraftsPage,
     SocialPublicationDraft, SteamLfgInput, SteamLfgPost, SteamLfgValidationError, TelegramBridge,
-    WorkflowDefinition, WorkflowDefinitionsPage, WorkflowStorageError,
-    validate_marketplace_package_input, validate_steam_lfg_game_id,
+    UnresolvedPluginInstallation, WorkflowDefinition, WorkflowDefinitionsPage,
+    WorkflowStorageError, validate_marketplace_package_input, validate_steam_lfg_game_id,
 };
 
 use super::{
@@ -1832,6 +1832,43 @@ pub async fn list_installed_guild_plugins(
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(Json(list))
+}
+
+#[derive(Debug, Serialize)]
+pub struct UnresolvedPluginInstallationResponse {
+    #[serde(flatten)]
+    installation: UnresolvedPluginInstallation,
+    status: &'static str,
+    enabled: bool,
+}
+
+pub async fn list_unresolved_guild_plugin_installations(
+    State(state): State<WebState>,
+    Path(guild_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<impl axum::response::IntoResponse, ApiError> {
+    let (_, session) = authenticate(&state, &headers).await?;
+    ensure_guild_access(&state, &session, &guild_id).await?;
+
+    let installations = state
+        .app
+        .storage
+        .list_unresolved_plugin_installations(&guild_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok((
+        [(CACHE_CONTROL, "no-store")],
+        Json(
+            installations
+                .into_iter()
+                .map(|installation| UnresolvedPluginInstallationResponse {
+                    installation,
+                    status: "unresolved",
+                    enabled: false,
+                })
+                .collect::<Vec<_>>(),
+        ),
+    ))
 }
 
 #[cfg(test)]

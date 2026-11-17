@@ -24,7 +24,7 @@ use rusty_discord_bot::{
     storage::{
         AiKnowledgeDocument, IntegrationConnection, IntegrationDeliveryLog, LinkedAccount,
         MAX_STEAM_LFG_DESCRIPTION_CHARS, MAX_STEAM_LFG_GAME_ID_CHARS,
-        MAX_STEAM_LFG_GAME_NAME_CHARS, PluginMarketplacePackage,
+        MAX_STEAM_LFG_GAME_NAME_CHARS, PluginMarketplacePackage, Storage,
         run_integrations_retention_janitor,
     },
     web::{
@@ -4613,6 +4613,171 @@ async fn test_marketplace_http_keyset_pagination_and_tamper_isolation_issue_404(
         .await
         .unwrap();
     assert_eq!(bad_cur_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_marketplace_unresolved_report_is_guild_scoped_and_inactive() {
+    let config = Config {
+        database_url: std::env::var("DATABASE_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty()),
+        offline_mode: true,
+        ticket_transcripts_disabled: true,
+        integration_credentials_disabled: true,
+        ..test_config()
+    };
+    let state = WebState::new(
+        AppState::bootstrap(config).await.unwrap(),
+        Arc::new(LoginRateLimiter::new()),
+        Arc::new(DashMap::new()),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = build_router(state.clone());
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let own_guild = (Uuid::new_v4().as_u128() as u64).max(1).to_string();
+    let foreign_guild = (Uuid::new_v4().as_u128() as u64).max(1).to_string();
+    let member_guild = (Uuid::new_v4().as_u128() as u64).max(1).to_string();
+    let session_token = Uuid::new_v4().to_string();
+    let cookie = format!("rusty_discord_bot_session={session_token}");
+    state
+        .app
+        .sessions
+        .save_session(
+            &session_token,
+            DashboardUser {
+                id: "marketplace_quarantine_report_user".to_owned(),
+                username: "Report user".to_owned(),
+                global_name: None,
+                avatar: None,
+            },
+            vec![
+                DashboardGuild {
+                    id: own_guild.clone(),
+                    name: "Managed guild".to_owned(),
+                    icon: None,
+                    owner: false,
+                    permissions: "32".to_owned(),
+                },
+                DashboardGuild {
+                    id: member_guild.clone(),
+                    name: "Member-only guild".to_owned(),
+                    icon: None,
+                    owner: false,
+                    permissions: "0".to_owned(),
+                },
+            ],
+            "csrf_marketplace_quarantine_report".to_owned(),
+            Timestamp::now() + SignedDuration::from_hours(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let client = reqwest::Client::new();
+    let marketplace_url = |guild: &str| format!("http://{addr}/api/guilds/{guild}/marketplace");
+    let report_url = format!("{}/unresolved", marketplace_url(&own_guild));
+    let anonymous = client.get(&report_url).send().await.unwrap();
+    assert_eq!(anonymous.status(), reqwest::StatusCode::UNAUTHORIZED);
+    for guild in [&foreign_guild, &member_guild] {
+        let forbidden = client
+            .get(format!("{}/unresolved", marketplace_url(guild)))
+            .header(COOKIE, &cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), reqwest::StatusCode::FORBIDDEN);
+    }
+
+    let mut expected = Vec::new();
+    if let Storage::Postgres(store) = &state.app.storage {
+        for (guild, plugin, enabled, config) in [
+            (&own_guild, "enabled", true, serde_json::json!({"limit": 7})),
+            (
+                &own_guild,
+                "disabled",
+                false,
+                serde_json::json!({"limit": 1}),
+            ),
+            (
+                &foreign_guild,
+                "foreign",
+                true,
+                serde_json::json!({"foreign": true}),
+            ),
+        ] {
+            let id = Uuid::new_v4();
+            let plugin_id = format!("report-{plugin}-{id}");
+            sqlx::query(
+                "INSERT INTO plugin_guild_installation_quarantine \
+                 (id, guild_id, plugin_id, version, enabled, config, installed_at) \
+                 VALUES ($1, $2, $3, '1.0.0', $4, $5, '2026-10-02T03:04:05Z')",
+            )
+            .bind(id)
+            .bind(guild)
+            .bind(&plugin_id)
+            .bind(enabled)
+            .bind(&config)
+            .execute(store.pool())
+            .await
+            .unwrap();
+            if guild == &own_guild {
+                expected.push(serde_json::json!({
+                    "id": id,
+                    "guild_id": guild,
+                    "plugin_id": plugin_id,
+                    "version": "1.0.0",
+                    "enabled": false,
+                    "original_enabled": enabled,
+                    "status": "unresolved",
+                    "config": config,
+                    "installed_at": "2026-10-02T03:04:05Z"
+                }));
+            }
+        }
+    }
+
+    let report = client
+        .get(report_url)
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(report.status(), reqwest::StatusCode::OK);
+    assert_eq!(report.headers()[reqwest::header::CACHE_CONTROL], "no-store");
+    let rows: Vec<serde_json::Value> = report.json().await.unwrap();
+    assert_eq!(rows.len(), expected.len());
+    assert!(expected.iter().all(|row| rows.contains(row)));
+
+    let installed = client
+        .get(format!("{}/installed", marketplace_url(&own_guild)))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(installed.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        installed.json::<serde_json::Value>().await.unwrap(),
+        serde_json::json!([])
+    );
+
+    if let Storage::Postgres(store) = &state.app.storage {
+        sqlx::query("DELETE FROM plugin_guild_installation_quarantine WHERE guild_id IN ($1, $2)")
+            .bind(own_guild)
+            .bind(foreign_guild)
+            .execute(store.pool())
+            .await
+            .unwrap();
+    }
+    state
+        .app
+        .sessions
+        .delete_session(&session_token)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

@@ -7,7 +7,11 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
+use sqlx::{
+    Connection, PgConnection, PgPool, Postgres, Transaction,
+    migrate::{Migrate, MigrateError, Migrator},
+    postgres::PgPoolOptions,
+};
 
 use uuid::Uuid;
 
@@ -39,9 +43,9 @@ use super::{
     StarboardEntry, SteamLfgPost, StickyMessage, StoreItem, StoreItemsPage, StorePurchase,
     StorePurchasesPage, TagRecord, TelegramBridge, TelegramMessageMapping, TimedRoleGrant,
     Tournament, TransitionApplicationParams, TupperError, TupperProfile, TwitchStreamSubscription,
-    UpsertMemberSnapshotParams, UserErasureReport, VkSubscription, WORK_JOBS, WorkClaimOutcome,
-    WorkflowDefinition, WorkflowDefinitionsPage, WorkflowRunExecution, WorkflowStorageError,
-    XpAward, YouTubeChannelSubscription, decode_marketplace_package_cursor,
+    UnresolvedPluginInstallation, UpsertMemberSnapshotParams, UserErasureReport, VkSubscription,
+    WORK_JOBS, WorkClaimOutcome, WorkflowDefinition, WorkflowDefinitionsPage, WorkflowRunExecution,
+    WorkflowStorageError, XpAward, YouTubeChannelSubscription, decode_marketplace_package_cursor,
     decode_workflow_definition_cursor, encode_marketplace_package_cursor,
     encode_scheduled_event_cursor, encode_store_purchase_cursor, encode_workflow_definition_cursor,
     level_for_xp, normalize_steam_lfg_post, parse_member_search_cursor, snowflake_created_at,
@@ -49,70 +53,124 @@ use super::{
     validate_scheduled_event_content, validate_snowflake, validate_workflow_definition_content,
 };
 
-pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
-    // 1. Pre-migration check: If legacy moderation_cases (from 0001) exists with target_user_id column,
+const MARKETPLACE_RELEASE_MIGRATION: i64 = 67;
+const MIGRATIONS_TABLE: &str = "_sqlx_migrations";
 
-    //    rename it to legacy_0001_moderation_cases so 0005 DROP TABLE won't delete user data (#51).
+pub async fn run_safe_migrations(pool: &PgPool) -> Result<(), MigrateError> {
+    let mut conn = pool.acquire().await?;
+    // A canceled migration must never return a session holding the SQLx lock to the pool.
+    conn.close_on_drop();
+    conn.lock().await?;
+    let result = run_locked_migrations(&mut conn).await;
+    let unlocked = conn.unlock().await;
+    result.and(unlocked)
+}
 
+async fn run_locked_migrations(conn: &mut PgConnection) -> Result<(), MigrateError> {
+    // Preserve the legacy moderation_cases table before migration 0005 can drop it (#51).
     let _ = sqlx::query(
         r#"
-
         DO $$
-
         BEGIN
-
             IF EXISTS (
-
-                SELECT 1 FROM information_schema.columns 
-
-                WHERE table_name = 'moderation_cases' AND column_name = 'target_user_id'
-
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                    AND table_name = 'moderation_cases' AND column_name = 'target_user_id'
             ) THEN
-
                 ALTER TABLE moderation_cases RENAME TO legacy_0001_moderation_cases;
-
             END IF;
-
         END $$;
-
         "#,
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await;
 
-    // 2. Pre-migration checksum synchronization for applied migrations:
+    let mut migrator = sqlx::migrate!("./migrations");
+    // The session lock above spans all the steps, including the special handling of 0067.
+    migrator.set_locking(false);
+    conn.ensure_migrations_table(MIGRATIONS_TABLE).await?;
+    let applied = conn.list_applied_migrations(MIGRATIONS_TABLE).await?;
 
-    //    If _sqlx_migrations exists, synchronize stored checksums with current migrator checksums
+    let needs_marketplace_upgrade = !applied
+        .iter()
+        .any(|migration| migration.version == MARKETPLACE_RELEASE_MIGRATION);
 
-    //    to prevent VersionMismatch panics on existing databases (#59).
-
-    let migrator = sqlx::migrate!("./migrations");
-
-    let table_exists: bool = sqlx::query_scalar(
-
-        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = '_sqlx_migrations')",
-
-    )
-
-    .fetch_one(pool)
-
-    .await
-
-    .unwrap_or(false);
-
-    if table_exists {
-        for migration in migrator.iter() {
-            let _ = sqlx::query("UPDATE _sqlx_migrations SET checksum = $1 WHERE version = $2")
+    // Keep the existing compatibility repair for edited legacy migrations (#59).
+    // From 0067 onwards SQLx must verify the recorded checksum without rewriting it.
+    for installed in applied
+        .into_iter()
+        .filter(|migration| migration.version < MARKETPLACE_RELEASE_MIGRATION)
+    {
+        if let Some(migration) = migrator.iter().find(|m| m.version == installed.version)
+            && migration.checksum != installed.checksum
+        {
+            sqlx::query("UPDATE _sqlx_migrations SET checksum = $1 WHERE version = $2")
                 .bind(&*migration.checksum)
                 .bind(migration.version)
-                .execute(pool)
-                .await;
+                .execute(&mut *conn)
+                .await?;
         }
     }
 
-    // 3. Execute all pending migrations
+    // SQLx's connection-specific entry point avoids the Acquire lifetime bound
+    // of run_to when the caller needs to spawn the startup future.
+    if needs_marketplace_upgrade {
+        migrator
+            .run_direct(Some(MARKETPLACE_RELEASE_MIGRATION - 1), conn, false)
+            .await?;
+        migrate_marketplace_releases(conn, &migrator).await?;
+    }
 
-    migrator.run(pool).await
+    migrator.run_direct(None, conn, false).await
+}
+
+async fn migrate_marketplace_releases(
+    conn: &mut PgConnection,
+    migrator: &Migrator,
+) -> Result<(), MigrateError> {
+    // PostgreSQL runs 0067 and records its original checksum inside this transaction.
+    // The trigger records exactly the deleted rows and exists only during this upgrade.
+    let mut tx = conn.begin().await?;
+    sqlx::raw_sql(include_str!(
+        "../../migrations/0069_marketplace_installation_quarantine.sql"
+    ))
+    .execute(&mut *tx)
+    .await?;
+    sqlx::raw_sql(
+        r#"
+        CREATE FUNCTION archive_marketplace_installation_0067() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            INSERT INTO plugin_guild_installation_quarantine
+                (id, guild_id, plugin_id, version, enabled, config, installed_at)
+            VALUES
+                (OLD.id, OLD.guild_id, OLD.plugin_id, OLD.version, OLD.enabled, OLD.config, OLD.installed_at);
+            RETURN NULL;
+        END;
+        $$;
+
+        CREATE TRIGGER archive_marketplace_installation_0067
+        AFTER DELETE ON plugin_guild_installations
+        FOR EACH ROW EXECUTE FUNCTION archive_marketplace_installation_0067();
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    migrator
+        .run_direct(Some(MARKETPLACE_RELEASE_MIGRATION), &mut *tx, false)
+        .await?;
+
+    sqlx::raw_sql(
+        r#"
+        DROP TRIGGER archive_marketplace_installation_0067 ON plugin_guild_installations;
+        DROP FUNCTION archive_marketplace_installation_0067();
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -10767,6 +10825,24 @@ impl PostgresStore {
         .fetch_all(&self.pool)
         .await?;
 
+        Ok(rows)
+    }
+
+    pub async fn list_unresolved_plugin_installations(
+        &self,
+        guild_id: &str,
+    ) -> anyhow::Result<Vec<UnresolvedPluginInstallation>> {
+        let rows = sqlx::query_as(
+            r#"
+            SELECT id, guild_id, plugin_id, version, enabled AS original_enabled, config, installed_at
+            FROM plugin_guild_installation_quarantine
+            WHERE guild_id = $1
+            ORDER BY plugin_id
+            "#,
+        )
+        .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows)
     }
 

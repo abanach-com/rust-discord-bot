@@ -121,6 +121,23 @@ Rules:
 
 The supplied Compose stack currently targets PostgreSQL 18.6. PostgreSQL 18 changed the official container's volume layout, so persistent data is mounted at `/var/lib/postgresql`, not the pre-18 `/var/lib/postgresql/data` location.
 
+### Upgrading Marketplace installations past migration 0067
+
+Use the upgraded application's PostgreSQL startup migrator for existing databases. The CI job that executes the SQL files directly validates a fresh, disposable schema. Running those files directly on an existing database bypasses the preservation step.
+
+1. Stop the old application instances and any other Marketplace writers or migration jobs. Take a PostgreSQL backup and verify that it restores to a separate database. Prepare the PostgreSQL credential configuration for the new binary. [Startup preflight and encryption settings](SECURITY.md#application-layer-encryption-at-rest-and-deployment-upgrades)
+2. Rehearse startup against the restored copy with `OFFLINE_MODE=true` and external network access blocked. During startup, the migrator holds the SQLx migration lock. If migration `0067` is pending, the migrator applies preceding migrations and then archives the exact rows that the original `0067` would delete. The archive writes, `0067` and trigger cleanup run in a single transaction. A failure in that transaction leaves the original installations available for retry.
+3. On the restored copy, check that `plugin_guild_installations` still contains the installations with a matching release and that `plugin_guild_installation_quarantine` contains the original rows for the missing versions. Treat exported configuration as private guild data.
+4. After verifying the rehearsal, start the upgraded binary against the target database and check the same results before bringing the remaining instances back online. Guild administrators can review the disabled entries through the read-only `GET /api/guilds/{guild_id}/marketplace/unresolved` endpoint. It requires permission to manage that guild and returns `status: unresolved`, `enabled: false`, `original_enabled`, and the original UUID, pinned version, configuration and installation timestamp. Archived entries remain inactive even if a guild later installs an available release.
+
+#### Recovering installations deleted by an earlier upgrade
+
+A successful `0067` applied by a previous binary can already have deleted the original rows. Check `SELECT version, success FROM _sqlx_migrations WHERE version = 67` on the affected database. An empty quarantine in an already-upgraded database cannot establish whether any rows were lost.
+
+1. Restore a verified backup or recover to the point immediately before `0067` using PostgreSQL point-in-time recovery. Use a separate database. Confirm the restored copy has no `0067` entry in `_sqlx_migrations` and contains the original `plugin_guild_installations` rows. An older export can supply evidence, but an installation missing today could also have been intentionally removed between the export and migration.
+2. Apply the fixed startup migration to the isolated copy. Read the affected guild's rows from `plugin_guild_installation_quarantine`. Compare their UUIDs and `(guild_id, plugin_id)` pairs with the current installations and any existing quarantine entries. Preserve `id`, `guild_id`, `plugin_id`, `version`, `enabled`, `config` and `installed_at` in the recovery export. Review any conflicts or newer installations with the guild administrator before using that export.
+3. Recover the historical settings for the affected guild from the reviewed export. Leave current installations in place. An administrator can explicitly install a known release through the normal Marketplace flow after reviewing its version and configuration. Exact recovery requires original records. The current release's hash or manifest cannot stand in for the missing historical artifact.
+
 ## Dashboard frontend
 
 The foundation frontend uses plain HTML, CSS and JavaScript so the Rust binary has no Node build requirement.
