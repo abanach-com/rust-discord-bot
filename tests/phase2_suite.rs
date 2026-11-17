@@ -890,7 +890,7 @@ async fn test_phase2_community_operations_and_media_suite() {
     let event_req = serde_json::json!({
         "title": "Community Raid Night",
         "description": "Defeat the ender dragon together",
-        "start_time": "2026-11-15T19:00:00Z",
+        "start_time": Utc::now() + Duration::hours(1),
         "timezone": "Europe/Warsaw",
         "max_participants": 2
     });
