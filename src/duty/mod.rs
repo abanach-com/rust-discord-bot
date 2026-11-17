@@ -1,7 +1,12 @@
+pub(crate) mod authorization;
+
+use anyhow::Context as _;
+use authorization::{DutyRoleAuthorization, RemovalAuthorization};
 use jiff::SignedDuration;
 use jiff::civil::{Time, Weekday};
 use jiff::tz::TimeZone;
 use serde::{Deserialize, Serialize};
+use serenity::all::{GuildId, Http, RoleId, UserId};
 
 use crate::datetime::Timestamp;
 use crate::storage::validate_snowflake;
@@ -112,6 +117,25 @@ pub struct ModeratorDutySettings {
     pub max_override_duration_mins: i32,
     pub fallback_channel_id: Option<String>,
     pub updated_at: Timestamp,
+    #[serde(skip)]
+    pub role_authorized_by_user_id: Option<String>,
+    #[serde(skip)]
+    pub version: i64,
+}
+
+impl ModeratorDutySettings {
+    pub(crate) fn unconfigured(guild_id: String) -> Self {
+        Self {
+            guild_id,
+            staff_role_id: None,
+            on_call_role_id: None,
+            max_override_duration_mins: 1440,
+            fallback_channel_id: None,
+            updated_at: Timestamp::now(),
+            role_authorized_by_user_id: None,
+            version: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -321,296 +345,361 @@ pub async fn resolve_staff_audience(
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum DutyDiscord<'a> {
+    Live(&'a Http),
+    Offline(&'a [String]),
+}
+
+pub(crate) fn duty_http(config: &crate::config::Config) -> Option<Http> {
+    if config.is_offline_mode() {
+        None
+    } else if config.discord_api_base_url.starts_with("http://") {
+        Some(
+            serenity::http::HttpBuilder::new(&config.discord_token)
+                .proxy(
+                    config
+                        .discord_api_base_url
+                        .trim_end_matches('/')
+                        .trim_end_matches("/api/v10"),
+                )
+                .ratelimiter_disabled(true)
+                .build(),
+        )
+    } else {
+        Some(Http::new(&config.discord_token))
+    }
+}
+
 pub struct ReconcileDutyParams<'a> {
     pub storage: &'a crate::storage::Storage,
-    pub guild_id: &'a str,
-    pub user_id: &'a str,
     pub settings: &'a ModeratorDutySettings,
     pub profile: &'a ModeratorDutyProfile,
-    pub member_roles: &'a [String],
-    pub bot_highest_role_pos: Option<i64>,
-    pub on_call_role_pos: Option<i64>,
-    pub is_live_discord: bool,
+    pub discord: DutyDiscord<'a>,
     pub dry_run: bool,
-    pub http: Option<&'a serenity::all::Http>,
 }
 
 pub async fn reconcile_member_duty_state(
     params: ReconcileDutyParams<'_>,
 ) -> anyhow::Result<DutyReconcileOutcome> {
-    let is_staff = match params.settings.staff_role_id {
-        Some(ref sr) => params.member_roles.contains(sr),
-        None => true,
+    let mut outcome = DutyReconcileOutcome {
+        user_id: params.profile.user_id.clone(),
+        ..DutyReconcileOutcome::default()
     };
 
-    let expected = compute_is_on_call(params.profile, Timestamp::now(), is_staff);
-
-    let on_call_role_id = match params.settings.on_call_role_id {
-        Some(ref r) => r.clone(),
-        None => {
-            if !params.dry_run {
-                let state = ModeratorDutyState {
-                    guild_id: params.guild_id.to_string(),
-                    user_id: params.user_id.to_string(),
-                    expected_on_call: expected,
-                    state_generation: 0,
-                    last_reconciled_at: Some(Timestamp::now()),
-                    last_error: Some("No on_call_role_id configured".to_string()),
-                };
-                let _ = params.storage.upsert_duty_state(state).await?;
-            }
-            return Ok(DutyReconcileOutcome {
-                user_id: params.user_id.to_string(),
-                expected_on_call: expected,
-                role_granted: false,
-                role_revoked: false,
-                would_grant: false,
-                would_revoke: false,
-                error: Some("No on_call_role_id configured".to_string()),
-            });
+    let result = match params.discord {
+        DutyDiscord::Live(http) => reconcile_live_duty_member(&params, http, &mut outcome).await,
+        DutyDiscord::Offline(member_roles) => {
+            reconcile_offline_duty_member(&params, member_roles, &mut outcome)
         }
     };
+    outcome.error = result.err().map(|error| format!("{error:#}"));
 
-    let has_on_call = params.member_roles.contains(&on_call_role_id);
-    let mut role_granted = false;
-    let mut role_revoked = false;
-    let mut would_grant = false;
-    let mut would_revoke = false;
-    let mut error = None;
-
-    if expected != has_on_call {
-        // Verify role hierarchy
-        if let (Some(bot_pos), Some(role_pos)) =
-            (params.bot_highest_role_pos, params.on_call_role_pos)
-            && bot_pos <= role_pos
-        {
-            error = Some(
-                "Role hierarchy failure: bot role is lower than or equal to on-call role"
-                    .to_string(),
-            );
-        }
-
-        if error.is_none() {
-            if params.dry_run {
-                // Issue #187: In dry-run mode, never mutate Discord or falsify role_granted/role_revoked
-                if expected {
-                    would_grant = true;
-                } else {
-                    would_revoke = true;
-                }
-            } else if params.is_live_discord {
-                if let Some(h) = params.http
-                    && let (Ok(g_num), Ok(u_num), Ok(r_num)) = (
-                        params.guild_id.parse::<u64>(),
-                        params.user_id.parse::<u64>(),
-                        on_call_role_id.parse::<u64>(),
-                    )
-                {
-                    let g_id = serenity::all::GuildId::new(g_num);
-                    let u_id = serenity::all::UserId::new(u_num);
-                    let r_id = serenity::all::RoleId::new(r_num);
-
-                    if expected {
-                        if let Err(e) = h
-                            .add_member_role(g_id, u_id, r_id, Some("Moderator on-duty scheduled"))
-                            .await
-                        {
-                            error = Some(format!("Discord API add_role error: {e}"));
-                        } else {
-                            role_granted = true;
-                            // Issue #188: Record bot-owned active grant
-                            let _ = params
-                                .storage
-                                .record_duty_role_grant(
-                                    params.guild_id,
-                                    params.user_id,
-                                    &on_call_role_id,
-                                    "active",
-                                )
-                                .await;
-                        }
-                    } else if let Err(e) = h
-                        .remove_member_role(g_id, u_id, r_id, Some("Moderator off-duty scheduled"))
-                        .await
-                    {
-                        error = Some(format!("Discord API remove_role error: {e}"));
-                    } else {
-                        role_revoked = true;
-                        // Issue #188: Mark grant revoked
-                        let _ = params
-                            .storage
-                            .record_duty_role_grant(
-                                params.guild_id,
-                                params.user_id,
-                                &on_call_role_id,
-                                "revoked",
-                            )
-                            .await;
-                    }
-                }
-            } else if expected {
-                role_granted = true;
-            } else {
-                role_revoked = true;
-            }
-        }
-    }
-
-    // Issue #187: In dry_run mode, do NOT mutate ModeratorDutyState in database
     if !params.dry_run {
         let state = ModeratorDutyState {
-            guild_id: params.guild_id.to_string(),
-            user_id: params.user_id.to_string(),
-            expected_on_call: expected,
+            guild_id: params.profile.guild_id.clone(),
+            user_id: params.profile.user_id.clone(),
+            expected_on_call: outcome.expected_on_call,
             state_generation: 0,
             last_reconciled_at: Some(Timestamp::now()),
-            last_error: error.clone(),
+            last_error: outcome.error.clone(),
         };
-        let _ = params.storage.upsert_duty_state(state).await?;
+        params
+            .storage
+            .upsert_current_duty_state(params.profile, state)
+            .await?;
     }
 
-    Ok(DutyReconcileOutcome {
-        user_id: params.user_id.to_string(),
-        expected_on_call: expected,
-        role_granted,
-        role_revoked,
-        would_grant,
-        would_revoke,
-        error,
-    })
+    Ok(outcome)
 }
+
+fn reconcile_offline_duty_member(
+    params: &ReconcileDutyParams<'_>,
+    member_roles: &[String],
+    outcome: &mut DutyReconcileOutcome,
+) -> anyhow::Result<()> {
+    let has_role = |role_id: &str| {
+        let role_id = role_id.trim_start_matches('0');
+        member_roles
+            .iter()
+            .any(|role| role.trim_start_matches('0') == role_id)
+    };
+    let is_staff = params
+        .settings
+        .staff_role_id
+        .as_deref()
+        .is_none_or(|role_id| {
+            role_id.trim_start_matches('0') == params.settings.guild_id || has_role(role_id)
+        });
+    outcome.expected_on_call = compute_is_on_call(params.profile, Timestamp::now(), is_staff);
+
+    let role_id = params
+        .settings
+        .on_call_role_id
+        .as_deref()
+        .context("No on_call_role_id configured")?;
+    let has_on_call = has_role(role_id);
+    match (outcome.expected_on_call, has_on_call, params.dry_run) {
+        (true, false, true) => outcome.would_grant = true,
+        (false, true, true) => outcome.would_revoke = true,
+        (true, false, false) => outcome.role_granted = true,
+        (false, true, false) => outcome.role_revoked = true,
+        _ => {}
+    }
+    Ok(())
+}
+
+async fn reconcile_live_duty_member(
+    params: &ReconcileDutyParams<'_>,
+    http: &Http,
+    outcome: &mut DutyReconcileOutcome,
+) -> anyhow::Result<()> {
+    let profile = params.profile;
+    let settings = params.settings;
+    anyhow::ensure!(
+        profile.guild_id == settings.guild_id,
+        "Moderator Duty settings do not belong to this guild"
+    );
+
+    let guild = GuildId::new(validate_snowflake("guild_id", &profile.guild_id)?);
+    let user = UserId::new(validate_snowflake("user_id", &profile.user_id)?);
+
+    let authorization = DutyRoleAuthorization::fetch(http, guild).await?;
+    let member = authorization.fetch_member(http, user).await?;
+    let staff_role = settings
+        .staff_role_id
+        .as_deref()
+        .map(|id| validate_snowflake("staff_role_id", id).map(RoleId::new))
+        .transpose()?;
+    let is_staff =
+        staff_role.is_none_or(|id| id.get() == guild.get() || member.roles.contains(&id));
+    outcome.expected_on_call = compute_is_on_call(profile, Timestamp::now(), is_staff);
+    let role_key = settings
+        .on_call_role_id
+        .as_deref()
+        .context("No on_call_role_id configured")?;
+    let role = RoleId::new(validate_snowflake("on_call_role_id", role_key)?);
+    let has_on_call = member.roles.contains(&role);
+
+    let mut tracked_removal = None;
+    if outcome.expected_on_call {
+        authorization
+            .authorize_grant(
+                http,
+                role,
+                settings.staff_role_id.as_deref(),
+                settings.role_authorized_by_user_id.as_deref(),
+            )
+            .await?;
+        if has_on_call {
+            return Ok(());
+        }
+    } else if has_on_call {
+        tracked_removal = params
+            .storage
+            .get_duty_role_grant(&profile.guild_id, &profile.user_id, role_key)
+            .await?
+            .filter(|grant| {
+                matches!(
+                    grant.status.as_str(),
+                    "active" | "revoke_pending" | "failed"
+                )
+            });
+        if authorization.authorize_removal(role, tracked_removal.is_some())?
+            == RemovalAuthorization::Deleted
+        {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            !tracked_removal.as_ref().is_some_and(|grant| {
+                grant.status == "revoke_pending"
+                    || grant.status == "active" && grant.next_attempt_at > Timestamp::now()
+            }),
+            "A Moderator Duty role operation is already pending"
+        );
+    } else {
+        authorization.authorize_staff_role(settings.staff_role_id.as_deref())?;
+        return Ok(());
+    }
+
+    if params.dry_run || !outcome.expected_on_call {
+        anyhow::ensure!(
+            params
+                .storage
+                .duty_grant_policy_is_current(settings, profile)
+                .await?,
+            "Moderator Duty settings or profile changed during reconciliation"
+        );
+    }
+    if params.dry_run {
+        outcome.would_grant = outcome.expected_on_call;
+        outcome.would_revoke = !outcome.expected_on_call;
+    } else if outcome.expected_on_call {
+        let grant = params
+            .storage
+            .begin_duty_role_grant(settings, profile)
+            .await?
+            .context("Moderator Duty policy changed or a role operation is already pending")?;
+        // Record intent before Discord. A timeout or lost response may still have added the role.
+        let delivery = tokio::time::timeout(
+            DUTY_DISCORD_OPERATION_TIMEOUT,
+            http.add_member_role(guild, user, role, Some("Moderator on-duty scheduled")),
+        )
+        .await
+        .context("Timed out adding the on-call role")?;
+        if let Err(error) = &delivery
+            && !matches!(
+                error,
+                serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(_))
+            )
+        {
+            // Keep the lease when sending failed without a confirmed Discord response.
+            return delivery.context("Discord could not confirm the on-call role grant");
+        }
+        outcome.role_granted = delivery.is_ok();
+        let current = params
+            .storage
+            .finish_duty_role_grant(settings, profile, &grant)
+            .await?;
+        delivery.context("Discord could not add the on-call role")?;
+        anyhow::ensure!(
+            current,
+            "Moderator Duty policy changed during the role grant"
+        );
+    } else {
+        tokio::time::timeout(
+            DUTY_DISCORD_OPERATION_TIMEOUT,
+            http.remove_member_role(guild, user, role, Some("Moderator off-duty scheduled")),
+        )
+        .await
+        .context("Timed out removing the on-call role")?
+        .context("Discord could not remove the on-call role")?;
+        outcome.role_revoked = true;
+        if let Some(mut grant) = tracked_removal {
+            // A newer grant can finish while Discord is delivering this DELETE response.
+            grant.status = "revoked".to_owned();
+            grant.last_error = None;
+            params.storage.complete_duty_role_revocation(grant).await?;
+        }
+    }
+    Ok(())
+}
+
+const DUTY_DISCORD_OPERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub async fn process_duty_role_revocations(
     storage: &crate::storage::Storage,
-    http: Option<&serenity::all::Http>,
+    http: Option<&Http>,
     guild_id: Option<&str>,
 ) -> anyhow::Result<usize> {
-    if let Some(gid) = guild_id {
-        validate_snowflake("guild_id", gid)?;
-    }
+    let Some(http) = http else {
+        return Ok(0);
+    };
 
     let pending = storage.list_pending_duty_role_revocations(guild_id).await?;
     let mut processed = 0;
 
-    for mut grant in pending {
-        if let Some(target_gid) = guild_id
-            && grant.guild_id != target_gid
+    for pending_grant in pending {
+        let Some(mut grant) = storage.claim_duty_role_revocation(&pending_grant).await? else {
+            continue;
+        };
+
+        match tokio::time::timeout(
+            DUTY_DISCORD_OPERATION_TIMEOUT,
+            revoke_queued_duty_role(http, &grant),
+        )
+        .await
+        .context("Timed out checking or revoking a Moderator Duty grant")
+        .flatten()
         {
-            continue;
-        }
-
-        if let Some(client) = http {
-            if let (Ok(g_num), Ok(u_num), Ok(r_num)) = (
-                grant.guild_id.parse::<u64>(),
-                grant.user_id.parse::<u64>(),
-                grant.role_id.parse::<u64>(),
-            ) {
-                let g_id = serenity::all::GuildId::new(g_num);
-                let u_id = serenity::all::UserId::new(u_num);
-                let r_id = serenity::all::RoleId::new(r_num);
-
-                match client
-                    .remove_member_role(
-                        g_id,
-                        u_id,
-                        r_id,
-                        Some("Moderator duty role revoked: profile deleted or role changed"),
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        grant.status = "revoked".to_string();
-                        grant.last_error = None;
-                        grant.updated_at = Timestamp::now();
-                        processed += 1;
-                    }
-                    Err(e) => {
-                        let err_msg = e.to_string();
-                        grant.attempts += 1;
-                        grant.last_error = Some(err_msg);
-                        grant.updated_at = Timestamp::now();
-                        if grant.attempts >= 5 {
-                            grant.status = "failed".to_string();
-                        } else {
-                            let backoff_secs = 2u64.pow(grant.attempts.min(6) as u32) * 5;
-                            grant.next_attempt_at =
-                                Timestamp::now() + SignedDuration::from_secs(backoff_secs as i64);
-                        }
-                    }
-                }
-            } else {
-                grant.status = "failed".to_string();
-                grant.last_error = Some("Invalid snowflake ID in duty role grant".to_string());
+            Ok(()) => {
+                grant.status = "revoked".to_owned();
+                grant.last_error = None;
             }
-        } else {
-            // Offline / mock mode without live Discord client
-            continue;
+            Err(error) => {
+                grant.attempts += 1;
+                grant.last_error = Some(format!("{error:#}"));
+                if grant.attempts >= 5 {
+                    grant.status = "failed".to_owned();
+                } else {
+                    let backoff_secs = 2_i64.pow(grant.attempts as u32) * 5;
+                    grant.next_attempt_at =
+                        Timestamp::now() + SignedDuration::from_secs(backoff_secs);
+                }
+            }
         }
 
-        storage.upsert_duty_role_grant(grant).await?;
+        let revoked = grant.status == "revoked";
+        if storage.complete_duty_role_revocation(grant).await? && revoked {
+            processed += 1;
+        }
     }
 
     Ok(processed)
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct DiscordMemberDutyContext {
-    pub member_roles: Vec<String>,
-    pub bot_highest_role_pos: Option<i64>,
-    pub on_call_role_pos: Option<i64>,
+async fn revoke_queued_duty_role(
+    http: &Http,
+    grant: &ModeratorDutyRoleGrant,
+) -> anyhow::Result<()> {
+    let guild = GuildId::new(validate_snowflake("guild_id", &grant.guild_id)?);
+    let user = UserId::new(validate_snowflake("user_id", &grant.user_id)?);
+    let role = RoleId::new(validate_snowflake("role_id", &grant.role_id)?);
+    remove_tracked_duty_role(
+        http,
+        guild,
+        user,
+        role,
+        "Moderator Duty profile deleted or on-call role changed",
+    )
+    .await
 }
 
-pub async fn fetch_discord_member_duty_context(
-    http: &serenity::all::Http,
-    guild_id: &str,
-    user_id: &str,
-    on_call_role_id: Option<&str>,
-) -> anyhow::Result<DiscordMemberDutyContext> {
-    let g_num = guild_id.parse::<u64>()?;
-    let u_num = user_id.parse::<u64>()?;
-    let g_id = serenity::all::GuildId::new(g_num);
-    let u_id = serenity::all::UserId::new(u_num);
-
-    let member = http.get_member(g_id, u_id).await?;
-    let member_roles: Vec<String> = member.roles.iter().map(|r| r.get().to_string()).collect();
-
-    let mut bot_highest_role_pos = None;
-    let mut on_call_role_pos = None;
-
-    if let Ok(guild) = http.get_guild(g_id).await {
-        if let Some(on_call_id) = on_call_role_id
-            && let Ok(on_call_num) = on_call_id.parse::<u64>()
-            && let Some(role) = guild.roles.get(&serenity::all::RoleId::new(on_call_num))
-        {
-            on_call_role_pos = Some(role.position as i64);
-        }
-
-        if let Ok(bot_user) = http.get_current_user().await
-            && let Ok(bot_member) = http.get_member(g_id, bot_user.id).await
-        {
-            let max_pos = bot_member
-                .roles
-                .iter()
-                .filter_map(|rid| guild.roles.get(rid))
-                .map(|r| r.position as i64)
-                .max()
-                .unwrap_or(0);
-            bot_highest_role_pos = Some(max_pos);
-        }
+async fn remove_tracked_duty_role(
+    http: &Http,
+    guild: GuildId,
+    user: UserId,
+    role: RoleId,
+    reason: &str,
+) -> anyhow::Result<()> {
+    let authorization = DutyRoleAuthorization::fetch(http, guild).await?;
+    if authorization.authorize_removal(role, true)? == RemovalAuthorization::Deleted {
+        return Ok(());
     }
 
-    Ok(DiscordMemberDutyContext {
-        member_roles,
-        bot_highest_role_pos,
-        on_call_role_pos,
-    })
+    match http
+        .remove_member_role(guild, user, role, Some(reason))
+        .await
+    {
+        // A member or role deleted since the grant cannot hold it anymore.
+        Err(serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(response)))
+            if response.status_code == serenity::http::StatusCode::NOT_FOUND
+                && matches!(response.error.code, 10007 | 10011) =>
+        {
+            Ok(())
+        }
+        result => result.context("Discord could not revoke the tracked on-call role"),
+    }
 }
 
 pub async fn reconcile_all_duty_guilds(
     storage: &crate::storage::Storage,
-    http: Option<&serenity::all::Http>,
+    http: Option<&Http>,
     is_live: bool,
 ) -> anyhow::Result<usize> {
+    let discord = if is_live {
+        DutyDiscord::Live(http.context("Live Moderator Duty reconcile requires a Discord client")?)
+    } else {
+        DutyDiscord::Offline(&[])
+    };
+
+    if let DutyDiscord::Live(http) = discord {
+        // Also service guilds whose last profile was deleted.
+        if let Err(error) = process_duty_role_revocations(storage, Some(http), None).await {
+            tracing::error!(%error, "Could not process queued Moderator Duty revocations");
+        }
+    }
+
     let guilds = storage.list_guilds_with_duty_profiles().await?;
     let mut total_reconciled = 0;
 
@@ -618,68 +707,25 @@ pub async fn reconcile_all_duty_guilds(
         let settings = storage
             .get_duty_settings(&guild_id)
             .await?
-            .unwrap_or_else(|| ModeratorDutySettings {
-                guild_id: guild_id.clone(),
-                staff_role_id: None,
-                on_call_role_id: None,
-                max_override_duration_mins: 1440,
-                fallback_channel_id: None,
-                updated_at: Timestamp::now(),
-            });
+            .unwrap_or_else(|| ModeratorDutySettings::unconfigured(guild_id.clone()));
 
         let profiles = storage.list_duty_profiles(&guild_id).await?;
         for profile in profiles {
-            let (member_roles, bot_pos, on_call_pos) = if is_live && let Some(h) = http {
-                match fetch_discord_member_duty_context(
-                    h,
-                    &guild_id,
-                    &profile.user_id,
-                    settings.on_call_role_id.as_deref(),
-                )
-                .await
-                {
-                    Ok(ctx) => (
-                        ctx.member_roles,
-                        ctx.bot_highest_role_pos,
-                        ctx.on_call_role_pos,
-                    ),
-                    Err(e) => {
-                        let _ = storage
-                            .upsert_duty_state(ModeratorDutyState {
-                                guild_id: guild_id.clone(),
-                                user_id: profile.user_id.clone(),
-                                expected_on_call: false,
-                                state_generation: 0,
-                                last_reconciled_at: Some(Timestamp::now()),
-                                last_error: Some(format!("Failed to fetch Discord member: {e}")),
-                            })
-                            .await;
-                        continue;
-                    }
-                }
-            } else {
-                (Vec::new(), None, None)
-            };
-
-            let _ = reconcile_member_duty_state(ReconcileDutyParams {
+            if let Err(error) = reconcile_member_duty_state(ReconcileDutyParams {
                 storage,
-                guild_id: &guild_id,
-                user_id: &profile.user_id,
                 settings: &settings,
                 profile: &profile,
-                member_roles: &member_roles,
-                bot_highest_role_pos: bot_pos,
-                on_call_role_pos: on_call_pos,
-                is_live_discord: is_live && http.is_some(),
+                discord,
                 dry_run: false,
-                http,
             })
-            .await;
+            .await
+            {
+                tracing::error!(%error, %guild_id, user_id = %profile.user_id,
+                    "Could not save Moderator Duty reconciliation state");
+                continue;
+            }
             total_reconciled += 1;
         }
-
-        // Issue #188: Process durable role revocations for orphaned roles
-        let _ = process_duty_role_revocations(storage, http, Some(&guild_id)).await;
     }
 
     Ok(total_reconciled)
@@ -694,16 +740,8 @@ pub async fn run_moderator_duty_reconciler_loop(
     let mut interval = tokio::time::interval(interval_duration);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    let is_live = !state.config.discord_token.starts_with("dummy")
-        && state.config.discord_token != "mock"
-        && state.config.discord_token != "offline"
-        && !state.config.discord_token.is_empty();
-
-    let http = if is_live {
-        Some(serenity::all::Http::new(&state.config.discord_token))
-    } else {
-        None
-    };
+    let http = duty_http(&state.config);
+    let is_live = !state.config.is_offline_mode();
 
     loop {
         tokio::select! {
@@ -960,6 +998,8 @@ mod tests {
             max_override_duration_mins: 1440,
             fallback_channel_id: None,
             updated_at: Timestamp::now(),
+            role_authorized_by_user_id: None,
+            version: 0,
         };
 
         let mut profile = ModeratorDutyProfile::new(
@@ -975,16 +1015,10 @@ mod tests {
         // Member currently has both staff and on_call roles
         let outcome = reconcile_member_duty_state(ReconcileDutyParams {
             storage: &store,
-            guild_id,
-            user_id,
             settings: &settings,
             profile: &profile,
-            member_roles: &[staff_role.clone(), on_call_role.clone()],
-            bot_highest_role_pos: Some(100),
-            on_call_role_pos: Some(50),
-            is_live_discord: false,
+            discord: DutyDiscord::Offline(&[staff_role.clone(), on_call_role.clone()]),
             dry_run: false,
-            http: None,
         })
         .await
         .unwrap();
@@ -996,16 +1030,10 @@ mod tests {
         // Now member LOSES staff role (only has on_call_role)
         let outcome2 = reconcile_member_duty_state(ReconcileDutyParams {
             storage: &store,
-            guild_id,
-            user_id,
             settings: &settings,
             profile: &profile,
-            member_roles: std::slice::from_ref(&on_call_role),
-            bot_highest_role_pos: Some(100),
-            on_call_role_pos: Some(50),
-            is_live_discord: false,
+            discord: DutyDiscord::Offline(std::slice::from_ref(&on_call_role)),
             dry_run: false,
-            http: None,
         })
         .await
         .unwrap();
@@ -1018,54 +1046,6 @@ mod tests {
             outcome2.role_revoked,
             "On-call role must be revoked immediately when staff status is lost"
         );
-    }
-
-    #[tokio::test]
-    async fn test_reconcile_role_hierarchy_failure() {
-        let store = crate::storage::Storage::Memory(crate::storage::MemoryStore::default());
-        let guild_id = "100000000000000001";
-        let user_id = "200000000000000001";
-        let on_call_role = "400000000000000001".to_string();
-
-        let settings = ModeratorDutySettings {
-            guild_id: guild_id.to_string(),
-            staff_role_id: None,
-            on_call_role_id: Some(on_call_role.clone()),
-            max_override_duration_mins: 1440,
-            fallback_channel_id: None,
-            updated_at: Timestamp::now(),
-        };
-
-        let mut profile = ModeratorDutyProfile::new(
-            guild_id.to_string(),
-            user_id.to_string(),
-            "UTC".to_string(),
-            RecurringSchedule::default(),
-        )
-        .unwrap();
-        profile.manual_override = Some("force_on".to_string());
-
-        // Bot role pos = 10, On-call role pos = 20 (bot is LOWER than on_call role!)
-        let outcome = reconcile_member_duty_state(ReconcileDutyParams {
-            storage: &store,
-            guild_id,
-            user_id,
-            settings: &settings,
-            profile: &profile,
-            member_roles: &[],
-            bot_highest_role_pos: Some(10),
-            on_call_role_pos: Some(20),
-            is_live_discord: false,
-            dry_run: false,
-            http: None,
-        })
-        .await
-        .unwrap();
-
-        assert!(outcome.expected_on_call);
-        assert!(!outcome.role_granted);
-        assert!(outcome.error.is_some());
-        assert!(outcome.error.unwrap().contains("hierarchy"));
     }
 
     #[tokio::test]
@@ -1083,6 +1063,8 @@ mod tests {
             max_override_duration_mins: 1440,
             fallback_channel_id: Some(fallback_chan.clone()),
             updated_at: Timestamp::now(),
+            role_authorized_by_user_id: None,
+            version: 0,
         };
         store.upsert_duty_settings(settings).await.unwrap();
 
@@ -1125,6 +1107,8 @@ mod tests {
             max_override_duration_mins: 1440,
             fallback_channel_id: None,
             updated_at: Timestamp::now(),
+            role_authorized_by_user_id: None,
+            version: 0,
         };
         store.upsert_duty_settings(settings).await.unwrap();
 

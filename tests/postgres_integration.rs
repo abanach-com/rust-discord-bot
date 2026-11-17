@@ -10,7 +10,9 @@ use rusty_discord_bot::{
     },
     session::{DashboardGuild, DashboardUser, PostgresSessionStore},
     storage::{
-        PostgresStore, SocialDraftApprovalError, SocialPublicationDraft, UpdateModuleSettingsParams,
+        ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState, PostgresStore,
+        RecurringSchedule, SocialDraftApprovalError, SocialPublicationDraft, Storage,
+        UpdateModuleSettingsParams,
     },
     tickets::{
         NewTicketReservation, NewTicketTranscript, PostgresTicketStore, ReserveTicketOutcome,
@@ -24,6 +26,382 @@ fn get_database_url() -> Option<String> {
     std::env::var("DATABASE_URL")
         .ok()
         .filter(|v| !v.trim().is_empty())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_duty_settings_transition_memory() {
+    let store = Storage::connect(None).await.unwrap();
+    let legacy = store
+        .upsert_duty_settings(ModeratorDutySettings {
+            guild_id: "100000000000000001".to_string(),
+            staff_role_id: None,
+            on_call_role_id: Some("500000000000000001".to_string()),
+            role_authorized_by_user_id: None,
+            max_override_duration_mins: 720,
+            fallback_channel_id: None,
+            version: 0,
+            updated_at: Timestamp::now(),
+        })
+        .await
+        .unwrap();
+    assert_duty_settings_transition(store, legacy).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_duty_settings_transition_postgres() {
+    let Some(database_url) = get_database_url() else {
+        eprintln!("SKIPPING PostgreSQL Duty settings transition test: DATABASE_URL not set");
+        return;
+    };
+    let store = Storage::connect(Some(&database_url)).await.unwrap();
+    let Storage::Postgres(postgres) = &store else {
+        panic!("expected PostgreSQL storage");
+    };
+    let pool = postgres.pool().clone();
+    let guild_id = (Uuid::new_v4().as_u128() as u64).max(1).to_string();
+    sqlx::query("INSERT INTO moderator_duty_settings (guild_id, on_call_role_id) VALUES ($1, $2)")
+        .bind(&guild_id)
+        .bind("500000000000000001")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let legacy = store.get_duty_settings(&guild_id).await.unwrap().unwrap();
+    assert_duty_settings_transition(store, legacy).await;
+    for statement in [
+        "DELETE FROM moderator_duty_role_grants WHERE guild_id = $1",
+        "DELETE FROM moderator_duty_profiles WHERE guild_id = $1",
+        "DELETE FROM moderator_duty_settings WHERE guild_id = $1",
+    ] {
+        sqlx::query(statement)
+            .bind(&guild_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+}
+
+async fn assert_duty_settings_transition(store: Storage, legacy: ModeratorDutySettings) {
+    let guild_id = &legacy.guild_id;
+    let user_id = "300000000000000003";
+    let actor_id = "400000000000000004";
+    let role_id = "500000000000000001";
+    assert!(legacy.role_authorized_by_user_id.is_none());
+
+    let mut approved = legacy.clone();
+    approved.role_authorized_by_user_id = Some("0".to_string());
+    assert!(
+        store
+            .replace_duty_settings(approved.clone(), Some(legacy.version))
+            .await
+            .is_err()
+    );
+    approved.role_authorized_by_user_id = Some(actor_id.to_string());
+    assert!(
+        store
+            .replace_duty_settings(approved.clone(), None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let approved = store
+        .replace_duty_settings(approved, Some(legacy.version))
+        .await
+        .unwrap()
+        .expect("approve the unchanged role");
+    let loaded = store.get_duty_settings(guild_id).await.unwrap().unwrap();
+    assert_eq!(loaded.role_authorized_by_user_id.as_deref(), Some(actor_id));
+    let public = serde_json::to_value(&loaded).unwrap();
+    assert!(public.get("role_authorized_by_user_id").is_none());
+    assert!(public.get("version").is_none());
+
+    let profile = ModeratorDutyProfile::new(
+        guild_id.clone(),
+        user_id.to_string(),
+        "UTC".to_string(),
+        RecurringSchedule::default(),
+    )
+    .unwrap();
+    let profile = store.upsert_duty_profile(profile).await.unwrap();
+    assert!(
+        store
+            .duty_grant_policy_is_current(&approved, &profile)
+            .await
+            .unwrap()
+    );
+    let grant = store
+        .begin_duty_role_grant(&approved, &profile)
+        .await
+        .unwrap()
+        .expect("reserve the grant before calling Discord");
+    assert!(
+        store
+            .begin_duty_role_grant(&approved, &profile)
+            .await
+            .unwrap()
+            .is_none(),
+        "a second worker cannot reserve the same grant"
+    );
+    assert!(
+        store
+            .finish_duty_role_grant(&approved, &profile, &grant)
+            .await
+            .unwrap()
+    );
+    let mut old_delete = store
+        .get_duty_role_grant(guild_id, user_id, role_id)
+        .await
+        .unwrap()
+        .unwrap();
+    old_delete.status = "revoked".to_owned();
+    let newer_grant = store
+        .begin_duty_role_grant(&approved, &profile)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        store
+            .finish_duty_role_grant(&approved, &profile, &newer_grant)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .complete_duty_role_revocation(old_delete)
+            .await
+            .unwrap(),
+        "the old DELETE response cannot overwrite a newer completed PUT"
+    );
+    let mut current_delete = store
+        .get_duty_role_grant(guild_id, user_id, role_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current_delete.status, "active");
+    current_delete.status = "revoked".to_owned();
+    assert!(
+        store
+            .complete_duty_role_revocation(current_delete)
+            .await
+            .unwrap()
+    );
+    let grant = store
+        .begin_duty_role_grant(&approved, &profile)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        store
+            .finish_duty_role_grant(&approved, &profile, &grant)
+            .await
+            .unwrap()
+    );
+
+    let second_user = "300000000000000005";
+    let in_flight_profile = store
+        .upsert_duty_profile(
+            ModeratorDutyProfile::new(
+                guild_id.clone(),
+                second_user.to_string(),
+                "UTC".to_string(),
+                RecurringSchedule::default(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let in_flight = store
+        .begin_duty_role_grant(&approved, &in_flight_profile)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        store
+            .list_pending_duty_role_revocations(Some(guild_id))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let replace = |role: Option<&str>| {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        let mut candidate = approved.clone();
+        let expected_version = candidate.version;
+        candidate.on_call_role_id = role.map(str::to_owned);
+        if role.is_none() {
+            candidate.role_authorized_by_user_id = None;
+        }
+        tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .replace_duty_settings(candidate, Some(expected_version))
+                .await
+                .unwrap()
+        })
+    };
+    let (disable, replace) = tokio::join!(replace(None), replace(Some("500000000000000002")));
+    let (disable, replace) = (disable.unwrap(), replace.unwrap());
+    assert_ne!(disable.is_some(), replace.is_some());
+    let winner = disable.or(replace).unwrap();
+    assert_eq!(winner.version, approved.version + 1);
+    let loaded = store.get_duty_settings(guild_id).await.unwrap().unwrap();
+    assert_eq!(loaded.on_call_role_id, winner.on_call_role_id);
+    assert!(
+        !store
+            .duty_grant_policy_is_current(&approved, &profile)
+            .await
+            .unwrap()
+    );
+
+    let pending = store
+        .list_pending_duty_role_revocations(Some(guild_id))
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].role_id, role_id);
+    assert_eq!(pending[0].user_id, user_id);
+
+    let mut claimed = store
+        .claim_duty_role_revocation(&pending[0])
+        .await
+        .unwrap()
+        .expect("claim pending revocation");
+    assert!(
+        store
+            .claim_duty_role_revocation(&pending[0])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .list_pending_duty_role_revocations(Some(guild_id))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let queued_in_flight = store
+        .get_duty_role_grant(guild_id, second_user, role_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(queued_in_flight.status, "revoke_pending");
+    assert_eq!(queued_in_flight.next_attempt_at, in_flight.next_attempt_at);
+    assert!(
+        !store
+            .finish_duty_role_grant(&approved, &in_flight_profile, &in_flight)
+            .await
+            .unwrap(),
+        "a Discord PUT finishing after the role transition must leave its revocation pending"
+    );
+
+    let restored = store
+        .replace_duty_settings(approved.clone(), Some(winner.version))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.on_call_role_id.as_deref(), Some(role_id));
+    assert!(
+        store
+            .begin_duty_role_grant(&restored, &profile)
+            .await
+            .unwrap()
+            .is_none(),
+        "re-selecting a role must wait for its queued DELETE"
+    );
+    claimed.status = "revoked".to_string();
+    assert!(
+        store
+            .complete_duty_role_revocation(claimed.clone())
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .replace_duty_settings(approved.clone(), Some(approved.version))
+            .await
+            .unwrap()
+            .is_none(),
+        "restoring the old role must not restore the old settings revision"
+    );
+
+    let grant = store
+        .begin_duty_role_grant(&restored, &profile)
+        .await
+        .unwrap()
+        .expect("allow a new grant after the queued DELETE is complete");
+    assert!(
+        !store.complete_duty_role_revocation(claimed).await.unwrap(),
+        "a previous DELETE lease cannot finish a newer grant"
+    );
+    let mut updated_profile = profile.clone();
+    updated_profile.manual_override = Some("force_off".to_string());
+    let updated_profile = store.upsert_duty_profile(updated_profile).await.unwrap();
+    assert!(
+        !store
+            .finish_duty_role_grant(&restored, &profile, &grant)
+            .await
+            .unwrap(),
+        "a Discord PUT finishing after the profile changes must be queued for cleanup"
+    );
+    assert_eq!(
+        store
+            .get_duty_role_grant(guild_id, user_id, role_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "revoke_pending"
+    );
+
+    let state = ModeratorDutyState {
+        guild_id: guild_id.clone(),
+        user_id: user_id.to_owned(),
+        expected_on_call: true,
+        state_generation: 0,
+        last_reconciled_at: Some(Timestamp::now()),
+        last_error: Some("fixture reconcile outcome".to_owned()),
+    };
+    store
+        .upsert_current_duty_state(&updated_profile, state.clone())
+        .await
+        .unwrap();
+    assert!(
+        store
+            .get_duty_state(guild_id, user_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(store.delete_duty_profile(guild_id, user_id).await.unwrap());
+    store
+        .upsert_current_duty_state(&updated_profile, state)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .get_duty_state(guild_id, user_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    store
+        .erase_guild_user_data(guild_id, actor_id)
+        .await
+        .unwrap();
+    let erased = store.get_duty_settings(guild_id).await.unwrap().unwrap();
+    assert!(erased.role_authorized_by_user_id.is_none());
+    assert_eq!(erased.on_call_role_id.as_deref(), Some(role_id));
+    assert!(
+        store
+            .replace_duty_settings(restored.clone(), Some(restored.version))
+            .await
+            .unwrap()
+            .is_none(),
+        "an in-flight write must not restore the erased authorizer"
+    );
 }
 
 #[tokio::test]
@@ -2552,8 +2930,10 @@ async fn test_postgres_integration_suite() {
         guild_id: duty_guild.to_string(),
         staff_role_id: Some(staff_role.to_string()),
         on_call_role_id: Some(on_call_role.to_string()),
+        role_authorized_by_user_id: None,
         max_override_duration_mins: 720,
         fallback_channel_id: None,
+        version: 0,
         updated_at: Timestamp::now(),
     };
 

@@ -610,6 +610,21 @@ impl PostgresStore {
         .rows_affected();
         related_erased += deleted_policy as usize;
 
+        Self::lock_duty_write(&mut tx, guild_id).await?;
+        let erased_duty_authorization = sqlx::query(
+            r#"
+            UPDATE moderator_duty_settings
+            SET role_authorized_by_user_id = NULL, version = version + 1, updated_at = clock_timestamp()
+            WHERE guild_id = $1 AND role_authorized_by_user_id = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        related_erased += erased_duty_authorization as usize;
+
         let deleted_duty =
             sqlx::query("DELETE FROM moderator_duty_profiles WHERE guild_id = $1 AND user_id = $2")
                 .bind(guild_id)
@@ -11149,7 +11164,8 @@ impl PostgresStore {
         validate_snowflake("guild_id", guild_id)?;
         let row = sqlx::query_as::<_, ModeratorDutySettings>(
             r#"
-            SELECT guild_id, staff_role_id, on_call_role_id, max_override_duration_mins, fallback_channel_id, updated_at
+            SELECT guild_id, staff_role_id, on_call_role_id, role_authorized_by_user_id,
+                   max_override_duration_mins, fallback_channel_id, version, updated_at
             FROM moderator_duty_settings
             WHERE guild_id = $1
             "#,
@@ -11165,42 +11181,98 @@ impl PostgresStore {
         &self,
         settings: ModeratorDutySettings,
     ) -> anyhow::Result<ModeratorDutySettings> {
-        validate_snowflake("guild_id", &settings.guild_id)?;
-        if let Some(ref r_id) = settings.staff_role_id {
-            validate_snowflake("staff_role_id", r_id)?;
-        }
-        if let Some(ref r_id) = settings.on_call_role_id {
-            validate_snowflake("on_call_role_id", r_id)?;
-        }
-        if let Some(ref c_id) = settings.fallback_channel_id {
-            validate_snowflake("fallback_channel_id", c_id)?;
+        self.write_duty_settings(settings, super::DutySettingsWrite::Upsert)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("unconditional Duty settings write conflicted"))
+    }
+
+    pub async fn replace_duty_settings(
+        &self,
+        settings: ModeratorDutySettings,
+        expected_version: Option<i64>,
+    ) -> anyhow::Result<Option<ModeratorDutySettings>> {
+        self.write_duty_settings(
+            settings,
+            super::DutySettingsWrite::Replace(expected_version),
+        )
+        .await
+    }
+
+    async fn begin_duty_write(&self, guild_id: &str) -> anyhow::Result<Transaction<'_, Postgres>> {
+        let mut tx = self.pool.begin().await?;
+        Self::lock_duty_write(&mut tx, guild_id).await?;
+        Ok(tx)
+    }
+
+    async fn lock_duty_write(
+        tx: &mut Transaction<'_, Postgres>,
+        guild_id: &str,
+    ) -> anyhow::Result<()> {
+        // Serialize Duty settings and grant recording, including the first settings insert.
+        sqlx::query("SELECT pg_advisory_xact_lock(4353, hashtext($1))")
+            .bind(guild_id)
+            .execute(&mut **tx)
+            .await?;
+        Ok(())
+    }
+
+    async fn write_duty_settings(
+        &self,
+        settings: ModeratorDutySettings,
+        write: super::DutySettingsWrite,
+    ) -> anyhow::Result<Option<ModeratorDutySettings>> {
+        super::validate_duty_settings(&settings)?;
+        let mut tx = self.begin_duty_write(&settings.guild_id).await?;
+        let previous: Option<(i64, Option<String>)> = sqlx::query_as(
+            "SELECT version, on_call_role_id FROM moderator_duty_settings WHERE guild_id = $1",
+        )
+        .bind(&settings.guild_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let super::DutySettingsWrite::Replace(expected_version) = write
+            && previous.as_ref().map(|row| row.0) != expected_version
+        {
+            tx.rollback().await?;
+            return Ok(None);
         }
 
         let saved = sqlx::query_as::<_, ModeratorDutySettings>(
             r#"
             INSERT INTO moderator_duty_settings (
-                guild_id, staff_role_id, on_call_role_id, max_override_duration_mins, fallback_channel_id, updated_at
+                guild_id, staff_role_id, on_call_role_id, role_authorized_by_user_id,
+                max_override_duration_mins, fallback_channel_id
             )
-            VALUES ($1, $2, $3, $4, $5, NOW())
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (guild_id)
             DO UPDATE SET
                 staff_role_id = EXCLUDED.staff_role_id,
                 on_call_role_id = EXCLUDED.on_call_role_id,
+                role_authorized_by_user_id = EXCLUDED.role_authorized_by_user_id,
                 max_override_duration_mins = EXCLUDED.max_override_duration_mins,
                 fallback_channel_id = EXCLUDED.fallback_channel_id,
+                version = moderator_duty_settings.version + 1,
                 updated_at = NOW()
-            RETURNING guild_id, staff_role_id, on_call_role_id, max_override_duration_mins, fallback_channel_id, updated_at
+            RETURNING guild_id, staff_role_id, on_call_role_id, role_authorized_by_user_id,
+                      max_override_duration_mins, fallback_channel_id, version, updated_at
             "#,
         )
         .bind(&settings.guild_id)
         .bind(&settings.staff_role_id)
         .bind(&settings.on_call_role_id)
+        .bind(&settings.role_authorized_by_user_id)
         .bind(settings.max_override_duration_mins)
         .bind(&settings.fallback_channel_id)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
 
-        Ok(saved)
+        if let Some(old_role) = previous.and_then(|row| row.1)
+            && saved.on_call_role_id.as_deref() != Some(old_role.as_str())
+        {
+            Self::queue_duty_role_revocations(&mut *tx, &settings.guild_id, None, Some(&old_role))
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(Some(saved))
     }
 
     pub async fn get_duty_profile(
@@ -11265,13 +11337,14 @@ impl PostgresStore {
     ) -> anyhow::Result<ModeratorDutyProfile> {
         validate_snowflake("guild_id", &profile.guild_id)?;
         validate_snowflake("user_id", &profile.user_id)?;
+        let mut tx = self.begin_duty_write(&profile.guild_id).await?;
 
         let saved = sqlx::query_as::<_, ModeratorDutyProfile>(
             r#"
             INSERT INTO moderator_duty_profiles (
                 guild_id, user_id, timezone, recurring_schedule, manual_override, override_expires_at, version, updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, clock_timestamp())
             ON CONFLICT (guild_id, user_id)
             DO UPDATE SET
                 timezone = EXCLUDED.timezone,
@@ -11279,7 +11352,7 @@ impl PostgresStore {
                 manual_override = EXCLUDED.manual_override,
                 override_expires_at = EXCLUDED.override_expires_at,
                 version = moderator_duty_profiles.version + 1,
-                updated_at = NOW()
+                updated_at = clock_timestamp()
             RETURNING guild_id, user_id, timezone, recurring_schedule, manual_override, override_expires_at, version, updated_at
             "#,
         )
@@ -11290,9 +11363,10 @@ impl PostgresStore {
         .bind(&profile.manual_override)
         .bind(profile.override_expires_at)
         .bind(profile.version)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
 
+        tx.commit().await?;
         Ok(saved)
     }
 
@@ -11300,7 +11374,7 @@ impl PostgresStore {
         validate_snowflake("guild_id", guild_id)?;
         validate_snowflake("user_id", user_id)?;
 
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_duty_write(guild_id).await?;
         let res =
             sqlx::query("DELETE FROM moderator_duty_profiles WHERE guild_id = $1 AND user_id = $2")
                 .bind(guild_id)
@@ -11315,17 +11389,7 @@ impl PostgresStore {
                 .execute(&mut *tx)
                 .await?;
 
-        let _ = sqlx::query(
-            r#"
-            UPDATE moderator_duty_role_grants
-            SET status = 'revoke_pending', next_attempt_at = NOW(), updated_at = NOW()
-            WHERE guild_id = $1 AND user_id = $2 AND status = 'active'
-            "#,
-        )
-        .bind(guild_id)
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await?;
+        Self::queue_duty_role_revocations(&mut *tx, guild_id, Some(user_id), None).await?;
 
         tx.commit().await?;
         Ok(res.rows_affected() > 0)
@@ -11380,6 +11444,40 @@ impl PostgresStore {
         validate_snowflake("guild_id", &state.guild_id)?;
         validate_snowflake("user_id", &state.user_id)?;
 
+        Self::write_duty_state(&self.pool, state).await
+    }
+
+    pub async fn upsert_current_duty_state(
+        &self,
+        profile: &ModeratorDutyProfile,
+        state: ModeratorDutyState,
+    ) -> anyhow::Result<()> {
+        let mut tx = self.begin_duty_write(&profile.guild_id).await?;
+        let current = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM moderator_duty_profiles
+                WHERE guild_id = $1 AND user_id = $2 AND version = $3 AND updated_at = $4
+            )
+            "#,
+        )
+        .bind(&profile.guild_id)
+        .bind(&profile.user_id)
+        .bind(profile.version)
+        .bind(profile.updated_at)
+        .fetch_one(&mut *tx)
+        .await?;
+        if current {
+            Self::write_duty_state(&mut *tx, state).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn write_duty_state<'e>(
+        executor: impl sqlx::PgExecutor<'e>,
+        state: ModeratorDutyState,
+    ) -> anyhow::Result<ModeratorDutyState> {
         let saved = sqlx::query_as::<_, ModeratorDutyState>(
             r#"
             INSERT INTO moderator_duty_state (
@@ -11400,7 +11498,7 @@ impl PostgresStore {
         .bind(state.expected_on_call)
         .bind(state.state_generation)
         .bind(&state.last_error)
-        .fetch_one(&self.pool)
+        .fetch_one(executor)
         .await?;
 
         Ok(saved)
@@ -11491,10 +11589,16 @@ impl PostgresStore {
             ON CONFLICT (guild_id, user_id, role_id)
             DO UPDATE SET
                 status = EXCLUDED.status,
-                attempts = CASE WHEN EXCLUDED.status = 'active' THEN 0 ELSE moderator_duty_role_grants.attempts END,
+                attempts = CASE WHEN EXCLUDED.status IN ('active', 'revoke_pending')
+                           THEN 0 ELSE moderator_duty_role_grants.attempts END,
                 last_error = NULL,
+                next_attempt_at = CASE WHEN EXCLUDED.status IN ('active', 'revoke_pending')
+                                  THEN NOW() ELSE moderator_duty_role_grants.next_attempt_at END,
                 generation = moderator_duty_role_grants.generation + 1,
                 updated_at = NOW()
+            WHERE EXCLUDED.status <> 'revoked'
+               OR moderator_duty_role_grants.status NOT IN ('active', 'revoke_pending')
+               OR moderator_duty_role_grants.next_attempt_at <= clock_timestamp()
             "#,
         )
         .bind(guild_id)
@@ -11505,6 +11609,172 @@ impl PostgresStore {
         .await?;
 
         Ok(())
+    }
+
+    pub async fn duty_grant_policy_is_current(
+        &self,
+        settings: &ModeratorDutySettings,
+        profile: &ModeratorDutyProfile,
+    ) -> anyhow::Result<bool> {
+        let role_id = super::duty_policy_role(settings, profile)?;
+        Self::duty_grant_policy_matches(&self.pool, settings, profile, role_id).await
+    }
+
+    async fn duty_grant_policy_matches<'e>(
+        executor: impl sqlx::PgExecutor<'e>,
+        settings: &ModeratorDutySettings,
+        profile: &ModeratorDutyProfile,
+        role_id: &str,
+    ) -> anyhow::Result<bool> {
+        let current = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM moderator_duty_settings
+                WHERE guild_id = $1 AND version = $2 AND on_call_role_id = $3
+                  AND role_authorized_by_user_id IS NOT DISTINCT FROM $7
+            ) AND EXISTS (
+                SELECT 1 FROM moderator_duty_profiles
+                WHERE guild_id = $1 AND user_id = $4 AND version = $5 AND updated_at = $6
+            )
+            "#,
+        )
+        .bind(&settings.guild_id)
+        .bind(settings.version)
+        .bind(role_id)
+        .bind(&profile.user_id)
+        .bind(profile.version)
+        .bind(profile.updated_at)
+        .bind(&settings.role_authorized_by_user_id)
+        .fetch_one(executor)
+        .await?;
+        Ok(current)
+    }
+
+    pub async fn begin_duty_role_grant(
+        &self,
+        settings: &ModeratorDutySettings,
+        profile: &ModeratorDutyProfile,
+    ) -> anyhow::Result<Option<crate::duty::ModeratorDutyRoleGrant>> {
+        let role_id = super::duty_policy_role(settings, profile)?;
+        if settings.role_authorized_by_user_id.is_none() {
+            return Ok(None);
+        }
+        let mut tx = self.begin_duty_write(&settings.guild_id).await?;
+        if !Self::duty_grant_policy_matches(&mut *tx, settings, profile, role_id).await? {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        let grant = sqlx::query_as(
+            r#"
+            INSERT INTO moderator_duty_role_grants (
+                guild_id, user_id, role_id, status, next_attempt_at
+            )
+            VALUES ($1, $2, $3, 'active', clock_timestamp() + $4::BIGINT * INTERVAL '1 second')
+            ON CONFLICT (guild_id, user_id, role_id)
+            DO UPDATE SET status = 'active', attempts = 0, last_error = NULL,
+                next_attempt_at = EXCLUDED.next_attempt_at,
+                generation = moderator_duty_role_grants.generation + 1,
+                updated_at = clock_timestamp()
+            WHERE moderator_duty_role_grants.status <> 'revoke_pending'
+              AND (moderator_duty_role_grants.status <> 'active'
+                   OR moderator_duty_role_grants.next_attempt_at <= clock_timestamp())
+            RETURNING guild_id, user_id, role_id, status, attempts, last_error,
+                      next_attempt_at, generation, created_at, updated_at
+            "#,
+        )
+        .bind(&settings.guild_id)
+        .bind(&profile.user_id)
+        .bind(role_id)
+        .bind(super::DUTY_ROLE_GRANT_LEASE_SECONDS)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(grant)
+    }
+
+    pub async fn finish_duty_role_grant(
+        &self,
+        settings: &ModeratorDutySettings,
+        profile: &ModeratorDutyProfile,
+        grant: &crate::duty::ModeratorDutyRoleGrant,
+    ) -> anyhow::Result<bool> {
+        let mut tx = self.begin_duty_write(&settings.guild_id).await?;
+        let current =
+            Self::duty_grant_policy_matches(&mut *tx, settings, profile, &grant.role_id).await?;
+        let status = if current { "active" } else { "revoke_pending" };
+        let finished = sqlx::query(
+            r#"
+            UPDATE moderator_duty_role_grants
+            SET status = $6, next_attempt_at = clock_timestamp(),
+                generation = generation + 1, updated_at = clock_timestamp()
+            WHERE guild_id = $1 AND user_id = $2 AND role_id = $3 AND generation = $4
+              AND status = 'active' AND created_at = $5
+            "#,
+        )
+        .bind(&grant.guild_id)
+        .bind(&grant.user_id)
+        .bind(&grant.role_id)
+        .bind(grant.generation)
+        .bind(grant.created_at)
+        .bind(status)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(current && finished.rows_affected() == 1)
+    }
+
+    pub async fn claim_duty_role_revocation(
+        &self,
+        grant: &crate::duty::ModeratorDutyRoleGrant,
+    ) -> anyhow::Result<Option<crate::duty::ModeratorDutyRoleGrant>> {
+        let claimed = sqlx::query_as(
+            r#"
+            UPDATE moderator_duty_role_grants
+            SET next_attempt_at = NOW() + $5::BIGINT * INTERVAL '1 second',
+                generation = generation + 1,
+                updated_at = NOW()
+            WHERE guild_id = $1 AND user_id = $2 AND role_id = $3 AND generation = $4
+              AND status = 'revoke_pending' AND next_attempt_at <= NOW() AND created_at = $6
+            RETURNING guild_id, user_id, role_id, status, attempts, last_error,
+                      next_attempt_at, generation, created_at, updated_at
+            "#,
+        )
+        .bind(&grant.guild_id)
+        .bind(&grant.user_id)
+        .bind(&grant.role_id)
+        .bind(grant.generation)
+        .bind(super::DUTY_ROLE_REVOCATION_LEASE_SECONDS)
+        .bind(grant.created_at)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(claimed)
+    }
+
+    pub async fn complete_duty_role_revocation(
+        &self,
+        grant: crate::duty::ModeratorDutyRoleGrant,
+    ) -> anyhow::Result<bool> {
+        let completed = sqlx::query(
+            r#"
+            UPDATE moderator_duty_role_grants
+            SET status = $5, attempts = $6, last_error = $7, next_attempt_at = $8,
+                generation = generation + 1, updated_at = NOW()
+            WHERE guild_id = $1 AND user_id = $2 AND role_id = $3 AND generation = $4 AND created_at = $9
+              AND (status = 'revoke_pending' OR ($5 = 'revoked' AND status IN ('active', 'failed')))
+            "#,
+        )
+        .bind(&grant.guild_id)
+        .bind(&grant.user_id)
+        .bind(&grant.role_id)
+        .bind(grant.generation)
+        .bind(&grant.status)
+        .bind(grant.attempts)
+        .bind(&grant.last_error)
+        .bind(grant.next_attempt_at)
+        .bind(grant.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(completed.rows_affected() == 1)
     }
 
     pub async fn mark_duty_role_grants_for_revocation(
@@ -11521,11 +11791,20 @@ impl PostgresStore {
             validate_snowflake("role_id", rid)?;
         }
 
-        let rows = sqlx::query_as::<_, crate::duty::ModeratorDutyRoleGrant>(
+        Self::queue_duty_role_revocations(&self.pool, guild_id, user_id, role_id).await
+    }
+
+    async fn queue_duty_role_revocations<'e>(
+        executor: impl sqlx::PgExecutor<'e>,
+        guild_id: &str,
+        user_id: Option<&str>,
+        role_id: Option<&str>,
+    ) -> anyhow::Result<Vec<crate::duty::ModeratorDutyRoleGrant>> {
+        let rows = sqlx::query_as(
             r#"
             UPDATE moderator_duty_role_grants
             SET status = 'revoke_pending',
-                next_attempt_at = NOW(),
+                next_attempt_at = GREATEST(next_attempt_at, NOW()),
                 generation = generation + 1,
                 updated_at = NOW()
             WHERE guild_id = $1
@@ -11538,7 +11817,7 @@ impl PostgresStore {
         .bind(guild_id)
         .bind(user_id)
         .bind(role_id)
-        .fetch_all(&self.pool)
+        .fetch_all(executor)
         .await?;
 
         Ok(rows)

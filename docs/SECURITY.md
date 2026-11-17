@@ -160,6 +160,29 @@ Production deployments must isolate media workers at the host/container firewall
 - Block outbound traffic from media workers to internal VPC ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) and local daemon ports (PostgreSQL `5432`, Dashboard `8080`).
 - Ensure DNS resolvers drop or filter responses resolving to RFC 1918 addresses (DNS rebinding prevention).
 
+## Moderator Duty role authorization
+
+Changing or re-saving settings with an on-call role requires current Discord
+role-management permission and authority over the previous and proposed role.
+The guild owner is exempt from the approver hierarchy check. Duty rejects
+managed and default roles, as well as roles with privileged or unrecognized
+guild permission bits, for new grants.
+The bot must have current role-management permission and rank above the role.
+Dry runs check live authorization without writing to Discord or storage.
+
+The dashboard, watchdog and native `/duty` commands share live grant checks.
+Reconciliation rechecks the current guild, role, member, bot and approving
+administrator. If those checks fail, reconcile reports a per-member error.
+Existing settings, schedules and grant history survive migration 0068.
+For a guild with an existing on-call role, an authorized administrator must
+review and re-save the settings to resume grants. A later loss of the approver's
+permission or hierarchy requires a new approval from a current administrator.
+Recorded grants can still be cleaned up when their role or profile is removed.
+When an assigned role gains privileged permissions during a shift, operators
+can clear the on-call role setting to queue cleanup of the bot's grants.
+Duty records grant intent before the Discord request so cleanup can recover
+even if Discord applies a grant and the response is lost.
+
 ## Message safety
 
 Bot-generated messages use an empty Discord allowed-mentions policy. User-provided text should also pass through `zuckerbot.escape_mentions`.

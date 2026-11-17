@@ -16,6 +16,11 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::discord::events::generate_icalendar_event;
+use crate::duty::{
+    DutyDiscord, ReconcileDutyParams,
+    authorization::{DutyAuthorizationError, DutyRoleAuthorization},
+    duty_http, process_duty_role_revocations, reconcile_member_duty_state,
+};
 
 use crate::storage::{
     CardCollection, CardTrade, CleanupPlan, CommandPolicyRule, CommunityPoll, CompanionMappingItem,
@@ -23,10 +28,10 @@ use crate::storage::{
     EVENT_VOICE_JOB_STATE_PENDING, EVENT_VOICE_MODE_NOTIFY_ONLY, EventRoster,
     EventVoiceQueueConfig, EventVoiceQueueRosterEntry, FaqEntry, FeedSubscription, GameAccountLink,
     Giveaway, HelpForumConfig, InviteTracking, MAX_COMPANION_MAPPINGS_PER_GUILD,
-    ModeratorDutyProfile, ModeratorDutySettings, ModeratorDutyState, ProgressionSeason,
-    ReactionRoleBinding, RecruitmentApplication, RecruitmentReview, RecruitmentTrack,
-    RecruitmentTrackConfig, RecurringSchedule, ScheduledEvent, ScheduledEventsPage, ServerSnapshot,
-    StickyMessage, StoreItem, SubmittedAnswer, TupperProfile, validate_snowflake,
+    ModeratorDutyProfile, ModeratorDutySettings, ProgressionSeason, ReactionRoleBinding,
+    RecruitmentApplication, RecruitmentReview, RecruitmentTrack, RecruitmentTrackConfig,
+    RecurringSchedule, ScheduledEvent, ScheduledEventsPage, ServerSnapshot, StickyMessage,
+    StoreItem, SubmittedAnswer, TupperProfile, validate_snowflake,
 };
 
 use super::{
@@ -4944,14 +4949,7 @@ pub async fn get_duty_settings(
         .get_duty_settings(&guild_id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
-        .unwrap_or_else(|| ModeratorDutySettings {
-            guild_id: guild_id.clone(),
-            staff_role_id: None,
-            on_call_role_id: None,
-            max_override_duration_mins: 1440,
-            fallback_channel_id: None,
-            updated_at: Timestamp::now(),
-        });
+        .unwrap_or_else(|| ModeratorDutySettings::unconfigured(guild_id.clone()));
 
     Ok(Json(json!({ "settings": settings })))
 }
@@ -4965,19 +4963,20 @@ pub async fn upsert_duty_settings(
     let (_, session) = authenticate(&state, &headers).await?;
     verify_csrf(&headers, &session)?;
     ensure_guild_access(&state, &session, &guild_id).await?;
-    validate_snowflake("guild_id", &guild_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
-
-    if let Some(ref r_id) = payload.staff_role_id {
-        validate_snowflake("staff_role_id", r_id)
-            .map_err(|e| ApiError::bad_request(e.to_string()))?;
-    }
-    if let Some(ref r_id) = payload.on_call_role_id {
-        validate_snowflake("on_call_role_id", r_id)
-            .map_err(|e| ApiError::bad_request(e.to_string()))?;
-    }
-    if let Some(ref c_id) = payload.fallback_channel_id {
-        validate_snowflake("fallback_channel_id", c_id)
-            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let guild = validate_snowflake("guild_id", &guild_id)
+        .map(serenity::all::GuildId::new)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let parse_role = |label: &str, id: Option<String>| {
+        id.as_deref()
+            .map(|id| validate_snowflake(label, id).map(|id| id.to_string()))
+            .transpose()
+            .map_err(|error| ApiError::bad_request(error.to_string()))
+    };
+    let staff_role_id = parse_role("staff_role_id", payload.staff_role_id)?;
+    let on_call_role_id = parse_role("on_call_role_id", payload.on_call_role_id)?;
+    if let Some(channel_id) = payload.fallback_channel_id.as_deref() {
+        validate_snowflake("fallback_channel_id", channel_id)
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
     }
 
     let old_settings = state
@@ -4985,51 +4984,66 @@ pub async fn upsert_duty_settings(
         .storage
         .get_duty_settings(&guild_id)
         .await
-        .ok()
-        .flatten();
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let previous_role = old_settings
+        .as_ref()
+        .and_then(|settings| settings.on_call_role_id.as_deref());
+
+    let http = duty_http(&state.app.config);
+    let mut role_authorized_by_user_id = None;
+    if previous_role.is_some() || on_call_role_id.is_some() {
+        if let Some(http) = &http {
+            let actor = validate_snowflake("user_id", &session.user.id)
+                .map(serenity::all::UserId::new)
+                .map_err(|error| ApiError::forbidden(error.to_string()))?;
+            let authorization = DutyRoleAuthorization::fetch(http, guild)
+                .await
+                .map_err(duty_settings_authorization_error)?;
+            authorization
+                .authorize_settings(
+                    http,
+                    actor,
+                    previous_role,
+                    on_call_role_id.as_deref(),
+                    staff_role_id.as_deref(),
+                )
+                .await
+                .map_err(duty_settings_authorization_error)?;
+            if on_call_role_id.is_some() {
+                role_authorized_by_user_id = Some(actor.to_string());
+            }
+        } else {
+            ensure_manage_roles_access(&state, &session, &guild_id).await?;
+        }
+    }
 
     let settings = ModeratorDutySettings {
         guild_id: guild_id.clone(),
-        staff_role_id: payload.staff_role_id,
-        on_call_role_id: payload.on_call_role_id,
+        staff_role_id,
+        on_call_role_id,
         max_override_duration_mins: payload.max_override_duration_mins.unwrap_or(1440).max(1),
         fallback_channel_id: payload.fallback_channel_id,
         updated_at: Timestamp::now(),
+        role_authorized_by_user_id,
+        version: 0,
     };
-
     let saved = state
         .app
         .storage
-        .upsert_duty_settings(settings)
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-
-    // Issue #188: Jeśli zmieniono on_call_role_id ze starej roli A, oznaczamy stare granty do revoke
-    if let Some(old_role) = old_settings.and_then(|s| s.on_call_role_id)
-        && saved.on_call_role_id.as_deref() != Some(&old_role)
-    {
-        let _ = state
-            .app
-            .storage
-            .mark_duty_role_grants_for_revocation(&guild_id, None, Some(&old_role))
-            .await;
-
-        let token = &state.app.config.discord_token;
-        let has_real_token = !token.is_empty()
-            && !token.starts_with("dummy")
-            && token != "mock"
-            && token != "offline";
-        let http = if has_real_token {
-            Some(serenity::all::Http::new(token))
-        } else {
-            None
-        };
-        let _ = crate::duty::process_duty_role_revocations(
-            &state.app.storage,
-            http.as_ref(),
-            Some(&guild_id),
+        .replace_duty_settings(
+            settings,
+            old_settings.as_ref().map(|settings| settings.version),
         )
-        .await;
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::conflict("Moderator Duty settings changed. Refresh and retry."))?;
+
+    if previous_role.is_some()
+        && previous_role != saved.on_call_role_id.as_deref()
+        && let Err(error) =
+            process_duty_role_revocations(&state.app.storage, http.as_ref(), Some(&guild_id)).await
+    {
+        tracing::warn!(%error, %guild_id, "Could not process queued Moderator Duty revocations");
     }
 
     let _ = state
@@ -5049,6 +5063,21 @@ pub async fn upsert_duty_settings(
         .await;
 
     Ok(Json(json!({ "settings": saved })))
+}
+
+fn duty_settings_authorization_error(error: DutyAuthorizationError) -> ApiError {
+    match error {
+        DutyAuthorizationError::Denied(message) => ApiError::forbidden(message),
+        DutyAuthorizationError::Unavailable(source) => {
+            tracing::warn!(error = %source, "Could not verify Moderator Duty settings with Discord");
+            ApiError {
+                status: axum::http::StatusCode::BAD_GATEWAY,
+                message: "Could not verify Moderator Duty role authorization with Discord."
+                    .to_owned(),
+                details: None,
+            }
+        }
+    }
 }
 
 pub async fn list_duty_profiles(
@@ -5210,23 +5239,12 @@ pub async fn delete_duty_profile(
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     if deleted {
-        // Issue #188: Usuwamy profil i od razu próbujemy przetworzyć zaległe odwołania ról
-        let token = &state.app.config.discord_token;
-        let has_real_token = !token.is_empty()
-            && !token.starts_with("dummy")
-            && token != "mock"
-            && token != "offline";
-        let http = if has_real_token {
-            Some(serenity::all::Http::new(token))
-        } else {
-            None
-        };
-        let _ = crate::duty::process_duty_role_revocations(
-            &state.app.storage,
-            http.as_ref(),
-            Some(&guild_id),
-        )
-        .await;
+        let http = duty_http(&state.app.config);
+        if let Err(error) =
+            process_duty_role_revocations(&state.app.storage, http.as_ref(), Some(&guild_id)).await
+        {
+            tracing::warn!(%error, %guild_id, "Could not process queued Moderator Duty revocations");
+        }
 
         let _ = state
             .app
@@ -5359,14 +5377,7 @@ pub async fn reconcile_guild_duty(
         .get_duty_settings(&guild_id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
-        .unwrap_or_else(|| ModeratorDutySettings {
-            guild_id: guild_id.clone(),
-            staff_role_id: None,
-            on_call_role_id: None,
-            max_override_duration_mins: 1440,
-            fallback_channel_id: None,
-            updated_at: Timestamp::now(),
-        });
+        .unwrap_or_else(|| ModeratorDutySettings::unconfigured(guild_id.clone()));
 
     let profiles = state
         .app
@@ -5375,91 +5386,21 @@ pub async fn reconcile_guild_duty(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    let token = &state.app.config.discord_token;
-    let has_real_token =
-        !token.is_empty() && !token.starts_with("dummy") && token != "mock" && token != "offline";
-
-    let http = if has_real_token {
-        if state.app.config.discord_api_base_url.starts_with("http://") {
-            Some(
-                serenity::http::HttpBuilder::new(token)
-                    .proxy(&state.app.config.discord_api_base_url)
-                    .ratelimiter_disabled(true)
-                    .build(),
-            )
-        } else {
-            Some(serenity::all::Http::new(token))
-        }
-    } else {
-        None
-    };
-
-    let is_live_discord = !dry_run && http.is_some();
-
+    let http = duty_http(&state.app.config);
+    let discord = http
+        .as_ref()
+        .map_or(DutyDiscord::Offline(&[]), DutyDiscord::Live);
     let mut outcomes = Vec::new();
     for profile in profiles {
-        let (member_roles, bot_pos, on_call_pos) = if let Some(ref h) = http {
-            match crate::duty::fetch_discord_member_duty_context(
-                h,
-                &guild_id,
-                &profile.user_id,
-                settings.on_call_role_id.as_deref(),
-            )
-            .await
-            {
-                Ok(ctx) => (
-                    ctx.member_roles,
-                    ctx.bot_highest_role_pos,
-                    ctx.on_call_role_pos,
-                ),
-                Err(e) => {
-                    let err_msg =
-                        format!("Failed to fetch Discord member {}: {e}", profile.user_id);
-                    if !dry_run {
-                        let _ = state
-                            .app
-                            .storage
-                            .upsert_duty_state(ModeratorDutyState {
-                                guild_id: guild_id.clone(),
-                                user_id: profile.user_id.clone(),
-                                expected_on_call: false,
-                                state_generation: 0,
-                                last_reconciled_at: Some(Timestamp::now()),
-                                last_error: Some(err_msg.clone()),
-                            })
-                            .await;
-                    }
-                    outcomes.push(crate::duty::DutyReconcileOutcome {
-                        user_id: profile.user_id.clone(),
-                        expected_on_call: false,
-                        role_granted: false,
-                        role_revoked: false,
-                        would_grant: false,
-                        would_revoke: false,
-                        error: Some(err_msg),
-                    });
-                    continue;
-                }
-            }
-        } else {
-            (Vec::new(), None, None)
-        };
-
-        let outcome = crate::duty::reconcile_member_duty_state(crate::duty::ReconcileDutyParams {
+        let outcome = reconcile_member_duty_state(ReconcileDutyParams {
             storage: &state.app.storage,
-            guild_id: &guild_id,
-            user_id: &profile.user_id,
             settings: &settings,
             profile: &profile,
-            member_roles: &member_roles,
-            bot_highest_role_pos: bot_pos,
-            on_call_role_pos: on_call_pos,
-            is_live_discord,
+            discord,
             dry_run,
-            http: if is_live_discord { http.as_ref() } else { None },
         })
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(|error| ApiError::internal(error.to_string()))?;
         outcomes.push(outcome);
     }
 
